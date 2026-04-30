@@ -172,6 +172,14 @@ def handler(event, context):
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
+    # Dry-run controls (added 2026-04-30):
+    #   skip_dry_run_gate — bypass the auto-gate stub-pass, run real only.
+    #   dry_run_llm — exclusive stub-only mode (no real LLM calls). Implies
+    #                 no S3 writes, no email, no DB upload.
+    # Default behavior (both false): run a stub-pass first, halt on failure,
+    # only proceed to real pass if stub-pass succeeds.
+    skip_dry_run_gate = event.get("skip_dry_run_gate", False)
+    dry_run_llm = event.get("dry_run_llm", False)
     fd = None
 
     # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
@@ -287,7 +295,87 @@ def handler(event, context):
         except Exception as _me:
             print(f"WARNING: memory extraction skipped: {_me}")
 
-        final_state = graph.invoke(initial_state)
+        # ── Auto-gate: stub-LLM dry-run before real pass ─────────────
+        # Catches bugs below the LLM layer (graph orchestration, schema
+        # parse, reducer behavior, archive writes) without paying for
+        # Anthropic tokens. Real pass only fires if stub-pass succeeds.
+        # Skipped when skip_dry_run_gate=True or when dry_run_llm=True
+        # (which is itself the stub-only mode, no real pass to gate).
+        if not skip_dry_run_gate and not dry_run_llm:
+            from dry_run import install_dry_run_stubs
+            print("Stub-LLM dry-run gate: starting...")
+            _restore = install_dry_run_stubs(archive)
+            try:
+                _stub_graph = build_graph()
+                _stub_state = create_initial_state(
+                    run_date=run_date,
+                    archive_manager=archive,
+                    is_early_close=early_close,
+                )
+                _stub_state["performance_summary"] = perf_summary
+                _stub_state["flow_doctor"] = get_flow_doctor()
+                _stub_graph.invoke(_stub_state)
+                print("Stub-LLM dry-run gate: OK (proceeding to real pass)")
+            except Exception as _se:
+                import traceback as _tb
+                _stub_tb = _tb.format_exc()
+                print(f"Stub-LLM dry-run gate: FAILED — halting before real LLM calls")
+                print(f"Stub-pass error: {_se}\n{_stub_tb}")
+                return {
+                    "status": "ERROR",
+                    "phase": "stub_pass",
+                    "date": run_date,
+                    "error": str(_se),
+                }
+            finally:
+                _restore()
+
+            # Stub-pass mutated state + may have left archive in odd shape.
+            # Rebuild archive + supporting state for the real pass so it
+            # starts from a clean slate.
+            archive.close()
+            archive = ArchiveManager()
+            archive.download_db()
+            perf_summary = run_performance_checks(archive.db_conn, run_date)
+            graph = build_graph()
+            initial_state = create_initial_state(
+                run_date=run_date,
+                archive_manager=archive,
+                is_early_close=early_close,
+            )
+            initial_state["performance_summary"] = perf_summary
+            initial_state["flow_doctor"] = get_flow_doctor()
+
+        if dry_run_llm:
+            # Exclusive stub-only mode — no real LLM calls. Caller asked
+            # for it explicitly (e.g. operator running a stub smoke test).
+            #
+            # CRITICAL: rebuild graph + initial_state AFTER install_dry_run_stubs.
+            # `archive_writer` and `email_sender` are wired into the graph via
+            # graph.add_node(...) which captures the function reference at
+            # build_graph() time. Stubs installed AFTER build_graph have no
+            # effect on those direct-bound nodes — the real S3-write +
+            # email-send code paths would fire. (LLM agent functions are
+            # late-bound through wrapper nodes so they pick up patches
+            # either way; this guard is specifically for the direct-bound
+            # archive_writer/email_sender pair.)
+            from dry_run import install_dry_run_stubs
+            print("dry_run_llm=True: stub-only mode (no real LLM calls)")
+            _restore = install_dry_run_stubs(archive)
+            try:
+                graph = build_graph()
+                initial_state = create_initial_state(
+                    run_date=run_date,
+                    archive_manager=archive,
+                    is_early_close=early_close,
+                )
+                initial_state["performance_summary"] = perf_summary
+                initial_state["flow_doctor"] = get_flow_doctor()
+                final_state = graph.invoke(initial_state)
+            finally:
+                _restore()
+        else:
+            final_state = graph.invoke(initial_state)
 
         # ── Trajectory validation (Phase 2 eval) ──────────────────
         _trajectory_result = None

@@ -8,6 +8,12 @@ Usage:
 
 Generates synthetic but structurally valid data so every graph node
 receives the dict shapes it expects.
+
+NOTE 2026-04-30: The LLM-only agent stub functions (``_stub_run_*``) are
+duplicated in ``/dry_run.py`` at repo root, which is the Lambda-importable
+copy. Keep them in sync. Single-source consolidation is tracked as a
+follow-up item; this PR keeps two copies to avoid scope creep on the
+Lambda dry-run gate landing.
 """
 
 from __future__ import annotations

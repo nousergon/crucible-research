@@ -40,6 +40,7 @@ COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
 COPY health_status.py ${LAMBDA_TASK_ROOT}/
 COPY ssm_secrets.py ${LAMBDA_TASK_ROOT}/
+COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
