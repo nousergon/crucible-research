@@ -100,6 +100,17 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_judge
 
+      # Cross-week rationale clustering Lambda — same image-share as
+      # eval-judge, different CMD entrypoint. Created lazily on first
+      # deploy; idempotent thereafter. Auto-deployed on every push to
+      # match the eval-judge precedent so capture-format or extraction
+      # logic changes propagate without manual intervention.
+      - name: Deploy rationale-clustering Lambda (alpha-engine-research-rationale-clustering)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh rationale_clustering
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
