@@ -1,11 +1,10 @@
 """
-LLM-as-judge evaluation pipeline (PR 2 of ROADMAP P3.1, Phase 2 P1).
+LLM-as-judge evaluation pipeline (workstream closed 2026-05-03).
 
 Reads a captured ``DecisionArtifact``, looks up the matching rubric
 prompt, sends ``(rubric, artifact_input, artifact_output)`` to a judge
-LLM (Haiku for cost on every weekly run; Sonnet for nuance on a
-sampled subset wired in PR 3), and persists the structured eval result
-to S3.
+LLM (Haiku default; Sonnet for nuance-tier sampled subset), and
+persists the structured eval result to S3.
 
 Eval is observability, NOT a gate. Runs proceed regardless of eval
 score; the eval corpus + dashboard surface quality regressions weeks
@@ -17,13 +16,6 @@ Composes with:
   version 1.0.0+, loaded via ``agents.prompt_loader.load_prompt``).
 - Cost telemetry — eval LLM calls are tagged ``agent_id="eval_judge"``
   via ``track_llm_cost`` so judging cost is observable + bounded.
-
-Out of scope (lands in PR 3+):
-- SF wiring (new ``EvalJudge`` state after Research).
-- Two-tier model orchestration (Haiku default, Sonnet on sampled
-  subset / on Haiku score < 3).
-- CloudWatch metric ``AlphaEngine/Eval/agent_quality_score`` + SNS.
-- Streamlit dashboard page.
 """
 
 from __future__ import annotations
@@ -57,13 +49,13 @@ DEFAULT_JUDGE_MODEL = "claude-haiku-4-5"
 """Default judge model — Haiku for cost on every weekly run.
 
 Sonnet (``claude-sonnet-4-6``) is used for the nuance-tier sampled
-subset; orchestration logic lands in PR 3."""
+subset."""
 
 DEFAULT_MAX_TOKENS = MAX_TOKENS_STRATEGIC
 """Token cap for the judge response. Routes through the strategic-tier
 constant per the consolidation in PR #102 (4 hardcoded literals
 replaced; CI lint guard prevents drift). Synthesis-class output:
-4-5 dimension entries × verbose reasoning + overall_reasoning, plus
+5-6 dimension entries × verbose reasoning + overall_reasoning, plus
 tool-use envelope. Bumped from 1500 hardcoded on 2026-05-03 after
 judge_only smoke against Sat 5/3 captures showed ~5/32 evals failed
 with truncated/stringified dimension_scores at the prior 1500 cap."""
@@ -305,7 +297,7 @@ def evaluate_artifact(
 
 
 DEFAULT_EVAL_PREFIX = "decision_artifacts/_eval/"
-"""Production eval-artifact prefix. PR 4e ``judge_only`` mode swaps in
+"""Production eval-artifact prefix. ``judge_only`` mode swaps in
 ``decision_artifacts/_eval_judge_only/`` so isolated test runs don't
 pollute the prod corpus the rolling-mean Lambda + dashboard read."""
 
@@ -320,23 +312,20 @@ def build_eval_s3_key(
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
 
-    Path shape (extends ROADMAP §1630 to disambiguate two-tier judges):
+    Path shape:
       ``{prefix}{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
 
     The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
-    of the same artifact coexist without clobbering each other (PR 3b
-    two-tier orchestration). ROADMAP §1630 wrote ``{run_id}.json``
-    before the two-tier dimension was specified; the extra segment is
-    backwards-compat-friendly for new writes.
+    of the same artifact coexist without clobbering each other.
 
     The date partition is taken from ``timestamp`` (defaults to
     now-UTC) so multiple runs on the same calendar day cluster under
     one prefix. ``run_id`` is the filename stem so retries with the
     same run_id + judge_model idempotently overwrite.
 
-    ``prefix`` (PR 4e) lets ``judge_only`` mode redirect outputs to
-    an isolated path so test runs don't pollute prod observability.
-    Must end in ``/``.
+    ``prefix`` lets ``judge_only`` mode redirect outputs to an isolated
+    path so test runs don't pollute prod observability. Must end in
+    ``/``.
     """
     ts = timestamp or datetime.now(timezone.utc)
     date_partition = ts.strftime("%Y-%m-%d")
@@ -360,8 +349,8 @@ def persist_eval_artifact(
     should handle the exception explicitly if running in best-effort
     mode.
 
-    ``prefix`` (PR 4e) lets ``judge_only`` mode persist to an isolated
-    path. Must end in ``/`` and is forwarded to ``build_eval_s3_key``.
+    ``prefix`` lets ``judge_only`` mode persist to an isolated path.
+    Must end in ``/`` and is forwarded to ``build_eval_s3_key``.
 
     The ``s3_client`` parameter accepts an injected client for tests;
     production passes None and the helper builds the default client.

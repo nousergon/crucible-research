@@ -174,14 +174,12 @@ def run_macro_agent(
 
     prompt = check_prompt_size(prompt, MAX_TOKENS_STRATEGIC, caller="macro_agent")
 
-    # PR 2.2 Step B (Path B2): with_structured_output(include_raw=True) replaces
-    # the prior _extract_macro_json regex parser. Anthropic's tool-use mechanism
-    # populates the typed Pydantic model; we keep the raw text alongside so the
-    # markdown narrative (report_md) is preserved verbatim — pulled from raw if
-    # the LLM didn't fill the schema field directly. include_raw=True converts
-    # parse failures into a captured ``parsing_error`` rather than raising; the
-    # strict-mode env-var gate explicitly raises on parse failure to match the
-    # "no silent fallbacks" feedback rule.
+    # with_structured_output(include_raw=True): Anthropic tool-use populates the
+    # typed Pydantic model; the raw text is kept alongside so the markdown
+    # narrative (report_md) can be recovered if the LLM didn't fill the schema
+    # field directly. include_raw=True captures parse failures as a
+    # ``parsing_error`` rather than raising; the strict-mode gate below raises
+    # explicitly to match the "no silent fallbacks" rule.
     structured_llm = llm.with_structured_output(
         MacroEconomistRawOutput, include_raw=True
     )
@@ -229,9 +227,9 @@ def run_macro_agent(
             report_md = full_text.strip()
 
     # Sector ratings post-validation: per-sector validity check + derived
-    # fallback when the LLM emits an invalid rating string. Preserved from the
-    # legacy _extract_macro_json; the schema only types sector_ratings as
-    # ``dict[str, dict]`` so this domain logic still lives in the agent.
+    # fallback when the LLM emits an invalid rating string. The schema only
+    # types sector_ratings as ``dict[str, dict]``, so domain validation lives
+    # in the agent.
     raw_ratings = dict(parsed.sector_ratings or {})
     validated_ratings = {}
     for sector in ALL_SECTORS:
@@ -245,9 +243,8 @@ def run_macro_agent(
         else:
             validated_ratings[sector] = {"rating": rating, "rationale": rationale}
 
-    # Build macro_json in the legacy return shape so downstream consumers
-    # (graph/research_graph.py merge_results, archive_writer, consolidator)
-    # see the same dict structure as before the with_structured_output flip.
+    # Build macro_json in the dict shape downstream consumers expect
+    # (graph/research_graph.py merge_results, archive_writer, consolidator).
     macro_json = {
         "market_regime": parsed.market_regime,
         "sector_modifiers": dict(parsed.sector_modifiers),
@@ -256,8 +253,8 @@ def run_macro_agent(
         "material_changes": parsed.material_changes,
     }
 
-    # Post-LLM regime validation (Task 3A) — quantitative cross-check that
-    # may override the LLM's regime call when guardrail invariants fire.
+    # Post-LLM regime validation — quantitative cross-check that may override
+    # the LLM's regime call when guardrail invariants fire.
     validated_regime = _validate_regime(parsed.market_regime, macro_data)
     macro_json["market_regime"] = validated_regime
 
@@ -387,13 +384,10 @@ def run_macro_critic(
         sector_modifiers_text="\n".join(mod_lines),
     )
 
-    # PR 2.2 Step C: flip macro_critic to with_structured_output. Critic
-    # historically returned a single-object JSON like {"action": "...", ...}
-    # extracted via regex; structured output replaces the regex with the
-    # typed extraction. Strict mode raises on parse failure; lax mode keeps
-    # the silent-accept fallback because the critic is an editorial gate
-    # (rejecting the critic's input falls back to the macro_agent's initial
-    # classification, which is the conservative behavior).
+    # Critic uses with_structured_output for typed extraction. Strict mode
+    # raises on parse failure; lax mode keeps the silent-accept fallback
+    # because the critic is an editorial gate — accepting the initial macro
+    # classification is the conservative behavior on critic failure.
     structured_llm = llm.with_structured_output(MacroCriticOutput)
     try:
         verdict: MacroCriticOutput = structured_llm.invoke(

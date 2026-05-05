@@ -26,17 +26,16 @@ decision (one node — sector_team, macro_economist, or ic_cio).
 Both streams gated on ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED`` — same
 flag governs both since they're complementary views of the same data.
 
-Why aggregate per-node rather than per-call:
+Why both per-node and per-call streams:
 
 - The existing decision-capture surface writes ONE artifact per node
   boundary in ``research_graph.py``. A sector_team node fires up to four
   LLM calls (quant ReAct → qual ReAct → peer_review quant addition →
-  peer_review joint finalization); summing them yields the total cost
-  attributed to that team's decision.
-- Per-call granularity (one row per Anthropic API call) is the PR 3
-  parquet aggregator's concern. It can either read these artifacts and
-  pull the aggregated cost, or walk a side-stream we add later. Out of
-  scope here.
+  peer_review joint finalization); summing them into ``ModelMetadata``
+  yields the total cost attributed to that team's decision.
+- Per-call granularity (one row per Anthropic API call) flows through
+  the JSONL sink so the daily aggregator can recompute costs against
+  any pricing table version without replaying agents.
 
 Usage pattern (one ChatAnthropic instance, one agent decision)::
 
@@ -67,8 +66,10 @@ Usage pattern (one ChatAnthropic instance, one agent decision)::
 - The callback hard-fails if ``on_llm_end`` fires with no usage metadata
   on the response. Anthropic responses always carry usage; missing
   fields are an upstream change worth surfacing immediately.
-- Price-table lookup hard-fails on unknown model (delegated to
-  ``alpha_engine_lib.cost.recompute_cost``).
+- Price-table lookup tolerates unknown model (warn + leave cost_usd=0)
+  so a missing yaml entry doesn't halt the SF on cost-telemetry; token
+  counts are still captured and the aggregator can re-derive later if a
+  card is added retroactively.
 - **Run budget ceiling (PR 5)** — per-run cumulative cost is tracked in
   a ContextVar. At each ``track_llm_cost`` frame exit, the cumulative
   cost for the active ``run_id`` is compared against
@@ -718,8 +719,12 @@ def track_llm_cost(
     RuntimeError
         If the frame stack underflows on exit (enter/exit imbalance —
         usually a bug in the calling code, e.g. swallowed exception).
-        Also propagates ``PriceCardLookupError`` from ``recompute_cost``
-        if the resolved model isn't in the price table.
+    RunBudgetExceededError
+        At frame exit when cumulative run cost exceeds
+        ``ALPHA_ENGINE_RUN_BUDGET_USD`` (raised AFTER the JSONL flush
+        so per-call detail is preserved on S3).
+    CostRawWriteError
+        If the per-call JSONL flush to S3 fails when capture is enabled.
     """
     frame = _Frame(
         agent_id=agent_id,

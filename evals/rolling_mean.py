@@ -1,4 +1,4 @@
-"""Rolling-4-week-mean derived CloudWatch metric (PR 4b).
+"""Rolling-4-week-mean derived CloudWatch metric.
 
 CloudWatch alarms cap evaluation period at 24 hours, so a true
 4-week rolling alarm on the raw ``AlphaEngine/Eval/agent_quality_score``
@@ -11,7 +11,7 @@ Per ROADMAP §1634:
   Alarm threshold on rolling-4-week-mean < 3.0 emits SNS.
 
 Run cadence: weekly, after the eval-judge Lambda has emitted the
-current week's raw metric. EventBridge or SF wiring lands in PR 4c.
+current week's raw metric.
 
 Discovery flow:
   1. ListMetrics paged through ``AlphaEngine/Eval / agent_quality_score``
@@ -89,7 +89,7 @@ def _build_metric_data_queries(
     """One GetMetricData query per combo. The query Id is the combo
     index — used to map results back to dimensions on the response side.
     CloudWatch caps queries at 500 per call; with ~6 sector teams ×
-    3 sub-agents × 5 criteria × 2 judge models = ~180 we're well below.
+    3 sub-agents × 4-6 criteria × 2 judge models = ~290 we're well below.
     """
     return [
         {

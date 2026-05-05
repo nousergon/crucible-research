@@ -1,5 +1,5 @@
 """
-Intraday price alert Lambda (§11.4).
+Intraday price alert Lambda.
 
 Runs every 30 minutes during market hours (9:30am–4:00pm ET, Mon–Fri).
 Checks current prices for universe + active candidates and fires an email
@@ -215,7 +215,7 @@ def handler(event, context):
     from preflight import ResearchPreflight
     ResearchPreflight(bucket=S3_BUCKET, mode="alerts").run()
 
-    # Download research.db for prior closes + ratings
+    # Download research.db for prior closes + candidate/population tickers
     local_db = os.path.join(tempfile.gettempdir(), "research_alerts.db")
     s3 = boto3.client("s3", region_name=AWS_REGION)
     try:

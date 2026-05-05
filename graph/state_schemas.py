@@ -3,18 +3,19 @@ Pydantic schemas for typed LangGraph state — agent outputs + computed
 artifacts referenced from ``ResearchState``.
 
 These schemas are the typed-state successor to the ``dict[str, Any]`` and
-``dict[str, dict]`` annotations in ``graph.research_graph.ResearchState``.
-They are not yet wired into ``ResearchState`` — that happens in a subsequent
-commit of the typed-state workstream once each node's read/write contract
-has been verified against its actual returned shape.
+``dict[str, dict]`` annotations that lived in
+``graph.research_graph.ResearchState``. They are now wired into
+``ResearchState`` via ``Annotated[..., reducer]`` field types and used by
+``_validate`` at every node boundary in strict-by-default mode.
 
-**Compatibility posture for this commit (PR 1, commit 1):** every model
-uses ``model_config = ConfigDict(extra="allow")`` so a model constructed
-from a real agent output (which carries fields not enumerated here — e.g.
-``quant_output``, ``qual_output``, ``peer_review_output`` from the
-sector-team stub) does NOT reject the extras. PR 2 (where agents are
-wrapped with ``with_structured_output()``) flips ``extra="forbid"`` once
-the agent contracts are explicit.
+**Compatibility posture:** most models still use
+``model_config = ConfigDict(extra="allow")`` because agents emit fields
+not enumerated here (e.g. ``quant_output``, ``qual_output``,
+``peer_review_output`` from the sector-team stub). LLM-extraction schemas
+wrapped via ``with_structured_output()`` at 8 sites enforce the stricter
+contract on the LLM side; the state-schema ``extra="forbid"`` flip lands
+incrementally as each agent's output contract soaks. ``RubricEvalArtifact``
+already runs ``extra="forbid"``.
 
 Numeric constraints (e.g. ``quant_score ∈ [0, 100]``, sector modifiers
 ∈ [0.70, 1.30]) ARE enforced even with ``extra="allow"`` — the validators
@@ -296,7 +297,7 @@ class PopulationRotationEvent(BaseModel):
     reason: str = ""
 
 
-# ── LLM-extraction schemas (for `with_structured_output()` in PR 2) ───────
+# ── LLM-extraction schemas (used by `with_structured_output()` at agent boundaries) ───────
 #
 # These are the typed shapes passed to ``llm.with_structured_output(Schema)``
 # at each agent boundary. They are distinct from the state-shape schemas

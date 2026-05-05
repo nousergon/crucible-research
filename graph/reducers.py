@@ -2,9 +2,9 @@
 LangGraph state reducers — canonical-key-ordering, typed-aware variants.
 
 These reducers are the typed-state successor to ``research_graph._merge_dicts``
-(shipped 2026-04-29 as PR #50 with canonical key ordering). They are not yet
-wired into ``ResearchState`` — that happens in a subsequent commit of the
-typed-state workstream once the per-field reducer audit is complete.
+(shipped 2026-04-29 as PR #50 with canonical key ordering). They are wired
+into ``ResearchState`` via ``Annotated[T, reducer]`` field types — see
+``graph.research_graph.ResearchState`` for the per-field reducer assignments.
 
 Three reducer behaviors:
 

@@ -19,13 +19,16 @@ the cap per the Day-1 design doc § 4 PR 3 size estimates.
 ``technical_scores`` instead). Replay paths can reconstruct ``price_data``
 from ArcticDB's universe library via ``run_date`` if needed.
 
-**Placeholder-quality fields** (refined in a follow-up commit):
-- ``ModelMetadata`` token counts default to 0 — real counts come from a
-  LangChain callback handler integration that lands when agents are
-  upgraded to ``with_structured_output()`` (D4 in the workstream).
-- ``FullPromptContext`` system_prompt + user_prompt are placeholders —
-  the actual prompts live in gitignored ``agents/`` files; plumbing them
-  through requires the same agent-upgrade work.
+**Field provenance:**
+- ``ModelMetadata`` token counts + cost_usd now flow from
+  ``graph.llm_cost_tracker`` — ``_capture_if_enabled`` reads populated
+  metadata via ``pop_metadata_for(agent_id)``. Call sites not yet wired
+  through ``track_llm_cost`` fall back to a model-name-only stub with
+  zero tokens (logged loudly so the gap is visible).
+- ``FullPromptContext.user_prompt`` is plumbed via ``LoadedPrompt`` at
+  ``track_llm_cost`` enter; ``system_prompt`` is still a placeholder
+  because the agent-specific system prompts live in gitignored
+  ``agents/`` files and aren't loaded by name.
 
 Workstream design: ``alpha-engine-docs/private/alpha-engine-research-typed-
 state-capture-260429.md``.

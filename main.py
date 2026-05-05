@@ -2,7 +2,7 @@
 Local entry point for alpha-engine-research.
 Delegates to local/run.py for full-featured CLI.
 
-Usage: python main.py [--date YYYY-MM-DD] [--dry-run] [--skip-scanner]
+Usage: python main.py [--date YYYY-MM-DD] [--local] [--no-s3] [--offline] [--stub-llm]
 """
 
 import sys

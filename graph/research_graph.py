@@ -640,9 +640,8 @@ def sector_team_node(state: ResearchState) -> dict:
     ):
         result = run_sector_team(team_id, ctx)
 
-    # Warn-mode schema validation — surfaces agent-output drift without
-    # changing runtime behavior. Hard-fail flip lands in a follow-up PR
-    # after one Saturday SF cycle of clean warn-counts.
+    # Schema validation — strict-by-default (raises RuntimeError on
+    # validation failure unless STRICT_VALIDATION=false).
     _validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
@@ -824,7 +823,7 @@ def exit_evaluator_node(state: ResearchState) -> dict:
         constituents=set(scanner_universe) if scanner_universe else None,
     )
 
-    # Warn-mode schema validation on per-exit shape.
+    # Schema validation on per-exit shape (strict-by-default).
     for ev in exits:
         _validate(ExitEvent, ev, context="exit_evaluator")
 
@@ -1038,7 +1037,7 @@ def score_aggregator(state: ResearchState) -> dict:
 
     logger.info("[score_aggregator] scored %d tickers", len(investment_theses))
 
-    # Warn-mode schema validation on every produced thesis.
+    # Schema validation on every produced thesis (strict-by-default).
     for ticker, thesis in investment_theses.items():
         _validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
 
@@ -1105,7 +1104,7 @@ def cio_node(state: ResearchState) -> dict:
             min_new_entrants=CIO_MIN_NEW_ENTRANTS,
         )
 
-    # Warn-mode schema validation on CIO output shapes.
+    # Schema validation on CIO output shapes (strict-by-default).
     for decision in cio_result.get("decisions", []):
         _validate(CIODecision, decision, context="cio")
     for ticker, thesis in cio_result.get("entry_theses", {}).items():

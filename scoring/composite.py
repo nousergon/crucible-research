@@ -37,7 +37,7 @@ def compute_composite_score(
         quant_score: Quantitative score (0-100) from quant analyst. None if failed.
         qual_score: Qualitative score (0-100) from qual analyst. None if failed.
         sector_modifier: Macro sector modifier (0.70-1.30).
-        boosts: {boost_name: points} from O10-O13 enrichments.
+        boosts: {boost_name: points} from signal-boost enrichments.
         w_quant: Weight for quant score.
         w_qual: Weight for qual score.
         max_aggregate_boost: Cap on total boost points.

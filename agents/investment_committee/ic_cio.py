@@ -1,8 +1,8 @@
 """
 CIO Agent — evaluates all sector team recommendations in a single batch Sonnet call.
 
-The CIO sees all candidates simultaneously and selects the top N for open slots.
-Evaluates on 4 dimensions: team conviction, macro alignment, portfolio fit, catalyst specificity.
+The CIO sees all candidates simultaneously and selects up to `max_new_entrants` for advancement (floor-enforced; `open_slots` is informational only — see `_compute_advance_bounds`).
+Evaluates on 5 dimensions: risk/reward asymmetry (primary), team conviction, macro alignment, portfolio fit, catalyst specificity.
 Writes entry theses for advanced stocks. All decisions (advance, reject, deadlock) saved.
 """
 

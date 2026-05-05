@@ -1,8 +1,9 @@
 """
 Lambda entry point — main research pipeline.
 
-Weekly (primary): triggered by EventBridge Monday 06:00 UTC (Sunday ~10-11pm PT).
-EventBridge passes {"weekly_run": true} — bypasses the 5:45am PT time gate.
+Weekly (primary): triggered by the Saturday Step Function via EventBridge
+Saturday 06:00 UTC (Friday ~10-11pm PT). EventBridge passes {"weekly_run": true}
+— bypasses the 5:45am PT time gate.
 
 Weekday (disabled, available for rollback): EventBridge at 12:45+13:45 UTC
 (5:45am PT after DST time gate). Checks for market holidays.
@@ -168,7 +169,7 @@ def handler(event, context):
 
     Gate logic:
       - force=True  → bypass all gates (manual testing)
-      - weekly_run=True → bypass time gate (Monday 06:00 UTC weekly schedule)
+      - weekly_run=True → bypass time gate (Saturday 06:00 UTC weekly schedule)
       - Otherwise → require 5:40-5:55am PT time window AND NYSE trading day
 
     Returns:
@@ -197,11 +198,12 @@ def handler(event, context):
 
     today = datetime.date.today()
 
-    # Trading day gate: force bypasses; weekly runs on Monday (always a trading day
-    # unless it's a rare Monday holiday like MLK Day or Presidents' Day)
+    # Trading day gate: force bypasses; weekly runs Saturday (never a trading day,
+    # so weekly always proceeds — signals are stamped with the most recent trading
+    # day below). Weekday runs require an actual NYSE session.
     if not force and not is_trading_day(today):
         if weekly:
-            logger.info("Monday holiday on %s — running anyway (weekly population refresh).", today)
+            logger.info("Non-trading day %s — running anyway (weekly population refresh).", today)
         else:
             logger.info("Market holiday on %s — skipping run.", today)
             return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
