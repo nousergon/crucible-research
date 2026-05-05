@@ -39,7 +39,6 @@ Multi-agent investment-research pipeline — six sector teams, a CIO, a macro ec
 | LLM-as-judge rubric scoring | [`evals/judge.py`](evals/judge.py) |
 | Eval rolling-mean tracker | [`evals/rolling_mean.py`](evals/rolling_mean.py) |
 | LangGraph trajectory invariants | [`evals/trajectory.py`](evals/trajectory.py) |
-| RAG ingestion pipelines (filings, transcripts, theses) | [`rag/pipelines/`](rag/pipelines/) |
 | Archive manager (S3 + SQLite + thesis history) | [`archive/manager.py`](archive/manager.py) |
 | SQLite schema | [`archive/schema.py`](archive/schema.py) |
 | Health status writer | [`health_status.py`](health_status.py) |
