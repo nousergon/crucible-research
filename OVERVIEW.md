@@ -21,7 +21,7 @@ Multi-agent investment-research pipeline — six sector teams, a CIO, a macro ec
 | Concept | File |
 |---|---|
 | LangGraph orchestrator (Send fan-out, fan-in, state) | [`graph/research_graph.py`](graph/research_graph.py) |
-| Typed state schemas (Pydantic) | [`graph/state_schemas.py`](graph/state_schemas.py) |
+| Typed state schemas (Pydantic) | [`graph/state_schemas.py`](graph/state_schemas.py) — research-internal state + storage types; LLM-output schemas re-exported from `alpha_engine_lib.agent_schemas` (lifted 2026-05-05, lib v0.4.0) |
 | State reducers | [`graph/reducers.py`](graph/reducers.py) |
 | Per-call LLM cost tracker + run-budget hard ceiling | [`graph/llm_cost_tracker.py`](graph/llm_cost_tracker.py) |
 | Decision-artifact capture helpers | [`graph/decision_capture_helpers.py`](graph/decision_capture_helpers.py) |
