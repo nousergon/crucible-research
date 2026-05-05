@@ -20,6 +20,7 @@ FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
 FUNCTION_EVAL_JUDGE="alpha-engine-research-eval-judge"
 FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
+FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -545,16 +546,81 @@ deploy_eval_rolling_mean() {
   echo "  Alias 'live' → version $VERSION"
 }
 
+# ── deploy_rationale_clustering ─────────────────────────────────────────────
+#
+# Cross-week rationale clustering Lambda — same image-share + CMD-override
+# pattern as eval_judge / eval_rolling_mean. CMD overrides to
+# ``rationale_clustering_handler.handler``. Trigger wiring (weekly
+# EventBridge after eval-rolling-mean finishes) lands separately.
+
+deploy_rationale_clustering() {
+  echo "=== Deploying $FUNCTION_RATIONALE_CLUSTERING (image-share with $FUNCTION_MAIN) ==="
+
+  IMAGE_URI="$ECR_REPO:latest"
+  IMAGE_CONFIG='{"Command":["rationale_clustering_handler.handler"]}'
+
+  ENV_ARGS=()
+  if [ -n "$LAMBDA_ENV_JSON" ]; then
+    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
+  fi
+
+  if aws lambda get-function --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" &>/dev/null; then
+    aws lambda update-function-code \
+      --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+      --image-uri "$IMAGE_URI" \
+      --region "$REGION" > /dev/null
+    echo "  Waiting for code update to complete..."
+    aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
+    aws lambda update-function-configuration \
+      --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+      --image-config "$IMAGE_CONFIG" \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  else
+    aws lambda create-function \
+      --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+      --package-type Image \
+      --code "ImageUri=$IMAGE_URI" \
+      --image-config "$IMAGE_CONFIG" \
+      --role "$ROLE_ARN" \
+      --timeout 600 \
+      --memory-size 1024 \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  fi
+  echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
+
+  echo "  Publishing Lambda version..."
+  aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
+  VERSION=$(aws lambda publish-version \
+    --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+    --query "Version" --output text \
+    --region "$REGION")
+  echo "  Published version: $VERSION"
+  aws lambda update-alias \
+    --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION" 2>/dev/null || \
+  aws lambda create-alias \
+    --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION"
+  echo "  Alias 'live' → version $VERSION"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
-  main)               build_and_deploy_main ;;
-  alerts)             build_and_deploy_alerts ;;
-  eval_judge)         deploy_eval_judge ;;
-  eval_rolling_mean)  deploy_eval_rolling_mean ;;
-  both)               build_and_deploy_main; build_and_deploy_alerts ;;
-  all)                build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_rolling_mean ;;
-  *)                  echo "Usage: $0 [main|alerts|eval_judge|eval_rolling_mean|both|all]"; exit 1 ;;
+  main)                  build_and_deploy_main ;;
+  alerts)                build_and_deploy_alerts ;;
+  eval_judge)            deploy_eval_judge ;;
+  eval_rolling_mean)     deploy_eval_rolling_mean ;;
+  rationale_clustering)  deploy_rationale_clustering ;;
+  both)                  build_and_deploy_main; build_and_deploy_alerts ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_rolling_mean; deploy_rationale_clustering ;;
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_rolling_mean|rationale_clustering|both|all]"; exit 1 ;;
 esac
 
 echo ""

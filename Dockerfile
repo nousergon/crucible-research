@@ -62,4 +62,10 @@ COPY lambda/eval_judge_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_handler.py
 # Lambda overriding CMD to ["eval_rolling_mean_handler.handler"].
 COPY lambda/eval_rolling_mean_handler.py ${LAMBDA_TASK_ROOT}/eval_rolling_mean_handler.py
 
+# Cross-week rationale clustering Lambda — same image, separate Lambda
+# overriding CMD to ["rationale_clustering_handler.handler"]. Reads
+# decision_artifacts/ for trailing 8 weeks, clusters rationales per
+# agent_id, emits agent_rationale_template_concentration CW metric.
+COPY lambda/rationale_clustering_handler.py ${LAMBDA_TASK_ROOT}/rationale_clustering_handler.py
+
 CMD ["handler.handler"]
