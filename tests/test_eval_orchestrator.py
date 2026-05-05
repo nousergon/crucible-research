@@ -82,9 +82,11 @@ def _make_eval(
 @pytest.fixture
 def mocked_s3_with_captures():
     """Yields an S3 client + bucket pre-populated with a small Sat-5/9-style
-    capture set: 1 sector_quant + 1 sector_qual + 1 ic_cio + 1
-    macro_economist + 1 thesis_update (intentionally unmapped) + 1 stray
-    non-JSON file (defensive listing case)."""
+    capture set: 5 mapped agent captures (sector_quant + sector_qual +
+    macro_economist + ic_cio + thesis_update — the latter mapped 2026-05-05
+    after the executor's behavioral dependency on conviction + bull_case
+    was confirmed) + 1 unknown_agent (defensive coverage of the
+    unmapped-skip path) + 1 stray non-JSON file (defensive listing case)."""
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket="alpha-engine-research")
@@ -101,6 +103,8 @@ def mocked_s3_with_captures():
                 _make_capture("ic_cio"),
             f"{prefix}/thesis_update:technology:AAPL/run-1.json":
                 _make_capture("thesis_update:technology:AAPL"),
+            f"{prefix}/unknown_agent_xyz/run-1.json":
+                _make_capture("unknown_agent_xyz"),
         }
         for key, payload in captures.items():
             client.put_object(
@@ -166,8 +170,9 @@ class TestListCaptureKeys:
             date="2026-05-09",
             bucket="alpha-engine-research",
         )
-        # 5 capture artifacts; README.txt + _eval/ entry both excluded.
-        assert len(keys) == 5
+        # 6 capture artifacts (5 mapped + 1 unknown_agent); README.txt
+        # + _eval/ entry both excluded.
+        assert len(keys) == 6
         assert all(k.endswith(".json") for k in keys)
         assert all("/_eval/" not in k for k in keys)
         assert all(k.startswith("decision_artifacts/2026/05/09/") for k in keys)
@@ -197,13 +202,13 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        # 4 mapped agents (sector_quant + sector_qual + macro_economist + ic_cio);
-        # thesis_update is intentionally unmapped → skipped.
-        assert result["haiku_evaluated"] == 4
+        # 5 mapped agents (sector_quant + sector_qual + macro_economist +
+        # ic_cio + thesis_update); unknown_agent_xyz is unmapped → skipped.
+        assert result["haiku_evaluated"] == 5
         assert result["sonnet_evaluated"] == 0
         assert result["skipped_unmapped"] == 1
         assert result["failed"] == []
-        assert len(result["persisted_keys"]) == 4
+        assert len(result["persisted_keys"]) == 5
         assert all(
             ".claude-haiku-4-5.json" in k for k in result["persisted_keys"]
         )
@@ -228,13 +233,13 @@ class TestEvaluateCorpus:
             )
 
         # Every mapped artifact gets BOTH Haiku and Sonnet evals.
-        assert result["haiku_evaluated"] == 4
-        assert result["sonnet_evaluated"] == 4
-        assert len(result["persisted_keys"]) == 8
+        assert result["haiku_evaluated"] == 5
+        assert result["sonnet_evaluated"] == 5
+        assert len(result["persisted_keys"]) == 10
         haiku_keys = [k for k in result["persisted_keys"] if "claude-haiku-4-5" in k]
         sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
-        assert len(haiku_keys) == 4
-        assert len(sonnet_keys) == 4
+        assert len(haiku_keys) == 5
+        assert len(sonnet_keys) == 5
 
     def test_per_artifact_escalation_when_haiku_score_below_threshold(
         self, mocked_s3_with_captures,
@@ -259,7 +264,7 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        assert result["haiku_evaluated"] == 4
+        assert result["haiku_evaluated"] == 5
         assert result["sonnet_evaluated"] == 1
         # The Sonnet escalation should be for ic_cio specifically.
         sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
@@ -287,8 +292,9 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        # 3 succeed (sector_quant + sector_qual + ic_cio); macro fails.
-        assert result["haiku_evaluated"] == 3
+        # 4 succeed (sector_quant + sector_qual + ic_cio + thesis_update);
+        # macro fails.
+        assert result["haiku_evaluated"] == 4
         assert result["sonnet_evaluated"] == 0
         assert len(result["failed"]) == 1
         assert result["failed"][0]["agent_id"] == "macro_economist"
@@ -317,20 +323,23 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        # Every mapped artifact has Haiku score 2 → all 4 escalate.
-        assert result["haiku_evaluated"] == 4
+        # Every mapped artifact has Haiku score 2 → all 5 escalate.
+        assert result["haiku_evaluated"] == 5
         assert result["sonnet_evaluated"] == 0
-        # All 4 Sonnet attempts failed; no Haiku failures.
+        # All 5 Sonnet attempts failed; no Haiku failures.
         sonnet_failures = [f for f in result["failed"] if f["stage"] == "sonnet"]
         haiku_failures = [f for f in result["failed"] if f["stage"] == "haiku"]
-        assert len(sonnet_failures) == 4
+        assert len(sonnet_failures) == 5
         assert len(haiku_failures) == 0
 
     def test_skipped_unmapped_agents_not_in_failed(
         self, mocked_s3_with_captures,
     ):
-        """thesis_update:* artifacts have no rubric; they should be
-        counted as skipped, NOT as failures."""
+        """unknown_agent_xyz has no rubric; it should be counted as
+        skipped, NOT as a failure. (thesis_update:* was unmapped pre
+        2026-05-05; rubric shipped that day after confirming executor's
+        behavioral dependency, so the unmapped-skip path is now
+        exercised by the unknown_agent fixture entry.)"""
         from evals import orchestrator as orch
 
         def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
@@ -437,8 +446,8 @@ class TestEvaluateCorpus:
         self, mocked_s3_with_captures,
     ):
         """Default ``emit_metrics=True``: every successful persist should
-        trigger one ``emit_eval_metric`` call. With 4 mapped agents +
-        no escalation, that's 4 emission calls."""
+        trigger one ``emit_eval_metric`` call. With 5 mapped agents +
+        no escalation, that's 5 emission calls."""
         from evals import orchestrator as orch
 
         def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
@@ -462,13 +471,14 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        assert len(emit_calls) == 4
+        assert len(emit_calls) == 5
         assert result["metric_emission_failures"] == 0
         assert sorted(emit_calls) == sorted([
             "sector_quant:technology",
             "sector_qual:technology",
             "macro_economist",
             "ic_cio",
+            "thesis_update:technology:AAPL",
         ])
 
     def test_metric_emission_failure_does_not_halt_run(
@@ -495,10 +505,10 @@ class TestEvaluateCorpus:
                 s3_client=mocked_s3_with_captures,
             )
 
-        assert result["haiku_evaluated"] == 4
-        assert result["metric_emission_failures"] == 4
+        assert result["haiku_evaluated"] == 5
+        assert result["metric_emission_failures"] == 5
         assert result["failed"] == []  # not promoted to artifact-level failure
-        assert len(result["persisted_keys"]) == 4
+        assert len(result["persisted_keys"]) == 5
 
     def test_dry_run_skips_llm_persist_and_metrics(
         self, mocked_s3_with_captures,
@@ -527,9 +537,10 @@ class TestEvaluateCorpus:
         assert result["dry_run"] is True
         assert result["haiku_evaluated"] == 0
         assert result["sonnet_evaluated"] == 0
-        # 4 mapped agents (sector_quant + sector_qual + macro + cio);
-        # thesis_update is unmapped → skipped, not in would_evaluate.
-        assert len(result["would_evaluate"]) == 4
+        # 5 mapped agents (sector_quant + sector_qual + macro + cio +
+        # thesis_update); unknown_agent_xyz is unmapped → skipped, not
+        # in would_evaluate.
+        assert len(result["would_evaluate"]) == 5
         assert result["skipped_unmapped"] == 1
         assert result["persisted_keys"] == []
         # Each entry carries enough info to manually verify what would
@@ -619,7 +630,7 @@ class TestEvaluateCorpus:
         assert result["eval_prefix"] == "decision_artifacts/_eval_judge_only/"
         assert result["cw_namespace"] == "AlphaEngine/EvalJudgeOnly"
         assert result["haiku_evaluated"] == 0
-        assert len(result["would_evaluate"]) == 4
+        assert len(result["would_evaluate"]) == 5
 
     def test_default_keeps_prod_paths(self, mocked_s3_with_captures):
         """Default invocation (no flags) must NOT redirect anything —

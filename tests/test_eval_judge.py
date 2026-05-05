@@ -130,12 +130,17 @@ class TestResolveRubricForAgent:
         from evals.judge import resolve_rubric_for_agent
         assert resolve_rubric_for_agent("ic_cio") == "eval_rubric_ic_cio"
 
-    def test_thesis_update_intentionally_unevaluated(self):
-        # Held-stock thesis updates have artifacts captured (PR #87)
-        # but no rubric — narrower call shape, structured update vs
-        # novel analysis. Returns None so callers skip cleanly.
+    def test_thesis_update_with_team_and_ticker(self):
+        # Held-stock thesis update rubric promoted from "deferred"
+        # to "shipped" 2026-05-05 after confirming behavioral
+        # load-bearing-ness in the executor (position sizing reads
+        # conviction; EOD email reads bull_case). agent_id shape is
+        # ``thesis_update:{team}:{ticker}`` per
+        # research_graph._capture_if_enabled.
         from evals.judge import resolve_rubric_for_agent
-        assert resolve_rubric_for_agent("thesis_update:technology:AAPL") is None
+        assert resolve_rubric_for_agent("thesis_update:technology:AAPL") == "eval_rubric_thesis_update"
+        assert resolve_rubric_for_agent("thesis_update:financials:JHG") == "eval_rubric_thesis_update"
+        assert resolve_rubric_for_agent("thesis_update:healthcare:LLY") == "eval_rubric_thesis_update"
 
     def test_unknown_agent_returns_none(self):
         from evals.judge import resolve_rubric_for_agent

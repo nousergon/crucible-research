@@ -96,12 +96,18 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
       sector_peer_review:{team_id}  → eval_rubric_sector_peer_review
       macro_economist               → eval_rubric_macro_economist
       ic_cio                        → eval_rubric_ic_cio
-      thesis_update:{team}:{ticker} → None (deferred — narrower call,
-                                       structured update not novel
-                                       analysis; eval value lower)
+      thesis_update:{team}:{ticker} → eval_rubric_thesis_update
 
     Unknown agent_ids return None so the caller can skip cleanly
     rather than crash on rubric lookup.
+
+    The thesis_update rubric was added 2026-05-05 after confirming the
+    held-stock update is alpha-load-bearing: executor's position_sizer
+    reads conviction (0.7× multiplier on declining); eod_reconcile reads
+    bull_case (EOD email rationale). Silent regression in this output
+    directly costs alpha through wrong sizing on held positions, so the
+    rubric makes the regression visible weeks before it shows up in
+    alpha-vs-SPY.
     """
     if agent_id.startswith("sector_quant:"):
         return "eval_rubric_sector_quant"
@@ -109,6 +115,8 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
         return "eval_rubric_sector_qual"
     if agent_id.startswith("sector_peer_review:"):
         return "eval_rubric_sector_peer_review"
+    if agent_id.startswith("thesis_update:"):
+        return "eval_rubric_thesis_update"
     if agent_id == "macro_economist":
         return "eval_rubric_macro_economist"
     if agent_id == "ic_cio":
