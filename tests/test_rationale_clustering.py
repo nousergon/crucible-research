@@ -28,21 +28,23 @@ import pytest
 
 
 class TestExtractRationales:
-    def test_sector_quant_top5_picks(self):
+    def test_sector_quant_ranked_picks(self):
+        # Real capture shape: ranked_picks[*].rationale
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
-            "sector_quant:tech",
+            "sector_quant:technology",
             {
-                "top5_picks": [
-                    {"ticker": "NVDA", "quant_rationale": "P/E of 32 attractive"},
-                    {"ticker": "AAPL", "quant_rationale": "FCF yield strong"},
+                "ranked_picks": [
+                    {"ticker": "NVDA", "rationale": "P/E of 32 attractive"},
+                    {"ticker": "AAPL", "rationale": "FCF yield strong"},
                 ]
             },
         )
         assert out == ["P/E of 32 attractive", "FCF yield strong"]
 
     def test_sector_qual_assessments(self):
+        # Real capture shape: assessments[*].bull_case
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
@@ -56,42 +58,54 @@ class TestExtractRationales:
         )
         assert out == ["Pipeline strong", "Oncology lead"]
 
-    def test_sector_peer_review_decisions_plus_team(self):
+    def test_sector_peer_review_recommendations_plus_team(self):
+        # Real capture shape: recommendations[*].peer_review_rationale +
+        # top-level peer_review_rationale.
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
             "sector_peer_review:financials",
             {
-                "selected_decisions": [
-                    {"ticker": "JPM", "rationale": "Strong NIM tailwind"},
+                "recommendations": [
+                    {"ticker": "JPM", "peer_review_rationale": "Strong NIM tailwind"},
                 ],
-                "team_rationale": "Sector concentration controlled",
+                "peer_review_rationale": "Sector concentration controlled",
             },
         )
         assert "Strong NIM tailwind" in out
         assert "Sector concentration controlled" in out
 
-    def test_macro_economist_picks_longest_field(self):
+    def test_macro_economist_picks_macro_report(self):
+        # Real capture shape: macro_report (~2KB narrative); other keys
+        # don't appear on real captures but stay as fallback.
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
             "macro_economist",
             {
-                "regime_rationale": "short",
-                "macro_report": "much longer narrative about regime classification",
-                "summary": "tiny",
+                "macro_report": "Full regime narrative",
+                "market_regime": "BULL",
             },
         )
-        # Picks longest of the candidate fields.
-        assert out == ["much longer narrative about regime classification"]
+        assert out == ["Full regime narrative"]
+
+    def test_macro_economist_falls_back_to_alt_keys(self):
+        from evals.rationale_clustering import extract_rationales
+
+        out = extract_rationales(
+            "macro_economist",
+            {"regime_rationale": "fallback narrative"},
+        )
+        assert out == ["fallback narrative"]
 
     def test_ic_cio_decisions(self):
+        # Real capture shape: ic_decisions[*].rationale
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
             "ic_cio",
             {
-                "decisions": [
+                "ic_decisions": [
                     {"ticker": "META", "rationale": "Composite 78, R/R 2.1"},
                     {"ticker": "GOOG", "rationale": "Composite 81, R/R 2.4"},
                 ]
@@ -99,7 +113,9 @@ class TestExtractRationales:
         )
         assert out == ["Composite 78, R/R 2.1", "Composite 81, R/R 2.4"]
 
-    def test_thesis_update_pulls_bull_case_and_conviction(self):
+    def test_thesis_update_pulls_all_four_narrative_fields(self):
+        # Real capture shape: bull_case + conviction_rationale +
+        # thesis_summary + triggers_response.
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
@@ -107,10 +123,15 @@ class TestExtractRationales:
             {
                 "bull_case": "Services growth accelerating",
                 "conviction_rationale": "Confirmed by Q3 print",
+                "thesis_summary": "Long-term compounder; current setup favorable",
+                "triggers_response": "Triggers within tolerance — hold",
             },
         )
+        assert len(out) == 4
         assert "Services growth accelerating" in out
         assert "Confirmed by Q3 print" in out
+        assert "Long-term compounder; current setup favorable" in out
+        assert "Triggers within tolerance — hold" in out
 
     def test_unknown_agent_returns_empty(self):
         from evals.rationale_clustering import extract_rationales
@@ -128,11 +149,11 @@ class TestExtractRationales:
         from evals.rationale_clustering import extract_rationales
 
         out = extract_rationales(
-            "sector_quant:tech",
+            "sector_quant:technology",
             {
-                "top5_picks": [
-                    {"ticker": "X", "quant_rationale": "valid"},
-                    {"ticker": "Y", "quant_rationale": ""},
+                "ranked_picks": [
+                    {"ticker": "X", "rationale": "valid"},
+                    {"ticker": "Y", "rationale": ""},
                     {"ticker": "Z"},  # missing key entirely
                 ]
             },
@@ -305,9 +326,9 @@ class TestComputeAndEmit:
             key: {
                 "agent_id": "sector_quant",
                 "agent_output": {
-                    "top5_picks": [
-                        {"ticker": "X", "quant_rationale": "rationale a"},
-                        {"ticker": "Y", "quant_rationale": "rationale b"},
+                    "ranked_picks": [
+                        {"ticker": "X", "rationale": "rationale a"},
+                        {"ticker": "Y", "rationale": "rationale b"},
                     ]
                 },
             }
@@ -341,8 +362,8 @@ class TestComputeAndEmit:
             key1: {
                 "agent_id": "sector_quant",
                 "agent_output": {
-                    "top5_picks": [
-                        {"ticker": f"T{i}", "quant_rationale": templates[i]}
+                    "ranked_picks": [
+                        {"ticker": f"T{i}", "rationale": templates[i]}
                         for i in range(4)
                     ]
                 },
@@ -350,8 +371,8 @@ class TestComputeAndEmit:
             key2: {
                 "agent_id": "sector_quant",
                 "agent_output": {
-                    "top5_picks": [
-                        {"ticker": f"T{i}", "quant_rationale": templates[i]}
+                    "ranked_picks": [
+                        {"ticker": f"T{i}", "rationale": templates[i]}
                         for i in range(4, 8)
                     ]
                 },
@@ -398,8 +419,8 @@ class TestComputeAndEmit:
             key: {
                 "agent_id": "sector_quant",
                 "agent_output": {
-                    "top5_picks": [
-                        {"ticker": f"T{i}", "quant_rationale": templates[i]}
+                    "ranked_picks": [
+                        {"ticker": f"T{i}", "rationale": templates[i]}
                         for i in range(8)
                     ]
                 },
@@ -429,8 +450,8 @@ class TestComputeAndEmit:
             good_key: {
                 "agent_id": "sector_quant",
                 "agent_output": {
-                    "top5_picks": [
-                        {"ticker": f"T{i}", "quant_rationale": f"rationale {i}"}
+                    "ranked_picks": [
+                        {"ticker": f"T{i}", "rationale": f"rationale {i}"}
                         for i in range(8)
                     ]
                 },

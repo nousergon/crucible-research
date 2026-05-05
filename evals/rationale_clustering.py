@@ -130,66 +130,65 @@ def extract_rationales(agent_id: str, agent_output: dict[str, Any]) -> list[str]
 
     base_id = agent_id.split(":", 1)[0]
 
+    # Field names below were validated against real captures from
+    # 2026-05-03 (see extractor smoke run notes). Each branch lists the
+    # actual top-level keys observed in agent_output.
+
     if base_id == "sector_quant":
-        # Output shape: {"top5_picks": [{"ticker": ..., "quant_rationale": "..."}, ...]}
-        # Plus additional picks may live in different list fields by team.
+        # ranked_picks[*].rationale — list of 5-10 picks per sector team.
         rationales: list[str] = []
-        for key in ("top5_picks", "ranked_picks", "picks"):
-            picks = agent_output.get(key)
-            if isinstance(picks, list):
-                rationales.extend(
-                    str(p["quant_rationale"]).strip()
-                    for p in picks
-                    if isinstance(p, dict) and p.get("quant_rationale")
-                )
+        picks = agent_output.get("ranked_picks")
+        if isinstance(picks, list):
+            rationales.extend(
+                str(p["rationale"]).strip()
+                for p in picks
+                if isinstance(p, dict) and p.get("rationale")
+            )
         return [r for r in rationales if r]
 
     if base_id == "sector_qual":
-        # Output shape: {"assessments": [{"ticker": ..., "bull_case": "..."}, ...]}
+        # assessments[*].bull_case — list of qual assessments per sector.
         rationales = []
-        for key in ("assessments", "qual_assessments"):
-            items = agent_output.get(key)
-            if isinstance(items, list):
-                rationales.extend(
-                    str(a["bull_case"]).strip()
-                    for a in items
-                    if isinstance(a, dict) and a.get("bull_case")
-                )
+        items = agent_output.get("assessments")
+        if isinstance(items, list):
+            rationales.extend(
+                str(a["bull_case"]).strip()
+                for a in items
+                if isinstance(a, dict) and a.get("bull_case")
+            )
         return [r for r in rationales if r]
 
     if base_id == "sector_peer_review":
-        # Output shape: {"selected_decisions": [{"ticker": ..., "rationale": "..."}, ...]}
+        # Two-track: per-pick recommendations[*].peer_review_rationale +
+        # the top-level cross-pick peer_review_rationale string. Both
+        # carry distinct rationale signal — the former is per-ticker,
+        # the latter is the team-level synthesis.
         rationales = []
-        for key in ("selected_decisions", "decisions"):
-            items = agent_output.get(key)
-            if isinstance(items, list):
-                rationales.extend(
-                    str(d["rationale"]).strip()
-                    for d in items
-                    if isinstance(d, dict) and d.get("rationale")
-                )
-        # Plus the team-level rationale string if present.
-        team_rat = agent_output.get("team_rationale")
+        items = agent_output.get("recommendations")
+        if isinstance(items, list):
+            rationales.extend(
+                str(d["peer_review_rationale"]).strip()
+                for d in items
+                if isinstance(d, dict) and d.get("peer_review_rationale")
+            )
+        team_rat = agent_output.get("peer_review_rationale")
         if isinstance(team_rat, str) and team_rat.strip():
             rationales.append(team_rat.strip())
         return [r for r in rationales if r]
 
     if base_id == "macro_economist":
-        # Output shape: regime call text in one of several fields per the
-        # macro agent's emit pattern. Pull the longest narrative field.
-        candidates = []
-        for key in ("regime_rationale", "macro_report", "rationale", "summary"):
+        # macro_report is the canonical narrative field on real captures
+        # (~2KB per call). Fall back to other candidates if a future
+        # capture format renames it.
+        for key in ("macro_report", "regime_rationale", "rationale", "summary"):
             v = agent_output.get(key)
             if isinstance(v, str) and v.strip():
-                candidates.append(v.strip())
-        # Return the longest (likely the full rationale, not the one-liner).
-        if candidates:
-            return [max(candidates, key=len)]
+                return [v.strip()]
         return []
 
     if base_id == "ic_cio":
-        # Output shape: {"decisions": [{"ticker": ..., "rationale": "..."}, ...]}
-        decisions = agent_output.get("decisions")
+        # ic_decisions[*].rationale — per-candidate CIO decisions.
+        decisions = agent_output.get("ic_decisions")
         if not isinstance(decisions, list):
             return []
         return [
@@ -199,9 +198,19 @@ def extract_rationales(agent_id: str, agent_output: dict[str, Any]) -> list[str]
         ]
 
     if base_id == "thesis_update":
-        # Output shape: {"bull_case": "...", "conviction_rationale": "...", ...}
+        # Held-stock thesis carries multiple narrative fields; treat each
+        # as an independent rationale so per-field templating is
+        # observable. bull_case + conviction_rationale + thesis_summary
+        # + triggers_response are all author-emitted prose with distinct
+        # purpose; clustering them separately catches "all four wear the
+        # same template" patterns.
         rationales = []
-        for key in ("bull_case", "conviction_rationale"):
+        for key in (
+            "bull_case",
+            "conviction_rationale",
+            "thesis_summary",
+            "triggers_response",
+        ):
             v = agent_output.get(key)
             if isinstance(v, str) and v.strip():
                 rationales.append(v.strip())
