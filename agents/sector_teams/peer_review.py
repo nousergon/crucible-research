@@ -209,79 +209,145 @@ def _joint_finalization(
     candidates: list[dict],
     market_regime: str,
 ) -> dict:
-    """Single Haiku call to select final 2-3 from merged candidates."""
-    candidates_text = "\n".join(
-        f"  {c['ticker']}: quant={c.get('quant_score', '?')}, qual={c.get('qual_score', '?')}, "
-        f"conviction={c.get('conviction', '?')}, bull={c.get('bull_case', '')[:80]}"
-        for c in candidates
-    )
+    """Two-pass joint finalization (selection then per-ticker rationale).
 
-    loaded_prompt = load_prompt("peer_review_joint_finalization")
-    prompt = loaded_prompt.format(
-        team_title=team_id.title(),
-        market_regime=market_regime,
-        candidates_text=candidates_text,
-        team_picks_per_run=TEAM_PICKS_PER_RUN,
-    )
+    Pass 1: Haiku picks final 2-3 tickers from merged candidates and
+            emits cross-pick context (team_rationale). Output shape is
+            ``JointSelectionOutput`` — list[str] of tickers + a 1-2
+            sentence team rationale, ~200 tokens, bounded by
+            construction.
 
-    # PR 2.2 Step C: flip _joint_finalization to with_structured_output.
-    # The combined-score fallback is load-bearing — every team MUST produce
-    # 2-3 picks for the merge step downstream — so the lax-mode fallback
-    # is preserved. Strict mode raises on parse failure; the operator
-    # then has the choice to flip STRICT_VALIDATION=false in 30s and
-    # re-run if the failure is an isolated LLM hiccup rather than a
-    # systemic schema issue.
-    from graph.state_schemas import JointFinalizationOutput
+    Pass 2: For each selected ticker, a separate Haiku call produces a
+            ``JointFinalizationDecision`` (ticker + rationale ≤ 50
+            words). Each call is self-bounded; total per-team output
+            scales linearly in N picks but no single response can blow
+            past max_tokens.
+
+    Replaced single-pass ``JointFinalizationOutput`` call after
+    truncation incidents 2026-05-03 + 2026-05-06 where Haiku's
+    rationale verbosity drift across 2-3 picks pushed combined output
+    past max_tokens_strategic mid-emission, losing the entire
+    selection.
+
+    Lax-mode fallback (sort by combined score) is preserved — every
+    team MUST produce picks for the downstream merge — and applies if
+    Pass 1 fails. If Pass 1 succeeds but a Pass 2 call fails, the
+    ticker still ships with an empty rationale (don't lose the pick
+    just because rationale generation hiccups).
+    """
+    from graph.state_schemas import JointSelectionOutput, JointFinalizationDecision
     from strict_mode import is_strict_validation_enabled
 
-    # Dedicated llm instance with the strategic-tier token budget. The
-    # parent ``llm`` was created in run_peer_review() with
-    # MAX_TOKENS_PER_STOCK (sized for single-ticker outputs) — the joint
-    # finalization produces a list of 2-3 JointFinalizationDecision
-    # entries plus team_rationale, which fits the strategic tier sizing
-    # (synthesis-class structured output). Reuses parent's model +
-    # api_key + callbacks via cheap rebind; no extra cost-tracker
-    # registration needed.
+    # Pass 1 LLM instance — strategic-tier token budget for selection
+    # output. Even though the new schema is small (~200 tokens),
+    # MAX_TOKENS_STRATEGIC is the right ceiling: it leaves slack for
+    # team_rationale verbosity and matches the prior call shape.
     finalization_llm = ChatAnthropic(
         model=llm.model,
         anthropic_api_key=llm.anthropic_api_key,
         max_tokens=MAX_TOKENS_STRATEGIC,
         callbacks=llm.callbacks,
     )
-    structured_llm = finalization_llm.with_structured_output(JointFinalizationOutput)
+
+    # ── Pass 1: selection ────────────────────────────────────────────
+    candidates_text = "\n".join(
+        f"  {c['ticker']}: quant={c.get('quant_score', '?')}, qual={c.get('qual_score', '?')}, "
+        f"conviction={c.get('conviction', '?')}, bull={c.get('bull_case', '')[:80]}"
+        for c in candidates
+    )
+    selection_prompt = load_prompt("peer_review_joint_selection")
+    p1_text = selection_prompt.format(
+        team_title=team_id.title(),
+        market_regime=market_regime,
+        candidates_text=candidates_text,
+        team_picks_per_run=TEAM_PICKS_PER_RUN,
+    )
+
+    selection_structured = finalization_llm.with_structured_output(JointSelectionOutput)
+    selection: Optional[JointSelectionOutput] = None
     try:
-        result: JointFinalizationOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": loaded_prompt.langsmith_metadata()},
+        selection = selection_structured.invoke(
+            [HumanMessage(content=p1_text)],
+            config={"metadata": selection_prompt.langsmith_metadata()},
         )
-        rationale_by_ticker = {
-            d.ticker: d.rationale for d in result.selected_decisions
-        }
-        picks = []
-        for c in candidates:
-            if c["ticker"] in rationale_by_ticker:
-                pick = dict(c)
-                # Per-pick rationale captured for LLM-as-judge eval — flows
-                # into ``recommendations`` and on into decision artifacts.
-                pick["peer_review_rationale"] = rationale_by_ticker[c["ticker"]]
-                picks.append(pick)
-        return {
-            "picks": picks[:TEAM_PICKS_PER_RUN],
-            "rationale": result.team_rationale,
-        }
     except Exception as e:
         if is_strict_validation_enabled():
             raise
-        log.warning("[peer_review:%s] joint finalization failed: %s", team_id, e)
+        log.warning(
+            "[peer_review:%s] Pass 1 (selection) failed: %s — applying combined-score fallback",
+            team_id, e,
+        )
 
-    # Fallback: sort by combined score and take top N
+    if selection is None or not selection.selected_tickers:
+        # Pass 1 failed entirely — combined-score fallback (preserves
+        # invariant that every team produces picks).
+        for c in candidates:
+            qs = c.get("quant_score") or 0
+            qls = c.get("qual_score") or 0
+            c["_combined"] = (qs + qls) / 2 if qls else qs
+        candidates.sort(key=lambda x: x["_combined"], reverse=True)
+        return {
+            "picks": candidates[:TEAM_PICKS_PER_RUN],
+            "rationale": "Fallback: selected by combined quant+qual score.",
+        }
+
+    # Selection succeeded — clamp to TEAM_PICKS_PER_RUN, drop tickers
+    # not in the candidate set (LLM hallucination guard).
+    candidate_by_ticker = {c["ticker"]: c for c in candidates}
+    selected = [
+        t for t in selection.selected_tickers if t in candidate_by_ticker
+    ][:TEAM_PICKS_PER_RUN]
+
+    # ── Pass 2: per-ticker rationale ─────────────────────────────────
+    rationale_prompt = load_prompt("peer_review_per_ticker_rationale")
+    rationale_structured = finalization_llm.with_structured_output(JointFinalizationDecision)
+    rationale_by_ticker: dict[str, str] = {}
+
+    for ticker in selected:
+        candidate = candidate_by_ticker[ticker]
+        # Compact candidate context — full quant/qual/conviction fields
+        # for this single ticker. ~100-200 tokens.
+        candidate_context = (
+            f"ticker={ticker}, quant_score={candidate.get('quant_score', '?')}, "
+            f"qual_score={candidate.get('qual_score', '?')}, "
+            f"conviction={candidate.get('conviction', '?')}, "
+            f"rr_ratio={candidate.get('rr_ratio', '?')}, "
+            f"bull_case={candidate.get('bull_case', '')[:200]}, "
+            f"bear_case={candidate.get('bear_case', '')[:200]}"
+        )
+        p2_text = rationale_prompt.format(
+            team_title=team_id.title(),
+            ticker=ticker,
+            market_regime=market_regime,
+            candidate_context=candidate_context,
+            team_rationale=selection.team_rationale,
+        )
+        try:
+            decision: JointFinalizationDecision = rationale_structured.invoke(
+                [HumanMessage(content=p2_text)],
+                config={"metadata": rationale_prompt.langsmith_metadata()},
+            )
+            rationale_by_ticker[ticker] = decision.rationale
+        except Exception as e:
+            # Pass 2 hiccup for one ticker — keep the pick, log the
+            # gap. Don't let one rationale failure poison the slate.
+            if is_strict_validation_enabled():
+                raise
+            log.warning(
+                "[peer_review:%s] Pass 2 rationale failed for %s: %s",
+                team_id, ticker, e,
+            )
+            rationale_by_ticker[ticker] = ""
+
+    picks = []
     for c in candidates:
-        qs = c.get("quant_score") or 0
-        qls = c.get("qual_score") or 0
-        c["_combined"] = (qs + qls) / 2 if qls else qs
-
-    candidates.sort(key=lambda x: x["_combined"], reverse=True)
+        if c["ticker"] in rationale_by_ticker:
+            pick = dict(c)
+            # Per-pick rationale captured for LLM-as-judge eval — flows
+            # into ``recommendations`` and on into decision artifacts.
+            pick["peer_review_rationale"] = rationale_by_ticker[c["ticker"]]
+            picks.append(pick)
     return {
-        "picks": candidates[:TEAM_PICKS_PER_RUN],
-        "rationale": "Fallback: selected by combined quant+qual score.",
+        "picks": picks[:TEAM_PICKS_PER_RUN],
+        "rationale": selection.team_rationale,
     }

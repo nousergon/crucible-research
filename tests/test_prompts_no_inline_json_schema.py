@@ -39,7 +39,8 @@ _PRODUCTION_PROMPTS = (
     "qual_analyst_system",
     "qual_analyst_user",
     "peer_review_quant_addition",
-    "peer_review_joint_finalization",
+    "peer_review_joint_selection",
+    "peer_review_per_ticker_rationale",
     "sector_team_thesis_update",
     "ic_cio_evaluation",
 )

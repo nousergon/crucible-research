@@ -37,11 +37,19 @@ import pytest
 # update only the configured column.
 _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
-        "peer_review._joint_finalization",
-        "JointFinalizationOutput",
+        "peer_review._joint_finalization (Pass 1 selection)",
+        "JointSelectionOutput",
         10752,  # MAX_TOKENS_STRATEGIC
-        2000,  # 2-3 JointFinalizationDecision (~150 tok each) + team_rationale (~150) + envelope
-        "List of 2-3 picks × (ticker + rationale ~150tok) + team_rationale ~150tok",
+        300,  # selected_tickers (list of ~3 short symbols) + team_rationale ~200tok + envelope
+        "Pass 1 of two-pass: ticker list + team_rationale only. Per-ticker rationale "
+        "moves to Pass 2 (one bounded JointFinalizationDecision call per ticker).",
+    ),
+    (
+        "peer_review._joint_finalization (Pass 2 per-ticker rationale)",
+        "JointFinalizationDecision",
+        10752,  # MAX_TOKENS_STRATEGIC (called via same finalization_llm; could drop to PER_STOCK)
+        200,  # ticker (short str) + rationale ≤50 words ~100tok + envelope
+        "Pass 2 of two-pass: single-ticker rationale generation, called once per pick.",
     ),
     (
         "peer_review._quant_reviews_addition",
