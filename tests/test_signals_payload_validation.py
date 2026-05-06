@@ -19,7 +19,11 @@ from __future__ import annotations
 import pytest
 
 
-def _enter_signal(ticker: str, sector: str = "Energy") -> dict:
+def _enter_signal(
+    ticker: str,
+    sector: str = "Energy",
+    team_id: str = "energy",
+) -> dict:
     return {
         "ticker": ticker,
         "signal": "ENTER",
@@ -28,7 +32,7 @@ def _enter_signal(ticker: str, sector: str = "Energy") -> dict:
         "conviction": "stable",
         "thesis_summary": "",
         "sector": sector,
-        "team_id": "energy",
+        "team_id": team_id,
         "quant_score": 75.0,
         "qual_score": 70.0,
         "sub_scores": {"quant": 75.0, "qual": 70.0},
@@ -227,3 +231,139 @@ def test_universe_set_input_also_works():
         }
     }
     _validate_signals_payload(payload, scanner_universe={"EOG", "NVT"})
+
+
+# ── Zero-tool-call gate (PR 4 of provenance grounding stack) ──────────────
+
+
+def test_zero_tool_call_team_soft_fails_by_default(caplog):
+    """When tool_call_counts shows the producing team had zero calls AND
+    block_on_zero_tool_calls=False (default), the validator logs a
+    WARNING and emission proceeds — soft-fail mode for the soak window."""
+    import logging
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy", team_id="energy"),
+        }
+    }
+
+    with caplog.at_level(logging.WARNING):
+        _validate_signals_payload(
+            payload,
+            tool_call_counts_by_team={"energy": 0},
+        )
+    assert any("SOFT-FAIL" in rec.message and "EOG" in rec.message
+               for rec in caplog.records)
+
+
+def test_zero_tool_call_team_hard_fails_when_flag_on():
+    """With block_on_zero_tool_calls=True (post-soak hard-fail mode),
+    the gate raises and signals.json is not written."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy", team_id="energy"),
+        }
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _validate_signals_payload(
+            payload,
+            tool_call_counts_by_team={"energy": 0},
+            block_on_zero_tool_calls=True,
+        )
+    msg = str(exc_info.value)
+    assert "zero tool_calls" in msg
+    assert "EOG" in msg
+
+
+def test_nonzero_tool_call_team_passes():
+    """Producing team with non-zero tool_calls passes the gate cleanly."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy", team_id="energy"),
+        }
+    }
+    _validate_signals_payload(
+        payload,
+        tool_call_counts_by_team={"energy": 42},
+        block_on_zero_tool_calls=True,
+    )
+
+
+def test_no_tool_call_counts_passed_skips_check():
+    """Backward-compatible: passing None for tool_call_counts disables
+    the gate entirely — matches the original PR #126/#128 contract."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy", team_id="energy"),
+        }
+    }
+    _validate_signals_payload(payload)
+    _validate_signals_payload(payload, tool_call_counts_by_team=None)
+
+
+def test_zero_tool_call_skipped_when_team_id_missing(caplog):
+    """A signal with no team_id (e.g., reaffirmed carry-over) can't be
+    looked up against the counts dict; gate skips it silently rather
+    than false-flagging."""
+    import logging
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": {**_enter_signal("EOG"), "team_id": None},
+        }
+    }
+    with caplog.at_level(logging.WARNING):
+        _validate_signals_payload(
+            payload,
+            tool_call_counts_by_team={"energy": 0},
+            block_on_zero_tool_calls=True,
+        )
+    # No raise + no SOFT-FAIL log entry
+    assert not any("SOFT-FAIL" in rec.message for rec in caplog.records)
+
+
+def test_tool_call_check_only_applies_to_enter_signals():
+    """HOLD/EXIT signals never gate on tool_calls — they're managing
+    existing positions, not opening new ones."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "OLD": {**_enter_signal("OLD"), "signal": "EXIT", "team_id": "energy"},
+            "META": {**_enter_signal("META"), "signal": "HOLD", "team_id": "tech"},
+        }
+    }
+    _validate_signals_payload(
+        payload,
+        tool_call_counts_by_team={"energy": 0, "tech": 0},
+        block_on_zero_tool_calls=True,
+    )
+
+
+def test_walk_tool_calls_handles_nested():
+    """The walker must traverse nested quant_output/qual_output paths
+    (sector_team is a sub-graph). Mirrors the test in
+    alpha-engine-backtester#148 ``analysis/provenance_grounding.py``."""
+    from graph.research_graph import _walk_tool_calls
+
+    team_output = {
+        "team_id": "tech",
+        "tool_calls": [],
+        "quant_output": {
+            "tool_calls": [{"tool": "screen"}, {"tool": "screen"}]
+        },
+        "qual_output": {
+            "tool_calls": [{"tool": "fetch_news"}]
+        },
+    }
+    assert _walk_tool_calls(team_output) == 3

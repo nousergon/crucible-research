@@ -1509,11 +1509,25 @@ def archive_writer(state: ResearchState) -> dict:
             e,
         )
 
+    # Per-team tool_call counts for the zero-tool-call gate. Walks
+    # sector_team_outputs (top-level + nested quant_output/qual_output
+    # tool_calls) so the count matches what alpha-engine-backtester#148
+    # provenance metric records. Pydantic instances are dumped to dicts
+    # before walking so the recursive walker handles both shapes.
+    tool_call_counts_by_team: dict[str, int] = {}
+    for team_id, output in (state.get("sector_team_outputs") or {}).items():
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+        if isinstance(output, dict):
+            tool_call_counts_by_team[team_id] = _walk_tool_calls(output)
+
     try:
         signals_payload = _build_signals_payload(state)
         _validate_signals_payload(
             signals_payload,
             scanner_universe=universe_symbols,
+            tool_call_counts_by_team=tool_call_counts_by_team,
+            block_on_zero_tool_calls=False,  # soft-fail; flip after soak
         )
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
@@ -1678,12 +1692,39 @@ def email_sender(state: ResearchState) -> dict:
     return {"email_sent": False}
 
 
+def _walk_tool_calls(node: object) -> int:
+    """Recursively count every ToolCall list found in an agent output dict.
+
+    Sector teams nest tool_calls under ``quant_output.tool_calls`` and
+    ``qual_output.tool_calls`` because the team is a sub-graph with
+    quant + qual + peer_review sub-agents; macro_economist puts them at
+    the top-level. Mirrors the walker shipped in alpha-engine-backtester
+    #148 ``analysis/provenance_grounding.py`` so producer (this gate)
+    and consumer (provenance metric) count the same trace.
+    """
+    count = 0
+    if isinstance(node, dict):
+        tcs = node.get("tool_calls")
+        if isinstance(tcs, list):
+            count += sum(1 for tc in tcs if isinstance(tc, dict))
+        for k, v in node.items():
+            if k == "tool_calls":
+                continue
+            count += _walk_tool_calls(v)
+    elif isinstance(node, list):
+        for item in node:
+            count += _walk_tool_calls(item)
+    return count
+
+
 def _validate_signals_payload(
     payload: dict,
     scanner_universe: list[str] | set[str] | None = None,
+    tool_call_counts_by_team: dict[str, int] | None = None,
+    block_on_zero_tool_calls: bool = False,
 ) -> None:
     """Block emission of signals.json when any ENTER signal violates a
-    structural correctness gate. Two checks, both fail-loud:
+    structural correctness gate. Three checks:
 
     1. **Unresolved sector.** Surface for the 2026-05-04 EOG/NVT incident:
        the v1 signals.json had sector="Unknown" for tickers whose
@@ -1698,12 +1739,23 @@ def _validate_signals_payload(
        — but never ENTER, which would let the executor add to a position
        outside the index.
 
+    3. **Zero-tool-call producing agent.** Soft-fail by default. When
+       ``tool_call_counts_by_team`` is provided, looks up the producing
+       team for each ENTER signal. If the team's tool_call count is 0,
+       the signal was emitted by an agent that didn't exercise its
+       retrieval capability — a hallucination signal. With
+       ``block_on_zero_tool_calls=True`` (post-soak hard-fail mode), the
+       list raises; otherwise a WARNING is logged and emission proceeds.
+       Composes with alpha-engine-backtester#148 provenance metrics
+       (per-Saturday tracking) — same walker, same structural definition.
+
     On block: signals.json is not written, the existing try/except logs
     ERROR, and the executor falls back to prior trading day's signals via
     signal_reader.read_signals_with_fallback.
     """
     unresolved_sector: list[str] = []
     out_of_universe: list[str] = []
+    zero_tool_call_signals: list[str] = []
     universe_set = set(scanner_universe) if scanner_universe else None
     for ticker, sig in (payload.get("signals") or {}).items():
         if sig.get("signal") != "ENTER":
@@ -1713,21 +1765,42 @@ def _validate_signals_payload(
             unresolved_sector.append(ticker)
         if universe_set is not None and ticker not in universe_set:
             out_of_universe.append(ticker)
-    if unresolved_sector or out_of_universe:
-        msg_parts: list[str] = []
-        if unresolved_sector:
-            msg_parts.append(
-                f"{len(unresolved_sector)} ENTER signals with unresolved "
-                f"sector: {sorted(unresolved_sector)}"
-            )
-        if out_of_universe:
-            msg_parts.append(
-                f"{len(out_of_universe)} ENTER signals outside current S&P "
-                f"900 scanner universe: {sorted(out_of_universe)}"
-            )
+        if tool_call_counts_by_team is not None:
+            team_id = sig.get("team_id")
+            if team_id and tool_call_counts_by_team.get(team_id, 0) == 0:
+                zero_tool_call_signals.append(ticker)
+
+    # Soft-fail emission for the zero-tool-call check during the soak window.
+    # Hard-fail flips the flag once ~4 weeks of observed metric show the
+    # gate doesn't false-positive.
+    if zero_tool_call_signals and not block_on_zero_tool_calls:
+        logger.warning(
+            "[signals_validation] SOFT-FAIL: %d ENTER signals from agents "
+            "with zero tool_calls (hallucination signal): %s. signals.json "
+            "still emitted; flip block_on_zero_tool_calls=True after soak.",
+            len(zero_tool_call_signals), sorted(zero_tool_call_signals),
+        )
+
+    blocking_failures: list[str] = []
+    if unresolved_sector:
+        blocking_failures.append(
+            f"{len(unresolved_sector)} ENTER signals with unresolved "
+            f"sector: {sorted(unresolved_sector)}"
+        )
+    if out_of_universe:
+        blocking_failures.append(
+            f"{len(out_of_universe)} ENTER signals outside current S&P "
+            f"900 scanner universe: {sorted(out_of_universe)}"
+        )
+    if zero_tool_call_signals and block_on_zero_tool_calls:
+        blocking_failures.append(
+            f"{len(zero_tool_call_signals)} ENTER signals from agents "
+            f"with zero tool_calls: {sorted(zero_tool_call_signals)}"
+        )
+    if blocking_failures:
         raise RuntimeError(
             "[signals_validation] BLOCKED: "
-            + "; ".join(msg_parts)
+            + "; ".join(blocking_failures)
             + ". signals.json not written; executor will fall back to "
             "prior trading day."
         )
