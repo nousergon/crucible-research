@@ -13,10 +13,22 @@ RUN microdnf install -y git && microdnf clean all
 # (lib was flipped public 2026-05-03; previous versions vendored a local
 # copy via deploy.sh staging). [arcticdb] pulls arcticdb (used by data/
 # fetchers/price_fetcher.py); [flow_doctor] pulls flow-doctor for the
-# handler's setup_logging call. Excludes pytest / python-dotenv /
+# handler's setup_logging call; [rag] pulls psycopg2-binary + pgvector +
+# numpy for the qual analyst's `query_filings` tool which calls
+# `alpha_engine_lib.rag.retrieve()`. Excludes pytest / python-dotenv /
 # pre-installed Lambda runtime deps (boto3 etc.).
+#
+# IMPORTANT: keep this `@vX.Y.Z` tag in sync with the pin in
+# `requirements.txt` — the `grep -vE "...|^alpha-engine-lib"` line below
+# strips the lib pin from requirements before the `pip install -r`, so
+# this hardcoded line is the AUTHORITATIVE pin for the Lambda image. A
+# requirements-only bump won't propagate. Surfaced 2026-05-06 when a
+# `@v0.4.0 → @v0.5.1` requirements bump landed but the image kept
+# installing v0.3.0 (no `agent_schemas` module → ModuleNotFoundError on
+# Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
+# + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.3.0" && \
+RUN pip install --no-cache-dir "alpha-engine-lib[arcticdb,flow_doctor,rag] @ git+https://github.com/cipher813/alpha-engine-lib@v0.5.1" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^alpha-engine-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt

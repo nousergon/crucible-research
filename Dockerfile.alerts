@@ -6,8 +6,14 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # [arcticdb] extra — the alerts Lambda never touches ArcticDB.
 
 # Minimal deps for alerts handler
+#
+# IMPORTANT: keep this `@vX.Y.Z` tag in sync with the main `Dockerfile`
+# and `requirements.txt`. The alerts Lambda only consumes
+# `alpha_engine_lib.logging.setup_logging`, which has been stable since
+# v0.1.0 — but moving the alerts pin in lockstep avoids two-track lib
+# state across this repo's Lambda images.
 COPY requirements-alerts.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "alpha-engine-lib[flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.3.0" && \
+RUN pip install --no-cache-dir "alpha-engine-lib[flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.5.1" && \
     pip install --no-cache-dir -r requirements-alerts.txt && \
     rm -rf /root/.cache/pip
 
