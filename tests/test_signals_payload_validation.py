@@ -131,3 +131,99 @@ def test_empty_payload_passes():
 
     _validate_signals_payload({})
     _validate_signals_payload({"signals": {}})
+
+
+# ── Universe-membership drift gate ────────────────────────────────────────
+
+
+def test_enter_ticker_outside_scanner_universe_raises():
+    """A ticker that's no longer in the S&P 500+400 scanner universe must
+    not surface as a buy candidate. Held positions get HOLD/EXIT signals
+    via the existing rating logic; ENTER on a de-listed ticker would let
+    the executor add to a position outside the index."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy"),
+        }
+    }
+    universe = ["AAPL", "MSFT", "NVDA"]  # EOG dropped from scanner universe
+
+    with pytest.raises(RuntimeError, match=r"outside current S&P 900.*EOG"):
+        _validate_signals_payload(payload, scanner_universe=universe)
+
+
+def test_enter_ticker_inside_universe_passes():
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy"),
+        }
+    }
+    universe = ["EOG", "NVT"]
+    _validate_signals_payload(payload, scanner_universe=universe)
+
+
+def test_universe_check_skipped_when_universe_is_none():
+    """Backward-compatible: passing scanner_universe=None disables the
+    membership check (matches the original PR #126 contract)."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy"),
+        }
+    }
+    _validate_signals_payload(payload)
+    _validate_signals_payload(payload, scanner_universe=None)
+
+
+def test_universe_check_skipped_for_hold_and_exit():
+    """Held tickers that left the universe still need HOLD/EXIT signals to
+    manage the existing position. The gate only blocks ENTER."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": {**_enter_signal("EOG"), "signal": "HOLD"},
+            "NVT": {**_enter_signal("NVT"), "signal": "EXIT"},
+        }
+    }
+    universe = ["AAPL"]  # EOG and NVT both out
+    _validate_signals_payload(payload, scanner_universe=universe)
+
+
+def test_combined_unresolved_sector_and_universe_drift_in_one_message():
+    """When both checks fail, surface both in the same RuntimeError so
+    operators see the full picture, not just the first one to trip."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Unknown"),
+            "DELISTED": _enter_signal("DELISTED", sector="Energy"),
+        }
+    }
+    universe = ["EOG", "AAPL"]  # EOG in universe but bad sector; DELISTED out
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _validate_signals_payload(payload, scanner_universe=universe)
+    msg = str(exc_info.value)
+    assert "unresolved sector" in msg
+    assert "EOG" in msg
+    assert "outside current S&P 900" in msg
+    assert "DELISTED" in msg
+
+
+def test_universe_set_input_also_works():
+    """Accept set or list for scanner_universe — defensively converted."""
+    from graph.research_graph import _validate_signals_payload
+
+    payload = {
+        "signals": {
+            "EOG": _enter_signal("EOG", sector="Energy"),
+        }
+    }
+    _validate_signals_payload(payload, scanner_universe={"EOG", "NVT"})

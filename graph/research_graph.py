@@ -1490,10 +1490,31 @@ def archive_writer(state: ResearchState) -> dict:
             n_theses_written, len(investment_theses),
         )
 
-    # Write signals.json (backward compatible)
+    # Write signals.json (backward compatible).
+    # Universe-membership check sourced from alpha_engine_lib.arcticdb so
+    # producer (research preflight) and consumer (executor's
+    # filter_buy_candidates_to_universe) compare ENTER tickers against the
+    # same authoritative ArcticDB universe library. Soft-skip if ArcticDB
+    # is unreachable — the executor's downstream filter is the second-line
+    # defense and will surface the gap there.
+    universe_symbols: set[str] | None = None
+    try:
+        from alpha_engine_lib.arcticdb import get_universe_symbols
+        universe_symbols = get_universe_symbols(am.bucket)
+    except Exception as e:
+        logger.warning(
+            "[signals_validation] could not load ArcticDB universe symbols: %s "
+            "— skipping universe-membership check. Executor's downstream "
+            "filter will still gate against the same source.",
+            e,
+        )
+
     try:
         signals_payload = _build_signals_payload(state)
-        _validate_signals_payload(signals_payload)
+        _validate_signals_payload(
+            signals_payload,
+            scanner_universe=universe_symbols,
+        )
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
         logger.error("Failed to write signals.json: %s", e)
@@ -1657,35 +1678,58 @@ def email_sender(state: ResearchState) -> dict:
     return {"email_sent": False}
 
 
-def _validate_signals_payload(payload: dict) -> None:
-    """Block emission of signals.json when any ENTER signal carries an
-    unresolved sector.
+def _validate_signals_payload(
+    payload: dict,
+    scanner_universe: list[str] | set[str] | None = None,
+) -> None:
+    """Block emission of signals.json when any ENTER signal violates a
+    structural correctness gate. Two checks, both fail-loud:
 
-    Surface for the 2026-05-04 EOG/NVT incident: research wrote the first
-    pass of signals.json with sector="Unknown" for tickers whose constituents
-    sector_map hadn't loaded yet, then re-ran 10 minutes later with correct
-    values. The morning planner had already consumed the v1 file, written
-    the order book with sector="Unknown", and the daemon's intraday fills
-    persisted "Unknown" into trades.db.
+    1. **Unresolved sector.** Surface for the 2026-05-04 EOG/NVT incident:
+       the v1 signals.json had sector="Unknown" for tickers whose
+       constituents sector_map hadn't loaded yet. The morning planner
+       consumed v1, the order book persisted "Unknown", and the daemon's
+       intraday fills wrote "Unknown" into trades.db.
 
-    The builder defaults to "Unknown" as an honest last-resort label when
-    sector_map and thesis both lack the field; that's a valid runtime state.
-    Emitting it on an ENTER signal is not — ENTER propagates into the order
-    book and the durable trades record, and a stale-fallback to the prior
-    trading day's signals.json is the safer outcome.
+    2. **Universe-membership drift.** A ticker that's no longer in the
+       current S&P 500+400 scanner universe must not surface as a buy
+       candidate. Held positions that exit the universe should still
+       receive HOLD/EXIT signals (managed via the existing rating logic)
+       — but never ENTER, which would let the executor add to a position
+       outside the index.
+
+    On block: signals.json is not written, the existing try/except logs
+    ERROR, and the executor falls back to prior trading day's signals via
+    signal_reader.read_signals_with_fallback.
     """
-    bad: list[str] = []
+    unresolved_sector: list[str] = []
+    out_of_universe: list[str] = []
+    universe_set = set(scanner_universe) if scanner_universe else None
     for ticker, sig in (payload.get("signals") or {}).items():
         if sig.get("signal") != "ENTER":
             continue
         sector = sig.get("sector")
         if not sector or sector == "Unknown":
-            bad.append(ticker)
-    if bad:
+            unresolved_sector.append(ticker)
+        if universe_set is not None and ticker not in universe_set:
+            out_of_universe.append(ticker)
+    if unresolved_sector or out_of_universe:
+        msg_parts: list[str] = []
+        if unresolved_sector:
+            msg_parts.append(
+                f"{len(unresolved_sector)} ENTER signals with unresolved "
+                f"sector: {sorted(unresolved_sector)}"
+            )
+        if out_of_universe:
+            msg_parts.append(
+                f"{len(out_of_universe)} ENTER signals outside current S&P "
+                f"900 scanner universe: {sorted(out_of_universe)}"
+            )
         raise RuntimeError(
-            f"[signals_validation] BLOCKED: {len(bad)} ENTER signals with "
-            f"unresolved sector: {sorted(bad)}. signals.json not written; "
-            "executor will fall back to prior trading day."
+            "[signals_validation] BLOCKED: "
+            + "; ".join(msg_parts)
+            + ". signals.json not written; executor will fall back to "
+            "prior trading day."
         )
 
 
