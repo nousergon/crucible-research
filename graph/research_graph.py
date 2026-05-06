@@ -1173,6 +1173,20 @@ def consolidator(state: ResearchState) -> dict:
         sections.append(macro_report)
     sections.append("")
 
+    # ── Section a.1: Risk Posture (regime indicator) ─────────────────────────
+    # Surfaces the ATR-distribution of the agent population so a reader can
+    # eyeball whether the agents have positioned toward higher-vol names
+    # (the desired direction post-evaluator-revamp) or drifted back toward
+    # defensives. Per evaluator-revamp-260506.md PR 7. This is a *snapshot* —
+    # WoW comparison is gated on atr_pct propagating into signals.json
+    # (tracked as a P3 ROADMAP follow-up).
+    posture_lines = _build_risk_posture(state)
+    if posture_lines:
+        sections.append("---\n")
+        sections.append("## a.1. RISK POSTURE\n")
+        sections.extend(posture_lines)
+        sections.append("")
+
     # ── Section 2: Sector Allocation ─────────────────────────────────────────
     sector_ratings = state.get("sector_ratings", {})
     if sector_ratings:
@@ -1287,6 +1301,77 @@ def consolidator(state: ResearchState) -> dict:
 
     consolidated = "\n".join(sections)
     return {"consolidated_report": consolidated}
+
+
+def _build_risk_posture(state: ResearchState) -> list[str]:
+    """Build the Risk Posture section: ATR-distribution snapshot of the
+    agent population.
+
+    Reports avg / median / max ATR(%) across the new population plus the
+    count of high-vol picks (top vol-quartile of the *fetched* universe,
+    not just the population). The high-vol-quartile threshold is computed
+    from ``technical_scores`` rather than hardcoded — adapts to whatever
+    universe happened to be fetched this run.
+
+    Returns an empty list when ``technical_scores`` is empty or no
+    population picks have ATR data — graceful no-op so the consolidator
+    skips the section. Per evaluator-revamp-260506.md PR 7.
+    """
+    new_pop = state.get("new_population", [])
+    technical_scores = state.get("technical_scores", {})
+    if not new_pop or not technical_scores:
+        return []
+
+    def _atr_for(ticker: str) -> float | None:
+        ts = technical_scores.get(ticker, {})
+        # Both keys appear depending on which feature pipeline ran.
+        return ts.get("atr_pct") or ts.get("atr_14_pct")
+
+    pop_atrs = [
+        a for a in (_atr_for(p["ticker"]) for p in new_pop)
+        if a is not None
+    ]
+    if not pop_atrs:
+        return []
+
+    universe_atrs = [
+        a for a in (
+            ts.get("atr_pct") or ts.get("atr_14_pct")
+            for ts in technical_scores.values()
+        )
+        if a is not None
+    ]
+
+    pop_atrs_sorted = sorted(pop_atrs)
+    avg_atr = sum(pop_atrs) / len(pop_atrs)
+    median_atr = pop_atrs_sorted[len(pop_atrs_sorted) // 2]
+    max_atr = max(pop_atrs)
+
+    high_vol_threshold = None
+    n_high_vol = None
+    if len(universe_atrs) >= 4:
+        u_sorted = sorted(universe_atrs)
+        # Top-quartile threshold (75th percentile) of the fetched universe.
+        high_vol_threshold = u_sorted[int(0.75 * len(u_sorted))]
+        n_high_vol = sum(1 for a in pop_atrs if a >= high_vol_threshold)
+
+    lines = [
+        f"**Population: {len(new_pop)} stocks | ATR(%) — avg {avg_atr:.2f} | "
+        f"median {median_atr:.2f} | max {max_atr:.2f}**",
+        "",
+    ]
+    if high_vol_threshold is not None:
+        lines.append(
+            f"- **{n_high_vol}/{len(new_pop)}** picks in the top vol-quartile "
+            f"of the fetched universe (ATR ≥ {high_vol_threshold:.2f}%)"
+        )
+    lines.append(
+        "- _ATR-based vol proxy. Higher = more volatile names; intelligent risk-taking is the goal._"
+    )
+    lines.append(
+        "- _WoW delta gated on atr_pct in signals.json (P3 follow-up)._"
+    )
+    return lines
 
 
 def _build_notable_developments(state: ResearchState) -> list[str]:
