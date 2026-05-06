@@ -39,7 +39,7 @@ _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
         "peer_review._joint_finalization",
         "JointFinalizationOutput",
-        8192,  # MAX_TOKENS_STRATEGIC
+        10752,  # MAX_TOKENS_STRATEGIC
         2000,  # 2-3 JointFinalizationDecision (~150 tok each) + team_rationale (~150) + envelope
         "List of 2-3 picks × (ticker + rationale ~150tok) + team_rationale ~150tok",
     ),
@@ -53,21 +53,21 @@ _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
         "qual_analyst (extraction)",
         "QualAnalystOutput",
-        8192,  # MAX_TOKENS_STRATEGIC
+        10752,  # MAX_TOKENS_STRATEGIC
         6000,  # 5 QualAssessment × ~1000tok each + additional_candidate ~1000tok + envelope
         "5 assessments × (ticker + qual_score + bull/bear ~200tok each + catalysts list)",
     ),
     (
         "quant_analyst (extraction)",
         "QuantAnalystOutput",
-        8192,  # MAX_TOKENS_STRATEGIC
+        10752,  # MAX_TOKENS_STRATEGIC
         4000,  # 5 QuantPick × ~600tok each (ticker + rationale + scores + catalysts) + envelope
         "5 picks × (ticker + quant_score + rationale + catalysts list ~600tok)",
     ),
     (
         "macro_agent.run_macro_agent (extraction)",
         "MacroEconomistRawOutput",
-        8192,  # MAX_TOKENS_STRATEGIC
+        10752,  # MAX_TOKENS_STRATEGIC
         3500,  # macro_report (~500tok) + sector_modifiers dict (12×30) + sector_ratings (12×80) + envelope
         "Macro report + per-sector modifiers + per-sector ratings (12 sectors)",
     ),
@@ -81,16 +81,16 @@ _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
         "ic_cio",
         "CIORawOutput",
-        8192,  # MAX_TOKENS_STRATEGIC
+        10752,  # MAX_TOKENS_STRATEGIC
         4500,  # decisions list × per-decision rationale + entry_thesis + envelope
         "List of CIORawDecision × per-decision rationale + entry_thesis",
     ),
     (
         "evals.judge.evaluate_artifact",
         "RubricEvalLLMOutput",
-        8192,  # DEFAULT_MAX_TOKENS now routes through MAX_TOKENS_STRATEGIC
-        2500,  # 5 RubricDimensionScore × ~400tok verbose reasoning + overall_reasoning + envelope
-        "5 dimensions × (dim + score + reasoning ~400tok at verbose end) + overall_reasoning + envelope",
+        10752,  # DEFAULT_MAX_TOKENS now routes through MAX_TOKENS_STRATEGIC
+        3500,  # 6 RubricDimensionScore × ~450tok verbose reasoning + overall_reasoning + envelope (post output_completeness + reasoning_complexity addition)
+        "6 dimensions × (dim + score + reasoning ~450tok at verbose end) + overall_reasoning + envelope. 6th dim added 2026-05-04 (output_completeness for sector rubrics; reasoning_complexity for all rubrics) — actual Sonnet retry-exhaustion at 8192 in 2026-05-04 force_sonnet smoke triggered the bump to 10752.",
     ),
     (
         "sector_team._update_thesis_for_held_stock",
