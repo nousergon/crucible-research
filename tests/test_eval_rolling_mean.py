@@ -314,3 +314,185 @@ class TestComputeAndEmit4wMean:
         assert len(result["failed"]) == 1
         assert result["failed"][0]["combo_idx"] == "1"
         assert result["failed"][0]["stage"] == "get_metric_data"
+
+
+# ── Regression auto-emit (ROADMAP P0 sub-item 5 eval half) ───────────────
+
+
+@pytest.fixture
+def reset_regression_threshold(monkeypatch):
+    monkeypatch.delenv("ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD", raising=False)
+    yield
+
+
+class TestResolveRegressionThreshold:
+    def test_default_is_3x(self, reset_regression_threshold):
+        from evals.rolling_mean import _resolve_regression_threshold
+        assert _resolve_regression_threshold() == 3.0
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD", "2.5")
+        from evals.rolling_mean import _resolve_regression_threshold
+        assert _resolve_regression_threshold() == 2.5
+
+    def test_env_zero_disables(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD", "0")
+        from evals.rolling_mean import _resolve_regression_threshold
+        assert _resolve_regression_threshold() == 0.0
+
+    def test_env_unparseable_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD", "garbage")
+        from evals.rolling_mean import _resolve_regression_threshold
+        assert _resolve_regression_threshold() == 3.0
+
+
+class TestRegressionAutoEmit:
+    """End-to-end auto-emit when a combo's 4-week mean falls below threshold."""
+
+    def test_below_threshold_combo_writes_changelog_entry(
+        self, reset_regression_threshold,
+    ):
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("sector_quant", "calibration"), _dims("sector_qual", "depth")]
+        # First combo's mean is 2.5 < 3.0 → regression. Second is 4.0 → ok.
+        cw = _make_cw_with_combos(combos, {0: [2.5], 1: [4.0]})
+        s3 = MagicMock()
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        # Exactly one regression entry written (the first combo)
+        assert s3.put_object.call_count == 1
+        call = s3.put_object.call_args_list[0]
+        assert call.kwargs["Bucket"] == "alpha-engine-research"
+        assert call.kwargs["Key"].startswith("changelog/entries/")
+        assert call.kwargs["Key"].endswith(".json")
+        assert call.kwargs["ContentType"] == "application/json"
+
+        # Result summary carries the regression-emit count + threshold
+        assert len(result["regression_emits"]) == 1
+        assert result["regression_threshold"] == 3.0
+
+    def test_above_threshold_no_emit(self, reset_regression_threshold):
+        """All combos above threshold → no auto-emit (quiet weeks stay quiet)."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("sector_quant", "c1"), _dims("sector_qual", "c2")]
+        cw = _make_cw_with_combos(combos, {0: [4.0], 1: [4.5]})
+        s3 = MagicMock()
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        assert s3.put_object.call_count == 0
+        assert result["regression_emits"] == []
+
+    def test_disabled_threshold_no_emit(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD", "0")
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("sector_quant", "c1")]
+        cw = _make_cw_with_combos(combos, {0: [1.0]})  # would normally fire
+        s3 = MagicMock()
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        assert s3.put_object.call_count == 0
+        assert result["regression_emits"] == []
+        assert result["regression_threshold"] == 0.0
+
+    def test_entry_payload_shape(self, reset_regression_threshold):
+        """Auto-emitted entry carries every schema-1.0.0 field + the
+        eval_regression diagnostic block."""
+        import json as _json
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("sector_quant", "calibration", "claude-haiku-4-5")]
+        cw = _make_cw_with_combos(combos, {0: [2.0]})
+        s3 = MagicMock()
+
+        compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        body = _json.loads(s3.put_object.call_args.kwargs["Body"].decode())
+        assert body["schema_version"] == "1.0.0"
+        assert body["event_type"] == "eval_score_regression"
+        assert body["severity"] == "medium"  # operational, not capital-at-risk
+        assert body["subsystem"] == "eval"
+        assert body["root_cause_category"] == "prompt_regression"
+        assert body["source"] == "eval-regression-autoemit"
+        assert body["actor"] == "alpha-engine-eval-rolling-mean"
+        assert body["machine"] == "research:evals/rolling_mean.py"
+        assert body["auto_emitted"] is True
+        # eval_regression diagnostic block
+        er = body["eval_regression"]
+        assert er["judged_agent_id"] == "sector_quant"
+        assert er["criterion"] == "calibration"
+        assert er["judge_model"] == "claude-haiku-4-5"
+        assert er["rolling_mean"] == 2.0
+        assert er["threshold"] == 3.0
+        # eval_run_ref points at the per-day decision_artifacts path
+        assert "decision_artifacts/_eval/" in body["eval_run_ref"]
+        assert "/sector_quant/" in body["eval_run_ref"]
+        # event_id format mirrors SNS-mirror + cloudwatch-mirror scheme
+        parts = body["event_id"].split("_")
+        assert parts[1] == "alpha-engine-eval-rolling-mean"
+        assert len(parts[2]) == 7
+
+    def test_s3_write_failure_swallowed_other_combos_continue(
+        self, reset_regression_threshold,
+    ):
+        """If put_object raises on combo N, combo N+1 still gets a write
+        attempt + the floor metric still emits + the function returns."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [
+            _dims("a", "c1"),  # below threshold → tries to emit, fails
+            _dims("a", "c2"),  # below threshold → tries to emit, succeeds
+        ]
+        cw = _make_cw_with_combos(combos, {0: [2.0], 1: [2.5]})
+        s3 = MagicMock()
+
+        # First put_object raises, second succeeds
+        s3.put_object.side_effect = [
+            Exception("AccessDenied first call"),
+            {"ETag": '"deadbeef"'},
+        ]
+
+        # Should NOT raise — error is swallowed
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        # Both put_object calls attempted
+        assert s3.put_object.call_count == 2
+        # Only the second succeeded → only one S3 key in regression_emits
+        assert len(result["regression_emits"]) == 1
+        # CloudWatch metric emission happened in spite of S3 failure
+        # (combo data + floor were both put)
+        assert cw.put_metric_data.call_count >= 2
+
+    def test_event_id_idempotent_on_same_window_combo(
+        self, reset_regression_threshold,
+    ):
+        """Re-running with the same window + combo identity produces the
+        same event_id hash (overwrite, not duplicate)."""
+        from evals.rolling_mean import _emit_regression_entry
+
+        end = datetime(2026, 5, 9, 0, 0, 0, tzinfo=timezone.utc)
+        start = end - timedelta(days=28)
+        dims = _dims("sector_quant", "calibration")
+
+        s3_a = MagicMock()
+        s3_b = MagicMock()
+        _emit_regression_entry(
+            dims=dims, rolling_mean=2.0, threshold=3.0,
+            window_start=start, window_end=end, s3_client=s3_a,
+        )
+        _emit_regression_entry(
+            dims=dims, rolling_mean=2.0, threshold=3.0,
+            window_start=start, window_end=end, s3_client=s3_b,
+        )
+
+        key_a = s3_a.put_object.call_args.kwargs["Key"]
+        key_b = s3_b.put_object.call_args.kwargs["Key"]
+        # Hash segment (last 7 hex before .json) identical
+        hash_a = key_a.rsplit("_", 1)[-1].split(".")[0]
+        hash_b = key_b.rsplit("_", 1)[-1].split(".")[0]
+        assert hash_a == hash_b
