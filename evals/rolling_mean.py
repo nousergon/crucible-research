@@ -26,8 +26,11 @@ Discovery flow:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+from hashlib import sha1
 from typing import Any, Optional
 
 import boto3
@@ -35,6 +38,20 @@ import boto3
 from evals.metrics import DEFAULT_NAMESPACE, DEFAULT_METRIC_NAME
 
 logger = logging.getLogger(__name__)
+
+
+# Schema-1.0.0 changelog corpus (ROADMAP P0 sub-item 5 eval-regression
+# half — Item 6 LLM-as-judge eval pipeline shipped via the 2026-05-06
+# evaluator-revamp arc; this is the regression-detection + auto-emit
+# layer on top). Mirrors cost-anomaly auto-emit pattern from
+# alpha-engine-backtester#152.
+_CHANGELOG_BUCKET = os.environ.get("CHANGELOG_BUCKET", "alpha-engine-research")
+_CHANGELOG_PREFIX = "changelog/entries"
+_CHANGELOG_SCHEMA_VERSION = "1.0.0"
+
+_REGRESSION_THRESHOLD_ENV_VAR = "ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD"
+_REGRESSION_THRESHOLD_DEFAULT = 3.0
+"""Per ROADMAP §1634: alarm threshold on rolling-4-week-mean < 3.0."""
 
 
 DERIVED_METRIC_NAME = "agent_quality_score_4w_mean"
@@ -117,6 +134,7 @@ def compute_and_emit_4w_mean(
     derived_metric: str = DERIVED_METRIC_NAME,
     floor_metric: str = DERIVED_FLOOR_METRIC_NAME,
     cloudwatch_client: Optional[Any] = None,
+    s3_client: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Compute and emit the rolling-4-week-mean derived metric.
 
@@ -127,14 +145,18 @@ def compute_and_emit_4w_mean(
         source_metric: raw metric to roll up.
         derived_metric: name to push the mean under.
         cloudwatch_client: injected client for tests; production None.
+        s3_client: injected client for the regression auto-emit hook
+            (ROADMAP P0 sub-item 5 eval half). Tests inject; production
+            None → real boto3 client.
 
     Returns:
         Summary dict: combos discovered, derived datapoints emitted,
-        combos skipped (no data in window), and any per-combo errors.
-        Same shape as the eval orchestrator so the SF state can pattern-
-        match on ``failed`` to decide alarm severity.
+        combos skipped (no data in window), any per-combo errors, and
+        the list of S3 keys for any regression entries auto-emitted to
+        the system-wide changelog corpus.
     """
     cw = cloudwatch_client or boto3.client("cloudwatch")
+    s3 = s3_client or boto3.client("s3")
     end = end_time or datetime.now(timezone.utc)
     start = end - timedelta(days=ROLLING_WINDOW_DAYS)
     period_seconds = ROLLING_WINDOW_DAYS * 86400  # one datapoint per window
@@ -223,6 +245,28 @@ def compute_and_emit_4w_mean(
             chunk = derived_data[chunk_start:chunk_start + 1000]
             cw.put_metric_data(Namespace=namespace, MetricData=chunk)
 
+    # Regression auto-emit (ROADMAP P0 sub-item 5 eval half) — for every
+    # combo whose 4-week mean falls below the configured threshold,
+    # write one schema-1.0.0 entry to the system-wide changelog corpus.
+    # Each emit is best-effort + isolated: a write failure on combo N
+    # logs WARN but doesn't block combos N+1..M or the metric-emission
+    # below.
+    threshold = _resolve_regression_threshold()
+    regression_emits: list[str] = []
+    if threshold > 0:
+        for d in derived_data:
+            if d["Value"] < threshold:
+                key = _emit_regression_entry(
+                    dims=d["Dimensions"],
+                    rolling_mean=d["Value"],
+                    threshold=threshold,
+                    window_start=start,
+                    window_end=end,
+                    s3_client=s3,
+                )
+                if key:
+                    regression_emits.append(key)
+
     # Floor metric: single dimensionless datapoint = MIN across every
     # combo's 4-week mean. The alarm fires against this. Only emitted
     # when at least one combo had data — otherwise there's no floor
@@ -243,9 +287,10 @@ def compute_and_emit_4w_mean(
 
     logger.info(
         "[rolling_mean] done emitted=%d skipped_no_data=%d failed=%d "
-        "floor=%s",
+        "floor=%s regression_emits=%d",
         len(derived_data), skipped_no_data, len(failed),
         f"{floor_value:.3f}" if floor_value is not None else "(no data)",
+        len(regression_emits),
     )
 
     return {
@@ -257,4 +302,148 @@ def compute_and_emit_4w_mean(
         "window_end": end.isoformat(),
         "floor_value": floor_value,
         "floor_metric_emitted": floor_value is not None,
+        "regression_emits": regression_emits,
+        "regression_threshold": threshold,
     }
+
+
+# ── Regression auto-emit (ROADMAP P0 sub-item 5 eval half) ───────────────
+
+def _resolve_regression_threshold() -> float:
+    """Resolve the regression-detection threshold.
+
+    Mirrors the ``ALPHA_ENGINE_COST_ANOMALY_RATIO`` pattern from
+    alpha-engine-backtester#152: env var override (test/staging),
+    sane default at module level, threshold ≤ 0 disables auto-emit.
+    """
+    raw = os.environ.get(_REGRESSION_THRESHOLD_ENV_VAR)
+    if not raw:
+        return _REGRESSION_THRESHOLD_DEFAULT
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[rolling_mean] %s=%r unparseable as float; "
+            "falling back to default %s",
+            _REGRESSION_THRESHOLD_ENV_VAR, raw, _REGRESSION_THRESHOLD_DEFAULT,
+        )
+        return _REGRESSION_THRESHOLD_DEFAULT
+
+
+def _dims_to_dict(dims: list[dict[str, str]]) -> dict[str, str]:
+    """CloudWatch ``Dimensions`` is a list of ``{Name, Value}`` dicts —
+    flatten to ``{Name: Value}`` for the changelog entry's diagnostic block."""
+    return {d.get("Name", ""): d.get("Value", "") for d in dims}
+
+
+def _emit_regression_entry(
+    *,
+    dims: list[dict[str, str]],
+    rolling_mean: float,
+    threshold: float,
+    window_start: datetime,
+    window_end: datetime,
+    s3_client: Any,
+) -> Optional[str]:
+    """Write one schema-1.0.0 ``eval_score_regression`` entry to the
+    system-wide changelog corpus.
+
+    Best-effort: any failure logs WARN and returns None — does not
+    interrupt sibling combo emits or the metric-emission below.
+    Returns the structured S3 key on success.
+    """
+    try:
+        ts = datetime.now(timezone.utc)
+        ts_utc = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry_date = ts.strftime("%Y-%m-%d")
+        ts_id = ts_utc.replace(":", "-").rstrip("Z")
+        actor = "alpha-engine-eval-rolling-mean"
+
+        dims_flat = _dims_to_dict(dims)
+        agent_id = dims_flat.get("judged_agent_id", "unknown")
+        criterion = dims_flat.get("criterion", "unknown")
+        judge_model = dims_flat.get("judge_model", "unknown")
+        # event_id hashes on the combo identity + window so re-running
+        # rolling_mean for the same window produces the same id (overwrite,
+        # not duplicate).
+        digest_input = (
+            f"{agent_id}|{criterion}|{judge_model}|"
+            f"{window_start.isoformat()}|{window_end.isoformat()}"
+        ).encode()
+        event_hash = sha1(digest_input).hexdigest()[:7]
+        event_id = f"{ts_id}_{actor}_{event_hash}"
+
+        summary = (
+            f"Eval-score regression: {agent_id}/{criterion} "
+            f"4w mean = {rolling_mean:.2f} < threshold {threshold:.2f}"
+        )[:240]
+        description = (
+            f"Judged agent: {agent_id}\n"
+            f"Criterion: {criterion}\n"
+            f"Judge model: {judge_model}\n"
+            f"4-week rolling mean: {rolling_mean:.4f}\n"
+            f"Threshold: {threshold:.4f}\n"
+            f"Window: {window_start.isoformat()} → {window_end.isoformat()}\n"
+            f"Detected by: alpha-engine-research evals/rolling_mean.py\n"
+            f"Notification surface: AlphaEngine/Eval/agent_quality_score_4w_mean "
+            f"CloudWatch metric (per-combo) + agent_quality_score_4w_mean_min "
+            f"floor metric + this changelog corpus entry."
+        )
+
+        entry = {
+            "schema_version": _CHANGELOG_SCHEMA_VERSION,
+            "event_id": event_id,
+            "ts_utc": ts_utc,
+            "event_type": "eval_score_regression",
+            "severity": "medium",
+            "subsystem": "eval",
+            "root_cause_category": "prompt_regression",  # most plausible default; operator overrides via follow-up
+            "resolution_type": None,
+            "started_at": None,
+            "detected_at": ts_utc,
+            "resolved_at": None,
+            "verified_at": None,
+            "summary": summary,
+            "description": description,
+            "resolution_notes": None,
+            "actor": actor,
+            "machine": "research:evals/rolling_mean.py",
+            "source": "eval-regression-autoemit",
+            "auto_emitted": True,
+            "git_refs": [],
+            "prompt_version": None,
+            "run_id": window_end.strftime("%Y-%m-%d"),
+            "eval_run_ref": (
+                f"s3://alpha-engine-research/decision_artifacts/_eval/"
+                f"{window_end.strftime('%Y-%m-%d')}/{agent_id}/"
+            ),
+            "eval_regression": {
+                "judged_agent_id": agent_id,
+                "criterion": criterion,
+                "judge_model": judge_model,
+                "rolling_mean": rolling_mean,
+                "threshold": threshold,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+            },
+        }
+        key = f"{_CHANGELOG_PREFIX}/{entry_date}/{event_id}.json"
+        s3_client.put_object(
+            Bucket=_CHANGELOG_BUCKET,
+            Key=key,
+            Body=json.dumps(entry).encode("utf-8"),
+            ContentType="application/json",
+        )
+        logger.info(
+            "[rolling_mean] regression auto-emit: s3://%s/%s "
+            "agent=%s criterion=%s mean=%.2f threshold=%.2f",
+            _CHANGELOG_BUCKET, key, agent_id, criterion, rolling_mean, threshold,
+        )
+        return key
+    except Exception as e:
+        logger.warning(
+            "[rolling_mean] regression auto-emit failed (best-effort, "
+            "swallowed): %s",
+            e,
+        )
+        return None
