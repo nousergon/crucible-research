@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -346,6 +346,24 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          """
          ALTER TABLE scanner_appearances ADD COLUMN quant_score REAL;
          ALTER TABLE scanner_appearances ADD COLUMN qual_score REAL;
+         """),
+    # Calibrator-v1 preliminaries: enrich score_performance with the
+    # per-row context the v1 GBM upgrade in research_calibrator.py:5
+    # is documented to need. v0 (today) is a bucket lookup keyed by
+    # final score alone. v1 (queued behind enforce-flip + corpus depth)
+    # is GBM on score + sub-scores + conviction + regime context.
+    # Shipping the schema NOW means every Saturday going forward
+    # enriches the labeled training set; v1 trains against rich rows
+    # when its gate opens. Companion producer wire-up at
+    # scoring/performance_tracker.py:record_new_buy_scores; companion
+    # backfill from archived signals.json shipped separately.
+    12: ("Add per-row context to score_performance for calibrator-v1",
+         """
+         ALTER TABLE score_performance ADD COLUMN quant_score REAL;
+         ALTER TABLE score_performance ADD COLUMN qual_score REAL;
+         ALTER TABLE score_performance ADD COLUMN conviction TEXT;
+         ALTER TABLE score_performance ADD COLUMN sector_modifier REAL;
+         ALTER TABLE score_performance ADD COLUMN market_regime TEXT;
          """),
 }
 

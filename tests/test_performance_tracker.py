@@ -34,21 +34,27 @@ def _make_db() -> sqlite3.Connection:
             sp500_close REAL
         );
         CREATE TABLE score_performance (
-            id            INTEGER PRIMARY KEY,
-            symbol        TEXT NOT NULL,
-            score_date    TEXT NOT NULL,
-            score         REAL NOT NULL,
-            price_on_date REAL,
-            price_10d     REAL,
-            price_30d     REAL,
-            spy_10d_return REAL,
-            spy_30d_return REAL,
-            return_10d    REAL,
-            return_30d    REAL,
-            beat_spy_10d  INTEGER,
-            beat_spy_30d  INTEGER,
-            eval_date_10d TEXT,
-            eval_date_30d TEXT,
+            id              INTEGER PRIMARY KEY,
+            symbol          TEXT NOT NULL,
+            score_date      TEXT NOT NULL,
+            score           REAL NOT NULL,
+            price_on_date   REAL,
+            price_10d       REAL,
+            price_30d       REAL,
+            spy_10d_return  REAL,
+            spy_30d_return  REAL,
+            return_10d      REAL,
+            return_30d      REAL,
+            beat_spy_10d    INTEGER,
+            beat_spy_30d    INTEGER,
+            eval_date_10d   TEXT,
+            eval_date_30d   TEXT,
+            -- Calibrator-v1 context columns (schema v12)
+            quant_score     REAL,
+            qual_score      REAL,
+            conviction      TEXT,
+            sector_modifier REAL,
+            market_regime   TEXT,
             UNIQUE(symbol, score_date)
         );
     """)
@@ -149,6 +155,58 @@ class TestRecordNewBuyScores:
         record_new_buy_scores(db, "2026-03-05", theses, prices)
         count = db.execute("SELECT COUNT(*) FROM score_performance").fetchone()[0]
         assert count == 2
+
+    def test_writes_calibrator_v1_context_when_thesis_carries_it(self, db):
+        """Regression for ROADMAP P0 line ~103: per-row context columns
+        (quant_score, qual_score, conviction, sector_modifier, market_regime)
+        are populated when the producer thesis dict + market_regime arg
+        carry them. Missing fields write NULL — backward-compat with
+        legacy callers."""
+        theses = {
+            "PLTR": {
+                "final_score": 75.0,
+                "quant_score": 70.5,
+                "qual_score": 80.0,
+                "conviction": "rising",
+                "macro_modifier": 1.15,
+            },
+        }
+        prices = {"PLTR": 88.50}
+        record_new_buy_scores(
+            db, "2026-03-05", theses, prices, market_regime="bull",
+        )
+        row = db.execute(
+            "SELECT quant_score, qual_score, conviction, sector_modifier, market_regime "
+            "FROM score_performance WHERE symbol='PLTR'"
+        ).fetchone()
+        assert row == (70.5, 80.0, "rising", 1.15, "bull")
+
+    def test_legacy_thesis_without_context_writes_nulls(self, db):
+        """A thesis dict missing the new context fields (older test-shape
+        + any legacy in-flight caller that hasn't been updated yet) must
+        still INSERT cleanly with NULLs in the new columns."""
+        theses = {"PLTR": {"final_score": 75.0}}
+        prices = {"PLTR": 88.50}
+        record_new_buy_scores(db, "2026-03-05", theses, prices)
+        row = db.execute(
+            "SELECT quant_score, qual_score, conviction, sector_modifier, market_regime "
+            "FROM score_performance WHERE symbol='PLTR'"
+        ).fetchone()
+        assert row == (None, None, None, None, None)
+
+    def test_market_regime_arg_optional(self, db):
+        """market_regime is sourced from the caller (lambda handler has
+        state['market_regime'] available; tests can opt out). Omitted
+        arg writes NULL, matching the calibrator's tolerance for older
+        rows."""
+        theses = {"PLTR": {"final_score": 75.0, "quant_score": 70.0}}
+        prices = {"PLTR": 88.50}
+        # No market_regime arg passed.
+        record_new_buy_scores(db, "2026-03-05", theses, prices)
+        row = db.execute(
+            "SELECT quant_score, market_regime FROM score_performance WHERE symbol='PLTR'"
+        ).fetchone()
+        assert row == (70.0, None)
 
 
 # ── _get_spy_price_on_date ────────────────────────────────────────────────────

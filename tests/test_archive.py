@@ -47,6 +47,47 @@ class TestArchiveSchema:
         }
         assert expected.issubset(set(tables))
 
+    def test_score_performance_has_calibrator_v1_context_columns(self, archive_in_memory):
+        """Regression for ROADMAP P0 line ~103: schema migration v12 adds
+        the per-row context columns the calibrator-v1 GBM upgrade needs.
+        Pin the column names here so a future migration that renames them
+        breaks the test (and the producer wire-up at
+        scoring/performance_tracker.py:record_new_buy_scores)."""
+        conn = archive_in_memory.db_conn
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(score_performance)").fetchall()
+        }
+        for col in ("quant_score", "qual_score", "conviction",
+                    "sector_modifier", "market_regime"):
+            assert col in cols, (
+                f"score_performance missing calibrator-v1 column '{col}' — "
+                f"schema migration v12 must run on init"
+            )
+
+    def test_schema_version_is_recorded(self, archive_in_memory):
+        """schema_version table should record migration v12 application
+        on a fresh init. Catches the class of bug where MIGRATIONS gets
+        a new entry but SCHEMA_VERSION constant isn't bumped (the test
+        for the constant pin lives below; this covers the runtime
+        application path)."""
+        conn = archive_in_memory.db_conn
+        applied = {
+            row[0]
+            for row in conn.execute(
+                "SELECT version FROM schema_version"
+            ).fetchall()
+        }
+        assert 12 in applied
+
+    def test_schema_version_constant_matches_latest_migration(self):
+        """SCHEMA_VERSION must equal the highest key in MIGRATIONS so a
+        forgotten bump leaves migrations un-applied. Lockstep pin per
+        the schema.py docstring discipline ("To add a new migration:
+        add an entry + bump SCHEMA_VERSION")."""
+        from archive.schema import SCHEMA_VERSION, MIGRATIONS
+        assert SCHEMA_VERSION == max(MIGRATIONS.keys())
+
 
 class TestInvestmentThesisWrite:
     def test_write_and_read_thesis(self, archive_in_memory):

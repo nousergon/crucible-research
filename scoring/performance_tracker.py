@@ -183,10 +183,20 @@ def record_new_buy_scores(
     today: str,
     investment_theses: dict[str, dict],
     price_data: dict,
+    market_regime: Optional[str] = None,
 ) -> None:
     """
     At end of run: record any ticker scored >= BUY_THRESHOLD today into score_performance.
     price_data: {ticker: current_price}
+
+    The 5 calibrator-v1 context columns (quant_score, qual_score, conviction,
+    sector_modifier, market_regime) are populated when present on the thesis
+    dict + market_regime arg; missing values write NULL (older callers without
+    the new arg / fields stay backward-compatible). The per-ticker
+    sector_modifier is pulled from ``thesis["macro_modifier"]`` — that's the
+    per-sector modifier value applied to this ticker at scoring time
+    (renamed in the column for clarity; the in-memory field name is a
+    legacy artifact). See ROADMAP P0 line ~103 for the v1-GBM upgrade plan.
     """
     cursor = db_conn.cursor()
 
@@ -206,10 +216,21 @@ def record_new_buy_scores(
 
         cursor.execute(
             """
-            INSERT OR IGNORE INTO score_performance (symbol, score_date, score, price_on_date)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO score_performance (
+                symbol, score_date, score, price_on_date,
+                quant_score, qual_score, conviction,
+                sector_modifier, market_regime
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (ticker, today, score, current_price),
+            (
+                ticker, today, score, current_price,
+                thesis.get("quant_score"),
+                thesis.get("qual_score"),
+                thesis.get("conviction"),
+                thesis.get("macro_modifier"),
+                market_regime,
+            ),
         )
 
     db_conn.commit()
