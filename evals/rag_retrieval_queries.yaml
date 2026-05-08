@@ -1,0 +1,67 @@
+# RAG retrieval eval — hand-curated test set
+#
+# Each entry pairs a natural-language query with one or more chunk_id(s)
+# that a correctly-tuned retriever should surface in the top_k. The
+# harness in evals/rag_retrieval.py reads this file and reports
+# recall@k across (vector / keyword / hybrid w∈{0.3,0.5,0.7,0.9}).
+#
+# How to curate:
+#
+# 1. Pick a query you'd expect the qual analyst to ask the
+#    `query_filings` tool. Spread coverage across all 6 categories
+#    listed below — the harness reports per-category lift, and the
+#    ROADMAP gate requires positive lift on
+#    ticker_named_entity / filing_type / quantitative_line_item.
+#
+# 2. Run the query manually against a known-relevant filing in
+#    rag.chunks, find the chunk_id whose `content` you'd want the
+#    agent to see, and pin it as `expected_chunk_ids`.
+#    Example psql:
+#      SELECT c.id, LEFT(c.content, 100)
+#      FROM rag.chunks c
+#      JOIN rag.documents d ON c.document_id = d.id
+#      WHERE d.ticker = 'ABBV' AND d.doc_type = '10-Q'
+#        AND c.content ILIKE '%research and development%'
+#      LIMIT 10;
+#    Pick the chunk that genuinely answers the query (not just one
+#    that contains the keywords).
+#
+# 3. Add a `note` explaining what makes the query hard or canonical.
+#    These notes flow into the per-query trace section of the report.
+#
+# Target: 30-50 queries with good category coverage. Single-relevant
+# (one expected chunk per query) is the common case; multi-relevant
+# is supported when several chunks legitimately answer the query.
+#
+# Categories (match evals.rag_retrieval.CATEGORIES):
+# - ticker_named_entity     queries leaning on specific company / brand / drug names
+# - filing_type             queries that key on 10-K / 10-Q / earnings_transcript shape
+# - date_range              queries with a temporal anchor (fiscal year, quarter)
+# - quantitative_line_item  queries asking about numerical line items ($, %, ratio)
+# - abstract_thesis         queries about competitive moat / management / strategy
+# - conceptual_narrative    queries about pipeline transitions, patent cliffs, etc.
+
+queries: []
+
+# ── Curation seed examples (fill in real chunk_ids before the report) ──────
+#
+# Uncomment + adapt once you've picked real chunks. These are template
+# entries showing the shape the harness expects:
+#
+# - query: "ABBV's research and development spend in fiscal 2024"
+#   expected_chunk_ids:
+#     - "REPLACE-WITH-REAL-UUID"
+#   category: quantitative_line_item
+#   note: "Tests literal-term match on '$' line items vs cosine paraphrase"
+#
+# - query: "Stryker's competitive position in robotic surgery"
+#   expected_chunk_ids:
+#     - "REPLACE-WITH-REAL-UUID"
+#   category: abstract_thesis
+#   note: "Tests conceptual paraphrase — chunk likely discusses 'Mako' platform"
+#
+# - query: "Pfizer earnings call Q3 2024 management guidance"
+#   expected_chunk_ids:
+#     - "REPLACE-WITH-REAL-UUID"
+#   category: filing_type
+#   note: "Tests doc-type + date pre-filter overlay onto retrieval"
