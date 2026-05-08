@@ -1,0 +1,223 @@
+"""
+Per-agent CloudWatch runtime telemetry — invocations, failures, latency.
+
+Phase 2 observability. Emits a CloudWatch metric stream per LangGraph
+agent decision under the ``AlphaEngine/Agents`` namespace, dimensioned
+by ``agent_id`` (e.g. ``sector_team:technology``, ``macro_economist``,
+``ic_cio``). One emission per ``track_llm_cost`` frame exit — whether
+the body succeeded or raised.
+
+**Metrics:**
+
+- ``Invocations`` — 1.0 per frame (Sum over a window = runs in window)
+- ``Failures`` — 1.0 if the frame body raised, 0.0 otherwise
+  (Sum over window = failed runs; pair with Invocations for failure rate)
+- ``DurationMs`` — wall-clock time the frame body held (Average / p50 /
+  p95 / p99 derived by CW from individual datapoint samples)
+- ``LLMCallCount`` — number of Anthropic API calls inside the frame
+  (Sum over window = total LLM calls per agent; useful for "is this
+  agent doing the same number of LLM calls as last week?")
+
+**Why this lives next to llm_cost_tracker rather than inside it:**
+
+The cost tracker already wraps every agent decision in a
+``track_llm_cost`` frame; moving runtime telemetry into the same frame
+boundary avoids a second instrumentation layer that drifts. But the
+*emission* logic is independent of cost computation — a frame whose
+body raised an exception still has a meaningful ``DurationMs`` and
+``Failures=1``, even if no LLM call ever fired and ``cost_usd=0``.
+Splitting the emission into its own module keeps the cost tracker's
+post-finally code unchanged (which depends on the success path),
+while letting the runtime emission run unconditionally inside the
+finally block.
+
+**Hard-fail surface:**
+
+- The emission swallows CloudWatch errors and logs at warning. Per
+  ``feedback_no_silent_fails``: telemetry is observability, not
+  correctness — a CW outage must not take down a Sat SF run. This
+  mirrors how the substrate health check tolerates SNS publish
+  failures (alpha_engine_lib/transparency.py).
+
+**Disable for tests / smoke runs:** set
+``ALPHA_ENGINE_AGENT_TELEMETRY_ENABLED=false``. Default is enabled
+(matches cost-telemetry runtime behavior — production wants signal,
+tests can opt out).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+NAMESPACE = "AlphaEngine/Agents"
+_TELEMETRY_ENV_VAR = "ALPHA_ENGINE_AGENT_TELEMETRY_ENABLED"
+
+
+def _is_telemetry_enabled() -> bool:
+    """Default ON — production emits, tests can disable via env.
+
+    Matches the cost-tracker convention where the production-default
+    is to emit. Tests that need a clean CW surface set
+    ``ALPHA_ENGINE_AGENT_TELEMETRY_ENABLED=false``.
+    """
+    raw = os.environ.get(_TELEMETRY_ENV_VAR, "true").lower()
+    return raw in ("true", "1", "yes")
+
+
+def emit_agent_completion(
+    *,
+    agent_id: str,
+    enter_time: datetime,
+    exception_raised: bool,
+    llm_call_count: int,
+    cloudwatch_client: Any = None,
+) -> None:
+    """Emit one frame's worth of per-agent telemetry to CloudWatch.
+
+    Called from ``track_llm_cost``'s finally block on every frame exit,
+    regardless of success or failure. ``exception_raised`` is True when
+    the frame body raised — measured by the cost tracker via a
+    try/except around the yield.
+
+    Parameters
+    ----------
+    agent_id
+        ``DecisionArtifact.agent_id`` form: ``sector_team:technology``,
+        ``macro_economist``, ``ic_cio``, ``thesis_update:{sector}:{ticker}``.
+    enter_time
+        Frame enter timestamp (UTC). Duration computed as ``now - enter_time``.
+    exception_raised
+        True if the frame body raised an exception, False if it
+        completed normally.
+    llm_call_count
+        Number of Anthropic API calls observed by the cost tracker
+        callback inside this frame.
+    cloudwatch_client
+        Override for tests. Production passes None and a fresh boto3
+        client is created (cheap; alpha-engine-research Lambda lifecycle
+        is per-SF-run so we don't reuse).
+    """
+    if not _is_telemetry_enabled():
+        return
+
+    duration_ms = max(
+        0.0, (datetime.now(timezone.utc) - enter_time).total_seconds() * 1000.0,
+    )
+    failures = 1.0 if exception_raised else 0.0
+    metric_data = [
+        {
+            "MetricName": "Invocations",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": 1.0,
+            "Unit": "Count",
+        },
+        {
+            "MetricName": "Failures",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": failures,
+            "Unit": "Count",
+        },
+        {
+            "MetricName": "DurationMs",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": duration_ms,
+            "Unit": "Milliseconds",
+        },
+        {
+            "MetricName": "LLMCallCount",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": float(llm_call_count),
+            "Unit": "Count",
+        },
+    ]
+
+    cw = cloudwatch_client
+    if cw is None:
+        try:
+            import boto3
+
+            cw = boto3.client("cloudwatch", region_name="us-east-1")
+        except Exception as exc:
+            logger.warning(
+                "[agent_telemetry] could not create boto3 cloudwatch client: %s",
+                exc,
+            )
+            return
+
+    try:
+        cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
+    except Exception as exc:
+        logger.warning(
+            "[agent_telemetry] put_metric_data failed for agent_id=%s: %s",
+            agent_id, exc,
+        )
+
+
+def emit_agent_retry(
+    *,
+    agent_id: str,
+    attempted: bool,
+    succeeded: bool,
+    cloudwatch_client: Any = None,
+) -> None:
+    """Emit one retry-event datapoint per ``run_*_with_retry`` invocation.
+
+    Called from the retry wrappers in ``agents/sector_teams/sector_team.py``
+    (added by research#106 for empty-output detection). Even when
+    ``attempted=False`` (no retry needed), we emit so the metric stream
+    is dense enough to compute "retry rate per agent" without missing
+    datapoints.
+
+    Parameters
+    ----------
+    attempted
+        True iff the retry actually fired (initial run produced empty
+        output). False if the initial run produced non-empty output and
+        no retry was needed.
+    succeeded
+        True iff a fired retry produced non-empty output. Meaningful only
+        when ``attempted=True``; pass False otherwise.
+    """
+    if not _is_telemetry_enabled():
+        return
+
+    metric_data = [
+        {
+            "MetricName": "RetryAttempts",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": 1.0 if attempted else 0.0,
+            "Unit": "Count",
+        },
+        {
+            "MetricName": "RetrySuccesses",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": 1.0 if (attempted and succeeded) else 0.0,
+            "Unit": "Count",
+        },
+    ]
+
+    cw = cloudwatch_client
+    if cw is None:
+        try:
+            import boto3
+
+            cw = boto3.client("cloudwatch", region_name="us-east-1")
+        except Exception as exc:
+            logger.warning(
+                "[agent_telemetry] could not create boto3 cloudwatch client: %s",
+                exc,
+            )
+            return
+
+    try:
+        cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
+    except Exception as exc:
+        logger.warning(
+            "[agent_telemetry] retry emission failed for agent_id=%s: %s",
+            agent_id, exc,
+        )

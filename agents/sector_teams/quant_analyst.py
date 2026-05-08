@@ -36,6 +36,31 @@ log = logging.getLogger(__name__)
 _QUANT_RECURSION_LIMIT = QUANT_MAX_ITERATIONS * 2 + 2
 
 
+def _emit_retry_telemetry_safely(
+    *, team_id: str, attempted: bool, succeeded: bool,
+) -> None:
+    """Best-effort emit one retry-event datapoint to AlphaEngine/Agents.
+
+    Wrapped in broad except so a CW outage never bubbles up into the
+    research pipeline. Mirrors the gate in
+    ``graph.agent_telemetry.emit_agent_retry`` (which is itself
+    best-effort), but the import is wrapped here too so a stale lib
+    image at deploy time can't break the agent path.
+    """
+    try:
+        from graph.agent_telemetry import emit_agent_retry
+
+        emit_agent_retry(
+            agent_id=f"sector_quant:{team_id}",
+            attempted=attempted,
+            succeeded=succeeded,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "[quant:%s] retry telemetry emission failed: %s", team_id, exc,
+        )
+
+
 # Retry preamble injected into the user message on the second attempt
 # when the first attempt produced zero picks despite running tools.
 # Lives in code (not config) because it's a small fixed string used
@@ -366,6 +391,9 @@ def run_quant_analyst_with_retry(
         first["retry_attempted"] = False
         first["retry_succeeded"] = False
         first["retry_first_iterations"] = None
+        _emit_retry_telemetry_safely(
+            team_id=team_id, attempted=False, succeeded=False,
+        )
         return first
 
     # Retry path. The WARNING log line is flow-doctor-detectable so
@@ -396,6 +424,9 @@ def run_quant_analyst_with_retry(
     second["retry_attempted"] = True
     second["retry_succeeded"] = second_picks > 0
     second["retry_first_iterations"] = first["iterations"]
+    _emit_retry_telemetry_safely(
+        team_id=team_id, attempted=True, succeeded=second["retry_succeeded"],
+    )
 
     if second_picks == 0:
         # The retry also gave up — escalate via WARNING so flow-doctor

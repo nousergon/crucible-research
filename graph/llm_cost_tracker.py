@@ -737,9 +737,36 @@ def track_llm_cost(
     stack = _frame_stack.get()
     new_stack = stack + [frame]
     token = _frame_stack.set(new_stack)
+    exception_raised = False
     try:
         yield frame
+    except BaseException:
+        # Track failure for the agent-runtime telemetry stream, then
+        # re-raise. Distinct from the cost stream's "tokens captured but
+        # cost_usd=0" partial-frame case — Failures=1 fires whenever the
+        # body raises, regardless of whether any LLM call landed.
+        exception_raised = True
+        raise
     finally:
+        # Best-effort per-agent CW telemetry emission. Runs in the
+        # finally block so failure paths still emit (the post-finally
+        # cost code only runs on the success path). Independent of the
+        # decision-capture flag — Phase 2 observability is always-on.
+        try:
+            from graph.agent_telemetry import emit_agent_completion
+
+            emit_agent_completion(
+                agent_id=agent_id,
+                enter_time=frame.enter_time,
+                exception_raised=exception_raised,
+                llm_call_count=frame.call_count,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "[cost_tracker] agent telemetry emission failed for "
+                "agent_id=%s: %s", agent_id, exc,
+            )
+
         # Pop the frame regardless of whether the body raised; we still
         # want to surface accumulated cost for partial decisions.
         current = _frame_stack.get()
