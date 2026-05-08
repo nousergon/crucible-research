@@ -64,6 +64,7 @@ def _make_eval(
     scores = scores if scores is not None else [4, 4, 4, 4]
     return RubricEvalArtifact(
         run_id=run_id,
+        judge_run_id="test-batch-uuid",
         timestamp="2026-05-09T22:30:00.000Z",
         judged_agent_id=judged_agent_id,
         rubric_id="eval_rubric_test",
@@ -269,7 +270,8 @@ class TestEvaluateCorpus:
         # The Sonnet escalation should be for ic_cio specifically.
         sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
         assert len(sonnet_keys) == 1
-        assert "/ic_cio/" in sonnet_keys[0]
+        # Option B path: agent_id is in the FILENAME (ic_cio.{run_id}.{judge_model}.json)
+        assert "/ic_cio." in sonnet_keys[0]
 
     def test_haiku_failure_is_contained(self, mocked_s3_with_captures):
         """LLM raising on one artifact must not halt evaluation of others."""
@@ -682,7 +684,8 @@ class TestEvaluateCorpus:
             )
 
         # Find the two ic_cio keys (Haiku + Sonnet).
-        ic_cio_keys = [k for k in result["persisted_keys"] if "/ic_cio/" in k]
+        # Option B path: agent_id is in the FILENAME (ic_cio.{run_id}.{judge_model}.json)
+        ic_cio_keys = [k for k in result["persisted_keys"] if "/ic_cio." in k]
         assert len(ic_cio_keys) == 2
         assert any(".claude-haiku-4-5.json" in k for k in ic_cio_keys)
         assert any(".claude-sonnet-4-6.json" in k for k in ic_cio_keys)

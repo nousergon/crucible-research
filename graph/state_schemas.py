@@ -393,17 +393,25 @@ class PopulationRotationEvent(BaseModel):
 class RubricEvalArtifact(BaseModel):
     """One persisted eval result.
 
-    Stored at ``decision_artifacts/_eval/{YYYY-MM-DD}/{judged_agent_id}/
-    {run_id}.json`` (per ROADMAP §1630). Wraps the LLM output with
-    metadata that ties it back to the judged decision artifact, the
-    rubric prompt version, and the judge model.
+    Stored at the institutional production-grade path:
+    ``decision_artifacts/_eval/{judge_run_date}/{judge_run_id}/
+    {judged_agent_id}.{judged_run_id}.{judge_model}.json`` (Option B
+    partition shipped 2026-05-08). Each judge batch invocation gets a
+    fresh ``judge_run_id`` (UUID) so all artifacts emitted by one batch
+    cluster under a single directory and are queryable as a group.
+    Operator queries by capture-date use the manifest layer at
+    ``_eval_by_capture/{capture_date}/manifest.json`` (PR 2).
+
+    Wraps the LLM output with metadata that ties it back to the judged
+    decision artifact, the rubric prompt version, and the judge model.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
-    run_id: str = Field(description="Pipeline-invocation identifier; ties this eval to the judged artifact's run_id.")
-    timestamp: str = Field(description="ISO-8601 capture time (wall clock at the moment the wrapper writes to S3).")
+    schema_version: Literal[2] = 2
+    run_id: str = Field(description="Pipeline-invocation identifier of the JUDGED artifact; ties this eval back to the agent's run.")
+    judge_run_id: str = Field(description="UUID of the eval-judge batch invocation that produced this eval. Constant across all artifacts emitted by one batch; lets operators query 'what did this judge batch produce?' without scanning the corpus.")
+    timestamp: str = Field(description="ISO-8601 emission time. Per-artifact wall-clock; used as the date-partition source when present.")
     judged_agent_id: str = Field(description="agent_id of the DecisionArtifact this eval is scoring (e.g. 'sector_quant:technology').")
     judged_artifact_s3_key: str | None = Field(
         default=None,

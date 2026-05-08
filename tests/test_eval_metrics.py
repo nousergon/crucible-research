@@ -27,6 +27,7 @@ def _make_eval(
     ]
     return RubricEvalArtifact(
         run_id="run-1",
+        judge_run_id="test-batch-uuid",
         timestamp=timestamp,
         judged_agent_id=judged_agent_id,
         rubric_id=rubric_id,

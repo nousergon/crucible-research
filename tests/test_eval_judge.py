@@ -152,133 +152,134 @@ class TestResolveRubricForAgent:
 
 
 class TestBuildEvalS3Key:
-    def test_canonical_path(self):
+    """Pins the Option B institutional partition shape (ROADMAP closure
+    2026-05-08): ``_eval/{judge_run_date}/{judge_run_id}/
+    {agent_id}.{run_id}.{judge_model}.json``. Each judge batch
+    invocation gets a fresh judge_run_id so all artifacts emitted by
+    one batch cluster under one directory."""
+
+    def test_canonical_path_includes_judge_run_id(self):
         from evals.judge import build_eval_s3_key
         ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         key = build_eval_s3_key(
             judged_agent_id="sector_quant:technology",
             run_id="run-abc-123",
+            judge_run_id="batch-uuid-xyz",
             judge_model="claude-haiku-4-5",
             timestamp=ts,
         )
-        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-abc-123.claude-haiku-4-5.json"
+        # judge_run_date / judge_run_id / agent_id.run_id.judge_model.json
+        assert key == (
+            "decision_artifacts/_eval/2026-05-09/batch-uuid-xyz/"
+            "sector_quant:technology.run-abc-123.claude-haiku-4-5.json"
+        )
+
+    def test_judge_run_id_required(self):
+        """Empty string raises — production paths must mint a UUID per
+        batch and propagate. Solo callers go through evaluate_artifact
+        which defaults a UUID; build_eval_s3_key itself is strict."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="judge_run_id"):
+            build_eval_s3_key(
+                judged_agent_id="ic_cio", run_id="r1",
+                judge_run_id="",
+                judge_model="claude-haiku-4-5", timestamp=ts,
+            )
 
     def test_default_timestamp_is_now(self):
         from evals.judge import build_eval_s3_key
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-1",
             judge_model="claude-haiku-4-5",
         )
-        # Today's UTC date partition; we just verify shape, not exact match
-        assert "decision_artifacts/_eval/" in key
-        assert "/ic_cio/r1.claude-haiku-4-5.json" in key
+        # Today's UTC date partition; we just verify shape, not exact match.
+        assert key.startswith("decision_artifacts/_eval/")
+        assert "/batch-1/ic_cio.r1.claude-haiku-4-5.json" in key
 
     def test_judge_model_disambiguates_two_tier(self):
-        """Haiku + Sonnet of same (date, agent, run_id) must coexist —
-        the judge_model segment is what keeps the two writes from
-        clobbering each other (PR 3b two-tier orchestration)."""
+        """Haiku + Sonnet of same (judge_run_id, agent_id, run_id) must
+        coexist — the judge_model segment in the filename is what keeps
+        the two writes from clobbering each other."""
         from evals.judge import build_eval_s3_key
         ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         haiku_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-1",
             judge_model="claude-haiku-4-5", timestamp=ts,
         )
         sonnet_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-1",
             judge_model="claude-sonnet-4-6", timestamp=ts,
         )
         assert haiku_key != sonnet_key
         assert haiku_key.endswith(".claude-haiku-4-5.json")
         assert sonnet_key.endswith(".claude-sonnet-4-6.json")
 
+    def test_batch_cohesion_same_judge_run_id_same_directory(self):
+        """Institutional invariant: every artifact emitted by ONE batch
+        invocation lands under the SAME judge_run_id directory, even
+        across different judged_agent_ids and judged run_ids. Operator
+        query 'show me batch X's outputs' = `aws s3 ls _eval/{date}/{batch_id}/`."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        keys = [
+            build_eval_s3_key(
+                judged_agent_id=aid, run_id=rid,
+                judge_run_id="batch-cohesion-test",
+                judge_model="claude-haiku-4-5", timestamp=ts,
+            )
+            for aid, rid in [
+                ("sector_quant:technology", "agent-run-1"),
+                ("ic_cio", "agent-run-2"),
+                ("thesis_update:financials:CBOE", "agent-run-3"),
+            ]
+        ]
+        # All share the same judge_run_id directory prefix.
+        common_prefix = "decision_artifacts/_eval/2026-05-09/batch-cohesion-test/"
+        for k in keys:
+            assert k.startswith(common_prefix)
+
+    def test_different_batches_different_directories(self):
+        """Re-judging an artifact in a separate batch lands at a
+        DIFFERENT judge_run_id directory — preserves audit history of
+        re-runs (vs the prior shape that overwrote)."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        original = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-original",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+        )
+        rerun = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-rerun",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+        )
+        assert original != rerun
+        assert "/batch-original/" in original
+        assert "/batch-rerun/" in rerun
+
     def test_prefix_override_for_judge_only_mode(self):
-        """PR 4e: ``judge_only=True`` test runs persist under a
-        non-prod prefix. Verify the prefix override propagates."""
+        """``judge_only=True`` test runs persist under a non-prod prefix."""
         from evals.judge import build_eval_s3_key
         ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         prod_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-1",
             judge_model="claude-haiku-4-5", timestamp=ts,
         )
         test_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="batch-1",
             judge_model="claude-haiku-4-5", timestamp=ts,
             prefix="decision_artifacts/_eval_judge_only/",
         )
         assert prod_key.startswith("decision_artifacts/_eval/")
         assert test_key.startswith("decision_artifacts/_eval_judge_only/")
         assert prod_key != test_key
-
-    def test_capture_date_from_s3_key_overrides_judge_timestamp(self):
-        """ROADMAP P1 line ~83 closure (2026-05-08).
-
-        Pre-fix: ``timestamp`` was the partition source — judge
-        wall-clock falling across UTC midnight bucketed same-day
-        captures into different prefixes (5/6 thesis_update evals
-        landed at ``_eval/2026-05-07/`` instead of ``_eval/2026-05-06/``
-        because their judge runs straddled 17:00 PT 5/6 = 00:00 UTC 5/7).
-
-        Post-fix: ``judged_artifact_s3_key`` is the canonical capture-
-        date source. Judge wall-clock is fallback for in-memory /
-        synthetic artifacts only."""
-        from evals.judge import build_eval_s3_key
-        # Judge stamp says 2026-05-07 (UTC after midnight) but the
-        # capture S3 key says 2026-05-06 (the actual capture date).
-        judge_ts = datetime(2026, 5, 7, 0, 30, tzinfo=timezone.utc)
-        capture_key = "decision_artifacts/2026/05/06/thesis_update:financials:CBOE/run-xyz.json"
-        key = build_eval_s3_key(
-            judged_agent_id="thesis_update:financials:CBOE",
-            run_id="run-xyz",
-            judge_model="claude-haiku-4-5",
-            timestamp=judge_ts,
-            judged_artifact_s3_key=capture_key,
-        )
-        # Partition tracks capture (2026-05-06), NOT judge (2026-05-07).
-        assert "/2026-05-06/" in key
-        assert "/2026-05-07/" not in key
-
-    def test_falls_back_to_timestamp_when_no_s3_key(self):
-        """In-memory / synthetic artifacts that don't carry a capture
-        S3 backref keep using the judge timestamp — preserves behavior
-        for replay paths."""
-        from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
-        key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
-            judged_artifact_s3_key=None,
-        )
-        assert "/2026-05-09/" in key
-
-    def test_falls_back_to_timestamp_when_s3_key_does_not_match_pattern(self):
-        """A non-canonical S3 key (e.g. legacy decision_artifacts under
-        a different prefix shape) falls back to judge timestamp without
-        crashing — never silently mispartition by guessing."""
-        from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
-        key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
-            judged_artifact_s3_key="some/legacy/path/r1.json",
-        )
-        assert "/2026-05-09/" in key
-
-    def test_invalid_date_components_in_s3_key_fall_back(self):
-        """Defensive: malformed date parts (Feb 31, month 13, etc.)
-        fail the strict parse and fall back to judge timestamp instead
-        of producing an invalid date partition."""
-        from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
-        # February 31 is invalid; date(2026, 2, 31) raises ValueError.
-        bad_key = "decision_artifacts/2026/02/31/sector_quant:tech/r1.json"
-        key = build_eval_s3_key(
-            judged_agent_id="sector_quant:tech", run_id="r1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
-            judged_artifact_s3_key=bad_key,
-        )
-        # Falls back to judge timestamp; never produces /2026-02-31/.
-        assert "/2026-05-09/" in key
-        assert "/2026-02-31/" not in key
 
 
 # ── evaluate_artifact end-to-end ──────────────────────────────────────────
@@ -618,11 +619,16 @@ def mocked_s3():
 
 
 class TestPersistEvalArtifact:
+    """Pins persistence under the Option B institutional partition
+    (ROADMAP closure 2026-05-08): judge_run_id is required on every
+    persisted artifact and is the path's batch-grouping key."""
+
     def test_writes_at_canonical_key(self, mocked_s3):
         from evals.judge import persist_eval_artifact
 
         artifact = RubricEvalArtifact(
             run_id="run-1",
+            judge_run_id="batch-uuid-1",
             timestamp="2026-05-09T22:30:00.000Z",
             judged_agent_id="sector_quant:technology",
             rubric_id="eval_rubric_sector_quant",
@@ -635,25 +641,28 @@ class TestPersistEvalArtifact:
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
 
-        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-1.claude-haiku-4-5.json"
+        # Option B path: {prefix}{judge_run_date}/{judge_run_id}/{agent_id}.{run_id}.{judge_model}.json
+        assert key == (
+            "decision_artifacts/_eval/2026-05-09/batch-uuid-1/"
+            "sector_quant:technology.run-1.claude-haiku-4-5.json"
+        )
         obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=key)
         roundtrip = RubricEvalArtifact.model_validate(json.loads(obj["Body"].read()))
         assert roundtrip.judge_model == "claude-haiku-4-5"
+        assert roundtrip.judge_run_id == "batch-uuid-1"
         assert roundtrip.rubric_version == "1.0.0"
         assert len(roundtrip.dimension_scores) == 6
 
     def test_partition_date_matches_artifact_timestamp(self, mocked_s3):
-        # Re-derives partition from the artifact's stamped timestamp so
-        # replays land at the same key regardless of write-time clock.
-        # Note: when ``judged_artifact_s3_key`` is None, the partition
-        # falls back to ``timestamp`` (this test). When the S3 key is
-        # populated with a canonical capture-date prefix, that takes
-        # precedence — see test_partition_uses_capture_date_when_available.
+        """Date partition is derived from the artifact's stamped
+        timestamp — replays / out-of-band evals land at the same date
+        prefix as their original."""
         from evals.judge import persist_eval_artifact
 
         artifact = RubricEvalArtifact(
             run_id="run-2",
-            timestamp="2026-04-25T03:14:00.000Z",  # different from "today"
+            judge_run_id="batch-historical",
+            timestamp="2026-04-25T03:14:00.000Z",
             judged_agent_id="ic_cio",
             rubric_id="eval_rubric_ic_cio",
             rubric_version="1.0.0",
@@ -664,39 +673,48 @@ class TestPersistEvalArtifact:
         key = persist_eval_artifact(
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
-        assert "/2026-04-25/" in key
+        assert "/2026-04-25/batch-historical/" in key
 
-    def test_partition_uses_capture_date_when_available(self, mocked_s3):
-        """ROADMAP P1 line ~83 closure (2026-05-08): the canonical
-        partition source is the judged artifact's capture date, NOT the
-        eval-judge wall-clock timestamp.
-
-        Pre-fix the 2026-05-06 thesis_update evals landed at
-        ``_eval/2026-05-07/`` because the judge runs straddled UTC
-        midnight (17:00 PT 5/6 = 00:00 UTC 5/7) and the partition
-        tracked judge wall-clock. Post-fix the partition tracks the
-        capture date encoded in ``judged_artifact_s3_key``."""
+    def test_batch_cohesion_under_one_judge_run_id(self, mocked_s3):
+        """Two artifacts sharing a judge_run_id land under the same
+        directory — the institutional batch-cohesion property
+        (ROADMAP closure 2026-05-08, Option B)."""
         from evals.judge import persist_eval_artifact
 
-        # Judge timestamp says 2026-05-07 (after UTC midnight),
-        # but the capture S3 key is dated 2026-05-06.
-        artifact = RubricEvalArtifact(
-            run_id="run-thesis-1",
-            timestamp="2026-05-07T00:30:00.000Z",
+        shared_batch = "batch-cohesion-test"
+        artifact_a = RubricEvalArtifact(
+            run_id="run-a",
+            judge_run_id=shared_batch,
+            timestamp="2026-05-09T22:30:00.000Z",
+            judged_agent_id="ic_cio",
+            rubric_id="eval_rubric_ic_cio",
+            rubric_version="1.0.0",
+            judge_model="claude-haiku-4-5",
+            dimension_scores=_make_llm_output().dimension_scores,
+            overall_reasoning="x",
+        )
+        artifact_b = RubricEvalArtifact(
+            run_id="run-b",
+            judge_run_id=shared_batch,
+            timestamp="2026-05-09T22:31:00.000Z",
             judged_agent_id="thesis_update:financials:CBOE",
-            judged_artifact_s3_key="decision_artifacts/2026/05/06/thesis_update:financials:CBOE/run-thesis-1.json",
             rubric_id="eval_rubric_thesis_update",
             rubric_version="1.0.0",
             judge_model="claude-haiku-4-5",
             dimension_scores=_make_llm_output().dimension_scores,
             overall_reasoning="x",
         )
-        key = persist_eval_artifact(
-            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+        key_a = persist_eval_artifact(
+            artifact_a, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
-        # Partition tracks capture (2026-05-06), not judge (2026-05-07).
-        assert "/2026-05-06/" in key
-        assert "/2026-05-07/" not in key
+        key_b = persist_eval_artifact(
+            artifact_b, s3_client=mocked_s3, bucket="alpha-engine-research",
+        )
+        # Same judge_run_date + judge_run_id directory; different filenames.
+        common_prefix = f"decision_artifacts/_eval/2026-05-09/{shared_batch}/"
+        assert key_a.startswith(common_prefix)
+        assert key_b.startswith(common_prefix)
+        assert key_a != key_b
 
 
 # ── RubricEvalLLMOutput stringify defense ─────────────────────────────────

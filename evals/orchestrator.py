@@ -204,6 +204,12 @@ def evaluate_corpus(
 
     capture_keys = list_capture_keys(s3, date=date, bucket=bucket)
 
+    # One judge_run_id per evaluate_corpus invocation — all artifacts
+    # emitted by this run cluster under _eval/{date}/{judge_run_id}/.
+    from evals.judge import _new_judge_run_id
+
+    judge_run_id = _new_judge_run_id()
+
     haiku_evaluated = 0
     sonnet_evaluated = 0
     skipped_unmapped = 0
@@ -266,7 +272,8 @@ def evaluate_corpus(
         # Haiku tier — every mapped artifact every run.
         try:
             haiku_eval = evaluate_artifact(
-                artifact, judge_model=haiku_model, judged_artifact_s3_key=key,
+                artifact, judge_run_id=judge_run_id,
+                judge_model=haiku_model, judged_artifact_s3_key=key,
             )
             haiku_persisted_key = persist_eval_artifact(
                 haiku_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
@@ -305,7 +312,8 @@ def evaluate_corpus(
 
         try:
             sonnet_eval = evaluate_artifact(
-                artifact, judge_model=sonnet_model, judged_artifact_s3_key=key,
+                artifact, judge_run_id=judge_run_id,
+                judge_model=sonnet_model, judged_artifact_s3_key=key,
             )
             sonnet_persisted_key = persist_eval_artifact(
                 sonnet_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
@@ -480,6 +488,17 @@ def build_batch_plan(
                 "rubric_id": rubric,
             })
 
+    # Mint ONE judge_run_id for this whole batch invocation. Threaded
+    # to every RubricEvalArtifact emitted by this batch (skip-markers
+    # via _persist_client_side_skips, Haiku-pass + Sonnet-escalation
+    # via process_batch_results) so all artifacts cluster under a
+    # single _eval/{date}/{judge_run_id}/ directory. Persisted on the
+    # plan manifest so Process Lambda inherits the same UUID across
+    # the SF state boundary.
+    from evals.judge import _new_judge_run_id
+
+    judge_run_id = _new_judge_run_id()
+
     return {
         "date": date,
         "bucket": bucket,
@@ -490,6 +509,7 @@ def build_batch_plan(
         "force_sonnet_pass": force_sonnet_pass,
         "judge_only": judge_only,
         "max_tokens": max_tokens,
+        "judge_run_id": judge_run_id,
         "capture_keys_total": len(capture_keys),
         "skipped_unmapped": skipped_unmapped,
         "client_side_skips": client_side_skips,
@@ -515,6 +535,7 @@ def _persist_client_side_skips(
     haiku_model = plan["haiku_model"]
     sonnet_model = plan["sonnet_model"]
     force_sonnet_pass = plan["force_sonnet_pass"]
+    judge_run_id = plan["judge_run_id"]
 
     for skip in plan["client_side_skips"]:
         if skip.get("stage") != "empty_input_skip":
@@ -557,6 +578,7 @@ def _persist_client_side_skips(
                 rubric_name=rubric_name,
                 rubric_version=loaded_prompt.version,
                 judge_model=jm,
+                judge_run_id=judge_run_id,
                 judged_artifact_s3_key=capture_key,
             )
             try:
@@ -751,6 +773,15 @@ def process_batch_results(
     force_sonnet_pass = plan["force_sonnet_pass"]
     sonnet_model = plan["sonnet_model"]
     haiku_model = plan["haiku_model"]
+    # Inherit the batch's judge_run_id from the persisted plan manifest.
+    # All artifacts emitted by THIS Process invocation (Haiku-pass +
+    # Sonnet-escalation tail) share this UUID so they cluster under
+    # _eval/{date}/{judge_run_id}/ alongside the skip-markers Submit
+    # already wrote. Fall back to a fresh UUID for legacy plan
+    # manifests written pre-Option-B (replay safety only).
+    from evals.judge import _new_judge_run_id
+
+    judge_run_id = plan.get("judge_run_id") or _new_judge_run_id()
     plan_entries_by_cid = {e["custom_id"]: e for e in plan["plan_entries"]}
 
     haiku_evaluated = 0
@@ -859,6 +890,7 @@ def process_batch_results(
             loaded_prompt = load_prompt(entry["rubric_id"])
             eval_artifact = RubricEvalArtifact(
                 run_id=entry["run_id"],
+                judge_run_id=judge_run_id,
                 timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 judged_agent_id=entry["agent_id"],
                 judged_artifact_s3_key=entry["capture_s3_key"],
@@ -931,7 +963,8 @@ def process_batch_results(
 
             try:
                 sonnet_eval = evaluate_artifact(
-                    artifact, judge_model=sonnet_model,
+                    artifact, judge_run_id=judge_run_id,
+                    judge_model=sonnet_model,
                     judged_artifact_s3_key=entry["capture_s3_key"],
                 )
                 pkey = persist_eval_artifact(

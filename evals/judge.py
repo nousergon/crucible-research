@@ -38,8 +38,23 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
+
+
+def _new_judge_run_id() -> str:
+    """Mint a fresh UUID for a judge batch invocation.
+
+    Production paths generate one of these at the start of a batch and
+    propagate it to every RubricEvalArtifact emitted by that batch.
+    Solo / replay / smoke callers get a fresh UUID per call.
+
+    UUIDv4 chosen over UUIDv7 for readability — the path already
+    encodes the date as the partition prefix, so embedding a timestamp
+    in the UUID itself is redundant.
+    """
+    return str(uuid.uuid4())
 
 import boto3
 from langchain_anthropic import ChatAnthropic
@@ -250,6 +265,7 @@ def _make_skip_eval_artifact(
     rubric_name: str,
     rubric_version: str,
     judge_model: str,
+    judge_run_id: str,
     judged_artifact_s3_key: Optional[str],
 ) -> RubricEvalArtifact:
     """Build the skip-marker eval for an artifact whose ``agent_output``
@@ -264,6 +280,7 @@ def _make_skip_eval_artifact(
     """
     return RubricEvalArtifact(
         run_id=artifact.run_id,
+        judge_run_id=judge_run_id,
         timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         judged_agent_id=artifact.agent_id,
         judged_artifact_s3_key=judged_artifact_s3_key,
@@ -427,6 +444,7 @@ def parse_batch_message(
 def evaluate_artifact(
     artifact: DecisionArtifact,
     *,
+    judge_run_id: Optional[str] = None,
     judge_model: str = DEFAULT_JUDGE_MODEL,
     api_key: Optional[str] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -470,6 +488,14 @@ def evaluate_artifact(
             f"a mixed batch."
         )
 
+    # Default judge_run_id when caller didn't pass one. Production paths
+    # (orchestrator batch + escalation tail) pass an explicit batch-scoped
+    # UUID so all artifacts emitted by one batch cluster under a single
+    # judge_run_id directory. Solo callers (replay, ad-hoc smoke) get a
+    # fresh UUID per call — works but loses batch cohesion since each
+    # artifact lands at its own judge_run_id directory.
+    judge_run_id = judge_run_id or _new_judge_run_id()
+
     # Empty-input short-circuit. When the captured ``agent_output`` is
     # falsy (None or {}), the agent never produced anything to evaluate
     # — the most common case is ``sector_qual:{team}`` whose loop is
@@ -495,6 +521,7 @@ def evaluate_artifact(
             rubric_name=rubric_name,
             rubric_version=loaded_prompt.version,
             judge_model=judge_model,
+            judge_run_id=judge_run_id,
             judged_artifact_s3_key=judged_artifact_s3_key,
         )
 
@@ -566,6 +593,7 @@ def evaluate_artifact(
 
     return RubricEvalArtifact(
         run_id=artifact.run_id,
+        judge_run_id=judge_run_id,
         timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         judged_agent_id=artifact.agent_id,
         judged_artifact_s3_key=judged_artifact_s3_key,
@@ -621,49 +649,59 @@ def build_eval_s3_key(
     *,
     judged_agent_id: str,
     run_id: str,
+    judge_run_id: str,
     judge_model: str,
     timestamp: Optional[datetime] = None,
-    judged_artifact_s3_key: Optional[str] = None,
     prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
 
+    **Institutional production-grade partition (Option B, ROADMAP P1
+    closure 2026-05-08):**
+
     Path shape:
-      ``{prefix}{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
+      ``{prefix}{judge_run_date}/{judge_run_id}/
+        {judged_agent_id}.{judged_run_id}.{judge_model}.json``
 
-    The date partition is the **capture date** of the judged artifact
-    (extracted from ``judged_artifact_s3_key`` when present), NOT the
-    judge wall-clock. Judge wall-clock falls across UTC midnight when
-    eval-judge runs span the boundary (5/6 17:30 PT → 5/7 00:30 UTC),
-    causing same-day captures to land at different prefixes depending
-    on which side of midnight their evals finished. Pre-fix surface:
-    `thesis_update:*` evals on 5/6 captures landed at
-    ``_eval/2026-05-07/`` while `sector_quant:*` etc. landed at
-    ``_eval/2026-05-06/``. ROADMAP P1 line ~83 closure 2026-05-08.
+    The eval artifact is treated as a first-class entity owned by the
+    eval-judge batch invocation that produced it (the canonical pattern
+    in LangSmith / Langfuse / Helicone-class systems). Each batch gets
+    a fresh ``judge_run_id`` (UUID) so all artifacts emitted by one
+    batch cluster under a single directory and are queryable as a group
+    via ``aws s3 ls _eval/{date}/{judge_run_id}/``.
 
-    Fallback to ``timestamp`` (defaults to now-UTC) when
-    ``judged_artifact_s3_key`` is None or doesn't match the canonical
-    capture-date shape — preserves behavior for in-memory / synthetic
-    artifacts that don't carry the S3 backref.
+    Capture-date queries ("show me all evals of artifacts captured on
+    day X") are served by a separate manifest layer at
+    ``_eval_by_capture/{capture_date}/manifest.json`` (PR 2 of the
+    Option B arc). The judged artifact's S3 key remains as a
+    foreign-key field on the artifact for direct lookup.
+
+    The date partition is the artifact's emission timestamp (UTC).
+    Within a single batch, all artifacts share the same ``judge_run_id``;
+    if the batch crosses UTC midnight, the directory listing for that
+    judge_run_id will straddle two date prefixes — but
+    ``aws s3 ls --recursive --include "*{judge_run_id}*"`` still
+    returns the full batch as a single logical group because the
+    ``judge_run_id`` is in the path.
 
     The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
-    of the same artifact coexist without clobbering each other.
-    ``run_id`` is the filename stem so retries with the same run_id +
-    judge_model idempotently overwrite.
+    of the same judged artifact coexist without clobbering each other.
 
     ``prefix`` lets ``judge_only`` mode redirect outputs to an isolated
     path so test runs don't pollute prod observability. Must end in
     ``/``.
     """
-    capture_date = _capture_date_from_s3_key(judged_artifact_s3_key)
-    if capture_date is not None:
-        date_partition = capture_date
-    else:
-        ts = timestamp or datetime.now(timezone.utc)
-        date_partition = ts.strftime("%Y-%m-%d")
+    if not judge_run_id:
+        raise ValueError(
+            "build_eval_s3_key requires judge_run_id (Option B partition). "
+            "Generate one UUID per judge batch invocation and pass it to "
+            "every RubricEvalArtifact construction in that batch."
+        )
+    ts = timestamp or datetime.now(timezone.utc)
+    date_partition = ts.strftime("%Y-%m-%d")
     return (
-        f"{prefix}{date_partition}/"
-        f"{judged_agent_id}/{run_id}.{judge_model}.json"
+        f"{prefix}{date_partition}/{judge_run_id}/"
+        f"{judged_agent_id}.{run_id}.{judge_model}.json"
     )
 
 
@@ -688,21 +726,19 @@ def persist_eval_artifact(
     production passes None and the helper builds the default client.
     """
     s3 = s3_client or boto3.client("s3")
-    # Partition by the judged artifact's capture date (extracted from
-    # ``judged_artifact_s3_key`` inside build_eval_s3_key), falling back
-    # to the artifact's stamped ISO-8601 timestamp when no S3 backref is
-    # available (in-memory / synthetic artifacts). The capture-date
-    # source closes ROADMAP P1 line ~83 — pre-fix the partition tracked
-    # judge wall-clock and fell across UTC midnight, so same-day
-    # captures landed at different prefixes depending on which side of
-    # midnight their evals finished.
+    # Partition by judge_run_id (Option B institutional pattern,
+    # ROADMAP closure 2026-05-08). The judge_run_id is constant across
+    # all artifacts emitted by one batch invocation — operators query
+    # batch outputs as a single group via
+    # ``aws s3 ls _eval/{date}/{judge_run_id}/``. Capture-date queries
+    # are served by the manifest layer at _eval_by_capture/.
     artifact_ts = datetime.fromisoformat(artifact.timestamp.replace("Z", "+00:00"))
     key = build_eval_s3_key(
         judged_agent_id=artifact.judged_agent_id,
         run_id=artifact.run_id,
+        judge_run_id=artifact.judge_run_id,
         judge_model=artifact.judge_model,
         timestamp=artifact_ts,
-        judged_artifact_s3_key=artifact.judged_artifact_s3_key,
         prefix=prefix,
     )
     body = artifact.model_dump_json(indent=2).encode("utf-8")

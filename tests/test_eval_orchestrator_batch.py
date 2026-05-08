@@ -428,9 +428,10 @@ class TestProcessBatchResults:
             RubricEvalArtifact, RubricDimensionScore,
         )
 
-        def fake_evaluate(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+        def fake_evaluate(artifact, *, judge_run_id, judge_model, judged_artifact_s3_key, **kw):
             return RubricEvalArtifact(
                 run_id=artifact.run_id,
+                judge_run_id=judge_run_id,
                 timestamp="2026-05-09T22:30:00Z",
                 judged_agent_id=artifact.agent_id,
                 rubric_id="eval_rubric_test",
@@ -575,9 +576,11 @@ class TestProcessBatchResults:
         # taken from the eval artifact's stamped timestamp (now-UTC at
         # write time), not the eval_date — inherited sync-path behavior.
         # We pin the agent_id + judge_model segments only.
+        # Option B path: agent_id is in the FILENAME, not a directory segment.
+        # Path: {prefix}{judge_run_date}/{judge_run_id}/{agent_id}.{run_id}.{judge_model}.json
         assert any(
             "/_eval/" in k
-            and "/sector_qual:technology/" in k
+            and "/sector_qual:technology." in k
             and ".claude-haiku-4-5.json" in k
             for k in persisted
         )
