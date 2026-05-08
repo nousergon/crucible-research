@@ -21,7 +21,7 @@
 queries:
 - query: ABBV competitive moat in immunology
   expected_chunk_ids:
-  - TODO
+  - cfc9ff70-c0d0-4a1e-9700-7fb60c429cc0
   category: abstract_thesis
   note: ''
 - query: BMY 8-K Q3 2025 results announcement

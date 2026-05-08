@@ -92,51 +92,97 @@ def _read_header(path: Path) -> str:
     return "".join(lines)
 
 
+_PREVIEW_CHARS = 350
+_TOP_N = 5  # show top-5 per side (10 candidates) — tighter than top-10
+_VEC_LETTERS = "abcde"
+_KW_LETTERS = "ABCDE"
+
+
 def _print_side_by_side(vec_results, kw_results, query: str) -> None:
-    """Render top-10 vector + top-10 keyword candidates side-by-side."""
+    """Render top-N vector + top-N keyword candidates with enough
+    preview text to actually judge relevance.
+    """
     print()
-    print("=" * 110)
+    print("=" * 100)
     print(f"QUERY: {query}")
-    print("=" * 110)
+    print("=" * 100)
 
-    def _fmt_row(label: str, r) -> str:
-        cid = (r.chunk_id or "")[:8]
-        ticker = (r.ticker or "")[:6]
-        dtype = (r.doc_type or "")[:18]
+    def _fmt_block(label: str, r) -> str:
+        cid = (r.chunk_id or "")[:36]
+        ticker = (r.ticker or "")
+        dtype = (r.doc_type or "")
         date = str(r.filed_date)[:10]
+        section = (r.section_label or "—")[:60]
         score = r.similarity if r.similarity is not None else 0.0
-        preview = re.sub(r"\s+", " ", (r.content or ""))[:60]
-        return f"[{label}] {cid:<8} {ticker:<6} {dtype:<18} {date} {score:.3f}  {preview!r}"
+        preview = re.sub(r"\s+", " ", (r.content or ""))[:_PREVIEW_CHARS]
+        head = f"[{label}] {ticker} {dtype} {date} | section={section} | score={score:.3f}"
+        return f"{head}\n      {cid}\n      {preview}"
 
-    vec_letters = "abcdefghij"
-    kw_letters = "ABCDEFGHIJ"
-    print("\n-- VECTOR top 10 (cosine) --")
-    for i, r in enumerate(vec_results[:10]):
-        print(_fmt_row(vec_letters[i], r))
-    print("\n-- KEYWORD top 10 (FTS ts_rank_cd) --")
-    for i, r in enumerate(kw_results[:10]):
-        print(_fmt_row(kw_letters[i], r))
+    print("\n── VECTOR top 5 (cosine) " + "─" * 73)
+    for i, r in enumerate(vec_results[:_TOP_N]):
+        print(_fmt_block(_VEC_LETTERS[i], r))
+    print("\n── KEYWORD top 5 (FTS ts_rank_cd) " + "─" * 65)
+    for i, r in enumerate(kw_results[:_TOP_N]):
+        print(_fmt_block(_KW_LETTERS[i], r))
+    print()
+
+
+def _print_full_chunk(r) -> None:
+    """Expand a single candidate to full content for closer inspection."""
+    print()
+    print("─" * 100)
+    print(f"FULL CHUNK: {r.chunk_id}")
+    print(f"  {r.ticker} {r.doc_type} {r.filed_date} | section={r.section_label}")
+    print("─" * 100)
+    print(r.content or "(empty content)")
+    print("─" * 100)
     print()
 
 
 def _prompt_pick(vec_results, kw_results) -> str | None:
-    """Returns the picked chunk_id, or None to skip, or 'QUIT'."""
+    """Returns the picked chunk_id, None to skip, or 'QUIT'.
+
+    Commands:
+        a-e          pick vector candidate at that letter
+        A-E          pick keyword candidate at that letter
+        ?<letter>    expand that candidate to full chunk content
+        <UUID>       paste a chunk UUID directly (escape hatch)
+        x / Enter    skip this query (leaves TODO in place)
+        q            quit (already-saved picks preserved)
+    """
     while True:
         choice = input(
-            "Pick: [a-j]=vector  [A-J]=keyword  [paste UUID]  [x]=skip  [q]=quit  > "
+            "Pick: [a-e]=vec  [A-E]=kw  [?<letter>]=expand  [UUID]  [x]=skip  [q]=quit  > "
         ).strip()
         if choice in ("q", "Q"):
             return "QUIT"
         if choice in ("x", "X", ""):
             return None
-        if len(choice) == 1 and choice in "abcdefghij":
-            idx = "abcdefghij".index(choice)
+
+        # Expand-to-full-content commands: ?a, ?A, etc.
+        if choice.startswith("?") and len(choice) == 2:
+            letter = choice[1]
+            if letter in _VEC_LETTERS:
+                idx = _VEC_LETTERS.index(letter)
+                if idx < len(vec_results):
+                    _print_full_chunk(vec_results[idx])
+                    continue
+            if letter in _KW_LETTERS:
+                idx = _KW_LETTERS.index(letter)
+                if idx < len(kw_results):
+                    _print_full_chunk(kw_results[idx])
+                    continue
+            print(f"  (no candidate at letter {letter!r})")
+            continue
+
+        if len(choice) == 1 and choice in _VEC_LETTERS:
+            idx = _VEC_LETTERS.index(choice)
             if idx < len(vec_results):
                 return vec_results[idx].chunk_id
             print("  (no vector result at that letter)")
             continue
-        if len(choice) == 1 and choice in "ABCDEFGHIJ":
-            idx = "ABCDEFGHIJ".index(choice)
+        if len(choice) == 1 and choice in _KW_LETTERS:
+            idx = _KW_LETTERS.index(choice)
             if idx < len(kw_results):
                 return kw_results[idx].chunk_id
             print("  (no keyword result at that letter)")
@@ -144,7 +190,8 @@ def _prompt_pick(vec_results, kw_results) -> str | None:
         if _UUID_RE.match(choice):
             return choice
         print(
-            "  (invalid — letter a-j or A-J, full UUID, x to skip, q to quit)"
+            "  (invalid — letter a-e or A-E, ?<letter> to expand, UUID, "
+            "x to skip, q to quit)"
         )
 
 
