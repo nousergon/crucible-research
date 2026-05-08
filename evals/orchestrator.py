@@ -678,17 +678,24 @@ def poll_batch(
             "ended_at": None,
         }
     batch = anthropic_client.messages.batches.retrieve(batch_id)
+    # ``mode='json'`` coerces datetime → ISO-8601 string so the Lambda
+    # response marshaller doesn't blow up. Plain ``model_dump()`` returns
+    # Python ``datetime`` objects on ``created_at`` / ``ended_at`` /
+    # ``expires_at``, which Lambda's JSON marshaller cannot serialize —
+    # surfaced 2026-05-07 against a real Anthropic batch retrieval after
+    # the unit tests (MagicMock-stubbed, no Pydantic) missed it.
     if hasattr(batch, "model_dump"):
-        batch_dict = batch.model_dump()
+        batch_dict = batch.model_dump(mode="json")
     elif hasattr(batch, "to_dict"):
         batch_dict = batch.to_dict()
     elif isinstance(batch, dict):
         batch_dict = batch
     else:
+        ended_at = getattr(batch, "ended_at", None)
         batch_dict = {
             "processing_status": batch.processing_status,
             "request_counts": batch.request_counts,
-            "ended_at": getattr(batch, "ended_at", None),
+            "ended_at": ended_at.isoformat() if hasattr(ended_at, "isoformat") else ended_at,
         }
     return {
         "processing_status": batch_dict.get("processing_status"),

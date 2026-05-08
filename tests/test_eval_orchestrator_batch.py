@@ -281,6 +281,54 @@ class TestPollBatch:
         assert result["processing_status"] == "in_progress"
         assert result["request_counts"]["processing"] == 5
 
+    def test_pydantic_batch_with_datetime_serializes_for_lambda_marshaller(self):
+        """Anthropic's real batch object is a Pydantic model with
+        ``datetime`` fields (``created_at`` / ``ended_at`` / ``expires_at``).
+        Plain ``model_dump()`` returns Python datetime objects, which
+        Lambda's JSON response marshaller cannot serialize — every poll
+        crashes with ``Object of type datetime is not JSON serializable``.
+
+        Surfaced 2026-05-07 against a real Anthropic batch retrieval:
+        the original unit test (above) used a MagicMock that bypassed
+        Pydantic and missed the bug. Pinning behavior with a real
+        Pydantic model that mirrors Anthropic's MessageBatch shape so
+        the regression class can't recur.
+        """
+        from datetime import datetime, timezone
+        from pydantic import BaseModel
+        from evals.orchestrator import poll_batch
+
+        class FakePydanticBatch(BaseModel):
+            id: str
+            processing_status: str
+            request_counts: dict
+            created_at: datetime
+            ended_at: datetime | None
+            expires_at: datetime
+
+        fake_batch = FakePydanticBatch(
+            id="msgbatch_xyz",
+            processing_status="ended",
+            request_counts={"succeeded": 24, "errored": 0},
+            created_at=datetime(2026, 5, 7, 23, 30, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 5, 7, 23, 35, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 5, 8, 23, 30, tzinfo=timezone.utc),
+        )
+        fake_client = MagicMock()
+        fake_client.messages.batches.retrieve.return_value = fake_batch
+
+        result = poll_batch(
+            batch_id="msgbatch_xyz", anthropic_client=fake_client,
+        )
+
+        # Result must be JSON-serializable — Lambda's runtime marshaller
+        # is `json.dumps`, no `default=` fallback.
+        json.dumps(result)
+
+        assert result["processing_status"] == "ended"
+        assert isinstance(result["ended_at"], str)  # ISO string, not datetime
+        assert result["ended_at"].startswith("2026-05-07T23:35")
+
 
 # ── process_batch_results ─────────────────────────────────────────────────
 
