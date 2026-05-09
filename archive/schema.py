@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -162,6 +162,9 @@ CREATE TABLE IF NOT EXISTS predictor_outcomes (
     score_modifier_applied  REAL DEFAULT 0.0,
     actual_5d_return        REAL,
     correct_5d              INTEGER,
+    actual_log_alpha        REAL,
+    horizon_days            INTEGER,
+    correct                 INTEGER,
     UNIQUE(symbol, prediction_date)
 );
 
@@ -364,6 +367,25 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          ALTER TABLE score_performance ADD COLUMN conviction TEXT;
          ALTER TABLE score_performance ADD COLUMN sector_modifier REAL;
          ALTER TABLE score_performance ADD COLUMN market_regime TEXT;
+         """),
+    # Predictor 21d canonical-alpha migration (2026-05-09; plan at
+    # alpha-engine-docs/private/predictor-21d-migration-260509.md). Aligns
+    # the measurement substrate with the predictor's canonical 21d
+    # log-domain training target shipped in alpha-engine-predictor #114
+    # (Track A canonical-label cutover). Column names are horizon-agnostic
+    # by design — `horizon_days` records the row's horizon-of-record so
+    # a future flip (21d → 60d) becomes a `cfg.FORWARD_DAYS` change, not
+    # another schema migration.
+    #
+    # Old `actual_5d_return` and `correct_5d` retained for historical
+    # reads + transition parity. Backtester analytics use
+    # `COALESCE(actual_log_alpha, actual_5d_return)` until parallel-write
+    # window closes (~4 weeks) and the legacy columns are retired.
+    13: ("Add horizon-agnostic predictor outcome columns",
+         """
+         ALTER TABLE predictor_outcomes ADD COLUMN actual_log_alpha REAL;
+         ALTER TABLE predictor_outcomes ADD COLUMN horizon_days INTEGER;
+         ALTER TABLE predictor_outcomes ADD COLUMN correct INTEGER;
          """),
 }
 
