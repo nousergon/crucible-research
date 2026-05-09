@@ -66,11 +66,12 @@ class TestArchiveSchema:
             )
 
     def test_schema_version_is_recorded(self, archive_in_memory):
-        """schema_version table should record migration v12 application
+        """schema_version table should record the latest migration application
         on a fresh init. Catches the class of bug where MIGRATIONS gets
         a new entry but SCHEMA_VERSION constant isn't bumped (the test
         for the constant pin lives below; this covers the runtime
         application path)."""
+        from archive.schema import SCHEMA_VERSION
         conn = archive_in_memory.db_conn
         applied = {
             row[0]
@@ -78,7 +79,35 @@ class TestArchiveSchema:
                 "SELECT version FROM schema_version"
             ).fetchall()
         }
-        assert 12 in applied
+        assert SCHEMA_VERSION in applied
+
+    def test_predictor_outcomes_has_horizon_agnostic_columns(self, archive_in_memory):
+        """Regression for predictor 21d canonical-alpha migration
+        (alpha-engine-docs/private/predictor-21d-migration-260509.md PR B):
+        schema migration v13 adds horizon-agnostic predictor outcome columns.
+        Pin the column names here so a future migration that renames them
+        breaks the test (and the producer wire-up at
+        alpha-engine-data/collectors/signal_returns.py:_backfill_predictor_returns)."""
+        conn = archive_in_memory.db_conn
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(predictor_outcomes)").fetchall()
+        }
+        for col in ("actual_log_alpha", "horizon_days", "correct"):
+            assert col in cols, (
+                f"predictor_outcomes missing horizon-agnostic column '{col}' — "
+                f"schema migration v13 must run on init"
+            )
+        # Old columns retained for transition parity (4-week parallel-write
+        # window); downstream COALESCEs over both. Pinning their presence
+        # protects against an over-eager retirement that breaks the
+        # backtester analytics fallback path.
+        for col in ("actual_5d_return", "correct_5d"):
+            assert col in cols, (
+                f"predictor_outcomes lost legacy column '{col}' — "
+                f"premature retirement breaks transition COALESCE in "
+                f"alpha-engine-backtester analytics readers"
+            )
 
     def test_schema_version_constant_matches_latest_migration(self):
         """SCHEMA_VERSION must equal the highest key in MIGRATIONS so a
