@@ -64,11 +64,34 @@ python scripts/run_rag_retrieval_eval.py
 # → ~/Development/alpha-engine-docs/private/rag-retrieval-eval-{date}.md
 ```
 
-## Calibration owed
+## Calibration result (2026-05-08)
 
-The 2026-05-08 first-pass eval against 30 auto-seeded queries was inconclusive — recall numbers stayed under 0.10 across all conditions due to (a) regex-artifact queries in the seed and (b) a harness/production mismatch where the eval doesn't apply the `tickers=[…]` pre-filter that `query_filings` uses in production. Two paths to genuine calibration:
+Hand-curated test set: **25 queries** across the 6 categories (11 additional queries skipped where neither retrieval method surfaced a relevant chunk in top-10). Eval ran each query through 6 conditions (vector / keyword / hybrid w∈{0.3, 0.5, 0.7, 0.9}) at top_k=20.
 
-1. **Refine the seed test set** — replace the regex-artifact entries, extend the YAML schema to carry per-query `tickers` / `doc_types` / `min_date` filters, re-run.
-2. **Passive measurement from production** — once the qual analyst has accumulated ~2 weeks of decision artifacts under hybrid mode, mine the `RAG_RETRIEVE` log lines + downstream agent citations to compute "did hybrid surface chunks the agent ended up citing?" against vector. No synthetic test set required.
+### Overall recall@10
 
-Path 2 is cleaner. Until calibration lands, `vector_weight=0.7` stays the default.
+| Method | Recall@10 |
+|---|---|
+| vector | **0.913** |
+| keyword | 0.043 |
+| hybrid w=0.3 | 0.783 |
+| hybrid w=0.5 | **0.913** |
+| hybrid w=0.7 | **0.913** |
+| hybrid w=0.9 | **0.913** |
+
+### Findings
+
+- **Vector alone is sufficient** at the eval-harness level. Hybrid at w∈{0.5, 0.7, 0.9} ties vector exactly — no regression, no lift.
+- **Keyword alone underperforms (0.043)** because the eval harness lacks the `tickers=[…]` pre-filter that production `query_filings` passes. Without ticker narrowing, the OR-relaxed FTS pool is dominated by token-overlap noise.
+- **Hybrid w=0.3 hurts** (0.783) — too much weight on the noisy keyword side drags the blend down.
+- **Per-category:** vector hits 100% on abstract_thesis, conceptual_narrative, date_range, and filing_type. The 75% on ticker_named_entity (n=4) and 50% on quantitative_line_item (n=2) are small-n; not load-bearing signal.
+
+### Default decision
+
+`vector_weight=0.7` stays. The eval confirms it ties vector at recall@10 — adding the keyword side at this weight costs nothing observable in the harness and may help in production when the ticker pre-filter narrows the keyword pool to the queried company before ranking. Hybrid is a safety belt, not a lift driver, against this corpus and harness.
+
+Full report at `~/Development/alpha-engine-docs/private/rag-retrieval-eval-2026-05-08.md`.
+
+### Why the harness underestimates keyword
+
+`agents/sector_teams/qual_tools.py::query_filings` passes `tickers=[ticker]` to `retrieve()` in production. The eval harness's YAML schema does not yet support per-query metadata filters, so retrieval runs unfiltered against the full 21,550-chunk corpus. For ticker-anchored queries (which most qual-analyst calls are), this is the wrong measurement surface. The cleaner calibration path is **passive measurement from production** — mine the `RAG_RETRIEVE` log lines + downstream agent citations once 2-3 weeks of hybrid-mode decision artifacts accumulate. Tracked as a ROADMAP P3 follow-up.
