@@ -1,0 +1,201 @@
+# RAG retrieval eval — hand-curated test set
+#
+# Each entry pairs a natural-language query with one or more chunk_id(s)
+# that a correctly-tuned retriever should surface in the top_k.
+#
+# Workflow:
+# 1. Type queries here with `expected_chunk_ids: ["TODO"]` placeholders.
+# 2. Run `python scripts/curate_rag_query.py` (interactive helper —
+#    walks each TODO, shows top-10 vector + keyword candidates, you
+#    pick the chunk that genuinely answers the query, writes back).
+# 3. Run `python scripts/run_rag_retrieval_eval.py` for the report.
+#
+# Categories (match evals.rag_retrieval.CATEGORIES):
+# - ticker_named_entity     queries leaning on company / brand / product names
+# - filing_type             queries that key on 10-K / 10-Q / 8-K shape
+# - date_range              queries with a temporal anchor
+# - quantitative_line_item  queries asking about $ / % / ratio line items
+# - abstract_thesis         queries about competitive moat / strategy
+# - conceptual_narrative    queries about strategic events / narratives
+
+queries:
+- query: ABBV competitive moat in immunology
+  expected_chunk_ids:
+  - cfc9ff70-c0d0-4a1e-9700-7fb60c429cc0
+  category: abstract_thesis
+  note: ''
+- query: BMY 8-K Q3 2025 results announcement
+  expected_chunk_ids:
+  - d8423b59-14b0-4c15-9c34-873557ea82b8
+  category: filing_type
+  note: ''
+- query: PFE 2024 fiscal year R&D expense
+  expected_chunk_ids:
+  - 2ca0c147-b073-45ff-977d-5924ec13dab9
+  category: date_range
+  note: ''
+- query: Costco Kirkland Signature private label margin
+  expected_chunk_ids:
+  - c5bdd752-512f-40b7-956e-ab50fd2701ec
+  category: ticker_named_entity
+  note: ''
+- query: Vertex 10-Q quarterly results September 2025
+  expected_chunk_ids:
+  - TODO
+  category: filing_type
+  note: ''
+- query: Janus Henderson 2025 first quarter AUM
+  expected_chunk_ids:
+  - a37a938b-998f-4edc-a89e-41aa5ba79b7e
+  category: date_range
+  note: ''
+- query: Stryker capital expenditures fiscal 2025
+  expected_chunk_ids:
+  - 82ab04b2-d178-41ca-be40-174b7b675d46
+  category: quantitative_line_item
+  note: ''
+- query: competitive moat from network effects in derivatives clearing
+  expected_chunk_ids:
+  - 57452341-d0e1-4ef8-97dc-72c1f3ddfd23
+  category: abstract_thesis
+  note: ''
+- query: ConocoPhillips Marathon Oil acquisition strategic rationale
+  expected_chunk_ids:
+  - 0b9f95b8-8c01-4f3a-8fab-048b4966a73c
+  category: conceptual_narrative
+  note: ''
+- query: ISRG Da Vinci robotic surgery platform
+  expected_chunk_ids:
+  - TODO
+  category: ticker_named_entity
+  note: ''
+- query: McDonald's 8-K material definitive agreement
+  expected_chunk_ids:
+  - c93f5985-8555-415a-971f-6b3578a7d914
+  category: filing_type
+  note: ''
+- query: Palantir fiscal Q1 2026 net sales
+  expected_chunk_ids:
+  - TODO
+  category: date_range
+  note: ''
+- query: ConocoPhillips production cost per barrel
+  expected_chunk_ids:
+  - ded4dc12-81e4-409d-bf6b-8e2e65d5e982
+  category: quantitative_line_item
+  note: ''
+- query: diversified pharma pipeline reducing single-product concentration risk
+  expected_chunk_ids:
+  - 654f2c90-f694-4019-b40e-a096c66a570b
+  category: abstract_thesis
+  note: ''
+- query: Stryker M&A discipline in medical device consolidation
+  expected_chunk_ids:
+  - 454ff49a-3a42-494b-b3d3-e492c6b1b86e
+  category: conceptual_narrative
+  note: ''
+- query: Palantir Gotham vs Foundry segment growth
+  expected_chunk_ids:
+  - 6baff57a-462b-4617-9d4c-59d795c01e68
+  category: ticker_named_entity
+  note: ''
+- query: ExxonMobil 10-K business properties Permian basin
+  expected_chunk_ids:
+  - TODO
+  category: filing_type
+  note: ''
+- query: Xcel Energy Q3 2025 storm cost recovery
+  expected_chunk_ids:
+  - 593e9cb7-a616-451d-a124-1b6f3272313a
+  category: date_range
+  note: ''
+- query: Novartis R&D expense 2024
+  expected_chunk_ids:
+  - TODO
+  category: quantitative_line_item
+  note: ''
+- query: consumer staples brand strength insulating margin from inflation
+  expected_chunk_ids:
+  - 59e8a8c9-2d70-4a61-8391-6f4fd4a8c1e6
+  category: abstract_thesis
+  note: ''
+- query: Akamai security business outgrowing legacy CDN
+  expected_chunk_ids:
+  - ed96d839-b535-4add-9e0c-b03a60395909
+  category: conceptual_narrative
+  note: ''
+- query: Akamai Connected Cloud strategic shift
+  expected_chunk_ids:
+  - 58a9b90b-7aab-4aa0-a838-76e1b9d489e7
+  category: ticker_named_entity
+  note: ''
+- query: Palo Alto Networks 8-K Item 5.02 executive officer transition
+  expected_chunk_ids:
+  - TODO
+  category: filing_type
+  note: ''
+- query: Eli Lilly second quarter 2025 GLP-1 revenue
+  expected_chunk_ids:
+  - 216b38b0-eac5-4fb8-b29f-2cc92549f9e1
+  category: date_range
+  note: ''
+- query: Moderna R&D expense 2024
+  expected_chunk_ids:
+  - TODO
+  category: quantitative_line_item
+  note: ''
+- query: regulated utility growth tied to data center electrification
+  expected_chunk_ids:
+  - 663907ca-40bd-4aae-bfd4-1ee503611c0c
+  category: abstract_thesis
+  note: ''
+- query: Eli Lilly capacity expansion for obesity drug demand
+  expected_chunk_ids:
+  - 8ebe011d-5fe4-4826-9f4e-d16140b57335
+  category: conceptual_narrative
+  note: ''
+- query: Eli Lilly Mounjaro and Zepbound demand outlook
+  expected_chunk_ids:
+  - df35adb0-83bd-4e75-ba1f-2498a89e8709
+  category: ticker_named_entity
+  note: ''
+- query: Blackstone 10-Q quarterly results September 2025
+  expected_chunk_ids:
+  - TODO
+  category: filing_type
+  note: ''
+- query: United Healthcare fiscal Q1 2026 net sales
+  expected_chunk_ids:
+  - TODO
+  category: date_range
+  note: ''
+- query: Nvidia capital expenditures fiscal 2025
+  expected_chunk_ids:
+  - TODO
+  category: quantitative_line_item
+  note: ''
+- query: edge compute infrastructure for distributed AI inference
+  expected_chunk_ids:
+  - 5959f3c2-0785-424c-b2f1-ceb038766661
+  category: abstract_thesis
+  note: ''
+- query: Costco membership fee increase rationale and member retention
+  expected_chunk_ids:
+  - 997602fd-6b8e-4375-8a5e-66be64a06720
+  category: conceptual_narrative
+  note: ''
+- query: Cummins Tractor Engine product mix shift
+  expected_chunk_ids:
+  - TODO
+  category: ticker_named_entity
+  note: ''
+- query: Intuitive Machines 10-Q quarterly results September 2025
+  expected_chunk_ids:
+  - TODO
+  category: filing_type
+  note: ''
+- query: Archer Aviation Q1 2026 cash burn
+  expected_chunk_ids:
+  - TODO
+  category: date_range
+  note: ''
