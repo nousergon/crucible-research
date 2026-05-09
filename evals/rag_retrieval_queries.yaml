@@ -26,17 +26,17 @@ queries:
   note: ''
 - query: BMY 8-K Q3 2025 results announcement
   expected_chunk_ids:
-  - TODO
+  - d8423b59-14b0-4c15-9c34-873557ea82b8
   category: filing_type
   note: ''
 - query: PFE 2024 fiscal year R&D expense
   expected_chunk_ids:
-  - TODO
+  - 2ca0c147-b073-45ff-977d-5924ec13dab9
   category: date_range
   note: ''
 - query: Costco Kirkland Signature private label margin
   expected_chunk_ids:
-  - TODO
+  - c5bdd752-512f-40b7-956e-ab50fd2701ec
   category: ticker_named_entity
   note: ''
 - query: Vertex 10-Q quarterly results September 2025
@@ -46,22 +46,22 @@ queries:
   note: ''
 - query: Janus Henderson 2025 first quarter AUM
   expected_chunk_ids:
-  - TODO
+  - a37a938b-998f-4edc-a89e-41aa5ba79b7e
   category: date_range
   note: ''
 - query: Stryker capital expenditures fiscal 2025
   expected_chunk_ids:
-  - TODO
+  - 82ab04b2-d178-41ca-be40-174b7b675d46
   category: quantitative_line_item
   note: ''
 - query: competitive moat from network effects in derivatives clearing
   expected_chunk_ids:
-  - TODO
+  - 57452341-d0e1-4ef8-97dc-72c1f3ddfd23
   category: abstract_thesis
   note: ''
 - query: ConocoPhillips Marathon Oil acquisition strategic rationale
   expected_chunk_ids:
-  - TODO
+  - 0b9f95b8-8c01-4f3a-8fab-048b4966a73c
   category: conceptual_narrative
   note: ''
 - query: ISRG Da Vinci robotic surgery platform
@@ -71,7 +71,7 @@ queries:
   note: ''
 - query: McDonald's 8-K material definitive agreement
   expected_chunk_ids:
-  - TODO
+  - c93f5985-8555-415a-971f-6b3578a7d914
   category: filing_type
   note: ''
 - query: Palantir fiscal Q1 2026 net sales
@@ -81,22 +81,22 @@ queries:
   note: ''
 - query: ConocoPhillips production cost per barrel
   expected_chunk_ids:
-  - TODO
+  - ded4dc12-81e4-409d-bf6b-8e2e65d5e982
   category: quantitative_line_item
   note: ''
 - query: diversified pharma pipeline reducing single-product concentration risk
   expected_chunk_ids:
-  - TODO
+  - 654f2c90-f694-4019-b40e-a096c66a570b
   category: abstract_thesis
   note: ''
 - query: Stryker M&A discipline in medical device consolidation
   expected_chunk_ids:
-  - TODO
+  - 454ff49a-3a42-494b-b3d3-e492c6b1b86e
   category: conceptual_narrative
   note: ''
 - query: Palantir Gotham vs Foundry segment growth
   expected_chunk_ids:
-  - TODO
+  - 6baff57a-462b-4617-9d4c-59d795c01e68
   category: ticker_named_entity
   note: ''
 - query: ExxonMobil 10-K business properties Permian basin
@@ -106,7 +106,7 @@ queries:
   note: ''
 - query: Xcel Energy Q3 2025 storm cost recovery
   expected_chunk_ids:
-  - TODO
+  - 593e9cb7-a616-451d-a124-1b6f3272313a
   category: date_range
   note: ''
 - query: Novartis R&D expense 2024
@@ -116,17 +116,17 @@ queries:
   note: ''
 - query: consumer staples brand strength insulating margin from inflation
   expected_chunk_ids:
-  - TODO
+  - 59e8a8c9-2d70-4a61-8391-6f4fd4a8c1e6
   category: abstract_thesis
   note: ''
 - query: Akamai security business outgrowing legacy CDN
   expected_chunk_ids:
-  - TODO
+  - ed96d839-b535-4add-9e0c-b03a60395909
   category: conceptual_narrative
   note: ''
 - query: Akamai Connected Cloud strategic shift
   expected_chunk_ids:
-  - TODO
+  - 58a9b90b-7aab-4aa0-a838-76e1b9d489e7
   category: ticker_named_entity
   note: ''
 - query: Palo Alto Networks 8-K Item 5.02 executive officer transition
@@ -136,7 +136,7 @@ queries:
   note: ''
 - query: Eli Lilly second quarter 2025 GLP-1 revenue
   expected_chunk_ids:
-  - TODO
+  - 216b38b0-eac5-4fb8-b29f-2cc92549f9e1
   category: date_range
   note: ''
 - query: Moderna R&D expense 2024
@@ -146,17 +146,17 @@ queries:
   note: ''
 - query: regulated utility growth tied to data center electrification
   expected_chunk_ids:
-  - TODO
+  - 663907ca-40bd-4aae-bfd4-1ee503611c0c
   category: abstract_thesis
   note: ''
 - query: Eli Lilly capacity expansion for obesity drug demand
   expected_chunk_ids:
-  - TODO
+  - 8ebe011d-5fe4-4826-9f4e-d16140b57335
   category: conceptual_narrative
   note: ''
 - query: Eli Lilly Mounjaro and Zepbound demand outlook
   expected_chunk_ids:
-  - TODO
+  - df35adb0-83bd-4e75-ba1f-2498a89e8709
   category: ticker_named_entity
   note: ''
 - query: Blackstone 10-Q quarterly results September 2025
@@ -176,12 +176,12 @@ queries:
   note: ''
 - query: edge compute infrastructure for distributed AI inference
   expected_chunk_ids:
-  - TODO
+  - 5959f3c2-0785-424c-b2f1-ceb038766661
   category: abstract_thesis
   note: ''
 - query: Costco membership fee increase rationale and member retention
   expected_chunk_ids:
-  - TODO
+  - 997602fd-6b8e-4375-8a5e-66be64a06720
   category: conceptual_narrative
   note: ''
 - query: Cummins Tractor Engine product mix shift
