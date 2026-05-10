@@ -1604,8 +1604,19 @@ def archive_writer(state: ResearchState) -> dict:
     am.write_scanner_evaluations(scanner_evals)
     logger.info("[archive_writer] logged %d scanner evaluations", len(scanner_evals))
 
-    # Log quant top-10 per team + final recommendations
+    # Log quant top-10 per team + final recommendations.
+    #
+    # Per-sub-signal scores (rsi/macd/ma50/ma200/momentum) are computed
+    # at write time from technical_scores using the committed
+    # compute_technical_sub_scores() helper. Persisting them lets the
+    # backtester's tech_weight_ablation optimizer (PR-C) re-rank under
+    # alternate composite weights without re-running the research
+    # pipeline. The market_regime input must match what the live
+    # compute_technical_score call used so the RSI sub-score is
+    # numerically consistent across producer + consumer.
+    from scoring.technical import compute_technical_sub_scores
     team_candidate_records = []
+    archive_writer_regime = state.get("market_regime", "neutral")
     for team_id, output in team_outputs.items():
         quant_picks = output.get("quant_output", {}).get("ranked_picks", [])
         recommended_tickers = {
@@ -1621,6 +1632,22 @@ def archive_writer(state: ResearchState) -> dict:
                 if rec.get("ticker") == ticker:
                     qual_score = rec.get("qual_score")
                     break
+            # Sub-scores from cached indicators. None on each field if
+            # technical_scores entry is missing (rare — would happen if
+            # the quant agent emitted a pick for a ticker that didn't
+            # pass scanner indicators), and the writer persists NULL.
+            indicators = technical_scores.get(ticker)
+            sub_scores: dict = {}
+            if isinstance(indicators, dict):
+                try:
+                    sub_scores = compute_technical_sub_scores(
+                        indicators, market_regime=archive_writer_regime,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[archive_writer] sub-score computation failed for %s: %s",
+                        ticker, e,
+                    )
             team_candidate_records.append({
                 "ticker": ticker,
                 "eval_date": run_date,
@@ -1629,6 +1656,11 @@ def archive_writer(state: ResearchState) -> dict:
                 "quant_score": pick.get("quant_score"),
                 "qual_score": qual_score,
                 "team_recommended": 1 if ticker in recommended_tickers else 0,
+                "rsi_sub_score": sub_scores.get("rsi"),
+                "macd_sub_score": sub_scores.get("macd"),
+                "ma50_sub_score": sub_scores.get("ma50"),
+                "ma200_sub_score": sub_scores.get("ma200"),
+                "momentum_sub_score": sub_scores.get("momentum"),
             })
     am.write_team_candidates(team_candidate_records)
     logger.info("[archive_writer] logged %d team candidates", len(team_candidate_records))

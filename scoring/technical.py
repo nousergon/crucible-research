@@ -119,6 +119,49 @@ def _score_momentum(momentum_20d: Optional[float], percentile_rank: Optional[flo
     return max(0.0, min(100.0, score))
 
 
+# ── Sub-score breakout (for ablation analysis) ────────────────────────────────
+
+
+def compute_technical_sub_scores(
+    indicators: dict,
+    market_regime: str = "neutral",
+    momentum_percentile: Optional[float] = None,
+) -> dict:
+    """Return the 5 per-signal sub-scores that feed compute_technical_score.
+
+    Used by the archive writer to persist per-sub-signal scores into
+    team_candidates so the backtester can run weight-ablation analysis
+    (re-rank under alternate composite weights) without re-running the
+    research pipeline. Each sub-score is in [0, 100].
+
+    Args:
+        indicators: dict from price_fetcher.compute_technical_indicators().
+        market_regime: 'bull' | 'neutral' | 'caution' | 'bear' — affects
+            the RSI thresholds.
+        momentum_percentile: percentile rank (0–100) within S&P 500 for
+            20d return.
+
+    Returns:
+        {rsi: float, macd: float, ma50: float, ma200: float, momentum: float}
+    """
+    return {
+        "rsi": _score_rsi(
+            indicators.get("rsi_14", 50.0),
+            market_regime=market_regime,
+        ),
+        "macd": _score_macd(
+            indicators.get("macd_cross", 0.0),
+            indicators.get("macd_above_zero", False),
+        ),
+        "ma50": _score_price_vs_ma(indicators.get("price_vs_ma50")),
+        "ma200": _score_price_vs_ma(indicators.get("price_vs_ma200")),
+        "momentum": _score_momentum(
+            indicators.get("momentum_20d"),
+            percentile_rank=momentum_percentile,
+        ),
+    }
+
+
 # ── Composite score ───────────────────────────────────────────────────────────
 
 def compute_technical_score(
