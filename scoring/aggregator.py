@@ -672,4 +672,93 @@ def aggregate_all(
             "long_term_rating": lt_rating,
         }
 
+    assign_cross_sectional_ranks(results)
     return results
+
+
+def assign_cross_sectional_ranks(results: dict[str, dict]) -> None:
+    """Attach ``cross_sectional_rank`` + ``percentile`` to each result dict
+    in-place.
+
+    PR 1 of the rank-based portfolio-construction restructure. These
+    additive fields are emitted on every per-ticker scoring dict so
+    downstream consumers (executor, backtester signal_quality, dashboard)
+    can migrate to rank-based selection without absolute thresholds.
+    No behavior change in this PR — fields are observability-only until
+    consumers wire to them.
+
+    Semantics:
+
+    - ``cross_sectional_rank``: 1-indexed integer where 1 = highest
+      ``final_score`` in the run's scored population. Ties get the same
+      rank via ``min`` semantics (e.g., scores [80, 75, 75, 60] →
+      ranks [1, 2, 2, 4]). Stable across runs only if scores are
+      deterministic — see typed-state arc 2026-04-30 for reducer
+      ordering guarantees.
+    - ``percentile``: float in ``[0.0, 1.0]`` where 1.0 = top. Computed
+      as ``(n - rank) / max(n - 1, 1)`` so rank 1 → 1.0 and last → 0.0.
+      Deterministic given ranks. Single-result population emits 1.0.
+
+    Empty results: no-op. Tickers with non-finite ``final_score`` are
+    sorted to the end (lowest rank, percentile 0.0) — defensive
+    handling; the [0, 100] clamp upstream should make this unreachable
+    in practice.
+
+    Why ``final_score`` (not ``weighted_base``): emits the rank of the
+    CURRENT pipeline output so downstream consumers see ranks that
+    match the current rating/score they already read. The future
+    restructure (PR 2+) may shift to ranking ``weighted_base`` so
+    macro_shift can move to a sector-allocation layer rather than a
+    per-stock score lever — but that's a behavior change, deferred.
+    """
+    n = len(results)
+    if n == 0:
+        return
+
+    # Sort tickers by final_score descending; non-finite scores sink to
+    # the bottom. ``-math.inf`` sentinel keeps the sort stable + deterministic.
+    import math
+
+    def _key(item: tuple[str, dict]) -> float:
+        score = item[1].get("final_score")
+        try:
+            v = float(score) if score is not None else -math.inf
+            return v if math.isfinite(v) else -math.inf
+        except (TypeError, ValueError):
+            return -math.inf
+
+    sorted_items = sorted(results.items(), key=_key, reverse=True)
+
+    # Assign ranks with ``min`` semantics for ties: scan in order and
+    # bump the rank counter when the score strictly drops. First entry
+    # gets rank 1; ties to its score also get rank 1.
+    prev_score: float | None = None
+    rank = 0
+    seq = 0  # 1-indexed sequence position; rank only advances on score drop
+    for ticker, result in sorted_items:
+        seq += 1
+        score = result.get("final_score")
+        try:
+            score_val: float | None = float(score) if score is not None else None
+            # Coerce NaN/inf to None so the tie-detection branch below
+            # (``score_val < prev_score``) doesn't return False on NaN
+            # and silently bucket non-finite tickers into the prior
+            # tie group.
+            if score_val is not None and not math.isfinite(score_val):
+                score_val = None
+        except (TypeError, ValueError):
+            score_val = None
+
+        if rank == 0:
+            rank = 1  # first entry
+        elif prev_score is None or score_val is None:
+            rank = seq  # non-finite handling: don't tie with valid scores
+        elif score_val < prev_score:
+            rank = seq  # advanced past prior tie group
+
+        # Percentile: rank 1 → 1.0, rank n → 0.0. n=1 case returns 1.0.
+        percentile = 1.0 - (rank - 1) / (n - 1) if n > 1 else 1.0
+
+        result["cross_sectional_rank"] = rank
+        result["percentile"] = round(percentile, 4)
+        prev_score = score_val
