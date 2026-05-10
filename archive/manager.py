@@ -476,19 +476,31 @@ class ArchiveManager:
             )
 
     def write_team_candidates(self, candidates: list[dict]) -> None:
-        """Log quant analyst top-10 per team with qual scores and recommendation flag."""
+        """Log quant analyst top-10 per team with qual scores and recommendation flag.
+
+        Sub-scores (rsi/macd/ma50/ma200/momentum) are optional — None →
+        SQLite NULL — for backwards compat with rows persisted before
+        the v15 schema migration's producer-side wire-up. Backtester's
+        tech_weight_ablation optimizer treats NULL as "no sub-score
+        data, ablation skips this row."
+        """
         if not self.db_conn:
             return
         for c in candidates:
             self.db_conn.execute(
                 """INSERT OR REPLACE INTO team_candidates
                    (ticker, eval_date, team_id, quant_rank, quant_score,
-                    qual_score, team_recommended)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    qual_score, team_recommended,
+                    rsi_sub_score, macd_sub_score, ma50_sub_score,
+                    ma200_sub_score, momentum_sub_score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     c["ticker"], c["eval_date"], c["team_id"],
                     c.get("quant_rank"), c.get("quant_score"),
                     c.get("qual_score"), c.get("team_recommended", 0),
+                    c.get("rsi_sub_score"), c.get("macd_sub_score"),
+                    c.get("ma50_sub_score"), c.get("ma200_sub_score"),
+                    c.get("momentum_sub_score"),
                 ),
             )
 

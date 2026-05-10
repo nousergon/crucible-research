@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -286,6 +286,11 @@ CREATE TABLE IF NOT EXISTS team_candidates (
     quant_score         REAL,
     qual_score          REAL,
     team_recommended    INTEGER NOT NULL DEFAULT 0,
+    rsi_sub_score       REAL,    -- 0-100, regime-aware mean-reversion signal
+    macd_sub_score      REAL,    -- 0-100, MACD cross + above-zero state
+    ma50_sub_score      REAL,    -- 0-100, price vs 50d MA
+    ma200_sub_score     REAL,    -- 0-100, price vs 200d MA
+    momentum_sub_score  REAL,    -- 0-100, 20d return percentile within universe
     UNIQUE(ticker, eval_date, team_id)
 );
 
@@ -398,6 +403,23 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # a default tag.
     14: ("Add rule_tags to cio_evaluations for per-decision attribution",
          "ALTER TABLE cio_evaluations ADD COLUMN rule_tags TEXT"),
+    # Per-sub-signal scores in team_candidates. Surfaced from the
+    # 2026-05-09 evaluator-email post-mortem on quant rank inversion in
+    # healthcare/industrials/tech (corr(rank, 5d_ret) at +0.33-0.36).
+    # Persisting the 5 sub-scores enables the backtester's
+    # tech_weight_ablation optimizer (PR-C of this arc) to re-rank
+    # historical team_candidates under alternate composite weights
+    # without re-running the research pipeline. NULL on rows persisted
+    # before the producer-side wire-up — backtester treats those as
+    # "no sub-score data, ablation gates skip this row."
+    15: ("Add per-sub-signal scores to team_candidates for ablation analysis",
+         """
+         ALTER TABLE team_candidates ADD COLUMN rsi_sub_score REAL;
+         ALTER TABLE team_candidates ADD COLUMN macd_sub_score REAL;
+         ALTER TABLE team_candidates ADD COLUMN ma50_sub_score REAL;
+         ALTER TABLE team_candidates ADD COLUMN ma200_sub_score REAL;
+         ALTER TABLE team_candidates ADD COLUMN momentum_sub_score REAL;
+         """),
 }
 
 
