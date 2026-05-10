@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS cio_evaluations (
     cio_conviction      INTEGER,
     cio_rank            INTEGER,
     rationale           TEXT,
+    rule_tags           TEXT,    -- JSON list[str] of closed-vocab tags; see migration 14
     UNIQUE(ticker, eval_date)
 );
 """
@@ -387,6 +388,16 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          ALTER TABLE predictor_outcomes ADD COLUMN horizon_days INTEGER;
          ALTER TABLE predictor_outcomes ADD COLUMN correct INTEGER;
          """),
+    # CIO rule-tag attribution. Pairs with prompt v1.3.0 + lib v0.7.0
+    # rule_tags field on CIORawDecision. JSON-serialized list[str] of
+    # closed-vocabulary tags (qual_veto, quant_veto, dual_score_floor,
+    # rr_asymmetry, macro_alignment, portfolio_fit, catalyst_specificity,
+    # prior_continuity, other) identifying which gating rule(s) drove
+    # each decision. NULL on rows from prompts < v1.3.0 — backtester
+    # analytics treat NULL as "untagged legacy" rather than coercing to
+    # a default tag.
+    14: ("Add rule_tags to cio_evaluations for per-decision attribution",
+         "ALTER TABLE cio_evaluations ADD COLUMN rule_tags TEXT"),
 }
 
 

@@ -493,23 +493,31 @@ class ArchiveManager:
             )
 
     def write_cio_evaluations(self, evaluations: list[dict]) -> None:
-        """Log all CIO decisions (ADVANCE/REJECT/DEADLOCK) for evaluation."""
+        """Log all CIO decisions (ADVANCE/REJECT/DEADLOCK) for evaluation.
+
+        ``rule_tags`` (closed-vocab attribution from prompt v1.3.0+) is
+        JSON-serialized for SQLite storage. Legacy decisions (prompts
+        < v1.3.0) come through with rule_tags=None and persist as NULL,
+        which downstream analytics interpret as "untagged legacy."
+        """
         if not self.db_conn:
             return
         for e in evaluations:
+            tags = e.get("rule_tags")
+            tags_json = json.dumps(tags) if tags is not None else None
             self.db_conn.execute(
                 """INSERT OR REPLACE INTO cio_evaluations
                    (ticker, eval_date, team_id, quant_score, qual_score,
                     combined_score, macro_shift, final_score, cio_decision,
-                    cio_conviction, cio_rank, rationale)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    cio_conviction, cio_rank, rationale, rule_tags)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("team_id"),
                     e.get("quant_score"), e.get("qual_score"),
                     e.get("combined_score"), e.get("macro_shift"),
                     e.get("final_score"), e["cio_decision"],
                     e.get("cio_conviction"), e.get("cio_rank"),
-                    e.get("rationale"),
+                    e.get("rationale"), tags_json,
                 ),
             )
 

@@ -1651,6 +1651,11 @@ def archive_writer(state: ResearchState) -> dict:
             "cio_conviction": decision.get("conviction"),
             "cio_rank": decision.get("rank"),
             "rationale": decision.get("rationale"),
+            # Rule-tag attribution from prompt v1.3.0 + lib v0.7.0
+            # CIORawDecision.rule_tags. None on legacy outputs (prompt
+            # < v1.3.0); persisted as SQLite NULL so analytics can
+            # distinguish "untagged legacy" from "no tags emitted."
+            "rule_tags": decision.get("rule_tags"),
         })
     am.write_cio_evaluations(cio_eval_records)
     logger.info("[archive_writer] logged %d CIO evaluations", len(cio_eval_records))
