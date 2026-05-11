@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -420,6 +420,21 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          ALTER TABLE team_candidates ADD COLUMN ma200_sub_score REAL;
          ALTER TABLE team_candidates ADD COLUMN momentum_sub_score REAL;
          """),
+    # Stance taxonomy arc PR (2026-05-11) — denormalize the predictor's
+    # stance label onto score_performance at write time (Kimball
+    # dimensional pattern). Without this, the backtester's per-stance
+    # attribution can only do compute-time joins with predictions.json
+    # archive, which is fragile (S3 versioning, archive rotation) and
+    # repeats the join every weekly run. Stamping stance on the fact
+    # row creates a single source of truth + auditable history.
+    #
+    # NULL for rows scored before 2026-05-11 (no predictions.json
+    # stance field existed). NULL also for rows where the predictor
+    # didn't score the ticker (e.g., ticker outside the predictor's
+    # population). Backtester's by_stance attribution treats NULL as
+    # "no stance recorded" rather than coercing to a default label.
+    16: ("Add stance column to score_performance for per-stance attribution",
+         "ALTER TABLE score_performance ADD COLUMN stance TEXT"),
 }
 
 

@@ -117,6 +117,31 @@ class TestArchiveSchema:
         from archive.schema import SCHEMA_VERSION, MIGRATIONS
         assert SCHEMA_VERSION == max(MIGRATIONS.keys())
 
+    def test_score_performance_has_stance_column(self, archive_in_memory):
+        """Regression for the stance taxonomy arc: schema migration v16
+        denormalizes the predictor's stance label onto the
+        score_performance fact table (Kimball dimensional pattern).
+        Without this, backtester per-stance attribution
+        (alpha-engine-backtester#182) can only do compute-time joins
+        with predictions.json archive — fragile + repeats the join
+        every weekly run.
+
+        Pin the column name + type here so a future migration that
+        renames it breaks the test (and the producer wire-up in
+        alpha-engine-data/collectors/signal_returns.py)."""
+        conn = archive_in_memory.db_conn
+        info = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(score_performance)").fetchall()
+        }
+        assert "stance" in info, (
+            "score_performance missing 'stance' column — migration v16 "
+            "must run on init"
+        )
+        assert info["stance"] == "TEXT", (
+            f"stance column type drift: expected TEXT, got {info['stance']}"
+        )
+
 
 class TestInvestmentThesisWrite:
     def test_write_and_read_thesis(self, archive_in_memory):
