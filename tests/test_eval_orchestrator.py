@@ -362,6 +362,80 @@ class TestEvaluateCorpus:
         assert result["skipped_unmapped"] == 1
         assert result["failed"] == []
 
+    def test_deterministic_executor_artifact_skipped_not_failed(self):
+        """alpha-engine-lib v0.10.0 introduced DecisionArtifact
+        schema_version=2 with optional model_metadata + full_prompt_context
+        for deterministic executor decisions (``executor:entry_triggers``
+        etc., L2308 arc). These artifacts:
+
+        - parse cleanly under lib v0.10.0 (Pydantic accepts None for both
+          LLM fields)
+        - have no rubric registered in ``resolve_rubric_for_agent`` (only
+          the 5 LLM agent families have rubrics)
+        - therefore land in ``skipped_unmapped``, not ``failed``
+
+        Pin this so a future refactor doesn't accidentally start routing
+        executor artifacts through the Haiku path (wasted cost on bogus
+        rubric evals) or counting them as load failures.
+        """
+        from evals import orchestrator as orch
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="alpha-engine-research")
+            prefix = "decision_artifacts/2026/05/15"
+
+            # One LLM artifact (sector_quant) — has a rubric, should evaluate.
+            llm_artifact = _make_capture("sector_quant:technology")
+            client.put_object(
+                Bucket="alpha-engine-research",
+                Key=f"{prefix}/sector_quant:technology/run-1.json",
+                Body=json.dumps(llm_artifact, default=str).encode("utf-8"),
+            )
+
+            # One deterministic v2 executor artifact — should land in
+            # skipped_unmapped, not failed.
+            deterministic_artifact = DecisionArtifact(
+                schema_version=2,
+                run_id="run-2026-05-15",
+                timestamp="2026-05-15T20:30:00Z",
+                agent_id="executor:entry_triggers",
+                model_metadata=None,
+                full_prompt_context=None,
+                input_data_snapshot={
+                    "ticker": "AAPL", "current_price": 175.25,
+                },
+                agent_output={
+                    "fired_trigger": "pullback", "trigger_kind": "pullback",
+                },
+            ).model_dump()
+            client.put_object(
+                Bucket="alpha-engine-research",
+                Key=f"{prefix}/executor:entry_triggers/run-1.json",
+                Body=json.dumps(deterministic_artifact, default=str).encode("utf-8"),
+            )
+
+            def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+                return _make_eval(
+                    artifact.agent_id,
+                    run_id=artifact.run_id,
+                    judge_model=judge_model,
+                    scores=[4, 4, 4, 4],
+                )
+
+            with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+                result = orch.evaluate_corpus(
+                    date="2026-05-15",
+                    bucket="alpha-engine-research",
+                    s3_client=client,
+                )
+
+        # Deterministic artifact filtered by rubric registry, not crashed.
+        assert result["skipped_unmapped"] == 1
+        assert result["failed"] == []
+        # LLM artifact still evaluated normally.
+        assert result["haiku_evaluated"] == 1
+
     def test_skipped_empty_input_counted_separately(
         self, mocked_s3_with_captures,
     ):
