@@ -11,9 +11,73 @@ See §5.1 for full scoring methodology.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from config import TECHNICAL_CFG
+
+logger = logging.getLogger(__name__)
+
+_REQUIRED_WEIGHT_KEYS = ("rsi", "macd", "ma50", "ma200", "momentum")
+_WEIGHT_SUM_TOLERANCE = 1e-3
+_warned_overrides: set[str] = set()
+
+
+def _resolve_team_id(team_id: Optional[str], sector: Optional[str]) -> Optional[str]:
+    """Return canonical team_id, resolving from a GICS sector name if needed.
+
+    Caller may pass team_id directly (canonical: technology / healthcare /
+    financials / industrials / consumer / defensives) or pass `sector` (GICS
+    name) and rely on the team_config.SECTOR_TEAM_MAP for translation.
+    Deferred import avoids a scoring → agents layering dependency at import
+    time; the mapping is only loaded when an override-eligible lookup
+    happens.
+    """
+    if team_id:
+        return team_id
+    if not sector:
+        return None
+    try:
+        from agents.sector_teams.team_config import SECTOR_TEAM_MAP
+    except ImportError:
+        return None
+    return SECTOR_TEAM_MAP.get(sector)
+
+
+def _resolve_composite_weights(team_id: Optional[str]) -> dict:
+    """Return composite_weights for the given team_id, falling back to global.
+
+    Sector-level overrides live under `technical.composite_weights_per_sector`
+    in scoring.yaml. Each entry MUST contain all 5 sub-keys (rsi/macd/ma50/
+    ma200/momentum) and sum to ~1.0. Malformed entries are logged once per
+    team_id and ignored (fallback to global weights).
+    """
+    base = TECHNICAL_CFG.get("composite_weights", {})
+    if not team_id:
+        return base
+    overrides = TECHNICAL_CFG.get("composite_weights_per_sector") or {}
+    override = overrides.get(team_id)
+    if not override:
+        return base
+    if not all(k in override for k in _REQUIRED_WEIGHT_KEYS):
+        if team_id not in _warned_overrides:
+            missing = sorted(set(_REQUIRED_WEIGHT_KEYS) - set(override))
+            logger.warning(
+                "composite_weights_per_sector[%s] missing keys %s; using global weights",
+                team_id, missing,
+            )
+            _warned_overrides.add(team_id)
+        return base
+    total = sum(float(override[k]) for k in _REQUIRED_WEIGHT_KEYS)
+    if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+        if team_id not in _warned_overrides:
+            logger.warning(
+                "composite_weights_per_sector[%s] sums to %.4f (expected 1.0); using global weights",
+                team_id, total,
+            )
+            _warned_overrides.add(team_id)
+        return base
+    return override
 
 
 # ── Per-signal scoring ────────────────────────────────────────────────────────
@@ -168,18 +232,28 @@ def compute_technical_score(
     indicators: dict,
     market_regime: str = "neutral",
     momentum_percentile: Optional[float] = None,
+    *,
+    sector: Optional[str] = None,
+    team_id: Optional[str] = None,
 ) -> float:
     """
     Compute weighted composite technical score (0–100).
 
     Weights and predictor-enrichment gate come from scoring.yaml
-    `technical.composite_weights` and `technical.predictor_enrichment`.
+    `technical.composite_weights` (global) and optional per-sector
+    overrides at `technical.composite_weights_per_sector` (keyed by
+    sector team_id: technology / healthcare / financials / industrials
+    / consumer / defensives). Predictor enrichment is unaffected by
+    overrides.
 
     Args:
         indicators: dict from price_fetcher.compute_technical_indicators()
         market_regime: 'bull' | 'neutral' | 'caution' | 'bear'
         momentum_percentile: percentile rank (0–100) within S&P 500 for 20d return.
                              If None, falls back to raw return mapping.
+        sector: GICS sector name (e.g. "Healthcare"); resolves to team_id
+            via team_config.SECTOR_TEAM_MAP. Ignored if team_id is given.
+        team_id: canonical sector team_id; takes precedence over `sector`.
 
     Returns: float in [0, 100]
     """
@@ -198,7 +272,8 @@ def compute_technical_score(
         percentile_rank=momentum_percentile,
     )
 
-    weights = TECHNICAL_CFG.get("composite_weights", {})
+    resolved_team_id = _resolve_team_id(team_id, sector)
+    weights = _resolve_composite_weights(resolved_team_id)
     composite = (
         rsi_score * weights["rsi"]
         + macd_score * weights["macd"]

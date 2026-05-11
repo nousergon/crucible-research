@@ -379,7 +379,7 @@ def fetch_data(state: ResearchState) -> dict:
                     "dist_from_52w_high": fs_row.get("dist_from_52w_high"),
                     "dist_from_52w_low": fs_row.get("dist_from_52w_low"),
                 }
-                ts = compute_technical_score(indicators)
+                ts = compute_technical_score(indicators, sector=sector_map.get(ticker))
                 technical_scores[ticker] = {**indicators, "technical_score": ts}
                 _fs_enriched += 1
             logger.info("[fetch_data] feature store: %d tickers loaded (skipping yfinance for these)", _fs_enriched)
@@ -428,7 +428,7 @@ def fetch_data(state: ResearchState) -> dict:
             continue
         if df is not None and len(df) >= 20:
             indicators = compute_technical_indicators(df)
-            ts = compute_technical_score(indicators)
+            ts = compute_technical_score(indicators, sector=sector_map.get(ticker))
             technical_scores[ticker] = {**indicators, "technical_score": ts}
 
     # ── Macro data ───────────────────────────────────────────────────────────

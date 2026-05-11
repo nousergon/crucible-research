@@ -171,7 +171,11 @@ def run_quant_filter(
         elif df is not None and not df.empty:
             atr_pct = _compute_atr_pct(df)
 
-        tech_score = compute_technical_score(tech, market_regime=market_regime)
+        tech_score = compute_technical_score(
+            tech,
+            market_regime=market_regime,
+            sector=_sector_map.get(ticker),
+        )
         eval_rec["tech_score"] = tech_score
         eval_rec["atr_pct"] = atr_pct
 
@@ -259,7 +263,11 @@ def run_quant_filter(
                 all_scored.append({
                     "ticker": ticker,
                     "path": "momentum",
-                    "tech_score": compute_technical_score(tech, market_regime=market_regime),
+                    "tech_score": compute_technical_score(
+                        tech,
+                        market_regime=market_regime,
+                        sector=_sector_map.get(ticker),
+                    ),
                     "rsi_14": tech.get("rsi_14", 50),
                     "current_price": price,
                     "avg_volume_20d": avg_vol,

@@ -53,6 +53,14 @@ technical:
     ma200: 0.20
     momentum: 0.20
 
+  # Optional per-sector overrides of composite_weights. Keyed by sector
+  # team_id: technology / healthcare / financials / industrials /
+  # consumer / defensives. Each entry, if present, MUST contain all 5
+  # sub-keys and sum to 1.0; malformed entries fall back to the global
+  # weights above. Sectors without an entry use the global weights.
+  # Default (empty) preserves sector-agnostic behaviour.
+  composite_weights_per_sector: {}
+
   predictor_enrichment:
     confidence_gate: 0.60
     max_adjustment: 10.0
