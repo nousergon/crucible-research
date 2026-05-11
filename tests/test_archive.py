@@ -297,3 +297,109 @@ class TestWriteSignalsJson:
         # only the JSON output schema was renamed for consumer clarity.
         assert payload["run_date"] == "00:15:00"
         assert payload["market_regime"] == "neutral"
+
+
+class TestSavePopulationMacroFields:
+    """Regression for the 2026-05-11 "Market Regime: NEUTRAL" brief defect.
+
+    Pre-fix `save_population` defaulted market_regime to "neutral" and
+    omitted sector_modifiers entirely. The caller in research_graph.py
+    didn't pass any macro args, so population/latest.json diverged from
+    signals/latest.json on every Saturday run — population carried the
+    pre-critic regime, signals carried the post-critic regime. The
+    predictor's load_universe read population first and rendered the
+    wrong regime on the weekday morning brief.
+
+    These tests pin the post-fix schema + signature so future readers
+    can't accidentally drop the macro fields again.
+    """
+
+    def _save_minimal(self, mgr, **macro_kwargs):
+        """Helper: call save_population with a one-element population."""
+        mgr.save_population(
+            population=[{
+                "ticker": "AAPL", "sector": "Technology",
+                "long_term_score": 80.0, "long_term_rating": "BUY",
+                "conviction": "rising", "price_target_upside": 0.15,
+                "thesis_summary": "test", "entry_date": "2026-05-11",
+                "tenure_weeks": 4,
+            }],
+            run_date="2026-05-11",
+            **macro_kwargs,
+        )
+        # Find the population/latest.json put_object call
+        for call in mgr.s3.put_object.call_args_list:
+            if call.kwargs.get("Key") == "population/latest.json":
+                return json.loads(call.kwargs["Body"].decode("utf-8"))
+        raise AssertionError("population/latest.json was not written")
+
+    def test_writes_market_regime_from_caller(self, archive_in_memory):
+        """When caller passes market_regime="bull", the payload carries
+        "bull" (not the default "neutral")."""
+        payload = self._save_minimal(archive_in_memory, market_regime="bull")
+        assert payload["market_regime"] == "bull"
+
+    def test_writes_sector_modifiers_from_caller(self, archive_in_memory):
+        """sector_modifiers is now a first-class parameter — the writer
+        must persist the caller's dict, not silently omit it as the
+        pre-fix signature did."""
+        modifiers = {"Technology": 1.10, "Energy": 1.05, "Healthcare": 0.95}
+        payload = self._save_minimal(
+            archive_in_memory,
+            sector_modifiers=modifiers,
+        )
+        assert payload["sector_modifiers"] == modifiers
+
+    def test_writes_sector_ratings_from_caller(self, archive_in_memory):
+        ratings = {"Technology": {"rating": "OVERWEIGHT", "rationale": "x"}}
+        payload = self._save_minimal(
+            archive_in_memory,
+            sector_ratings=ratings,
+        )
+        assert payload["sector_ratings"] == ratings
+
+    def test_writes_full_canonical_macro_surface(self, archive_in_memory):
+        """End-to-end pin: all three macro fields land in the JSON with
+        the values passed by the caller. This is the invariant that
+        keeps population.json and signals.json from diverging."""
+        payload = self._save_minimal(
+            archive_in_memory,
+            market_regime="bull",
+            sector_ratings={"Tech": {"r": "OVERWEIGHT"}},
+            sector_modifiers={"Tech": 1.1},
+        )
+        assert payload["market_regime"] == "bull"
+        assert payload["sector_ratings"] == {"Tech": {"r": "OVERWEIGHT"}}
+        assert payload["sector_modifiers"] == {"Tech": 1.1}
+
+    def test_omitted_args_use_safe_defaults(self, archive_in_memory):
+        """If a caller forgets to pass macro args, the payload should
+        still be well-formed (no key absent). Defaults preserve the
+        pre-fix behavior for any unmigrated callers."""
+        payload = self._save_minimal(archive_in_memory)  # no macro kwargs
+        assert payload["market_regime"] == "neutral"
+        assert payload["sector_ratings"] == {}
+        # sector_modifiers MUST be present even when omitted — predictor's
+        # load_watchlist treats absence as "use signals overlay", which
+        # rebuilds the divergence symptom in a different guise.
+        assert "sector_modifiers" in payload
+        assert payload["sector_modifiers"] == {}
+
+    def test_dated_and_latest_have_identical_macro(self, archive_in_memory):
+        """population/{date}.json and population/latest.json must carry
+        identical macro fields — both are written from the same JSON
+        blob in save_population. This is the pin against accidentally
+        derivig latest from a different source than the dated copy."""
+        archive_in_memory.save_population(
+            population=[],
+            run_date="2026-05-11",
+            market_regime="bull",
+            sector_ratings={"Tech": {"r": "OVERWEIGHT"}},
+            sector_modifiers={"Tech": 1.1},
+        )
+        bodies = {
+            call.kwargs["Key"]: call.kwargs["Body"].decode("utf-8")
+            for call in archive_in_memory.s3.put_object.call_args_list
+            if call.kwargs.get("Key", "").startswith("population/")
+        }
+        assert bodies["population/latest.json"] == bodies["population/2026-05-11.json"]
