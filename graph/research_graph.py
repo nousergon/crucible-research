@@ -1451,10 +1451,23 @@ def archive_writer(state: ResearchState) -> dict:
                 except Exception as e:
                     logger.debug("[archive_writer] tool log failed: %s", e)
 
-    # Save population
+    # Save population — pass the canonical post-critic macro fields so
+    # population/latest.json carries the same regime / sector_modifiers /
+    # sector_ratings that signals/latest.json does. Without these, the
+    # writer defaults (market_regime="neutral", sector_modifiers={}) and
+    # population.json drifts from signals.json on every run — the cause
+    # of the 2026-05-11 "Market Regime: NEUTRAL" morning-brief defect.
+    # State fields are guaranteed populated by macro_economist_node before
+    # this archive_writer node fires (see graph topology).
     new_pop = state.get("new_population", [])
     try:
-        am.save_population(new_pop, run_date)
+        am.save_population(
+            new_pop,
+            run_date,
+            market_regime=state.get("market_regime", "neutral"),
+            sector_ratings=state.get("sector_ratings", {}),
+            sector_modifiers=state.get("sector_modifiers", {}),
+        )
     except Exception as e:
         logger.warning("Failed to save population: %s", e)
 

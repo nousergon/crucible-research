@@ -626,13 +626,30 @@ class ArchiveManager:
         run_date: str,
         market_regime: str = "neutral",
         sector_ratings: dict | None = None,
+        sector_modifiers: dict | None = None,
     ) -> None:
         """
         Persist current investment population to SQLite for next-run continuity.
         Also writes population/latest.json and population/{date}.json to S3.
 
-        The S3 JSON includes market_regime and sector_ratings so the Executor's
-        population_reader.py can consume it directly.
+        The S3 JSON includes the canonical post-critic macro fields
+        (market_regime, sector_ratings, sector_modifiers) so downstream
+        consumers (predictor inference, executor population_reader)
+        see the same regime research's macro_agent committed.
+
+        Multi-writer history (2026-05-11): callers used to invoke this
+        without macro args, leaving market_regime defaulted to
+        "neutral", sector_ratings to {}, and sector_modifiers entirely
+        absent from population/latest.json — while signals/latest.json
+        (written by the same archive manager moments later) carried the
+        post-critic regime + populated sector_modifiers from
+        macro_agent's critic-revision loop. The predictor's
+        load_universe read population first and got the pre-critic
+        regime, rendering "Market Regime: NEUTRAL" on the morning brief
+        when research's own brief loudly declared BULL. Predictor-side
+        overlay landed in alpha-engine-predictor #134 as defense in
+        depth; this signature change closes the divergence at the
+        writer so the two producers can never drift again.
         """
         if not self.db_conn:
             return
@@ -662,11 +679,14 @@ class ArchiveManager:
             )
         self.db_conn.commit()
 
-        # S3: write population JSON (includes regime + sector_ratings for Executor)
+        # S3: write population JSON. Schema mirrors signals.json's macro
+        # surface so consumers can read either producer interchangeably
+        # without per-field divergence (see multi-writer history above).
         pop_json = json.dumps({
             "date": run_date,
             "market_regime": market_regime,
             "sector_ratings": sector_ratings or {},
+            "sector_modifiers": sector_modifiers or {},
             "population": population,
         }, indent=2, default=str)
         self._s3_put("population/latest.json", pop_json)
