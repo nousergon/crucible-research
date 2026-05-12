@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 _S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _MARKET_DATA_PREFIX = "market_data/"
 
+# Rerank configuration (L1303 ROADMAP — alpha-engine-lib v0.11.0 primitive).
+# Default empty string ≡ disabled, preserving the hybrid-only path so this
+# PR is safe to merge without a config-side change. Operators flip on by
+# setting ``RAG_RERANK=cross_encoder`` (default, local BAAI model, zero
+# new API surface) or ``RAG_RERANK=llm_judge`` (Anthropic Haiku) in the
+# Lambda environment — no redeploy required for the flip itself, only
+# for the install of the ``[rerank]`` extra (deferred to PR 3 of the
+# L1303 arc, alongside the eval-validated cutover).
+_RAG_RERANK = os.environ.get("RAG_RERANK", "").strip() or None
+_RAG_RERANK_INPUT_N = int(os.environ.get("RAG_RERANK_INPUT_N", "30"))
+
 
 def _load_alternative_from_s3(ticker: str) -> dict | None:
     """Try to load pre-collected alternative data for a ticker from S3."""
@@ -274,29 +285,41 @@ def create_qual_tools(context: dict) -> list:
             # ``content_tsv`` blended at vector_weight=0.7. Strong on both
             # conceptual queries (vector side) AND exact-term surfaces like
             # ticker symbols, filing types, and quantitative line items
-            # (keyword side). vector_weight is the PR-4 calibration target;
-            # PR 5 will move it to config if findings call for tuning.
-            results = retrieve(
-                query=query,
-                tickers=[ticker],
-                doc_types=[d.strip() for d in doc_types.split(",")],
-                min_date=date.today() - timedelta(days=730),
-                top_k=8,
-                method="hybrid",
-                vector_weight=0.7,
-            )
+            # (keyword side).
+            #
+            # Rerank toggle (env var ``RAG_RERANK``) wraps the hybrid pool
+            # with a cross-encoder or LLM-judge reordering pass when set —
+            # widens the candidate fetch to ``rerank_input_n`` (default 30)
+            # then truncates to ``top_k=8``. Default unset preserves the
+            # pre-rerank behavior so this PR ships safe.
+            retrieve_kwargs = {
+                "query": query,
+                "tickers": [ticker],
+                "doc_types": [d.strip() for d in doc_types.split(",")],
+                "min_date": date.today() - timedelta(days=730),
+                "top_k": 8,
+                "method": "hybrid",
+                "vector_weight": 0.7,
+            }
+            if _RAG_RERANK:
+                retrieve_kwargs["rerank"] = _RAG_RERANK
+                retrieve_kwargs["rerank_input_n"] = _RAG_RERANK_INPUT_N
+            results = retrieve(**retrieve_kwargs)
             if not results:
                 return f"No filing data found for {ticker}."
 
             _rag_stats["succeeded"] += 1
             # Structured INFO log for decision-artifact capture + LangSmith
             # observability. Per-result component scores let the eval
-            # harness in PR 4 read calibration data straight from prod logs
-            # without needing a side-channel.
+            # harness in PR 3 read calibration data straight from prod logs
+            # without needing a side-channel; rerank_score is populated
+            # post-rerank, ``None`` otherwise.
             log.info(
                 "RAG_RETRIEVE ticker=%s method=hybrid vector_weight=0.7 "
-                "top_k=8 n_results=%d component_scores=%s",
+                "top_k=8 rerank=%s rerank_input_n=%s n_results=%d component_scores=%s",
                 ticker,
+                _RAG_RERANK or "none",
+                _RAG_RERANK_INPUT_N if _RAG_RERANK else 0,
                 len(results),
                 [
                     {
@@ -304,6 +327,8 @@ def create_qual_tools(context: dict) -> list:
                         "vector_score": r.vector_score,
                         "keyword_score": r.keyword_score,
                         "combined_score": r.combined_score,
+                        "rerank_score": getattr(r, "rerank_score", None),
+                        "rerank_method": getattr(r, "rerank_method", None),
                     }
                     for r in results
                 ],

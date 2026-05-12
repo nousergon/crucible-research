@@ -23,8 +23,15 @@ import pytest
 from agents.sector_teams.qual_tools import create_qual_tools
 
 
-def _mock_retrieval_result(chunk_id: str, *, vec: float | None = None, kw: float | None = None,
-                            combined: float | None = None) -> MagicMock:
+def _mock_retrieval_result(
+    chunk_id: str,
+    *,
+    vec: float | None = None,
+    kw: float | None = None,
+    combined: float | None = None,
+    rerank_score: float | None = None,
+    rerank_method: str | None = None,
+) -> MagicMock:
     """Stand-in for `alpha_engine_lib.rag.retrieval.RetrievalResult`. We
     don't import the real dataclass here because the test runs against
     the lib version pinned in requirements.txt, and a mocked result with
@@ -42,6 +49,12 @@ def _mock_retrieval_result(chunk_id: str, *, vec: float | None = None, kw: float
     r.keyword_score = kw
     r.combined_score = combined
     r.retrieval_method = "hybrid"
+    # Rerank fields default to None so existing tests that don't pass
+    # them still serialize cleanly into the structured log line
+    # (otherwise MagicMock's auto-attribute child mocks would leak
+    # ``<MagicMock id=...>`` into the log payload).
+    r.rerank_score = rerank_score
+    r.rerank_method = rerank_method
     return r
 
 
@@ -129,3 +142,108 @@ class TestQualToolsHybridWiring:
                 out = tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
         assert "temporarily unavailable" in out
         assert any("RAG_UNAVAILABLE" in r.getMessage() for r in caplog.records)
+
+
+class TestQualToolsRerankFlag:
+    """L1303 PR 2 — `RAG_RERANK` env-var toggle wiring.
+
+    The flag defaults unset (==> no rerank kwargs passed, hybrid-only
+    path preserved). When set, `query_filings` widens the candidate
+    fetch and passes the rerank knobs through to
+    ``alpha_engine_lib.rag.retrieve()``.
+
+    These tests patch the module-level ``_RAG_RERANK`` /
+    ``_RAG_RERANK_INPUT_N`` constants directly because they're resolved
+    once at import time — env-var changes via ``monkeypatch.setenv``
+    after import are invisible.
+    """
+
+    def test_rerank_unset_omits_kwargs(self) -> None:
+        """Default config — no rerank kwargs leak into the retrieve() call."""
+        captured: dict = {}
+
+        def fake_retrieve(**kwargs):
+            captured.update(kwargs)
+            return [_mock_retrieval_result("c1", vec=0.7, combined=0.49)]
+
+        with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
+             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+            tool_fn = _get_query_filings_tool()
+            tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
+
+        assert "rerank" not in captured
+        assert "rerank_input_n" not in captured
+
+    def test_rerank_cross_encoder_passes_through(self) -> None:
+        """RAG_RERANK=cross_encoder → kwargs land on retrieve() with the
+        configured input_n.
+        """
+        captured: dict = {}
+
+        def fake_retrieve(**kwargs):
+            captured.update(kwargs)
+            return [_mock_retrieval_result(
+                "c1", vec=0.7, combined=0.49,
+                rerank_score=0.92, rerank_method="cross_encoder",
+            )]
+
+        with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
+             patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
+             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+            tool_fn = _get_query_filings_tool()
+            tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
+
+        assert captured.get("rerank") == "cross_encoder"
+        assert captured.get("rerank_input_n") == 30
+        # Other kwargs still pass through unchanged
+        assert captured.get("method") == "hybrid"
+        assert captured.get("top_k") == 8
+
+    def test_log_includes_rerank_fields_when_set(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """RAG_RETRIEVE log line surfaces rerank_method + per-result
+        rerank_score so the PR 3 eval harness can read both pre- and
+        post-rerank calibration data from prod logs.
+        """
+        results = [
+            _mock_retrieval_result(
+                "c1", vec=0.91, combined=0.637,
+                rerank_score=0.95, rerank_method="cross_encoder",
+            ),
+        ]
+
+        with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
+             patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
+             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+            with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
+                tool_fn = _get_query_filings_tool()
+                tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
+
+        rag_logs = [r for r in caplog.records if "RAG_RETRIEVE" in r.getMessage()]
+        assert len(rag_logs) == 1
+        msg = rag_logs[0].getMessage()
+        assert "rerank=cross_encoder" in msg
+        assert "rerank_input_n=30" in msg
+        assert "'rerank_score': 0.95" in msg
+        assert "'rerank_method': 'cross_encoder'" in msg
+
+    def test_log_rerank_none_when_unset(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unset flag still produces a parseable log line — fields show
+        rerank=none / rerank_input_n=0 / per-result rerank_score=None so
+        eval-harness consumers see consistent shape across both modes.
+        """
+        results = [_mock_retrieval_result("c1", vec=0.91, combined=0.637)]
+
+        with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
+             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+            with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
+                tool_fn = _get_query_filings_tool()
+                tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
+
+        msg = [r for r in caplog.records if "RAG_RETRIEVE" in r.getMessage()][0].getMessage()
+        assert "rerank=none" in msg
+        assert "rerank_input_n=0" in msg
+        assert "'rerank_score': None" in msg
