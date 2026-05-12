@@ -99,20 +99,39 @@ def recall_at_k(retrieved: Sequence[str], expected: Iterable[str], k: int) -> fl
 
 @dataclass
 class Condition:
-    """One method × vector_weight combo to sweep over."""
+    """One method × vector_weight × rerank combo to sweep over.
 
-    name: str          # display name in the report ("hybrid w=0.7", "vector", ...)
+    ``rerank`` extends the method-only condition matrix introduced in
+    PR 4 with the L1303 reranking dimension. When set, ``retrieve_kwargs``
+    threads ``rerank=`` + ``rerank_input_n=`` into the underlying
+    ``retrieve()`` call so the harness can measure pre- vs post-rerank
+    recall@k from the same call site the production qual_tools uses.
+    """
+
+    name: str          # display name in the report ("hybrid w=0.7", "hybrid w=0.7 + ce rerank", ...)
     method: str        # "vector" | "keyword" | "hybrid"
     vector_weight: float | None  # None for non-hybrid
+    rerank: str | None = None        # None | "cross_encoder" | "llm_judge"
+    rerank_input_n: int | None = None  # pre-rerank candidate pool size; None when rerank=None
 
     @property
     def retrieve_kwargs(self) -> dict:
-        kw = {"method": self.method}
+        kw: dict = {"method": self.method}
         if self.method == "hybrid":
             kw["vector_weight"] = self.vector_weight
+        if self.rerank is not None:
+            kw["rerank"] = self.rerank
+            if self.rerank_input_n is not None:
+                kw["rerank_input_n"] = self.rerank_input_n
         return kw
 
 
+# Default sweep — six baseline conditions (vector + keyword + four
+# hybrid weights, established 2026-05-08) plus two rerank conditions
+# layered on the winning hybrid w=0.7 baseline. Rerank conditions
+# require the ``[rerank]`` extras installed on the eval runner; the CLI
+# emits a clear ImportError pointing at the install path if missing
+# (see ``scripts/run_rag_retrieval_eval.py`` docstring).
 DEFAULT_CONDITIONS: tuple[Condition, ...] = (
     Condition("vector", "vector", None),
     Condition("keyword", "keyword", None),
@@ -120,6 +139,10 @@ DEFAULT_CONDITIONS: tuple[Condition, ...] = (
     Condition("hybrid w=0.5", "hybrid", 0.5),
     Condition("hybrid w=0.7", "hybrid", 0.7),
     Condition("hybrid w=0.9", "hybrid", 0.9),
+    Condition("hybrid w=0.7 + ce rerank", "hybrid", 0.7,
+              rerank="cross_encoder", rerank_input_n=30),
+    Condition("hybrid w=0.7 + llm rerank", "hybrid", 0.7,
+              rerank="llm_judge", rerank_input_n=30),
 )
 
 

@@ -138,7 +138,7 @@ class TestAggregateByCategory:
 class TestRunEval:
     def test_calls_retrieve_for_every_query_condition_combo(self) -> None:
         queries = [_q(f"q{i}", f"chunk{i}") for i in range(3)]
-        # 6 default conditions × 3 queries = 18 calls.
+        # ``len(DEFAULT_CONDITIONS)`` conditions × 3 queries = N calls.
         call_count = 0
 
         def fake_retrieve(**kwargs):
@@ -210,6 +210,81 @@ class TestRunEval:
             k_values=[5, 10, 20],
         )
         assert captured[0]["top_k"] == 20  # max(k_values)
+
+
+# ── Rerank-condition extension (L1303 PR 3) ─────────────────────────────────
+
+
+class TestConditionRerank:
+    def test_retrieve_kwargs_omits_rerank_when_none(self) -> None:
+        cond = Condition("hybrid-only", "hybrid", 0.7)
+        kw = cond.retrieve_kwargs
+        assert kw == {"method": "hybrid", "vector_weight": 0.7}
+        assert "rerank" not in kw
+        assert "rerank_input_n" not in kw
+
+    def test_retrieve_kwargs_includes_rerank_when_set(self) -> None:
+        cond = Condition(
+            "hybrid-w0.7-ce", "hybrid", 0.7,
+            rerank="cross_encoder", rerank_input_n=30,
+        )
+        kw = cond.retrieve_kwargs
+        assert kw == {
+            "method": "hybrid",
+            "vector_weight": 0.7,
+            "rerank": "cross_encoder",
+            "rerank_input_n": 30,
+        }
+
+    def test_retrieve_kwargs_includes_rerank_on_non_hybrid(self) -> None:
+        # Rerank composes with any base method — exercise the path that
+        # layers cross_encoder on top of pure vector.
+        cond = Condition(
+            "vector+ce", "vector", None,
+            rerank="cross_encoder", rerank_input_n=30,
+        )
+        kw = cond.retrieve_kwargs
+        assert kw["method"] == "vector"
+        assert "vector_weight" not in kw
+        assert kw["rerank"] == "cross_encoder"
+        assert kw["rerank_input_n"] == 30
+
+    def test_default_conditions_include_rerank_conditions(self) -> None:
+        rerank_conds = [c for c in DEFAULT_CONDITIONS if c.rerank is not None]
+        assert len(rerank_conds) == 2
+        rerank_methods = {c.rerank for c in rerank_conds}
+        assert rerank_methods == {"cross_encoder", "llm_judge"}
+        # Both layer on hybrid w=0.7 (the established baseline from PR 4).
+        for c in rerank_conds:
+            assert c.method == "hybrid"
+            assert c.vector_weight == 0.7
+            assert c.rerank_input_n == 30
+
+
+class TestRunEvalRerank:
+    def test_threads_rerank_kwargs_into_retrieve(self) -> None:
+        captured: list[dict] = []
+
+        def fake_retrieve(**kwargs):
+            captured.append(kwargs)
+            return []
+
+        run_eval(
+            queries=[_q("q", "c")],
+            retrieve_fn=fake_retrieve,
+            conditions=[
+                Condition("baseline", "hybrid", 0.7),
+                Condition(
+                    "with-rerank", "hybrid", 0.7,
+                    rerank="cross_encoder", rerank_input_n=30,
+                ),
+            ],
+            k_values=[5],
+        )
+        assert "rerank" not in captured[0]
+        assert "rerank_input_n" not in captured[0]
+        assert captured[1]["rerank"] == "cross_encoder"
+        assert captured[1]["rerank_input_n"] == 30
 
 
 # ── render_markdown_report ──────────────────────────────────────────────────

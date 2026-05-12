@@ -1,20 +1,36 @@
 """CLI entry point for the RAG hybrid-retrieval eval harness.
 
 Reads ``evals/rag_retrieval_queries.yaml``, runs every query through
-each (method × vector_weight) condition against the live Neon
-pgvector database, and writes the markdown report to
+each (method × vector_weight × rerank) condition against the live
+Neon pgvector database, and writes the markdown report to
 ``alpha-engine-docs/private/rag-retrieval-eval-{date}.md`` (default)
 or wherever ``--out`` points.
 
 Requires ``RAG_DATABASE_URL`` + ``VOYAGE_API_KEY`` in the environment.
-The report is the source of truth for PR 5's default-weight choice.
+Rerank conditions (cross_encoder + llm_judge) additionally require:
+
+    pip install 'alpha-engine-lib[rerank] @ git+https://github.com/cipher813/alpha-engine-lib@v0.11.0'
+    # (LLM-judge path also needs ANTHROPIC_API_KEY)
+
+When the ``[rerank]`` extras aren't installed on the eval runner, pass
+``--skip-rerank`` to drop the rerank conditions from the sweep and only
+exercise the original hybrid-only matrix. Otherwise the import error
+surfaces loudly on the first rerank condition's call.
+
+The report is the source of truth for the L1303 ROADMAP P1 cutover
+decision — flip ``RAG_RERANK=cross_encoder`` (or ``llm_judge``) in
+the alpha-engine-config Lambda env iff the rerank conditions show
+material recall@10 lift over the hybrid w=0.7 baseline.
 
 Usage:
 
     # Curate evals/rag_retrieval_queries.yaml first (see file header).
 
-    # Run with defaults (writes to alpha-engine-docs/private/...).
+    # Run with defaults (full sweep, including rerank conditions).
     python scripts/run_rag_retrieval_eval.py
+
+    # Drop rerank conditions (operator without [rerank] extras installed).
+    python scripts/run_rag_retrieval_eval.py --skip-rerank
 
     # Custom output path:
     python scripts/run_rag_retrieval_eval.py --out /tmp/eval.md
@@ -135,6 +151,15 @@ def main() -> int:
             "~/Development/alpha-engine-docs/private/rag-retrieval-eval-{date}.md"
         ),
     )
+    parser.add_argument(
+        "--skip-rerank",
+        action="store_true",
+        help=(
+            "Drop rerank conditions from the sweep (use when the eval "
+            "runner doesn't have the alpha-engine-lib[rerank] extras "
+            "installed). Default: include all conditions."
+        ),
+    )
     args = parser.parse_args()
 
     queries = load_queries(Path(args.queries_file))
@@ -152,11 +177,21 @@ def main() -> int:
     # is importable for unit tests without RAG_DATABASE_URL set.
     from alpha_engine_lib.rag import retrieve as live_retrieve
 
+    if args.skip_rerank:
+        conditions = tuple(c for c in DEFAULT_CONDITIONS if c.rerank is None)
+        log.info(
+            "Skipping rerank conditions (--skip-rerank); running %d of %d "
+            "default conditions.", len(conditions), len(DEFAULT_CONDITIONS),
+        )
+    else:
+        conditions = DEFAULT_CONDITIONS
+
     if queries:
         log.info("Running %d queries × %d conditions = %d retrievals",
-                 len(queries), len(DEFAULT_CONDITIONS),
-                 len(queries) * len(DEFAULT_CONDITIONS))
-        results = run_eval(queries=queries, retrieve_fn=live_retrieve)
+                 len(queries), len(conditions),
+                 len(queries) * len(conditions))
+        results = run_eval(queries=queries, retrieve_fn=live_retrieve,
+                           conditions=conditions)
     else:
         results = []
 
@@ -165,7 +200,7 @@ def main() -> int:
         run_date=run_date,
         queries=queries,
         results=results,
-        conditions=DEFAULT_CONDITIONS,
+        conditions=conditions,
         k_values=DEFAULT_K_VALUES,
     )
 
