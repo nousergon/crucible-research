@@ -343,18 +343,6 @@ class ArchiveManager:
                 ),
             )
 
-    def write_prices_json(self, run_date: str, prices: dict) -> None:
-        """Write daily OHLCV price snapshot to S3 for backtester consumption.
-
-        S3 key: prices/{date}/prices.json
-        Format: {"date": "YYYY-MM-DD", "prices": {"TICK": {"open": x, "close": x, "high": x, "low": x}}}
-        """
-        payload = {"date": run_date, "prices": prices}
-        self._s3_put(
-            f"prices/{run_date}/prices.json",
-            json.dumps(payload, indent=2),
-        )
-
     def write_investment_thesis(self, thesis: dict, run_time: str) -> None:
         if not self.db_conn:
             return

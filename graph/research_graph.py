@@ -1546,26 +1546,6 @@ def archive_writer(state: ResearchState) -> dict:
     except Exception as e:
         logger.error("Failed to write signals.json: %s", e)
 
-    # Write prices.json snapshot for backtester consumption
-    try:
-        price_data = state.get("price_data", {})
-        if price_data:
-            prices_snapshot = {}
-            for ticker, df in price_data.items():
-                if df is not None and not df.empty:
-                    last = df.iloc[-1]
-                    prices_snapshot[ticker] = {
-                        "open": round(float(last.get("Open", 0)), 2),
-                        "high": round(float(last.get("High", 0)), 2),
-                        "low": round(float(last.get("Low", 0)), 2),
-                        "close": round(float(last.get("Close", 0)), 2),
-                    }
-            if prices_snapshot:
-                am.write_prices_json(run_date, prices_snapshot)
-                logger.info("[archive_writer] wrote prices.json with %d tickers", len(prices_snapshot))
-    except Exception as e:
-        logger.warning("Failed to write prices.json: %s", e)
-
     # Extract semantic memories from this run (Phase 3)
     try:
         from memory.semantic import extract_semantic_memories
