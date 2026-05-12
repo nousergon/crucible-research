@@ -21,7 +21,6 @@ custom domain sender to avoid spam; @gmail.com senders will land in spam).
 from __future__ import annotations
 
 import logging
-import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -29,6 +28,7 @@ from email.mime.text import MIMEText
 import boto3
 from botocore.exceptions import ClientError
 
+from alpha_engine_lib.secrets import get_secret
 from config import AWS_REGION
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,7 @@ def send_email(
 
     Returns True on success, False on failure.
     """
-    app_password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    app_password = (get_secret("GMAIL_APP_PASSWORD", required=False, default="") or "").strip()
 
     if app_password:
         return _send_via_gmail_smtp(

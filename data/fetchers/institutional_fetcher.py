@@ -16,8 +16,9 @@ Requires:
 from __future__ import annotations
 
 import logging
-import os
 import time
+
+from alpha_engine_lib.secrets import get_secret
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def fetch_institutional_accumulation(
             min_funds_for_signal = 3
 
     # Check EDGAR_IDENTITY
-    identity = os.environ.get("EDGAR_IDENTITY", "")
+    identity = get_secret("EDGAR_IDENTITY", required=False, default="")
     if not identity:
         logger.warning("EDGAR_IDENTITY not set — skipping 13F institutional data")
         return {t: _empty_result() for t in tickers}

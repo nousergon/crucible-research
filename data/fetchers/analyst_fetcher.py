@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json as _json
 import logging
-import os
 import threading
 import time
 from datetime import date, datetime
@@ -18,6 +17,8 @@ from typing import Optional
 
 import boto3
 import requests
+
+from alpha_engine_lib.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ def fmp_budget_exhausted() -> bool:
 
 def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STABLE) -> dict | list:
     global _fmp_last_call, _fmp_daily_count
-    api_key = os.environ.get("FMP_API_KEY", "")
+    api_key = get_secret("FMP_API_KEY", required=False, default="")
     if not api_key:
         raise RuntimeError("FMP_API_KEY environment variable not set.")
 

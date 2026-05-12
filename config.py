@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
+from alpha_engine_lib.secrets import get_secret
+
 def _find_config(filename: str, subdir: str = "research") -> Path:
     """Locate real config yaml across local, CI, and Lambda environments.
 
@@ -170,9 +172,9 @@ CONCURRENT_AGENTS: int = LLM_CFG["concurrent_agents"]
 # ── AWS / Environment ─────────────────────────────────────────────────────────
 S3_BUCKET: str = os.environ.get("S3_BUCKET", "alpha-engine-research")
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
-ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
-FMP_API_KEY: str = os.environ.get("FMP_API_KEY", "")
-FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
+ANTHROPIC_API_KEY: str = get_secret("ANTHROPIC_API_KEY", required=False, default="") or ""
+FMP_API_KEY: str = get_secret("FMP_API_KEY", required=False, default="") or ""
+FRED_API_KEY: str = get_secret("FRED_API_KEY", required=False, default="") or ""
 
 # ── Thesis management ───────────────────────────────────────────────────────
 _thesis_cfg: dict = _cfg.get("thesis", {})

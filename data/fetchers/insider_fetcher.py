@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from datetime import datetime, timedelta
+
+from alpha_engine_lib.secrets import get_secret
 from typing import Optional
 from xml.etree import ElementTree
 
@@ -47,7 +48,7 @@ _COMPANY_TICKERS_CACHE: dict[str, str] | None = None
 
 def _get_headers() -> dict[str, str]:
     """Build SEC-compliant request headers from EDGAR_IDENTITY env var."""
-    identity = os.environ.get("EDGAR_IDENTITY", "")
+    identity = get_secret("EDGAR_IDENTITY", required=False, default="")
     if not identity:
         raise RuntimeError("EDGAR_IDENTITY env var not set")
     return {
@@ -262,8 +263,8 @@ def fetch_insider_activity(
     results: dict[str, dict] = {}
 
     # EDGAR_IDENTITY is required for SEC User-Agent compliance.
-    if not os.environ.get("EDGAR_IDENTITY"):
-        log.warning("EDGAR_IDENTITY env var not set — insider data unavailable. "
+    if not get_secret("EDGAR_IDENTITY", required=False):
+        log.warning("EDGAR_IDENTITY not set — insider data unavailable. "
                      "Set to 'Name email@domain.com' for SEC EDGAR access.")
         for ticker in tickers:
             results[ticker] = _empty_result()
