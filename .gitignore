@@ -5,6 +5,15 @@ config/prompts/
 # mirrors scoring.sample.yaml. Real prompts (gitignored above) override
 # the examples at runtime via the agents/prompt_loader.py fallback.
 config/scoring.yaml
+# Stale-backup hygiene — local-only ``*.stale-YYMMDD-bak`` / ``*.stale-bak/``
+# files that operators keep as safety nets when rolling forward prompts /
+# scoring / universe configs. They contain real proprietary content
+# (prompt templates, scoring weights) and must NEVER be committed. Pattern
+# catches both single-file and directory variants. (Added 2026-05-12 after
+# the L2853 session caught three uncommitted stale-bak artifacts that were
+# 6+ weeks dormant and would have shipped on any ``git add .``.)
+*.stale-*-bak
+*.stale-bak/
 *.db
 .coverage
 DOCS.md
