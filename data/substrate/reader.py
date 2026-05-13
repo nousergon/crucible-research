@@ -151,6 +151,30 @@ def _read_parquet_safely(
         return None
 
 
+def _read_via_latest(
+    s3_client: Any, *, bucket: str, prefix: str,
+) -> pd.DataFrame | None:
+    """Canonical-shape read: GET ``{prefix}/latest.json`` → resolve
+    ``artifact_key`` → GET parquet body. Returns None if either step
+    fails (logged at INFO so legacy-fallback callers can degrade).
+    """
+    import json as _json
+    latest_key = f"{prefix}/latest.json"
+    try:
+        obj = s3_client.get_object(Bucket=bucket, Key=latest_key)
+        sidecar = _json.loads(obj["Body"].read())
+    except Exception as e:
+        logger.info(
+            "[substrate_reader] no canonical sidecar at s3://%s/%s (%s)",
+            bucket, latest_key, type(e).__name__,
+        )
+        return None
+    artifact_key = sidecar.get("artifact_key")
+    if not artifact_key:
+        return None
+    return _read_parquet_safely(s3_client, bucket=bucket, key=artifact_key)
+
+
 def read_news_aggregates(
     as_of_date: Date,
     *,
@@ -158,13 +182,22 @@ def read_news_aggregates(
     bucket: str = DEFAULT_S3_BUCKET,
     prefix: str = NEWS_AGGREGATES_PREFIX,
 ) -> pd.DataFrame:
-    """Read one date's news aggregates parquet. Returns empty DataFrame
-    if missing."""
-    key = f"{prefix}/{as_of_date.isoformat()}.parquet"
-    df = _read_parquet_safely(s3_client, bucket=bucket, key=key)
-    if df is None:
-        return pd.DataFrame()
-    return df
+    """Read news aggregates via canonical ``latest.json`` sidecar
+    indirection. Falls back to legacy ``{as_of_date}.parquet`` shape
+    during the transition window. Returns empty DataFrame if missing.
+
+    ``as_of_date`` is used only for the legacy-shape fallback path —
+    under the canonical shape, ``latest.json`` always points at the
+    most recent run regardless of date; the parquet itself carries
+    ``aggregate_date`` per row.
+    """
+    df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
+    if df is not None:
+        return df
+    # Legacy fallback
+    legacy_key = f"{prefix}/{as_of_date.isoformat()}.parquet"
+    df = _read_parquet_safely(s3_client, bucket=bucket, key=legacy_key)
+    return df if df is not None else pd.DataFrame()
 
 
 def read_analyst_revisions(
@@ -174,13 +207,14 @@ def read_analyst_revisions(
     bucket: str = DEFAULT_S3_BUCKET,
     prefix: str = ANALYST_REVISIONS_PREFIX,
 ) -> pd.DataFrame:
-    """Read one date's analyst-revisions parquet. Returns empty
-    DataFrame if missing."""
-    key = f"{prefix}/{as_of_date.isoformat()}.parquet"
-    df = _read_parquet_safely(s3_client, bucket=bucket, key=key)
-    if df is None:
-        return pd.DataFrame()
-    return df
+    """Read analyst-revisions via canonical ``latest.json`` indirection
+    + legacy fallback. Same shape as :func:`read_news_aggregates`."""
+    df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
+    if df is not None:
+        return df
+    legacy_key = f"{prefix}/{as_of_date.isoformat()}.parquet"
+    df = _read_parquet_safely(s3_client, bucket=bucket, key=legacy_key)
+    return df if df is not None else pd.DataFrame()
 
 
 def read_insider_transactions_window(
@@ -191,16 +225,34 @@ def read_insider_transactions_window(
     bucket: str = DEFAULT_S3_BUCKET,
     prefix: str = INSIDER_TRANSACTIONS_PREFIX,
 ) -> pd.DataFrame:
-    """Read insider-transactions parquets covering the trailing
-    ``window_days`` and concatenate. Missing dates tolerated (most
-    weekdays have no insider filings for a given ticker)."""
+    """Read insider transactions covering the trailing ``window_days``.
+
+    Canonical shape: the producer writes one consolidated parquet per
+    run (containing all Form 4 filings collected in that run, with
+    ``filed_date`` as a row column). Read via ``latest.json`` → filter
+    rows where ``filed_date`` falls within the window. Falls back to
+    the legacy per-filed_date parquets if canonical sidecar missing.
+    """
+    df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
+    if df is not None and len(df) > 0 and "filed_date" in df.columns:
+        cutoff = as_of_date - timedelta(days=window_days)
+        # filed_date is stored as ISO date string OR pandas datetime;
+        # convert defensively
+        filed_dates = pd.to_datetime(df["filed_date"]).dt.date
+        return df[
+            (filed_dates >= cutoff) & (filed_dates <= as_of_date)
+        ].reset_index(drop=True)
+
+    # Legacy fallback: per-filed_date parquets
     frames: list[pd.DataFrame] = []
     for offset in range(window_days + 1):
         d = as_of_date - timedelta(days=offset)
-        key = f"{prefix}/{d.isoformat()}.parquet"
-        df = _read_parquet_safely(s3_client, bucket=bucket, key=key)
-        if df is not None and len(df) > 0:
-            frames.append(df)
+        legacy_key = f"{prefix}/{d.isoformat()}.parquet"
+        legacy_df = _read_parquet_safely(
+            s3_client, bucket=bucket, key=legacy_key,
+        )
+        if legacy_df is not None and len(legacy_df) > 0:
+            frames.append(legacy_df)
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)

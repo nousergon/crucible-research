@@ -295,6 +295,116 @@ class TestSubstrateReader:
         assert snap.has_news_signal is False
 
 
+# ── Canonical-shape (latest.json sidecar) reads ───────────────────────
+
+
+class TestCanonicalSidecarReads:
+    def test_news_aggregates_reads_via_latest_json(self):
+        s3 = _InMemoryS3()
+        df_in = pd.DataFrame([{
+            "ticker": "AAPL",
+            "aggregate_date": date(2026, 5, 17),
+            "schema_version": 1,
+            "n_articles": 5,
+            "n_articles_trusted_weighted": 5.0,
+            "n_articles_by_source_json": "{}",
+            "lm_sentiment_mean": 0.0,
+            "lm_sentiment_trusted_mean": 0.0,
+            "lm_uncertainty_words_total": 0,
+            "event_count": 0,
+            "event_severity_max": 0.0,
+            "event_categories": "",
+            "top_event_descriptions": "",
+        }])
+        # Producer-side canonical layout: parquet under run_id key,
+        # latest.json sidecar points to it.
+        _put_parquet(
+            s3, bucket="alpha-engine-research",
+            key=f"{NEWS_AGGREGATES_PREFIX}/2605170200_result.parquet",
+            df=df_in,
+        )
+        import json as _json
+        s3.put_object(
+            Bucket="alpha-engine-research",
+            Key=f"{NEWS_AGGREGATES_PREFIX}/latest.json",
+            Body=_json.dumps({
+                "run_id": "2605170200",
+                "artifact_key": f"{NEWS_AGGREGATES_PREFIX}/2605170200_result.parquet",
+                "aggregate_date": "2026-05-17",
+                "row_count": 1,
+            }).encode("utf-8"),
+        )
+        # Read with an arbitrary date — canonical path ignores it and
+        # follows the sidecar pointer.
+        df = read_news_aggregates(date(2026, 5, 13), s3_client=s3)
+        assert len(df) == 1
+        assert df.iloc[0]["ticker"] == "AAPL"
+
+    def test_falls_back_to_legacy_date_key_when_no_sidecar(self):
+        """Backward-compat: if a legacy {date}.parquet exists but no
+        canonical sidecar, the reader still finds the data."""
+        s3 = _InMemoryS3()
+        df_in = pd.DataFrame([{
+            "ticker": "AAPL",
+            "aggregate_date": date(2026, 5, 13),
+            "schema_version": 1,
+            "n_articles": 3,
+            "n_articles_trusted_weighted": 3.0,
+            "n_articles_by_source_json": "{}",
+            "lm_sentiment_mean": 0.0,
+            "lm_sentiment_trusted_mean": 0.0,
+            "lm_uncertainty_words_total": 0,
+            "event_count": 0,
+            "event_severity_max": 0.0,
+            "event_categories": "",
+            "top_event_descriptions": "",
+        }])
+        _put_parquet(
+            s3, bucket="alpha-engine-research",
+            key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
+            df=df_in,
+        )
+        # No latest.json sidecar — reader should fall back
+        df = read_news_aggregates(date(2026, 5, 13), s3_client=s3)
+        assert len(df) == 1
+
+    def test_insider_window_via_latest_filters_by_filed_date(self):
+        """Canonical shape: one consolidated parquet with filed_date as
+        row column. Reader filters to the 90d window."""
+        s3 = _InMemoryS3()
+        df_in = pd.DataFrame([
+            {"ticker": "AAPL", "filed_date": "2026-05-10",
+             "acquired_disposed_code": "D",
+             "transaction_value_usd": 500_000.0,
+             "reporting_owner_name": "Cook"},
+            {"ticker": "AAPL", "filed_date": "2025-12-01",  # outside window
+             "acquired_disposed_code": "A",
+             "transaction_value_usd": 100_000.0,
+             "reporting_owner_name": "Cook"},
+        ])
+        _put_parquet(
+            s3, bucket="alpha-engine-research",
+            key=f"{INSIDER_TRANSACTIONS_PREFIX}/2605131934_result.parquet",
+            df=df_in,
+        )
+        import json as _json
+        s3.put_object(
+            Bucket="alpha-engine-research",
+            Key=f"{INSIDER_TRANSACTIONS_PREFIX}/latest.json",
+            Body=_json.dumps({
+                "run_id": "2605131934",
+                "artifact_key": f"{INSIDER_TRANSACTIONS_PREFIX}/2605131934_result.parquet",
+                "row_count": 2,
+            }).encode("utf-8"),
+        )
+        df = read_insider_transactions_window(
+            date(2026, 5, 13), window_days=90, s3_client=s3,
+        )
+        # Only the within-window row remains
+        assert len(df) == 1
+        assert df.iloc[0]["filed_date"] == "2026-05-10"
+
+
 # ── read_substrate_for_population ─────────────────────────────────────
 
 
@@ -343,10 +453,12 @@ class TestReadSubstrateForPopulation:
             [f"T{i}" for i in range(25)],
             as_of_date=date(2026, 5, 13), s3_client=s3,
         )
-        # Reads: 1 news + 1 analyst + (window_days+1) insider attempts.
-        # With default window_days=90, max 92 get_object calls regardless
-        # of ticker count.
-        assert s3.get_object.call_count <= 95
+        # Canonical-shape: 3 latest.json reads (news + analyst + insider)
+        # each fail-fast on missing sidecar, then legacy fallbacks
+        # iterate per-date. Max ~3 + 1 (news legacy) + 1 (analyst legacy)
+        # + (window_days+1) (insider legacy) ≈ ~95 calls for 25 tickers.
+        # The pin is "O(1) per parquet type — not O(ticker count)".
+        assert s3.get_object.call_count <= 100
         assert len(snapshots) == 25
 
 
