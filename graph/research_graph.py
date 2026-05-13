@@ -259,6 +259,11 @@ class ResearchState(TypedDict, total=False):
     news_data_by_ticker: Annotated[dict[str, dict], take_last]
     analyst_data_by_ticker: Annotated[dict[str, dict], take_last]
     insider_data_by_ticker: Annotated[dict[str, dict], take_last]
+    # Wave 1 PR F: institutional substrate per-ticker dict
+    # (news_aggregates + insider_transactions + analyst_revisions
+    # joined). Populated only when INSTITUTIONAL_SUBSTRATE_ENABLED=true
+    # and the corresponding S3 parquets exist; otherwise empty.
+    substrate_by_ticker: Annotated[dict[str, dict], take_last]
 
     # ── Prior context (memory) ─────────────────────────────────────────────
     prior_macro_report: Annotated[str, take_last]
@@ -372,6 +377,74 @@ def _pre_fetch_held_enrichment(
             )
 
     return news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker
+
+
+def _read_institutional_substrate(
+    tickers: list[str], *, run_date: str,
+) -> dict[str, dict]:
+    """Read the producer-side structured aggregates (Wave 1 PR F).
+
+    Returns a per-ticker dict shape (not the SubstrateSnapshot dataclass)
+    so it composes naturally with the existing legacy maps when joined
+    into ``ctx.substrate_by_ticker``.
+
+    Reader gates: empty maps when alpha-engine-data hasn't produced the
+    parquets yet — agents see None/0 for missing fields. Any read
+    exception is caught at the caller; this helper raises on
+    configuration errors (missing date format, etc.) so they surface
+    loud.
+    """
+    from datetime import date as _date
+    from data.substrate.reader import read_substrate_for_population
+
+    import boto3
+    s3 = boto3.client("s3")
+    try:
+        as_of = _date.fromisoformat(run_date[:10])
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"INSTITUTIONAL_SUBSTRATE_ENABLED=true but run_date "
+            f"is not ISO-formatted: {run_date!r}"
+        ) from e
+
+    snapshots = read_substrate_for_population(
+        tickers, as_of_date=as_of, s3_client=s3,
+    )
+    out: dict[str, dict] = {}
+    for ticker, snap in snapshots.items():
+        out[ticker] = {
+            # News
+            "news_n_articles": snap.news_n_articles,
+            "news_n_articles_trusted_weighted": snap.news_n_articles_trusted_weighted,
+            "news_n_articles_by_source": snap.news_n_articles_by_source,
+            "news_lm_sentiment_mean": snap.news_lm_sentiment_mean,
+            "news_lm_sentiment_trusted_mean": snap.news_lm_sentiment_trusted_mean,
+            "news_lm_uncertainty_words_total": snap.news_lm_uncertainty_words_total,
+            "news_event_count": snap.news_event_count,
+            "news_event_severity_max": snap.news_event_severity_max,
+            "news_event_categories": list(snap.news_event_categories),
+            "news_top_event_descriptions": snap.news_top_event_descriptions,
+            # Insider
+            "insider_n_transactions_90d": snap.insider_n_transactions_90d,
+            "insider_n_buys_90d": snap.insider_n_buys_90d,
+            "insider_n_sells_90d": snap.insider_n_sells_90d,
+            "insider_net_dollar_flow_90d": snap.insider_net_dollar_flow_90d,
+            "insider_distinct_insiders_90d": snap.insider_distinct_insiders_90d,
+            "insider_max_single_transaction_usd": snap.insider_max_single_transaction_usd,
+            # Analyst revisions
+            "analyst_mean_target_current": snap.analyst_mean_target_current,
+            "analyst_mean_target_delta_30d": snap.analyst_mean_target_delta_30d,
+            "analyst_mean_target_pct_change_30d": snap.analyst_mean_target_pct_change_30d,
+            "analyst_num_analysts_current": snap.analyst_num_analysts_current,
+            "analyst_num_analysts_delta_30d": snap.analyst_num_analysts_delta_30d,
+            "analyst_consensus_rating": snap.analyst_consensus_rating,
+            "analyst_rating_changed_30d": snap.analyst_rating_changed_30d,
+            # Convenience flags
+            "has_news_signal": snap.has_news_signal,
+            "has_insider_signal": snap.has_insider_signal,
+            "has_analyst_signal": snap.has_analyst_signal,
+        }
+    return out
 
 
 # ── Node Functions ────────────────────────────────────────────────────────────
@@ -606,9 +679,44 @@ def fetch_data(state: ResearchState) -> dict:
     # the conditional held-stock ``thesis_update`` path reads directly
     # (sector_team.py:301). Sector team agents fetch their own data at
     # runtime via tools — this pre-fetch is specifically for thesis_update.
+    #
+    # Wave 1 PR F (data-revamp-260513.md): when the institutional
+    # substrate is enabled, read pre-computed structured aggregates
+    # from S3 parquet (written by alpha-engine-data PRs A.2/B/C) and
+    # JOIN them onto the legacy per-ticker maps. Substrate fields
+    # become a sibling map ``substrate_by_ticker`` so the thesis_update
+    # snapshot capture can include them without breaking the legacy
+    # news_data/analyst_data shape.
+    #
+    # Gated behind ``INSTITUTIONAL_SUBSTRATE_ENABLED=true`` (default
+    # OFF until alpha-engine-data has soaked the producer pipelines).
+    # When ON + parquets exist, the substrate snapshot enriches the
+    # input context. When ON + parquets missing, all SubstrateSnapshot
+    # fields default to empty — legacy maps still populate.
     news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
         _pre_fetch_held_enrichment(population_tickers)
     )
+    substrate_by_ticker: dict[str, dict] = {}
+    import os as _os
+    if _os.environ.get("INSTITUTIONAL_SUBSTRATE_ENABLED", "").lower() == "true":
+        try:
+            substrate_by_ticker = _read_institutional_substrate(
+                population_tickers, run_date=run_date,
+            )
+            logger.info(
+                "[fetch_data] institutional substrate loaded for %d tickers "
+                "(%d with news signal, %d with insider signal, "
+                "%d with analyst signal)",
+                len(substrate_by_ticker),
+                sum(1 for s in substrate_by_ticker.values() if s.get("has_news_signal")),
+                sum(1 for s in substrate_by_ticker.values() if s.get("has_insider_signal")),
+                sum(1 for s in substrate_by_ticker.values() if s.get("has_analyst_signal")),
+            )
+        except Exception as e:
+            logger.warning(
+                "[fetch_data] institutional substrate read failed: %s — "
+                "falling back to legacy enrichment only", e,
+            )
 
     logger.info("[fetch_data] done — %d prices, %d tech scores, %d population",
                 len(price_data), len(technical_scores), len(population_tickers))
@@ -627,6 +735,7 @@ def fetch_data(state: ResearchState) -> dict:
         "news_data_by_ticker": news_data_by_ticker,
         "analyst_data_by_ticker": analyst_data_by_ticker,
         "insider_data_by_ticker": insider_data_by_ticker,
+        "substrate_by_ticker": substrate_by_ticker,
         "prior_macro_report": prior_macro_report,
         "prior_macro_snapshots": prior_macro_snapshots,
         "episodic_memories": episodic_memories,
