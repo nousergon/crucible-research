@@ -1,9 +1,12 @@
 # Minimal dependencies for alpha-engine-research-alerts Lambda
-# Handler needs: pytz, yfinance, exchange_calendars, pyyaml
+# Handler needs: pytz, exchange_calendars, pyyaml, requests (for the
+# alpha_engine_lib.telegram substrate). yfinance dropped 2026-05-13 in
+# the L1067 surveillance rewrite — daemon-published S3 snapshots replaced
+# yfinance as the intraday price source.
 # boto3 is provided by the Lambda runtime
 pytz~=2024.1
-yfinance~=0.2.54
 exchange-calendars~=4.5
 pyyaml~=6.0.1
 feedparser~=6.0.11
 sgmllib3k
+requests~=2.31
