@@ -307,6 +307,73 @@ class ResearchState(TypedDict, total=False):
     team_id: Annotated[str, take_last]  # set by Send() per team
 
 
+# ── Pre-fetch helpers ─────────────────────────────────────────────────────────
+
+
+def _pre_fetch_held_enrichment(
+    population_tickers: list[str],
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    """Pre-fetch news + analyst data for the held population.
+
+    Returns ``(news_data_by_ticker, analyst_data_by_ticker,
+    insider_data_by_ticker)``. The held-stock ``thesis_update`` path
+    reads directly from these maps (no agent ReAct loop between
+    producer and consumer), so this pre-fetch is the only writer.
+
+    Bug-fix history:
+
+    * **News (pre-2026-05-13):** the call site used
+      ``fetch_all_news([ticker])`` — wrong function. ``fetch_all_news``
+      takes a single ``str`` and returns a flat
+      ``{"yahoo": [...], "edgar_8k": [...]}`` dict; the caller passed a
+      list AND treated the return as a batch dict keyed by ticker.
+      ``articles.get(ticker, [])`` always returned ``[]`` (no ``ticker``
+      key in the flat dict). Silent population-wide news drought.
+      Fixed: switched to ``fetch_news_batch(tickers)`` which IS keyed
+      by ticker and combines yahoo + edgar into a single ``articles``
+      list. ROADMAP P0 surfaced by L83 spot-check 2026-05-13.
+
+    * **Analyst (pre-2026-05-13):** ``analyst_data_by_ticker`` was
+      initialized empty and never populated. ``fetch_analyst_consensus``
+      exists in ``data/fetchers/analyst_fetcher.py`` but was only
+      called from sector_team agent tools. ``thesis_update`` read from
+      ``ctx.analyst_data_by_ticker.get(ticker)`` which always returned
+      ``None``. Fixed: added the analyst pre-fetch loop. ROADMAP P0
+      surfaced by L83 spot-check 2026-05-13.
+
+    Insider data is plumbed but not yet wired — explicit follow-up.
+    """
+    from data.fetchers.analyst_fetcher import fetch_analyst_consensus
+    from data.fetchers.news_fetcher import fetch_news_batch
+
+    news_data_by_ticker: dict[str, dict] = {}
+    analyst_data_by_ticker: dict[str, dict] = {}
+    insider_data_by_ticker: dict[str, dict] = {}
+
+    try:
+        news_batch = fetch_news_batch(population_tickers)
+    except Exception as e:
+        logger.warning("[fetch_data] news batch fetch failed: %s", e)
+        news_batch = {}
+    for ticker in population_tickers:
+        news = news_batch.get(ticker) or {}
+        articles = list(news.get("yahoo") or []) + list(news.get("edgar_8k") or [])
+        news_data_by_ticker[ticker] = {
+            "articles": articles,
+            "article_count": len(articles),
+        }
+
+    for ticker in population_tickers:
+        try:
+            analyst_data_by_ticker[ticker] = fetch_analyst_consensus(ticker)
+        except Exception as e:
+            logger.debug(
+                "[fetch_data] analyst fetch failed for %s: %s", ticker, e
+            )
+
+    return news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker
+
+
 # ── Node Functions ────────────────────────────────────────────────────────────
 
 def fetch_data(state: ResearchState) -> dict:
@@ -534,23 +601,14 @@ def fetch_data(state: ResearchState) -> dict:
     except Exception as e:
         logger.debug("[fetch_data] predictions not available: %s", e)
 
-    # Pre-fetch news/analyst/insider data for held population (for material triggers)
-    news_data_by_ticker = {}
-    analyst_data_by_ticker = {}
-    insider_data_by_ticker = {}
-
-    # Note: full data fetching happens within sector team agents via tools.
-    # Here we only pre-fetch lightweight data for material trigger checks.
-    from data.fetchers.news_fetcher import fetch_all_news
-    for ticker in population_tickers:
-        try:
-            articles = fetch_all_news([ticker])
-            news_data_by_ticker[ticker] = {
-                "articles": articles.get(ticker, []),
-                "article_count": len(articles.get(ticker, [])),
-            }
-        except Exception as e:
-            logger.debug("[fetch_data] news fetch failed for %s: %s", ticker, e)
+    # Pre-fetch news + analyst data for the held population. These feed
+    # ``ctx.news_data_by_ticker`` / ``ctx.analyst_data_by_ticker`` which
+    # the conditional held-stock ``thesis_update`` path reads directly
+    # (sector_team.py:301). Sector team agents fetch their own data at
+    # runtime via tools — this pre-fetch is specifically for thesis_update.
+    news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
+        _pre_fetch_held_enrichment(population_tickers)
+    )
 
     logger.info("[fetch_data] done — %d prices, %d tech scores, %d population",
                 len(price_data), len(technical_scores), len(population_tickers))
