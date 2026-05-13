@@ -135,3 +135,70 @@ def score_to_rating(score: float | None, buy_threshold: float = 70.0, sell_thres
     if score <= sell_threshold:
         return "SELL"
     return "HOLD"
+
+
+def compute_narrative_regime_adjustment(
+    thesis_text: str | None,
+    market_regime: str | None,
+    *,
+    bull_defensive_markers: list[str],
+    bull_growth_markers: list[str],
+    bull_defensive_penalty: float,
+    bull_growth_bonus: float,
+    bear_defensive_bonus: float,
+    bear_growth_penalty: float,
+    max_marker_hits: int = 3,
+) -> tuple[float, dict]:
+    """Compute regime-conditional adjustment based on thesis text markers.
+
+    Scans qual analyst's thesis for defensive vs growth narrative markers.
+    In BULL regime, defensive narratives get penalized and growth bonused.
+    Inverted in BEAR. NEUTRAL applies no adjustment. Marker hits per
+    direction are capped at ``max_marker_hits`` to prevent over-penalizing
+    richly worded theses (e.g. one that mentions "oversold" 5 times in a
+    long bull_case shouldn't be 5x penalized).
+
+    Returns (adjustment_pts, details) where adjustment is signed (negative
+    = penalty, positive = bonus) and details has the marker hit counts
+    for auditability.
+
+    Pure text-match logic — no LLM call, deterministic, zero token cost.
+    """
+    if not thesis_text or not market_regime:
+        return 0.0, {"reason": "no_thesis_or_regime"}
+
+    regime = market_regime.strip().lower()
+    if regime not in ("bull", "bear"):
+        return 0.0, {"reason": f"regime_neutral_or_unknown ({regime})"}
+
+    text_lower = thesis_text.lower()
+    defensive_hits = sum(1 for m in bull_defensive_markers if m.lower() in text_lower)
+    growth_hits = sum(1 for m in bull_growth_markers if m.lower() in text_lower)
+    capped_defensive = min(defensive_hits, max_marker_hits)
+    capped_growth = min(growth_hits, max_marker_hits)
+
+    # Per-hit attenuation: full penalty/bonus on first hit; subsequent hits
+    # contribute at decreasing weight to avoid double-counting near-synonyms.
+    # Using simple linear scaling: hit_n contributes at 1/n of base.
+    def _scale(hits_capped: int) -> float:
+        return sum(1.0 / (i + 1) for i in range(hits_capped))
+
+    if regime == "bull":
+        adjustment = (
+            -bull_defensive_penalty * _scale(capped_defensive)
+            + bull_growth_bonus * _scale(capped_growth)
+        )
+    else:  # bear
+        adjustment = (
+            bear_defensive_bonus * _scale(capped_defensive)
+            - bear_growth_penalty * _scale(capped_growth)
+        )
+
+    return round(adjustment, 2), {
+        "regime": regime,
+        "defensive_hits": defensive_hits,
+        "growth_hits": growth_hits,
+        "defensive_capped": capped_defensive,
+        "growth_capped": capped_growth,
+        "adjustment_pts": round(adjustment, 2),
+    }
