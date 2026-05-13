@@ -147,6 +147,27 @@ MAX_DEBT_TO_EQUITY: float = SCANNER_CFG.get("max_debt_to_equity", 3.0)
 MIN_CURRENT_RATIO: float = SCANNER_CFG.get("min_current_ratio", 0.5)
 BALANCE_SHEET_EXEMPT_SECTORS: list[str] = SCANNER_CFG.get("balance_sheet_exempt_sectors", ["Financial", "Real Estate"])
 
+# ── Quality floor (PR D, 2026-05-13) ─────────────────────────────────────────
+# Piotroski-lite: reject names with no profitability signal. Composes with
+# relaxed ATR ceiling (max_atr_pct=25) to admit higher-vol growth without
+# also admitting lottery-ticket junk.
+_QUALITY_FLOOR_CFG: dict = SCANNER_CFG.get("quality_floor", {})
+QUALITY_FLOOR_ENABLED: bool = bool(_QUALITY_FLOOR_CFG.get("enabled", False))
+QUALITY_MIN_PROFIT_MARGIN: float = float(_QUALITY_FLOOR_CFG.get("min_profit_margin", 0.0))
+QUALITY_MIN_ROE: float = float(_QUALITY_FLOOR_CFG.get("min_roe", 0.0))
+QUALITY_REQUIRE_BOTH: bool = bool(_QUALITY_FLOOR_CFG.get("require_both", False))
+QUALITY_EXEMPT_SECTORS: list[str] = list(_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"]))
+
+# ── Regime-conditional ATR tilt within sector (PR E, 2026-05-13) ─────────────
+# In BULL regimes drop bottom-quartile-by-ATR within each sector (those names
+# aren't contributing risk in a regime that rewards risk). Inverted in BEAR.
+_REGIME_ATR_TILT_CFG: dict = SCANNER_CFG.get("regime_atr_tilt", {})
+REGIME_ATR_TILT_ENABLED: bool = bool(_REGIME_ATR_TILT_CFG.get("enabled", False))
+REGIME_ATR_BULL_DROP: str = str(_REGIME_ATR_TILT_CFG.get("bull_drop", "bottom"))
+REGIME_ATR_BEAR_DROP: str = str(_REGIME_ATR_TILT_CFG.get("bear_drop", "top"))
+REGIME_ATR_QUARTILE_PCT: int = int(_REGIME_ATR_TILT_CFG.get("quartile_pct", 25))
+REGIME_ATR_MIN_SECTOR_SIZE: int = int(_REGIME_ATR_TILT_CFG.get("min_sector_size", 4))
+
 # ── Archive ───────────────────────────────────────────────────────────────────
 ARCHIVE_CFG: dict = _cfg["archive"]
 

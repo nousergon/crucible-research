@@ -28,6 +28,16 @@ from config import (
     MAX_DEBT_TO_EQUITY,
     MIN_CURRENT_RATIO,
     BALANCE_SHEET_EXEMPT_SECTORS,
+    QUALITY_FLOOR_ENABLED,
+    QUALITY_MIN_PROFIT_MARGIN,
+    QUALITY_MIN_ROE,
+    QUALITY_REQUIRE_BOTH,
+    QUALITY_EXEMPT_SECTORS,
+    REGIME_ATR_TILT_ENABLED,
+    REGIME_ATR_BULL_DROP,
+    REGIME_ATR_BEAR_DROP,
+    REGIME_ATR_QUARTILE_PCT,
+    REGIME_ATR_MIN_SECTOR_SIZE,
     get_scanner_params,
 )
 from data.fetchers.price_fetcher import (
@@ -552,3 +562,172 @@ def evaluate_candidate_rotation(
             rotations_this_run += 1
 
     return active, rotations
+
+
+def apply_quality_filter(
+    candidates: list[dict],
+    sector_map: dict[str, str] | None = None,
+    min_profit_margin: float = QUALITY_MIN_PROFIT_MARGIN,
+    min_roe: float = QUALITY_MIN_ROE,
+    require_both: bool = QUALITY_REQUIRE_BOTH,
+    exempt_sectors: list[str] | None = None,
+) -> list[dict]:
+    """Quality floor (Piotroski-lite). Reject names with no profitability signal.
+
+    Default lenient mode (require_both=False): a candidate passes if EITHER
+    profitMargins > min_profit_margin OR returnOnEquity > min_roe. Captures
+    pre-profit growth names with positive ROE on a small base AND established
+    compounders with positive margins. Strict mode (require_both=True) demands
+    both — for use in BEAR regimes or when defensiveness matters more.
+
+    Sector exemptions skip the gate where the metrics do not apply
+    (Financials, REITs, Utilities by default).
+
+    Uses yfinance Ticker.info — same data source as apply_balance_sheet_filter
+    so this function can run in the same fetch pass without doubling API load.
+    Fail-closed on fetch error (matches balance-sheet pattern, M7 fix).
+
+    Composes with apply_balance_sheet_filter — call this AFTER balance sheet
+    so the candidate set is already smaller (~60 ticker yfinance calls).
+    """
+    import yfinance as yf
+
+    _sector_map = sector_map or {}
+    _exempt = set(exempt_sectors if exempt_sectors is not None else QUALITY_EXEMPT_SECTORS)
+
+    result = []
+    rejected = 0
+    fetch_failures = 0
+    for c in candidates:
+        ticker = c["ticker"]
+        sector = _sector_map.get(ticker, c.get("sector", "Unknown"))
+
+        if sector in _exempt:
+            result.append(c)
+            continue
+
+        try:
+            info = yf.Ticker(ticker).info
+            profit_margin = info.get("profitMargins")
+            roe = info.get("returnOnEquity")
+
+            margin_ok = profit_margin is not None and profit_margin > min_profit_margin
+            roe_ok = roe is not None and roe > min_roe
+
+            if require_both:
+                passes = margin_ok and roe_ok
+            else:
+                passes = margin_ok or roe_ok
+
+            if not passes:
+                rejected += 1
+                logger.debug(
+                    "[quality_floor] REJECT %s: profit_margin=%s roe=%s "
+                    "(require_both=%s, min_pm=%.3f, min_roe=%.3f)",
+                    ticker, profit_margin, roe, require_both, min_profit_margin, min_roe,
+                )
+                continue
+
+        except Exception as e:
+            logger.warning("[quality_floor] REJECT %s (fetch error, fail-closed): %s", ticker, e)
+            fetch_failures += 1
+            continue
+
+        result.append(c)
+
+    if rejected:
+        logger.info(
+            "[quality_floor] rejected %d candidates (no profitability signal; "
+            "min_pm=%.3f, min_roe=%.3f, require_both=%s)",
+            rejected, min_profit_margin, min_roe, require_both,
+        )
+    if fetch_failures:
+        logger.warning("[quality_floor] %d candidates rejected due to fetch failures", fetch_failures)
+    return result
+
+
+def apply_regime_atr_tilt(
+    candidates: list[dict],
+    market_regime: str | None,
+    sector_map: dict[str, str] | None = None,
+    bull_drop: str = REGIME_ATR_BULL_DROP,
+    bear_drop: str = REGIME_ATR_BEAR_DROP,
+    quartile_pct: int = REGIME_ATR_QUARTILE_PCT,
+    min_sector_size: int = REGIME_ATR_MIN_SECTOR_SIZE,
+) -> list[dict]:
+    """Regime-conditional ATR tilt within sector.
+
+    In BULL regime: drop bottom-quartile-by-ATR within each sector — those
+    names are not contributing risk in a regime that rewards risk. In BEAR
+    invert: drop top-quartile to defensive-tilt the population. NEUTRAL
+    applies no tilt.
+
+    Sector grouping ensures within-sector composition is preserved (an
+    OW Tech sector does not lose all its names just because its average
+    ATR is high). Sectors with fewer than min_sector_size candidates skip
+    the tilt to avoid degenerate quartile cuts on tiny groups.
+
+    Each candidate must have an ``atr_pct`` field (computed upstream by
+    run_quant_filter). Candidates with missing/None ATR are kept as-is
+    (cannot rank without the value; fail-open).
+
+    Composes with sector OW/UW (drives WHICH sectors get exposure) and
+    max_atr_pct ceiling (drives the absolute upper bound on vol). This
+    is the within-sector relative tilt.
+    """
+    if not candidates:
+        return candidates
+
+    regime = (market_regime or "").strip().lower()
+    if regime not in ("bull", "bear"):
+        return candidates  # neutral / unknown → no tilt
+
+    drop_side = bull_drop if regime == "bull" else bear_drop
+    if drop_side not in ("bottom", "top"):
+        logger.warning("[regime_atr_tilt] unknown drop_side=%s; no-op", drop_side)
+        return candidates
+
+    _sector_map = sector_map or {}
+
+    # Group candidates by sector
+    by_sector: dict[str, list[dict]] = {}
+    for c in candidates:
+        sector = _sector_map.get(c["ticker"], c.get("sector", "Unknown"))
+        by_sector.setdefault(sector, []).append(c)
+
+    kept: list[dict] = []
+    dropped_total = 0
+    for sector, sector_cands in by_sector.items():
+        if len(sector_cands) < min_sector_size:
+            kept.extend(sector_cands)
+            continue
+
+        # Partition by has-ATR vs missing-ATR; missing kept as-is
+        with_atr = [c for c in sector_cands if c.get("atr_pct") is not None]
+        without_atr = [c for c in sector_cands if c.get("atr_pct") is None]
+
+        if len(with_atr) < min_sector_size:
+            kept.extend(sector_cands)
+            continue
+
+        with_atr.sort(key=lambda c: c["atr_pct"])
+        n_drop = max(1, int(round(len(with_atr) * (quartile_pct / 100.0))))
+
+        if drop_side == "bottom":
+            sector_kept = with_atr[n_drop:]   # drop bottom-N
+        else:
+            sector_kept = with_atr[:-n_drop]  # drop top-N
+
+        dropped_total += len(with_atr) - len(sector_kept)
+        kept.extend(sector_kept)
+        kept.extend(without_atr)
+
+    if dropped_total:
+        logger.info(
+            "[regime_atr_tilt] regime=%s drop_side=%s pct=%d → dropped %d/%d "
+            "candidates across %d sectors",
+            regime, drop_side, quartile_pct, dropped_total, len(candidates), len(by_sector),
+        )
+
+    return kept
+
