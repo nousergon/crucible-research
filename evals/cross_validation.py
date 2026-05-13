@@ -2,31 +2,36 @@
 
 ROADMAP L83 (P1):
     Manual judge cross-validation sample (LLM-as-judge calibration anchor).
-    Manually rate 10-20 captured decision artifacts on each rubric dimension;
+    Manually rate captured decision artifacts on each rubric dimension;
     compare against judge scores; document per-dimension agreement rate.
     Re-validate quarterly + on every judge model upgrade.
 
-The eval-judge framework (``evals/judge.py`` + ``evals/orchestrator.py``)
-emits per-agent rubric scores. Without a periodic human cross-validation
-anchor, judge-score drift across model upgrades and prompt revisions is
-undetectable. This module is the comparison layer:
+Spot-check methodology (chosen over blind rating, 2026-05-13):
+    The eval-judge framework emits per-agent rubric scores with a reasoning
+    string per dimension. The methodology shows the operator the judge's
+    score + reasoning inline and asks for a verdict (``agree`` / ``disagree``
+    / ``partial``) per dimension, plus an override score + notes only when
+    the operator flags a dispute.
 
-    1. Operator rates a stratified sample of decision artifacts on each
-       rubric dimension (see ``judge-crossval-260513/`` bundle for the
-       worksheet format — agent input + rubric anchors + blank score fields).
-    2. This module parses the filled worksheets and joins them against the
-       judge's scores stored under ``decision_artifacts/_eval/`` in S3 (or
-       a local hidden copy).
-    3. Emits per-dimension agreement metrics: exact-match rate, ±1-tolerance
-       rate, mean absolute difference, quadratic-weighted Cohen's kappa.
-       Quadratic kappa is the standard ordinal-rating agreement metric:
-       penalizes large disagreements (1↔5) more than small (3↔4) and
-       chance-corrects, so it's robust to score-distribution skew.
+    Trade-off: ratings are anchored to the judge's score (kappa is inflated),
+    BUT the deliverable becomes the dispute log — qualitative reasoning
+    comparisons that are more actionable for tuning the rubric than a kappa
+    number. Concurrence rate + dispute appendix is the headline output.
 
-The module is operator-driven and library-shaped: no network calls, no
-boto3, deterministic given input file paths. The companion operator
-script in ``scripts/run_judge_cross_validation.py`` is the thin CLI that
-locates the bundle directory and emits the markdown report.
+This module is the parsing + summary layer:
+    1. Operator fills worksheets in a rating bundle (see
+       ``judge-crossval-260513/`` for the format — judge scores rendered
+       inline + verdict field per dimension).
+    2. ``collect_review_outcomes`` walks the bundle, parses each
+       worksheet, joins to the hidden judge-score files, and emits one
+       ``ReviewOutcome`` per (artifact, dimension, judge_model).
+    3. ``render_markdown_report`` produces the concurrence summary + dispute
+       appendix.
+
+Library-shaped: no network calls, no boto3, deterministic given input
+file paths. The companion operator script
+``scripts/run_judge_cross_validation.py`` is the thin CLI that locates
+the bundle directory and emits the markdown report.
 """
 
 from __future__ import annotations
@@ -85,22 +90,43 @@ _SCORE_LINE = re.compile(
     r"(?P<val>\d|SCORE_HERE)\b"
 )
 
+# Spot-check verdict line:
+#   - **decision_coherence**: agree
+#   - **decision_coherence**: disagree
+#   - **decision_coherence**: partial
+#   - **decision_coherence**: VERDICT_HERE   (unfilled — skipped)
+#
+# The regex matches any word so we can catch typos ("agreee", "maybe") and
+# raise an explicit error rather than silently skipping the dimension.
+_VERDICT_LINE = re.compile(
+    r"^\s*-\s+\*\*(?P<dim>[A-Za-z_][A-Za-z0-9_]*)\*\*:\s*"
+    r"(?P<val>[A-Za-z_]+)\b"
+)
+
+# Spot-check sub-line for override_score / notes:
+#   - override_score: 3
+#   - notes: judge missed the regime override on EOG
+_OVERRIDE_LINE = re.compile(
+    r"^\s*-\s+override_score:\s*(?P<val>\d|SCORE_HERE)\b"
+)
+_NOTES_LINE = re.compile(
+    r"^\s*-\s+notes:\s*(?P<val>.*?)\s*$"
+)
+
+
+VALID_VERDICTS = {"agree", "disagree", "partial"}
+
 
 def parse_worksheet(path: Path) -> dict[str, int]:
-    """Return a mapping dimension_name -> integer score for one filled worksheet.
+    """Return a mapping dimension_name -> integer score for one blind-rating
+    worksheet (legacy blind-mode format with ``- **dim**: 4`` score lines).
 
-    Lines with the placeholder ``SCORE_HERE`` are skipped (treated as not yet
-    rated). Lines with values outside 1-5 raise ``ValueError`` so a typo
-    surfaces immediately instead of polluting the aggregate.
+    Spot-check worksheets (current format) use :func:`parse_spotcheck_worksheet`.
     """
     scores: dict[str, int] = {}
     in_scores_section = False
     text = path.read_text()
     for line in text.splitlines():
-        # The rubric section also has lines like "  5 — ..." that match our
-        # pattern's digit class if we're not careful. Gate on the
-        # "## Your scores" header so we only parse the operator's score
-        # block, not the rubric anchors.
         if line.strip().startswith("## "):
             in_scores_section = line.strip() == "## Your scores"
             continue
@@ -120,6 +146,117 @@ def parse_worksheet(path: Path) -> dict[str, int]:
             )
         scores[m.group("dim")] = score
     return scores
+
+
+@dataclass(frozen=True)
+class SpotcheckEntry:
+    """One dimension's spot-check verdict + optional override."""
+    dimension: str
+    verdict: str                 # "agree" | "disagree" | "partial"
+    override_score: int | None   # only set when verdict != "agree"
+    notes: str | None
+
+
+def parse_spotcheck_worksheet(path: Path) -> dict[str, SpotcheckEntry]:
+    """Parse a spot-check worksheet → mapping dimension_name → SpotcheckEntry.
+
+    Worksheet shape (per dimension):
+
+        - **dimension_name**: agree   (or disagree / partial)
+          - override_score: 3   (1-5; only required when verdict != agree)
+          - notes: free text
+
+    Dimensions left at ``VERDICT_HERE`` are skipped (not yet reviewed).
+    A ``disagree`` or ``partial`` verdict without an override_score raises
+    ``ValueError`` — the operator flagged a dispute but didn't say what
+    score they'd give instead, which would leave the dispute appendix
+    half-empty.
+    """
+    text = path.read_text()
+    in_section = False
+    # Walk the file once; whenever we hit a verdict line, look ahead at
+    # the next several indented lines for override_score / notes belonging
+    # to the same dimension.
+    lines = text.splitlines()
+    out: dict[str, SpotcheckEntry] = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith("## "):
+            in_section = line.strip() == "## Your spot-check"
+            i += 1
+            continue
+        if not in_section:
+            i += 1
+            continue
+        m = _VERDICT_LINE.match(line)
+        if not m:
+            i += 1
+            continue
+        dim = m.group("dim")
+        verdict_raw = m.group("val").lower()
+        if verdict_raw == "verdict_here":
+            i += 1
+            continue
+        if verdict_raw not in VALID_VERDICTS:
+            raise ValueError(
+                f"{path.name}: dimension {dim!r} verdict {verdict_raw!r} "
+                f"not one of {sorted(VALID_VERDICTS)}"
+            )
+
+        override_score: int | None = None
+        notes: str | None = None
+        # Look at the next few lines for override / notes (only the
+        # immediately following indented sub-bullets belong to this
+        # dimension; stop at blank line or next dimension verdict).
+        j = i + 1
+        while j < len(lines):
+            sub = lines[j]
+            stripped = sub.strip()
+            if not stripped:
+                break
+            if _VERDICT_LINE.match(sub):
+                break
+            om = _OVERRIDE_LINE.match(sub)
+            if om:
+                v = om.group("val")
+                if v != "SCORE_HERE":
+                    s = int(v)
+                    if s < 1 or s > 5:
+                        raise ValueError(
+                            f"{path.name}: dimension {dim!r} "
+                            f"override_score {s} out of range 1-5"
+                        )
+                    override_score = s
+                j += 1
+                continue
+            nm = _NOTES_LINE.match(sub)
+            if nm:
+                raw = nm.group("val")
+                if raw and raw != "WRITE_HERE  (optional — fill if you flagged anything)" \
+                        and raw != "WRITE_HERE":
+                    notes = raw
+                j += 1
+                continue
+            # Anything else — break out (probably a markdown subheader or
+            # the next dimension's anchors).
+            break
+
+        if verdict_raw in {"disagree", "partial"} and override_score is None:
+            raise ValueError(
+                f"{path.name}: dimension {dim!r} marked {verdict_raw!r} "
+                f"but no override_score given. Fill override_score 1-5 so "
+                f"the dispute appendix has a comparable number."
+            )
+
+        out[dim] = SpotcheckEntry(
+            dimension=dim,
+            verdict=verdict_raw,
+            override_score=override_score,
+            notes=notes,
+        )
+        i = j
+    return out
 
 
 def parse_judge_scores(path: Path) -> dict[str, dict[str, int]]:
@@ -348,11 +485,11 @@ def render_markdown_report(
 
 
 def run_cross_validation(bundle_dir: Path) -> tuple[str, list[DimensionAgreement]]:
-    """End-to-end: parse bundle, compute agreement, render markdown.
+    """End-to-end (blind-rating mode): parse bundle, compute agreement,
+    render markdown. Returns ``(markdown_report, agreements)``.
 
-    Returns ``(markdown_report, agreements)``. The caller decides where to
-    persist (local file, S3, both). Returns an empty report if no
-    worksheets are filled yet.
+    For spot-check mode (current default), use
+    :func:`run_spotcheck_review` instead.
     """
     pairs = collect_rating_pairs(bundle_dir)
     if not pairs:
@@ -370,3 +507,185 @@ def run_cross_validation(bundle_dir: Path) -> tuple[str, list[DimensionAgreement
         n_artifacts_rated=n_artifacts,
     )
     return md, agreements
+
+
+# ── Spot-check mode (current default) ───────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReviewOutcome:
+    """One operator-vs-judge spot-check on one (artifact, dimension, judge_model)."""
+    artifact_nn: str
+    agent_id: str
+    rubric_family: str
+    run_id: str
+    dimension: str
+    judge_model: str
+    verdict: str                   # "agree" | "disagree" | "partial"
+    judge_score: int
+    judge_reasoning: str
+    override_score: int | None     # operator's score when verdict != "agree"
+    operator_notes: str | None
+
+
+def collect_review_outcomes(bundle_dir: Path) -> list[ReviewOutcome]:
+    """Walk the bundle, parse each spot-check worksheet, join to the
+    hidden judge-score files, return one ``ReviewOutcome`` per
+    (artifact, dimension, judge_model). Unreviewed dimensions are
+    skipped silently.
+    """
+    items = load_index(bundle_dir)
+    outcomes: list[ReviewOutcome] = []
+    for item in items:
+        ws_path = bundle_dir / item["worksheet_path"]
+        judge_path = bundle_dir / item["judge_scores_path"]
+        if not ws_path.exists() or not judge_path.exists():
+            logger.warning("missing files for artifact %s — skip", item["nn"])
+            continue
+        entries = parse_spotcheck_worksheet(ws_path)
+        if not entries:
+            continue  # not yet reviewed
+        judge_payload = json.loads(judge_path.read_text())
+        for judge_model, jp in judge_payload.items():
+            judge_dims = {d["dimension"]: d for d in jp.get("dimension_scores", [])}
+            for dim, entry in entries.items():
+                jd = judge_dims.get(dim)
+                if jd is None:
+                    logger.warning(
+                        "artifact %s: dimension %r reviewed but not in "
+                        "judge eval (%s) — skip",
+                        item["nn"], dim, judge_model,
+                    )
+                    continue
+                outcomes.append(ReviewOutcome(
+                    artifact_nn=item["nn"],
+                    agent_id=item["agent_id"],
+                    rubric_family=item["rubric_family"],
+                    run_id=item["run_id"],
+                    dimension=dim,
+                    judge_model=judge_model,
+                    verdict=entry.verdict,
+                    judge_score=int(jd["score"]),
+                    judge_reasoning=(jd.get("reasoning") or "").strip(),
+                    override_score=entry.override_score,
+                    operator_notes=entry.notes,
+                ))
+    return outcomes
+
+
+def render_spotcheck_report(
+    outcomes: list[ReviewOutcome],
+    *,
+    bundle_dir: Path,
+) -> str:
+    """Render the spot-check report — concurrence summary + dispute appendix.
+
+    Concurrence is the headline metric (% of reviewed dimensions where
+    operator marked ``agree``). Dispute appendix lists every
+    ``disagree`` / ``partial`` with judge + operator scores +
+    judge-reasoning + operator-notes side-by-side. This is the
+    actionable artifact for tuning the rubric.
+    """
+    n = len(outcomes)
+    by_verdict = {"agree": 0, "disagree": 0, "partial": 0}
+    for o in outcomes:
+        by_verdict[o.verdict] = by_verdict.get(o.verdict, 0) + 1
+
+    # Per-rubric-family + per-judge-model concurrence
+    cells: dict[tuple[str, str], list[ReviewOutcome]] = {}
+    for o in outcomes:
+        cells.setdefault((o.rubric_family, o.judge_model), []).append(o)
+
+    lines: list[str] = []
+    lines.append("# LLM-as-judge spot-check report")
+    lines.append("")
+    lines.append(f"- Bundle: `{bundle_dir.name}`")
+    lines.append(f"- Dimensions reviewed: {n}")
+    lines.append(
+        f"- Concurrence: **{by_verdict['agree']}/{n}** "
+        f"({by_verdict['agree']/n:.0%} agree · "
+        f"{by_verdict['partial']/n:.0%} partial · "
+        f"{by_verdict['disagree']/n:.0%} disagree)"
+        if n else "- Concurrence: n/a (no reviewed dimensions)"
+    )
+    if n:
+        # Override deltas (signed: operator_score - judge_score) on disputes
+        deltas = [
+            o.override_score - o.judge_score
+            for o in outcomes
+            if o.verdict != "agree" and o.override_score is not None
+        ]
+        if deltas:
+            lines.append(
+                f"- Override delta (operator - judge) over "
+                f"{len(deltas)} disputes: "
+                f"mean {mean(deltas):+.2f}, "
+                f"range [{min(deltas):+d}, {max(deltas):+d}]"
+            )
+    lines.append("")
+
+    if not outcomes:
+        return "\n".join(lines) + "\nNo spot-check verdicts found. Mark `agree` / `disagree` / `partial` on at least one dimension.\n"
+
+    lines.append("## Concurrence by `(rubric_family, judge_model)`")
+    lines.append("")
+    lines.append("| rubric_family | judge_model | n | agree | partial | disagree |")
+    lines.append("|---|---|--:|--:|--:|--:|")
+    for (family, jm), cell in sorted(cells.items()):
+        cn = len(cell)
+        ca = sum(1 for o in cell if o.verdict == "agree")
+        cp = sum(1 for o in cell if o.verdict == "partial")
+        cd = sum(1 for o in cell if o.verdict == "disagree")
+        lines.append(
+            f"| {family} | {jm} | {cn} | "
+            f"{ca/cn:.0%} | {cp/cn:.0%} | {cd/cn:.0%} |"
+        )
+    lines.append("")
+
+    # Dispute appendix
+    disputes = [o for o in outcomes if o.verdict != "agree"]
+    lines.append(f"## Dispute appendix ({len(disputes)} dimensions)")
+    lines.append("")
+    if not disputes:
+        lines.append("_No disputes flagged. Either the judge is well-calibrated on this sample, or the sample was easy._")
+        lines.append("")
+        return "\n".join(lines)
+
+    for o in sorted(disputes, key=lambda x: (x.artifact_nn, x.dimension, x.judge_model)):
+        delta = (
+            f"{o.override_score - o.judge_score:+d}"
+            if o.override_score is not None else "n/a"
+        )
+        lines.append(
+            f"### #{o.artifact_nn} `{o.agent_id}` ({o.run_id}) · "
+            f"`{o.dimension}` · `{o.judge_model}`"
+        )
+        lines.append("")
+        lines.append(
+            f"- **Verdict:** `{o.verdict}` · "
+            f"judge={o.judge_score} → operator={o.override_score} (Δ={delta})"
+        )
+        lines.append(f"- **Judge reasoning:** {o.judge_reasoning or '_(none)_'}")
+        if o.operator_notes:
+            lines.append(f"- **Operator notes:** {o.operator_notes}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def run_spotcheck_review(bundle_dir: Path) -> tuple[str, list[ReviewOutcome]]:
+    """End-to-end (spot-check mode): parse bundle, render markdown report.
+
+    Returns ``(markdown_report, outcomes)``. Empty report if no
+    worksheets have any verdicts filled yet.
+    """
+    outcomes = collect_review_outcomes(bundle_dir)
+    if not outcomes:
+        return (
+            "# LLM-as-judge spot-check report\n\n"
+            "No verdicts filled in the bundle yet. Mark `agree` / "
+            "`disagree` / `partial` on at least one dimension.\n",
+            [],
+        )
+    md = render_spotcheck_report(outcomes, bundle_dir=bundle_dir)
+    return md, outcomes

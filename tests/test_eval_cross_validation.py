@@ -10,12 +10,18 @@ import pytest
 
 from evals.cross_validation import (
     DimensionAgreement,
+    ReviewOutcome,
+    SpotcheckEntry,
     collect_rating_pairs,
+    collect_review_outcomes,
     parse_judge_scores,
+    parse_spotcheck_worksheet,
     parse_worksheet,
     quadratic_weighted_kappa,
     render_markdown_report,
+    render_spotcheck_report,
     run_cross_validation,
+    run_spotcheck_review,
     summarize_agreement,
 )
 
@@ -359,3 +365,264 @@ def test_dimension_agreement_dataclass_roundtrip():
     )
     assert a.score_pairs == []
     assert a.n == 3
+
+
+# ── Spot-check parsing ──────────────────────────────────────────────────
+
+
+def _spotcheck_worksheet(tmp_path: Path, body: str) -> Path:
+    p = tmp_path / "01_x.md"
+    p.write_text(body)
+    return p
+
+
+def test_parse_spotcheck_basic_agree(tmp_path):
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: agree
+  - override_score: SCORE_HERE  (1-5, only if disagree/partial)
+  - notes: WRITE_HERE
+""")
+    out = parse_spotcheck_worksheet(path)
+    assert out == {
+        "decision_coherence": SpotcheckEntry(
+            dimension="decision_coherence",
+            verdict="agree",
+            override_score=None,
+            notes=None,
+        ),
+    }
+
+
+def test_parse_spotcheck_disagree_with_override_and_notes(tmp_path):
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: disagree
+  - override_score: 2
+  - notes: judge missed the regime override on EOG
+""")
+    out = parse_spotcheck_worksheet(path)
+    e = out["decision_coherence"]
+    assert e.verdict == "disagree"
+    assert e.override_score == 2
+    assert e.notes == "judge missed the regime override on EOG"
+
+
+def test_parse_spotcheck_partial_verdict(tmp_path):
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **rationale_quality**: partial
+  - override_score: 3
+  - notes: agree on the score but reasoning misses the catalyst structure
+""")
+    e = parse_spotcheck_worksheet(path)["rationale_quality"]
+    assert e.verdict == "partial"
+    assert e.override_score == 3
+
+
+def test_parse_spotcheck_skips_unfilled_verdict(tmp_path):
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: VERDICT_HERE
+  - override_score: SCORE_HERE
+  - notes: WRITE_HERE
+- **rationale_quality**: agree
+""")
+    out = parse_spotcheck_worksheet(path)
+    # Unfilled verdict skipped; filled `agree` kept
+    assert "decision_coherence" not in out
+    assert out["rationale_quality"].verdict == "agree"
+
+
+def test_parse_spotcheck_disagree_without_override_raises(tmp_path):
+    # A disagree without override_score leaves the dispute appendix empty
+    # of a comparison score — surface the error early.
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: disagree
+  - override_score: SCORE_HERE  (1-5, only if disagree/partial)
+  - notes: judge missed something
+""")
+    with pytest.raises(ValueError, match="no override_score"):
+        parse_spotcheck_worksheet(path)
+
+
+def test_parse_spotcheck_invalid_verdict_raises(tmp_path):
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: maybe
+""")
+    with pytest.raises(ValueError, match="not one of"):
+        parse_spotcheck_worksheet(path)
+
+
+def test_parse_spotcheck_ignores_lines_outside_section(tmp_path):
+    # A verdict-shaped line in the rubric anchor body must not be parsed
+    # as the operator's verdict.
+    path = _spotcheck_worksheet(tmp_path, """## Rubric
+
+- **decision_coherence**: agree   (this is rubric noise, not a verdict)
+
+## Your spot-check
+
+- **decision_coherence**: disagree
+  - override_score: 2
+""")
+    out = parse_spotcheck_worksheet(path)
+    assert out["decision_coherence"].verdict == "disagree"
+    assert out["decision_coherence"].override_score == 2
+
+
+def test_parse_spotcheck_blank_notes_normalised_to_none(tmp_path):
+    # The WRITE_HERE placeholder in the worksheet template means "no notes".
+    path = _spotcheck_worksheet(tmp_path, """## Your spot-check
+
+- **decision_coherence**: agree
+  - override_score: SCORE_HERE
+  - notes: WRITE_HERE  (optional — fill if you flagged anything)
+""")
+    e = parse_spotcheck_worksheet(path)["decision_coherence"]
+    assert e.notes is None
+
+
+# ── Spot-check collection + report ──────────────────────────────────────
+
+
+def _make_spotcheck_bundle(tmp_path: Path) -> Path:
+    bundle = tmp_path / "bundle"
+    (bundle / "worksheets").mkdir(parents=True)
+    (bundle / ".judge_scores").mkdir()
+
+    (bundle / "worksheets" / "01_x.md").write_text("""## Your spot-check
+
+- **decision_coherence**: agree
+- **rationale_quality**: disagree
+  - override_score: 2
+  - notes: judge over-rated boilerplate rationale on EOG
+""")
+    (bundle / ".judge_scores" / "01_x.json").write_text(json.dumps({
+        "claude-haiku-4-5": {
+            "dimension_scores": [
+                {
+                    "dimension": "decision_coherence", "score": 4,
+                    "reasoning": "ADVANCE pattern tracks scores",
+                },
+                {
+                    "dimension": "rationale_quality", "score": 4,
+                    "reasoning": "rationales tailored per ticker",
+                },
+            ],
+        },
+        "claude-sonnet-4-6": {
+            "dimension_scores": [
+                {
+                    "dimension": "decision_coherence", "score": 4,
+                    "reasoning": "good alignment",
+                },
+                {
+                    "dimension": "rationale_quality", "score": 5,
+                    "reasoning": "every rationale names rr_ratio",
+                },
+            ],
+        },
+    }))
+    (bundle / "index.json").write_text(json.dumps({"seed": 1, "items": [{
+        "nn": "01", "agent_id": "ic_cio", "rubric_family": "ic_cio",
+        "run_id": "2026-05-06",
+        "worksheet_path": "worksheets/01_x.md",
+        "judge_scores_path": ".judge_scores/01_x.json",
+    }]}))
+    return bundle
+
+
+def test_collect_review_outcomes_pairs_with_each_judge_model(tmp_path):
+    bundle = _make_spotcheck_bundle(tmp_path)
+    outcomes = collect_review_outcomes(bundle)
+    # 2 dimensions × 2 judge models = 4 outcomes
+    assert len(outcomes) == 4
+    # Verdicts replicate across judge models (same operator verdict applies
+    # to both judge_models for the same dimension)
+    dc_outcomes = [o for o in outcomes if o.dimension == "decision_coherence"]
+    assert all(o.verdict == "agree" for o in dc_outcomes)
+    rq_outcomes = [o for o in outcomes if o.dimension == "rationale_quality"]
+    assert all(o.verdict == "disagree" for o in rq_outcomes)
+    assert all(o.override_score == 2 for o in rq_outcomes)
+
+
+def test_run_spotcheck_review_renders_concurrence_and_disputes(tmp_path):
+    bundle = _make_spotcheck_bundle(tmp_path)
+    report, outcomes = run_spotcheck_review(bundle)
+    assert "spot-check report" in report.lower()
+    assert "Concurrence" in report
+    # The dispute appendix should include the operator notes
+    assert "judge over-rated boilerplate rationale on EOG" in report
+    # 2 dimensions agree, 2 disagree (per-judge-model) → 50% agree headline
+    assert "50% agree" in report
+    # Dispute appendix has 2 entries (one per judge model for rationale_quality)
+    disputes = [o for o in outcomes if o.verdict == "disagree"]
+    assert len(disputes) == 2
+
+
+def test_run_spotcheck_review_empty_bundle_renders_friendly_message(tmp_path):
+    bundle = tmp_path / "bundle"
+    (bundle / "worksheets").mkdir(parents=True)
+    (bundle / ".judge_scores").mkdir()
+    (bundle / "worksheets" / "01_x.md").write_text("""## Your spot-check
+
+- **decision_coherence**: VERDICT_HERE
+""")
+    (bundle / ".judge_scores" / "01_x.json").write_text(json.dumps({
+        "claude-haiku-4-5": {
+            "dimension_scores": [{"dimension": "decision_coherence", "score": 4}],
+        },
+    }))
+    (bundle / "index.json").write_text(json.dumps({"seed": 1, "items": [{
+        "nn": "01", "agent_id": "x", "rubric_family": "x", "run_id": "r",
+        "worksheet_path": "worksheets/01_x.md",
+        "judge_scores_path": ".judge_scores/01_x.json",
+    }]}))
+    report, outcomes = run_spotcheck_review(bundle)
+    assert outcomes == []
+    assert "No verdicts filled" in report
+
+
+def test_render_spotcheck_report_has_concurrence_table(tmp_path):
+    outcomes = [
+        ReviewOutcome(
+            artifact_nn="01", agent_id="ic_cio", rubric_family="ic_cio",
+            run_id="r", dimension="decision_coherence",
+            judge_model="claude-haiku-4-5", verdict="agree",
+            judge_score=4, judge_reasoning="ok", override_score=None,
+            operator_notes=None,
+        ),
+        ReviewOutcome(
+            artifact_nn="01", agent_id="ic_cio", rubric_family="ic_cio",
+            run_id="r", dimension="rationale_quality",
+            judge_model="claude-haiku-4-5", verdict="disagree",
+            judge_score=5, judge_reasoning="every rationale names rr_ratio",
+            override_score=2,
+            operator_notes="rationales are templated, not tailored",
+        ),
+    ]
+    md = render_spotcheck_report(outcomes, bundle_dir=Path("/tmp/bundle"))
+    # Concurrence table headers
+    assert "| rubric_family | judge_model | n | agree | partial | disagree |" in md
+    # Dispute appendix surfaces both reasonings
+    assert "every rationale names rr_ratio" in md
+    assert "rationales are templated, not tailored" in md
+    # Delta computed
+    assert "Δ=-3" in md
+
+
+def test_render_spotcheck_report_no_disputes(tmp_path):
+    """All-agree run: dispute appendix renders the encouraging message."""
+    outcomes = [
+        ReviewOutcome(
+            artifact_nn="01", agent_id="x", rubric_family="x",
+            run_id="r", dimension="dim", judge_model="m",
+            verdict="agree", judge_score=4, judge_reasoning="",
+            override_score=None, operator_notes=None,
+        ),
+    ]
+    md = render_spotcheck_report(outcomes, bundle_dir=Path("/tmp/bundle"))
+    assert "No disputes flagged" in md

@@ -25,7 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evals.cross_validation import run_cross_validation  # noqa: E402
+from evals.cross_validation import (  # noqa: E402
+    run_cross_validation,
+    run_spotcheck_review,
+)
 
 
 def main() -> int:
@@ -42,6 +45,12 @@ def main() -> int:
         "--s3-key", type=str, default=None,
         help="Optional S3 key under alpha-engine-research bucket "
              "(eg 'eval/cross_validation/2026-Q2.md').",
+    )
+    parser.add_argument(
+        "--mode", choices=["spotcheck", "blind"], default="spotcheck",
+        help="spotcheck (default): operator marks agree/disagree/partial per "
+             "dimension with judge scores visible. blind: operator rated all "
+             "dimensions independently before seeing judge scores.",
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -62,10 +71,16 @@ def main() -> int:
 
     out_path: Path = (args.out or bundle_dir / "REPORT.md").expanduser().resolve()
 
-    report, agreements = run_cross_validation(bundle_dir)
+    if args.mode == "spotcheck":
+        report, outcomes = run_spotcheck_review(bundle_dir)
+        n_label = f"{len(outcomes)} spot-check outcomes"
+    else:
+        report, agreements = run_cross_validation(bundle_dir)
+        n_label = f"{len(agreements)} dimension cells"
+
     out_path.write_text(report)
     print(f"Wrote report → {out_path}")
-    print(f"  {len(agreements)} dimension cells")
+    print(f"  {n_label}")
 
     if args.s3_key:
         try:
