@@ -38,6 +38,8 @@ from config import (
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
+    SECTOR_COHERENCE_GATE_ENABLED,
+    SECTOR_COHERENCE_UW_MIN_SCORE,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -2150,15 +2152,41 @@ def _build_signals_payload(state: ResearchState) -> dict:
         })
 
     # v1-compatible buy_candidates list (ENTER signals with enriched theses)
+    # Macro-sector coherence gate (2026-05-13): block NEW buys in UW sectors
+    # below SECTOR_COHERENCE_UW_MIN_SCORE. Defense-in-depth on macro shift;
+    # forces structural alignment between the macro call and per-pick action.
+    # HOLDs and EXITs are unaffected — only ENTER (new buy) is gated.
     buy_candidates = []
+    blocked_by_coherence_gate: list[dict] = []
     for entry in universe:
-        if entry["signal"] == "ENTER":
-            candidate = dict(entry)
-            et = entry_theses.get(entry["ticker"], {})
-            if et:
-                candidate["thesis_summary"] = et.get("bull_case", candidate["thesis_summary"])
-                candidate["catalysts"] = et.get("catalysts", [])
-            buy_candidates.append(candidate)
+        if entry["signal"] != "ENTER":
+            continue
+        if (
+            SECTOR_COHERENCE_GATE_ENABLED
+            and entry.get("sector_rating") == "underweight"
+            and (entry.get("score") or 0) < SECTOR_COHERENCE_UW_MIN_SCORE
+        ):
+            blocked_by_coherence_gate.append({
+                "ticker": entry["ticker"],
+                "sector": entry["sector"],
+                "score": entry["score"],
+                "uw_min_score": SECTOR_COHERENCE_UW_MIN_SCORE,
+            })
+            continue
+        candidate = dict(entry)
+        et = entry_theses.get(entry["ticker"], {})
+        if et:
+            candidate["thesis_summary"] = et.get("bull_case", candidate["thesis_summary"])
+            candidate["catalysts"] = et.get("catalysts", [])
+        buy_candidates.append(candidate)
+    if blocked_by_coherence_gate:
+        logger.info(
+            "macro_sector_coherence_gate blocked %d ENTER signal(s) "
+            "from UNDERWEIGHT sectors (uw_min_score=%.1f): %s",
+            len(blocked_by_coherence_gate),
+            SECTOR_COHERENCE_UW_MIN_SCORE,
+            [f"{b['ticker']}({b['sector']},{b['score']:.1f})" for b in blocked_by_coherence_gate],
+        )
 
     return {
         "date": state.get("run_date", ""),
