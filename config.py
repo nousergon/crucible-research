@@ -113,6 +113,20 @@ _COHERENCE_GATE_CFG: dict = _AGGREGATOR_CFG.get("macro_sector_coherence_gate", {
 SECTOR_COHERENCE_GATE_ENABLED: bool = bool(_COHERENCE_GATE_CFG.get("enabled", False))
 SECTOR_COHERENCE_UW_MIN_SCORE: float = float(_COHERENCE_GATE_CFG.get("uw_min_score", 80.0))
 
+# ── Regime-conditional narrative penalty (2026-05-13) ────────────────────────
+# Scans qual analyst's bull_case text for defensive vs growth markers; in BULL
+# regime, defensive narratives get penalized and growth narratives bonused.
+# Inverted in BEAR. NEUTRAL applies no adjustment.
+_NARRATIVE_PENALTY_CFG: dict = _AGGREGATOR_CFG.get("narrative_regime_penalty", {})
+NARRATIVE_PENALTY_ENABLED: bool = bool(_NARRATIVE_PENALTY_CFG.get("enabled", False))
+NARRATIVE_BULL_DEFENSIVE_MARKERS: list[str] = list(_NARRATIVE_PENALTY_CFG.get("bull_defensive_markers", []))
+NARRATIVE_BULL_GROWTH_MARKERS: list[str] = list(_NARRATIVE_PENALTY_CFG.get("bull_growth_markers", []))
+NARRATIVE_BULL_DEFENSIVE_PENALTY: float = float(_NARRATIVE_PENALTY_CFG.get("bull_defensive_penalty", 12.0))
+NARRATIVE_BULL_GROWTH_BONUS: float = float(_NARRATIVE_PENALTY_CFG.get("bull_growth_bonus", 5.0))
+NARRATIVE_BEAR_DEFENSIVE_BONUS: float = float(_NARRATIVE_PENALTY_CFG.get("bear_defensive_bonus", 8.0))
+NARRATIVE_BEAR_GROWTH_PENALTY: float = float(_NARRATIVE_PENALTY_CFG.get("bear_growth_penalty", 8.0))
+NARRATIVE_MAX_MARKER_HITS: int = int(_NARRATIVE_PENALTY_CFG.get("max_marker_hits", 3))
+
 # ── Scanner ───────────────────────────────────────────────────────────────────
 SCANNER_CFG: dict = _cfg["scanner"]
 CANDIDATE_COUNT: int = SCANNER_CFG["candidate_count"]

@@ -40,6 +40,14 @@ from config import (
     RATING_SELL_THRESHOLD,
     SECTOR_COHERENCE_GATE_ENABLED,
     SECTOR_COHERENCE_UW_MIN_SCORE,
+    NARRATIVE_PENALTY_ENABLED,
+    NARRATIVE_BULL_DEFENSIVE_MARKERS,
+    NARRATIVE_BULL_GROWTH_MARKERS,
+    NARRATIVE_BULL_DEFENSIVE_PENALTY,
+    NARRATIVE_BULL_GROWTH_BONUS,
+    NARRATIVE_BEAR_DEFENSIVE_BONUS,
+    NARRATIVE_BEAR_GROWTH_PENALTY,
+    NARRATIVE_MAX_MARKER_HITS,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -56,7 +64,12 @@ from data.population_selector import (
     compute_exits_and_open_slots,
     apply_ic_entries,
 )
-from scoring.composite import compute_composite_score, normalize_conviction, score_to_rating
+from scoring.composite import (
+    compute_composite_score,
+    compute_narrative_regime_adjustment,
+    normalize_conviction,
+    score_to_rating,
+)
 from archive.manager import ArchiveManager
 
 from alpha_engine_lib.decision_capture import (
@@ -1072,6 +1085,7 @@ def score_aggregator(state: ResearchState) -> dict:
         )
 
     investment_theses = {}
+    market_regime = state.get("market_regime", "neutral")
 
     for team_id, output in team_outputs.items():
         # Score each recommendation
@@ -1086,22 +1100,56 @@ def score_aggregator(state: ResearchState) -> dict:
                 sector_modifier=modifier,
             )
 
+            # Regime-conditional narrative adjustment (2026-05-13): in BULL,
+            # defensive narratives ("oversold bounce", "dividend yield",
+            # "extreme oversold") get penalized; growth narratives ("AI
+            # capex", "secular growth", "breakout") get bonused. Inverted in
+            # BEAR. NEUTRAL → no adjustment. Pure text-match, deterministic.
+            narrative_adj_pts = 0.0
+            narrative_details: dict = {"reason": "disabled"}
+            if NARRATIVE_PENALTY_ENABLED:
+                narrative_adj_pts, narrative_details = compute_narrative_regime_adjustment(
+                    thesis_text=rec.get("bull_case", ""),
+                    market_regime=market_regime,
+                    bull_defensive_markers=NARRATIVE_BULL_DEFENSIVE_MARKERS,
+                    bull_growth_markers=NARRATIVE_BULL_GROWTH_MARKERS,
+                    bull_defensive_penalty=NARRATIVE_BULL_DEFENSIVE_PENALTY,
+                    bull_growth_bonus=NARRATIVE_BULL_GROWTH_BONUS,
+                    bear_defensive_bonus=NARRATIVE_BEAR_DEFENSIVE_BONUS,
+                    bear_growth_penalty=NARRATIVE_BEAR_GROWTH_PENALTY,
+                    max_marker_hits=NARRATIVE_MAX_MARKER_HITS,
+                )
+            adjusted_final = max(
+                0.0, min(100.0, score_result["final_score"] + narrative_adj_pts)
+            )
+            if narrative_adj_pts != 0.0:
+                logger.info(
+                    "[score_aggregator] narrative regime adj %s: %.1f → %.1f "
+                    "(regime=%s, defensive_hits=%d, growth_hits=%d)",
+                    ticker, score_result["final_score"], adjusted_final,
+                    narrative_details.get("regime"),
+                    narrative_details.get("defensive_hits", 0),
+                    narrative_details.get("growth_hits", 0),
+                )
+
             investment_theses[ticker] = {
                 "ticker": ticker,
                 "sector": sector,
                 "team_id": team_id,
-                "final_score": score_result["final_score"],
+                "final_score": adjusted_final,
                 "quant_score": rec.get("quant_score"),
                 "qual_score": rec.get("qual_score"),
                 "weighted_base": score_result["weighted_base"],
                 "macro_shift": score_result["macro_shift"],
+                "narrative_regime_adj": narrative_adj_pts,
+                "narrative_regime_details": narrative_details,
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
                 "conviction": normalize_conviction(rec.get("conviction")),
                 "quant_rationale": rec.get("quant_rationale", ""),
                 "rating": score_to_rating(
-                    score_result["final_score"],
+                    adjusted_final,
                     buy_threshold=RATING_BUY_THRESHOLD,
                     sell_threshold=RATING_SELL_THRESHOLD,
                 ),
