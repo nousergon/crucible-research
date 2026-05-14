@@ -58,6 +58,12 @@ class SectorTeamContext:
     api_key: str | None = None
     episodic_memories: dict[str, list] = field(default_factory=dict)
     semantic_memories: dict[str, list] = field(default_factory=dict)
+    # Stage D' Wire 1 (regime-v3 2026-05-14): substrate intensity_z
+    # threaded through for the regime-conditional pick gate in
+    # peer_review. None when substrate hasn't published yet (Stage A
+    # pre-deploy or non-blocking SF Catch tripped) — gate degrades
+    # gracefully to base threshold only.
+    regime_intensity_z: float | None = None
 
 
 def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
@@ -129,7 +135,12 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         semantic_memories=ctx.semantic_memories,
     )
 
-    # ── Step 4: Peer review → final 2-3 ──────────────────────────────────────
+    # ── Step 4: Peer review → final 0-3 ──────────────────────────────────────
+    # Stage D' Wire 1: peer_review applies a regime-conditional pick
+    # gate after selection. Bear / caution regimes raise the minimum
+    # composite-score bar; teams now allowed to emit 0 picks when no
+    # candidate clears the bar. intensity_z (from regime substrate)
+    # scales the bar — deeper risk-off → higher bar.
     peer_output = run_peer_review(
         team_id=team_id,
         quant_picks=top5,
@@ -137,6 +148,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         additional_candidate=qual_output.get("additional_candidate"),
         technical_scores=ctx.technical_scores,
         market_regime=ctx.market_regime,
+        regime_intensity_z=ctx.regime_intensity_z,
         api_key=ctx.api_key,
     )
 

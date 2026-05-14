@@ -141,6 +141,29 @@ FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS: list[str] = list(
     _FACTOR_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"])
 )
 
+# ── Stage D' Wire 1: Sector regime-conditional pick gate ─────────────────────
+# Per regime-v3-260514.md §6 Stage D'. Filters sector-team peer-review
+# picks below a regime-conditional composite-score threshold. Allows
+# teams to emit 0 picks in bear/caution when no candidate clears the bar.
+#
+# Threshold formula (when enabled):
+#   threshold = base_min_score + max(0, -intensity_z) * intensity_scale
+# intensity_z is the regime substrate composite z-score (positive=risk-on,
+# negative=risk-off). Deeper risk-off → higher threshold → fewer picks
+# survive. bull/neutral regimes (intensity_z ≥ 0) → threshold = base_min_score.
+#
+# Off by default until observation period (4 weeks per [[think we need
+# 4 weeks to spend on confirming this]]) validates the new behavior.
+# Loaded from scoring.yaml `aggregator.regime_pick_gate`.
+_REGIME_PICK_GATE_CFG: dict = _AGGREGATOR_CFG.get("regime_pick_gate", {})
+SECTOR_REGIME_PICK_GATE_ENABLED: bool = bool(_REGIME_PICK_GATE_CFG.get("enabled", False))
+SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE: float = float(
+    _REGIME_PICK_GATE_CFG.get("base_min_score", 0.0)
+)
+SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE: float = float(
+    _REGIME_PICK_GATE_CFG.get("intensity_scale", 8.0)
+)
+
 # ── Scanner ───────────────────────────────────────────────────────────────────
 SCANNER_CFG: dict = _cfg["scanner"]
 CANDIDATE_COUNT: int = SCANNER_CFG["candidate_count"]

@@ -38,9 +38,18 @@ def run_peer_review(
     technical_scores: dict,
     market_regime: str,
     api_key: Optional[str] = None,
+    regime_intensity_z: float | None = None,
 ) -> dict:
     """
     Run intra-team peer review and produce final recommendations.
+
+    Stage D' Wire 1 (regime-v3 2026-05-14): when
+    ``SECTOR_REGIME_PICK_GATE_ENABLED``, the final recommendations are
+    filtered by a regime-conditional composite-score threshold.
+    Teams now allowed to emit 0 picks when no candidate clears the
+    bar — removes the structural forcing function that today
+    produces 12-18 picks every week even when nothing is attractive.
+    Off by default until observation validates.
 
     Args:
         team_id: Sector team identifier.
@@ -49,11 +58,15 @@ def run_peer_review(
         additional_candidate: Qual's extra candidate (or None).
         technical_scores: {ticker: dict} for quant review of additional.
         market_regime: Current macro regime.
+        regime_intensity_z: Substrate composite z-score (positive=risk-on,
+            negative=risk-off). When None (Stage A pre-deploy or
+            non-blocking SF Catch tripped), the gate degrades to its
+            base threshold only.
 
     Returns:
         {
             "team_id": str,
-            "recommendations": list[dict],  # final 2-3 picks
+            "recommendations": list[dict],  # final 0-3 picks
             "additional_accepted": bool,
             "peer_review_rationale": str,
         }
@@ -76,23 +89,139 @@ def run_peer_review(
     all_candidates = _merge_candidates(quant_picks, qual_assessments, additional_candidate, additional_accepted)
 
     if len(all_candidates) <= TEAM_PICKS_PER_RUN:
-        # Not enough to need selection — return all
+        # Not enough to need selection — apply Stage D' gate then return
+        gated = _apply_regime_pick_gate(all_candidates, market_regime, regime_intensity_z, team_id)
+        rationale = (
+            "All candidates advanced (fewer than max picks)."
+            if len(gated) == len(all_candidates)
+            else f"Regime gate filtered {len(all_candidates) - len(gated)} picks below threshold."
+        )
         return {
             "team_id": team_id,
-            "recommendations": all_candidates,
+            "recommendations": gated,
             "additional_accepted": additional_accepted,
-            "peer_review_rationale": "All candidates advanced (fewer than max picks).",
+            "peer_review_rationale": rationale,
         }
 
     # Joint finalization via single Haiku call
     result = _joint_finalization(llm, team_id, all_candidates, market_regime)
 
+    # Stage D' Wire 1: regime-conditional gate — applied after selection.
+    # Teams may emit 0 picks if no candidate clears the regime-conditional
+    # composite-score threshold (bear/caution raise the bar; bull/neutral
+    # use base threshold). Off by default until SECTOR_REGIME_PICK_GATE_ENABLED.
+    gated_picks = _apply_regime_pick_gate(
+        result["picks"], market_regime, regime_intensity_z, team_id,
+    )
+
     return {
         "team_id": team_id,
-        "recommendations": result["picks"],
+        "recommendations": gated_picks,
         "additional_accepted": additional_accepted,
         "peer_review_rationale": result["rationale"],
     }
+
+
+def regime_conditional_min_score(
+    intensity_z: float | None,
+    *,
+    base_min_score: float | None = None,
+    intensity_scale: float | None = None,
+) -> float:
+    """Compute the regime-conditional composite-score threshold for
+    sector picks (Stage D' Wire 1).
+
+    Formula::
+
+        threshold = base_min_score + max(0, -intensity_z) * intensity_scale
+
+    ``intensity_z`` is the substrate composite z-score where positive
+    means risk-on and negative means risk-off. Deeper risk-off raises
+    the threshold; bull/neutral conditions (intensity_z ≥ 0) leave the
+    threshold at the base.
+
+    None substrate (pre-deploy or non-blocking SF Catch tripped) →
+    threshold = base_min_score (degrade gracefully to base bar).
+
+    Args:
+        intensity_z: Substrate composite z-score, or None.
+        base_min_score: Override the config default
+            ``SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE``. Test convenience.
+        intensity_scale: Override the config default
+            ``SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE``. Test convenience.
+    """
+    from config import (
+        SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE,
+        SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE,
+    )
+    base = SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE if base_min_score is None else base_min_score
+    scale = SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE if intensity_scale is None else intensity_scale
+    if intensity_z is None:
+        return base
+    return base + max(0.0, -intensity_z) * scale
+
+
+def _candidate_composite_score(candidate: dict) -> float | None:
+    """Per-candidate composite score for the regime gate.
+
+    Mirrors the fallback combined-score formula in
+    ``_joint_finalization``: average of quant + qual when both present,
+    else just quant. Returns None if neither is present (caller passes
+    candidate through unfiltered — defensive on missing scores)."""
+    q = candidate.get("quant_score")
+    ql = candidate.get("qual_score")
+    if q is None:
+        return None
+    if ql is None:
+        return float(q)
+    return (float(q) + float(ql)) / 2.0
+
+
+def _apply_regime_pick_gate(
+    picks: list[dict],
+    market_regime: str,
+    intensity_z: float | None,
+    team_id: str,
+) -> list[dict]:
+    """Filter picks below the regime-conditional composite-score threshold.
+
+    No-op (returns picks unchanged) when
+    ``SECTOR_REGIME_PICK_GATE_ENABLED`` is False. Picks missing a
+    composite score are passed through unfiltered (the gate doesn't
+    have a basis to judge them).
+    """
+    from config import SECTOR_REGIME_PICK_GATE_ENABLED
+
+    if not SECTOR_REGIME_PICK_GATE_ENABLED:
+        return picks
+
+    threshold = regime_conditional_min_score(intensity_z)
+    if threshold <= 0:
+        return picks
+
+    kept: list[dict] = []
+    filtered_out: list[tuple[str, float]] = []
+    for c in picks:
+        score = _candidate_composite_score(c)
+        if score is None:
+            # No basis to judge — keep the pick rather than silently dropping.
+            kept.append(c)
+            continue
+        if score >= threshold:
+            kept.append(c)
+        else:
+            filtered_out.append((c.get("ticker", "?"), score))
+
+    if filtered_out:
+        log.info(
+            "[peer_review:%s] regime gate (regime=%s, intensity_z=%s, threshold=%.1f) "
+            "filtered %d pick(s): %s",
+            team_id, market_regime,
+            f"{intensity_z:+.2f}" if intensity_z is not None else "None",
+            threshold, len(filtered_out),
+            ", ".join(f"{t}({s:.1f})" for t, s in filtered_out),
+        )
+    return kept
 
 
 def _quant_reviews_addition(

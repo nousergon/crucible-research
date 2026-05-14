@@ -141,19 +141,35 @@ def test_build_graph_serializes_macro_upstream_of_dispatch() -> None:
     )
 
 
-def test_build_graph_dispatches_from_macro_not_fetch_data() -> None:
-    """The conditional-edges dispatch must hang off macro_economist_node,
-    not fetch_data. Pre-Stage-B it hung off fetch_data, which made macro
-    a Send target (parallel). Post-Stage-B macro is the source of the
-    dispatch (so it runs serially THEN sectors fan out)."""
+def test_build_graph_dispatches_from_downstream_of_macro_not_fetch_data() -> None:
+    """The conditional-edges dispatch must hang off a node downstream
+    of macro_economist_node, NOT off fetch_data. Pre-Stage-B it hung
+    off fetch_data, which made macro a Send target (parallel). Post-
+    Stage-B macro is upstream of the dispatch; subsequent arcs may
+    insert intermediate nodes (focus_list_by_team computation etc.)
+    between macro and the dispatch — the invariant is "macro is
+    serial upstream of the dispatch", not "dispatch immediately
+    follows macro"."""
     body = _build_graph_source()
+    # Must NOT dispatch off fetch_data (the pre-Stage-B antipattern).
     assert (
-        'graph.add_conditional_edges("macro_economist_node", dispatch_sectors_and_exit)'
-        in body
+        'graph.add_conditional_edges("fetch_data"' not in body
     ), (
-        "build_graph must dispatch sectors via conditional_edges off "
-        "macro_economist_node. A dispatch off fetch_data (pre-Stage-B) makes "
-        "macro a parallel Send target and defeats regime context propagation."
+        "build_graph dispatches from fetch_data — Stage B moves the "
+        "dispatch downstream of macro_economist_node. Stale dispatch on "
+        "fetch_data races macro and re-introduces the regime-context bug."
+    )
+    # Must dispatch off SOMETHING downstream of macro. Accept either
+    # macro_economist_node directly (post-Stage-B) or an intermediate
+    # node like compute_focus_list_node (post-focus-list-arc).
+    assert (
+        'graph.add_conditional_edges("macro_economist_node", dispatch_sectors_and_exit)' in body
+        or 'graph.add_conditional_edges("compute_focus_list_node", dispatch_sectors_and_exit)' in body
+    ), (
+        "build_graph must dispatch sectors via conditional_edges off a node "
+        "downstream of macro_economist_node (macro itself or a serial "
+        "intermediate). Without this serialization sector teams see the "
+        "default 'neutral' regime."
     )
 
 

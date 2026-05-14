@@ -881,6 +881,13 @@ def sector_team_node(state: ResearchState) -> dict:
     team_id = state.get("team_id", "unknown")
     logger.info("[sector_team:%s] starting", team_id)
 
+    # Stage D' Wire 1: extract intensity_z from the regime substrate
+    # (loaded by load_regime_substrate_node upstream of macro). None
+    # when substrate hasn't published yet — peer_review's gate degrades
+    # to base threshold only.
+    _substrate = state.get("regime_substrate") or {}
+    _intensity_z = (_substrate.get("composite") or {}).get("intensity_z")
+
     ctx = SectorTeamContext(
         scanner_universe=state.get("scanner_universe", []),
         sector_map=state.get("sector_map", {}),
@@ -897,6 +904,7 @@ def sector_team_node(state: ResearchState) -> dict:
         run_date=state["run_date"],
         episodic_memories=state.get("episodic_memories", {}),
         semantic_memories=state.get("semantic_memories", {}),
+        regime_intensity_z=_intensity_z,
     )
     # Cost-telemetry scope spans the whole sector team's LLM activity:
     # quant ReAct + qual ReAct + peer_review (×2) + thesis updates. The
