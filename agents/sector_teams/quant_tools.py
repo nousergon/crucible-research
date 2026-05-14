@@ -50,6 +50,20 @@ def create_quant_tools(context: dict) -> list:
     factor_blend_regime_weights: dict | None = context.get(
         "factor_blend_regime_weights"
     )
+    # PR 4 of scanner-placement arc:
+    #   - focus_list_tickers: set of tickers in THIS team's focus list. Tools
+    #     consult this set to determine whether a lookup constitutes an
+    #     agent_override (tool call on a ticker outside the focus list).
+    #     Empty set → no focus list this cycle; override tagging is skipped.
+    #   - override_tickers: shared mutable list (passed by reference from
+    #     sector_team via run_quant_analyst) that the get_factor_profile
+    #     wrapper appends to when invoked on a non-focus ticker. Aggregated
+    #     by archive_writer for the scanner_evaluations agent_override
+    #     column. Deliberately a list (not a set) so the audit captures
+    #     repeated lookups — useful signal about how often the agent
+    #     revisits a non-focus name.
+    focus_list_tickers: set = set(context.get("focus_list_tickers", set()))
+    override_tickers: list = context.get("override_tickers", [])
 
     # Set of valid tickers the LLM can reference. Used to reject
     # hallucinated tickers before they hit external APIs. Observed
@@ -219,6 +233,14 @@ def create_quant_tools(context: dict) -> list:
         valid, errors = _validate_tickers(tickers, "get_factor_profile")
         results: dict = dict(errors)
         for t in valid[:20]:
+            # agent_override telemetry (PR 4 of scanner-placement arc):
+            # tool call on a ticker outside the team's focus list = the
+            # agent reaching outside the curated set. Append even on
+            # missing-profile (the intent was to check) — archive_writer
+            # aggregates per-team. Skipped when focus_list_tickers is
+            # empty (no focus list this cycle).
+            if focus_list_tickers and t not in focus_list_tickers:
+                override_tickers.append(t)
             profile = factor_profiles.get(t) if factor_profiles else None
             if profile is None:
                 results[t] = {"error": "no factor profile available — ticker may be missing from factors/profiles/latest.json"}

@@ -61,6 +61,49 @@ def _emit_retry_telemetry_safely(
         )
 
 
+def _render_focus_list_for_prompt(focus_list: list[dict]) -> str:
+    """Render a per-team focus list as a compact prompt block.
+
+    Table-shaped per scanner-260514.md §5.2:
+        TICKER | sector | stance | focus_score | momentum_p | quality_p | value_p | low_vol_p
+
+    Empty input → empty string (caller falls back to the full sector slice
+    when this rendering is empty AND FOCUS_LIST_GATING_ENABLED is true).
+    """
+    if not focus_list:
+        return ""
+    header = (
+        "TICKER | sector | stance | focus_score | "
+        "momentum_p | quality_p | value_p | low_vol_p"
+    )
+    rows = []
+    for e in focus_list:
+        rows.append(
+            "{ticker} | {sector} | {stance} | {focus_score:.1f} | "
+            "{mom} | {qual} | {val} | {lv}".format(
+                ticker=e.get("ticker", "?"),
+                sector=e.get("sector", "?"),
+                stance=e.get("stance", "?"),
+                focus_score=float(e.get("focus_score") or 0.0),
+                mom=_fmt_pct(e.get("momentum_score")),
+                qual=_fmt_pct(e.get("quality_score")),
+                val=_fmt_pct(e.get("value_score")),
+                lv=_fmt_pct(e.get("low_vol_score")),
+            )
+        )
+    return header + "\n" + "\n".join(rows)
+
+
+def _fmt_pct(v) -> str:
+    """Format a 0-100 percentile compactly. None → '?'."""
+    if v is None:
+        return "?"
+    try:
+        return f"{float(v):.0f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
 # Retry preamble injected into the user message on the second attempt
 # when the first attempt produced zero picks despite running tools.
 # Lives in code (not config) because it's a small fixed string used
@@ -94,6 +137,8 @@ def run_quant_analyst(
     run_date: str,
     api_key: Optional[str] = None,
     _retry_preamble: Optional[str] = None,
+    focus_list: Optional[list[dict]] = None,
+    override_tickers: Optional[list[str]] = None,
 ) -> dict:
     """
     Run the quant analyst ReAct agent for a sector team.
@@ -125,12 +170,24 @@ def run_quant_analyst(
     # are threaded for Phase 2's @tool get_factor_profile so it can render the
     # regime-blended focus score alongside the within-sector factor composites.
     # factor_profiles is read lazily inside the tool factory on cache miss.
+    #
+    # PR 4 of scanner-placement arc:
+    #   - focus_list_tickers is the set of in-focus-list tickers for THIS team.
+    #     get_factor_profile invocations on tickers OUTSIDE this set are
+    #     appended to override_tickers (shared mutable list, propagated back
+    #     up to sector_team's team_result so archive_writer can project
+    #     agent_override=1 onto the audit table).
     from config import FACTOR_BLEND_REGIME_WEIGHTS
+    focus_list_tickers = {
+        e.get("ticker") for e in (focus_list or []) if e.get("ticker")
+    }
     tools = create_quant_tools({
         "price_data": price_data,
         "technical_scores": technical_scores,
         "market_regime": market_regime,
         "factor_blend_regime_weights": FACTOR_BLEND_REGIME_WEIGHTS,
+        "focus_list_tickers": focus_list_tickers,
+        "override_tickers": override_tickers if override_tickers is not None else [],
     })
 
     # Build system prompt
@@ -161,14 +218,47 @@ def run_quant_analyst(
     )
 
     # Build input message
-    ticker_list = ", ".join(sector_tickers[:MAX_TICKERS_IN_PROMPT])
+    #
+    # PR 4 of scanner-placement arc: when FOCUS_LIST_GATING_ENABLED and a
+    # non-empty focus_list is available for this team, the agent receives
+    # the regime-blended factor-composite focus list (top-N within-sector
+    # names) as ticker_list AND a rendered focus_list_rendered block with
+    # per-ticker scores + stance. The agent can still reach outside via
+    # @tool get_factor_profile — those calls are tagged agent_override=1
+    # by the tool wrapper for the audit table.
+    #
+    # Default-off (FOCUS_LIST_GATING_ENABLED=false): original full-sector-
+    # slice contract preserved exactly. Same when gating is on but the
+    # focus_list is empty (graceful degrade if the factor substrate is
+    # unavailable this cycle).
+    from config import FOCUS_LIST_GATING_ENABLED
+    use_focus_gating = bool(FOCUS_LIST_GATING_ENABLED and focus_list)
+    if use_focus_gating:
+        focus_tickers_ordered = [e["ticker"] for e in focus_list if e.get("ticker")]
+        ticker_list = ", ".join(focus_tickers_ordered)
+        focus_list_rendered = _render_focus_list_for_prompt(focus_list)
+        universe_size_for_prompt = len(focus_tickers_ordered)
+        log.info(
+            "[quant:%s] FOCUS_LIST_GATING_ENABLED: agent sees %d focus-list "
+            "tickers (was %d full sector slice)",
+            team_id, len(focus_tickers_ordered), len(sector_tickers),
+        )
+    else:
+        ticker_list = ", ".join(sector_tickers[:MAX_TICKERS_IN_PROMPT])
+        focus_list_rendered = ""
+        universe_size_for_prompt = len(sector_tickers)
+
     user_prompt = load_prompt("quant_analyst_user")
+    # focus_list_rendered is a new optional template var — alpha-engine-config's
+    # sibling prompt PR will reference it. Until that lands str.format
+    # silently ignores it (extra kwargs are not an error).
     user_message = user_prompt.format(
         run_date=run_date,
         market_regime=market_regime,
-        universe_size=len(sector_tickers),
+        universe_size=universe_size_for_prompt,
         ticker_list=ticker_list,
         quant_top_n=QUANT_TOP_N,
+        focus_list_rendered=focus_list_rendered,
     )
     # On retry, prepend the retry preamble so the LLM sees the "previous
     # attempt produced zero picks" context before the original request.
@@ -359,6 +449,8 @@ def run_quant_analyst_with_retry(
     technical_scores: dict,
     run_date: str,
     api_key: Optional[str] = None,
+    focus_list: Optional[list[dict]] = None,
+    override_tickers: Optional[list[str]] = None,
 ) -> dict:
     """Wrap ``run_quant_analyst`` with one-shot retry on empty picks.
 
@@ -391,6 +483,8 @@ def run_quant_analyst_with_retry(
         technical_scores=technical_scores,
         run_date=run_date,
         api_key=api_key,
+        focus_list=focus_list,
+        override_tickers=override_tickers,
     )
 
     if not _should_retry_on_empty_picks(first):
@@ -424,6 +518,8 @@ def run_quant_analyst_with_retry(
         run_date=run_date,
         api_key=api_key,
         _retry_preamble=retry_preamble,
+        focus_list=focus_list,
+        override_tickers=override_tickers,
     )
 
     second_picks = len(second.get("ranked_picks", []) or [])

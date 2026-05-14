@@ -64,6 +64,20 @@ class SectorTeamContext:
     # pre-deploy or non-blocking SF Catch tripped) — gate degrades
     # gracefully to base threshold only.
     regime_intensity_z: float | None = None
+    # PR 4 of scanner-placement arc (260514) — this team's regime-blended
+    # focus list (list of FocusListEntry.to_dict() entries) computed by
+    # compute_focus_list_node. Empty list when the factor substrate is
+    # unavailable this cycle. When FOCUS_LIST_GATING_ENABLED and non-empty,
+    # the quant analyst's user prompt uses this in place of the full
+    # sector ticker slice.
+    focus_list: list[dict] = field(default_factory=list)
+    # Mutable accumulator for agent_override tool-call telemetry. The
+    # get_factor_profile tool appends to this list whenever the agent
+    # looks up a ticker that's NOT in this team's focus_list. Shared by
+    # reference into create_quant_tools' context for the @tool wrapper;
+    # archive_writer aggregates per-team override_tickers from team
+    # outputs and projects agent_override=1 onto scanner_evaluations.
+    override_tickers: list[str] = field(default_factory=list)
 
 
 def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
@@ -106,6 +120,8 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         technical_scores=ctx.technical_scores,
         run_date=ctx.run_date,
         api_key=ctx.api_key,
+        focus_list=ctx.focus_list,
+        override_tickers=ctx.override_tickers,
     )
 
     quant_picks = quant_output.get("ranked_picks", [])
@@ -267,6 +283,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         "error": team_error,
         "partial": team_partial,
         "partial_reasons": partial_reasons,
+        # PR 4 of scanner-placement arc — tickers the quant agent looked up
+        # via @tool get_factor_profile that were NOT in this team's focus
+        # list. archive_writer projects these onto scanner_evaluations
+        # rows as agent_override=1 for the audit table.
+        "override_tickers": list(ctx.override_tickers),
     }
 
 

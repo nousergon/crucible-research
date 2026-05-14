@@ -63,6 +63,9 @@ from config import (
     FACTOR_QUALITY_FLOOR_ENABLED,
     FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
     FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
+    FOCUS_LIST_DEFAULT_TEAM_SIZE,
+    FOCUS_LIST_GATING_ENABLED,
+    FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -331,6 +334,15 @@ class ResearchState(TypedDict, total=False):
     sector_modifiers: Annotated[dict[str, float], take_last]
     sector_ratings: Annotated[dict[str, dict], take_last]
     market_regime: Annotated[str, take_last]
+
+    # ── Focus list (PR 4 of scanner-placement arc, 260514 plan) ─────────────
+    # Per-team regime-blended factor-composite focus list, computed by
+    # compute_focus_list_node AFTER macro_economist_node has written
+    # market_regime to state. Entries serialized as FocusListEntry.to_dict()
+    # so the TypedDict surface stays primitive-only. Used as the quant
+    # analyst's primary ranked input when FOCUS_LIST_GATING_ENABLED, and
+    # projected onto scanner_evaluations rows by archive_writer for audit.
+    focus_list_by_team: Annotated[dict[str, list[dict]], take_last]
 
     # ── Exit evaluator output ────────────────────────────────────────────────
     remaining_population: Annotated[list[dict], take_last]
@@ -905,6 +917,7 @@ def sector_team_node(state: ResearchState) -> dict:
         episodic_memories=state.get("episodic_memories", {}),
         semantic_memories=state.get("semantic_memories", {}),
         regime_intensity_z=_intensity_z,
+        focus_list=state.get("focus_list_by_team", {}).get(team_id, []),
     )
     # Cost-telemetry scope spans the whole sector team's LLM activity:
     # quant ReAct + qual ReAct + peer_review (×2) + thesis updates. The
@@ -1081,6 +1094,77 @@ def macro_economist_node(state: ResearchState) -> dict:
     )
 
     return macro_state_update
+
+
+def compute_focus_list_node(state: ResearchState) -> dict:
+    """Build the per-team regime-blended focus list from factor profiles.
+
+    Runs AFTER ``macro_economist_node`` so ``state["market_regime"]`` carries
+    the current cycle's regime (Stage B / PR #185 serializes macro upstream
+    of sector dispatch — pre-Stage-B this was the prior week's regime).
+    Writes ``focus_list_by_team`` to state for ``sector_team_node`` to read.
+
+    Composes with:
+      - Phase 1c (factor_scoring.py) — produces factors/profiles/latest.json
+      - Phase 3 (compute_factor_subscore) — same regime-conditional blend
+        formula (single source of truth — tuning factor_blend tunes focus)
+      - PR 1 (scoring/focus_list.py) — top-N per team build logic
+      - FOCUS_LIST_GATING_ENABLED — when true, the quant analyst's prompt
+        uses this list as primary ranked input; tool calls on non-focus
+        tickers are tagged agent_override=1 in the audit table
+
+    Empty result on any of:
+      - FACTOR_BLEND_ENABLED is False
+      - ``factors/profiles/latest.json`` artifact missing
+      - No tickers produced a contributing factor score
+    sector_team_node + agent_override telemetry both degrade gracefully
+    to "no focus list this cycle" semantics in these cases.
+    """
+    logger.info("[focus_list] starting")
+
+    if not FACTOR_BLEND_ENABLED:
+        logger.info(
+            "[focus_list] factor blend disabled — focus_list_by_team empty"
+        )
+        return {"focus_list_by_team": {}}
+
+    factor_profiles = read_factor_profiles_from_s3()
+    if not factor_profiles:
+        logger.warning(
+            "[focus_list] factor profile artifact missing — focus_list_by_team "
+            "empty (agents see full sector slice regardless of gating flag)"
+        )
+        return {"focus_list_by_team": {}}
+
+    market_regime = state.get("market_regime", "neutral")
+    focus_scores = compute_focus_scores(
+        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+    )
+    if not focus_scores:
+        logger.warning(
+            "[focus_list] no factor scores computed for regime=%s — "
+            "focus_list_by_team empty", market_regime,
+        )
+        return {"focus_list_by_team": {}}
+
+    focus_list = build_focus_list(
+        focus_scores,
+        SECTOR_TEAM_MAP,
+        per_team_size=FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES,
+        default_size=FOCUS_LIST_DEFAULT_TEAM_SIZE,
+    )
+    summary = summarize_focus_list(focus_list)
+    logger.info(
+        "[focus_list] regime=%s, gating_enabled=%s, summary=%s",
+        market_regime, FOCUS_LIST_GATING_ENABLED, summary,
+    )
+
+    return {
+        "focus_list_by_team": {
+            team_id: [e.to_dict() for e in entries]
+            for team_id, entries in focus_list.items()
+        }
+    }
 
 
 def exit_evaluator_node(state: ResearchState) -> dict:
@@ -1763,19 +1847,70 @@ def _compute_focus_list_audit_lookup(
     *,
     market_regime: str,
     sector_map: dict[str, str],
+    focus_list_by_team: dict[str, list[dict]] | None = None,
+    override_tickers_by_team: dict[str, list[str]] | None = None,
 ) -> dict[str, dict]:
-    """Compute the regime-blended focus list and project per-ticker audit fields.
+    """Project the focus list (from state) onto per-ticker audit fields.
 
     Returns ``{ticker: {focus_score, focus_stance, focus_team_id,
-    focus_rank_in_team, focus_rank_in_sector, focus_list_passed}}`` for every
-    ticker the factor substrate has a profile for. ``focus_list_passed=1``
-    for tickers that made any team's top-N; ``0`` for the rest.
+    focus_rank_in_team, focus_rank_in_sector, focus_list_passed,
+    agent_override}}`` for every ticker the factor substrate has a profile
+    for. ``focus_list_passed=1`` for top-N members. ``agent_override=1``
+    when the quant agent looked up this non-focus ticker via
+    @tool get_factor_profile during its team's run.
 
-    Empty dict on any of: factor blend disabled, factor profile artifact
-    missing, no contributing tickers. archive_writer treats empty as
-    "shadow logging unavailable this run" — scanner_eval rows get NULL
-    focus_* fields rather than synthetic defaults.
+    PR 4 path: when ``focus_list_by_team`` is provided (computed in
+    ``compute_focus_list_node`` and threaded through state), this is a
+    pure projection — no S3 read, no recompute.
+
+    Legacy path (PR 2 fallback): when ``focus_list_by_team`` is absent,
+    fall back to computing the lookup here so the audit table still gets
+    populated. PR 4 state plumbing makes the projection path authoritative;
+    the fallback is defensive only.
     """
+    override_tickers_by_team = override_tickers_by_team or {}
+
+    # PR 4 path — pure projection
+    if focus_list_by_team is not None:
+        lookup: dict[str, dict] = {}
+        all_overrides: set[str] = set()
+        for team_overrides in override_tickers_by_team.values():
+            all_overrides.update(team_overrides)
+
+        for team_id, entries in focus_list_by_team.items():
+            for e in entries:
+                ticker = e["ticker"]
+                lookup[ticker] = {
+                    "focus_score": e["focus_score"],
+                    "focus_stance": e["stance"],
+                    "focus_team_id": team_id,
+                    "focus_rank_in_team": e["rank_in_team"],
+                    "focus_rank_in_sector": e["rank_in_sector"],
+                    "focus_list_passed": 1,
+                    "agent_override": 0,  # focus-list members aren't overrides
+                }
+
+        # Non-focus tickers the agent looked up via @tool get_factor_profile
+        # surface here with empty focus fields + agent_override=1. The
+        # dashboard reads (focus_list_passed=0 AND agent_override=1) as
+        # "agent reached outside the curated set" — the precision /
+        # recall / override-hit-rate audit primitives in §5.3 of the
+        # scanner plan doc.
+        for ticker in all_overrides:
+            if ticker in lookup:
+                continue  # in focus list — not an override by definition
+            lookup[ticker] = {
+                "focus_score": None,
+                "focus_stance": None,
+                "focus_team_id": None,
+                "focus_rank_in_team": None,
+                "focus_rank_in_sector": None,
+                "focus_list_passed": 0,
+                "agent_override": 1,
+            }
+        return lookup
+
+    # ── Legacy fallback — focus_list_by_team absent from state ─────────
     if not FACTOR_BLEND_ENABLED:
         logger.info(
             "[focus_list] factor blend disabled — shadow logging skipped"
@@ -1808,25 +1943,21 @@ def _compute_focus_list_audit_lookup(
         market_regime, len(focus_list), summary,
     )
 
-    # Build per-ticker lookup with focus_list_passed=1 for top-N members
-    lookup: dict[str, dict] = {}
+    lookup_legacy: dict[str, dict] = {}
     passed_tickers: set[str] = set()
     for team_id, entries in focus_list.items():
         for e in entries:
             passed_tickers.add(e.ticker)
-            lookup[e.ticker] = {
+            lookup_legacy[e.ticker] = {
                 "focus_score": e.focus_score,
                 "focus_stance": e.stance,
                 "focus_team_id": team_id,
                 "focus_rank_in_team": e.rank_in_team,
                 "focus_rank_in_sector": e.rank_in_sector,
                 "focus_list_passed": 1,
+                "agent_override": 0,
             }
 
-    # Non-top-N tickers that still have a focus score (scored but ranked
-    # below the team cap) carry their score for downstream "near-miss"
-    # audit — same fields, focus_list_passed=0. team_id + ranks come from
-    # the score dict's sector → team mapping.
     for ticker, entry in focus_scores.items():
         if ticker in passed_tickers:
             continue
@@ -1834,16 +1965,17 @@ def _compute_focus_list_audit_lookup(
         team_id = SECTOR_TEAM_MAP.get(sector)
         if team_id is None:
             continue
-        lookup[ticker] = {
+        lookup_legacy[ticker] = {
             "focus_score": entry["focus_score"],
             "focus_stance": entry["stance"],
             "focus_team_id": team_id,
             "focus_rank_in_team": None,
             "focus_rank_in_sector": None,
             "focus_list_passed": 0,
+            "agent_override": 0,
         }
 
-    return lookup
+    return lookup_legacy
 
 
 def archive_writer(state: ResearchState) -> dict:
@@ -2017,19 +2149,44 @@ def archive_writer(state: ResearchState) -> dict:
             if isinstance(_pick, dict):
                 team_picked_tickers.add(_pick.get("ticker", ""))
 
-    # ── Shadow focus list (PR 2 of scanner-placement arc) ────────────────────
-    # Compute the regime-blended factor composite focus list and project
-    # per-ticker membership onto scanner_eval rows for audit. This is
-    # shadow-mode only — the agent contract is unchanged; downstream
-    # analytics can compare focus_list_passed vs quant_filter_pass to
-    # measure focus-list precision/recall against the agent's picks.
+    # ── Focus list audit (PR 4 of scanner-placement arc) ────────────────────
+    # Project the focus list computed in compute_focus_list_node + the
+    # per-team override_tickers (from @tool get_factor_profile invocations
+    # on non-focus tickers) onto scanner_eval rows. The legacy recompute
+    # path in _compute_focus_list_audit_lookup remains as a fallback when
+    # focus_list_by_team is unexpectedly absent from state.
     # Plan doc: alpha-engine-docs/private/scanner-260514.md
+    focus_list_by_team_state: dict[str, list[dict]] | None = state.get(
+        "focus_list_by_team"
+    )
+    # Aggregate override_tickers from sector_team_outputs. Each team's
+    # output dict (per sector_team.py) carries an "override_tickers" list
+    # of tickers the quant agent looked up via @tool get_factor_profile
+    # that were NOT in the team's focus list.
+    override_tickers_by_team: dict[str, list[str]] = {}
+    for _tid, _out in team_outputs.items():
+        ot = _out.get("override_tickers") if isinstance(_out, dict) else None
+        if ot:
+            override_tickers_by_team[_tid] = list(ot)
+
     focus_lookup: dict[str, dict] = _compute_focus_list_audit_lookup(
-        market_regime=market_regime, sector_map=sector_map,
+        market_regime=market_regime,
+        sector_map=sector_map,
+        focus_list_by_team=focus_list_by_team_state,
+        override_tickers_by_team=override_tickers_by_team,
     )
 
+    # Build the scanner_universe row set, then UNION with any agent_override
+    # tickers that fell outside the scanner_universe (the agent can look up
+    # any ticker, not just ones in the current week's S&P 900 slice).
+    universe_set = set(scanner_universe)
+    extra_override_tickers = [
+        t for t in focus_lookup.keys()
+        if t not in universe_set and focus_lookup[t].get("agent_override") == 1
+    ]
+
     scanner_evals = []
-    for ticker in scanner_universe:
+    for ticker in list(scanner_universe) + extra_override_tickers:
         ts = technical_scores.get(ticker, {})
         row = {
             "ticker": ticker,
@@ -2595,6 +2752,10 @@ def build_graph() -> StateGraph:
     graph.add_node("fetch_data", fetch_data)
     graph.add_node("load_regime_substrate_node", load_regime_substrate_node)
     graph.add_node("macro_economist_node", macro_economist_node)
+    # PR 4 of scanner-placement arc: compute the per-team regime-blended
+    # focus list AFTER macro has written market_regime to state, BEFORE
+    # the sector team dispatch reads it.
+    graph.add_node("compute_focus_list_node", compute_focus_list_node)
     graph.add_node("sector_team_node", sector_team_node)
     graph.add_node("exit_evaluator_node", exit_evaluator_node)
     graph.add_node("merge_results", merge_results_node)
@@ -2609,12 +2770,15 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("fetch_data")
 
     # Serial: fetch_data → load_regime_substrate_node → macro_economist_node
-    # (substrate flows into the macro agent's ReAct prompt as a strong prior).
+    # → compute_focus_list_node. Substrate flows into the macro agent's
+    # ReAct prompt as a strong prior; macro's regime feeds the focus list
+    # blend; focus list lands in state before sector teams dispatch.
     graph.add_edge("fetch_data", "load_regime_substrate_node")
     graph.add_edge("load_regime_substrate_node", "macro_economist_node")
+    graph.add_edge("macro_economist_node", "compute_focus_list_node")
 
-    # Fan-out AFTER macro: dispatch to 6 sector teams + exit evaluator.
-    graph.add_conditional_edges("macro_economist_node", dispatch_sectors_and_exit)
+    # Fan-out AFTER focus list: dispatch to 6 sector teams + exit evaluator.
+    graph.add_conditional_edges("compute_focus_list_node", dispatch_sectors_and_exit)
 
     # Fan-in: sector + exit Sends converge to merge_results.
     graph.add_edge("sector_team_node", "merge_results")

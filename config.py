@@ -141,6 +141,31 @@ FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS: list[str] = list(
     _FACTOR_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"])
 )
 
+# ── Focus list gating (PR 4 of scanner-placement arc, 260514 plan) ───────────
+# When enabled, the quant analyst's user prompt receives the regime-blended
+# focus list (top-N per team from the Phase 1c factor composites) as its
+# primary ranked input instead of the full sector ticker slice. The agent
+# can still reach outside the focus list via @tool get_factor_profile
+# (Phase 2 of factor substrate) — those calls are tagged agent_override=1
+# in the scanner_evaluations audit table. Default OFF; flip via
+# alpha-engine-config research/scoring.yaml `aggregator.focus_list_gating`
+# block after a 2-week shadow-observation window confirms focus-list
+# precision/recall vs the agent's full-slice picks.
+#
+# Composes with regime-substrate Stage B (PR #185): focus list is computed
+# by ``compute_focus_list_node`` AFTER ``macro_economist_node`` has
+# populated ``market_regime``, so the regime-conditional blend uses the
+# CURRENT cycle's regime (no prior-week workaround needed). Also
+# composes with Stage D' Wire 1 (PR #188) regime-conditional pick gate
+# in peer_review — these are independent surfaces (focus list narrows
+# what the agent SEES; pick gate filters what survives peer review).
+_FOCUS_LIST_GATING_CFG: dict = _AGGREGATOR_CFG.get("focus_list_gating", {})
+FOCUS_LIST_GATING_ENABLED: bool = bool(_FOCUS_LIST_GATING_CFG.get("enabled", False))
+FOCUS_LIST_DEFAULT_TEAM_SIZE: int = int(_FOCUS_LIST_GATING_CFG.get("default_team_size", 18))
+FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES: dict[str, int] = {
+    k: int(v) for k, v in _FOCUS_LIST_GATING_CFG.get("per_team_size", {}).items()
+}
+
 # ── Stage D' Wire 1: Sector regime-conditional pick gate ─────────────────────
 # Per regime-v3-260514.md §6 Stage D'. Filters sector-team peer-review
 # picks below a regime-conditional composite-score threshold. Allows
