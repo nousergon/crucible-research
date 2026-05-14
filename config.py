@@ -127,6 +127,21 @@ NARRATIVE_BEAR_DEFENSIVE_BONUS: float = float(_NARRATIVE_PENALTY_CFG.get("bear_d
 NARRATIVE_BEAR_GROWTH_PENALTY: float = float(_NARRATIVE_PENALTY_CFG.get("bear_growth_penalty", 8.0))
 NARRATIVE_MAX_MARKER_HITS: int = int(_NARRATIVE_PENALTY_CFG.get("max_marker_hits", 3))
 
+# ── Factor blend (Phase 3 of factor substrate, 260513 plan) ──────────────────
+# Regime-conditional blend of the 4 factor composites (quality / momentum /
+# value / low_vol — produced by scoring.factor_scoring) into the composite
+# score. Loaded from scoring.yaml `aggregator.factor_blend`. Wired in
+# graph.research_graph.score_aggregator: per-ticker factor profile is read
+# once from S3, blended at `weight` into the existing quant+qual base.
+_FACTOR_BLEND_CFG: dict = _AGGREGATOR_CFG.get("factor_blend", {})
+FACTOR_BLEND_ENABLED: bool = bool(_FACTOR_BLEND_CFG.get("enabled", False))
+FACTOR_BLEND_WEIGHT: float = float(_FACTOR_BLEND_CFG.get("weight", 0.30))
+FACTOR_BLEND_REGIME_WEIGHTS: dict = {
+    "bull": dict(_FACTOR_BLEND_CFG.get("bull", {})),
+    "bear": dict(_FACTOR_BLEND_CFG.get("bear", {})),
+    "neutral": dict(_FACTOR_BLEND_CFG.get("neutral", {})),
+}
+
 # ── Scanner ───────────────────────────────────────────────────────────────────
 SCANNER_CFG: dict = _cfg["scanner"]
 CANDIDATE_COUNT: int = SCANNER_CFG["candidate_count"]

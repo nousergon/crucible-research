@@ -29,6 +29,8 @@ def compute_composite_score(
     w_quant: float = DEFAULT_W_QUANT,
     w_qual: float = DEFAULT_W_QUAL,
     max_aggregate_boost: float = 10.0,
+    factor_subscore: float | None = None,
+    factor_weight: float = 0.0,
 ) -> dict:
     """
     Compute the composite attractiveness score.
@@ -41,6 +43,13 @@ def compute_composite_score(
         w_quant: Weight for quant score.
         w_qual: Weight for qual score.
         max_aggregate_boost: Cap on total boost points.
+        factor_subscore: optional regime-conditional factor blend (0-100) from
+            ``compute_factor_subscore``. Blended into ``weighted_base`` when
+            ``factor_weight > 0``.
+        factor_weight: weight applied to ``factor_subscore`` when blending into
+            the quant+qual base (e.g. 0.30 → 70% quant_qual + 30% factor).
+            Defaults to 0.0 so callers that do not pass a factor profile see
+            backward-compatible behavior.
 
     Returns:
         {
@@ -48,6 +57,8 @@ def compute_composite_score(
             "weighted_base": float,
             "macro_shift": float,
             "total_boost": float,
+            "factor_subscore": float | None,
+            "factor_weight_applied": float,
             "score_failed": bool,
         }
     """
@@ -58,16 +69,28 @@ def compute_composite_score(
             "weighted_base": None,
             "macro_shift": 0.0,
             "total_boost": 0.0,
+            "factor_subscore": factor_subscore,
+            "factor_weight_applied": 0.0,
             "score_failed": True,
         }
 
     # If one score is missing, use the other at full weight
     if quant_score is None:
-        weighted_base = qual_score
+        quant_qual_base = qual_score
     elif qual_score is None:
-        weighted_base = quant_score
+        quant_qual_base = quant_score
     else:
-        weighted_base = quant_score * w_quant + qual_score * w_qual
+        quant_qual_base = quant_score * w_quant + qual_score * w_qual
+
+    # Factor blend: convex combination with quant_qual_base. Skipped when
+    # subscore is unavailable for this ticker (e.g. no fundamentals → None)
+    # or factor_weight is 0 — graceful degrade to pure quant_qual behavior.
+    if factor_subscore is not None and factor_weight > 0.0:
+        weighted_base = (1.0 - factor_weight) * quant_qual_base + factor_weight * factor_subscore
+        factor_weight_applied = factor_weight
+    else:
+        weighted_base = quant_qual_base
+        factor_weight_applied = 0.0
 
     # Macro shift: (modifier - 1.0) / range × max_shift → [-10, +10]
     macro_shift = (sector_modifier - 1.0) / MACRO_MODIFIER_RANGE * MACRO_MAX_SHIFT_POINTS
@@ -86,7 +109,97 @@ def compute_composite_score(
         "weighted_base": round(weighted_base, 1),
         "macro_shift": round(macro_shift, 1),
         "total_boost": round(total_boost, 1),
+        "factor_subscore": round(factor_subscore, 1) if factor_subscore is not None else None,
+        "factor_weight_applied": factor_weight_applied,
         "score_failed": False,
+    }
+
+
+# ── Factor subscore (Phase 3 of factor substrate, 260513 plan) ──────────────
+
+
+_FACTOR_SCORE_KEYS = ("quality_score", "momentum_score", "value_score", "low_vol_score")
+
+
+def compute_factor_subscore(
+    factor_profile: dict | None,
+    market_regime: str | None,
+    regime_weights: dict[str, dict[str, float]] | None,
+) -> tuple[float | None, dict]:
+    """Compute a regime-conditional factor subscore from a ticker's factor profile.
+
+    Linear combination of the 4 factor composites (quality / momentum / value /
+    low_vol) with signed regime-conditional weights, clamped to ``[0, 100]``.
+    Returns ``(None, details)`` whenever the blend cannot be computed —
+    callers MUST handle ``None`` by falling back to the quant+qual-only path
+    (``compute_composite_score`` does this when ``factor_subscore is None``).
+
+    Args:
+        factor_profile: per-ticker dict produced by
+            ``scoring.factor_scoring.compute_factor_composites`` and persisted
+            to ``factors/profiles/latest.json``. Expected to contain any subset
+            of ``_FACTOR_SCORE_KEYS``; missing keys reallocate weight pro-rata
+            across the keys that ARE present.
+        market_regime: ``"bull" | "bear" | "neutral"`` (case-insensitive).
+        regime_weights: ``{regime: {factor_score_key: weight}}`` config block
+            (see ``alpha-engine-config/research/scoring.yaml``
+            ``aggregator.factor_blend``). Weights are signed (negatives flip the
+            sign of a factor's contribution — e.g. low_vol penalized in BULL).
+
+    Returns:
+        ``(subscore, details)`` where ``subscore`` is a clamped ``[0, 100]``
+        float (or ``None`` when no components contributed) and ``details``
+        carries the per-factor breakdown for observability and the rendered
+        ``regime``.
+    """
+    if not factor_profile or not market_regime or not regime_weights:
+        return None, {"reason": "no_profile_or_regime_or_config"}
+
+    regime = market_regime.strip().lower()
+    weights_for_regime = regime_weights.get(regime)
+    if not weights_for_regime:
+        return None, {"reason": f"no_blend_for_regime ({regime})"}
+
+    # Normalize weights to absolute sum 1.0 across contributing factors. This
+    # keeps the linear-combination output on the same ~0-100 scale as the raw
+    # factor scores even when partial coverage drops a component. Without
+    # renormalization a ticker missing one factor scores systematically lower
+    # than its peers.
+    breakdown: dict[str, float] = {}
+    raw_sum = 0.0
+    abs_weight_sum = 0.0
+    n_contributing = 0
+    for key in _FACTOR_SCORE_KEYS:
+        weight = float(weights_for_regime.get(key, 0.0))
+        if weight == 0.0:
+            continue
+        score = factor_profile.get(key)
+        if score is None:
+            continue
+        contribution = weight * float(score)
+        raw_sum += contribution
+        abs_weight_sum += abs(weight)
+        breakdown[key] = round(contribution, 2)
+        n_contributing += 1
+
+    if n_contributing == 0 or abs_weight_sum == 0.0:
+        return None, {"reason": "no_factor_components_available", "regime": regime}
+
+    # Re-normalize to keep output on the 0-100 scale regardless of partial
+    # coverage. Then clamp (the signed weights in BULL drive low_vol's
+    # contribution negative, which can push the un-clamped raw_sum slightly
+    # below 0 when low_vol_score is near 100 while others are near 0).
+    normalized = raw_sum / abs_weight_sum
+    subscore = max(0.0, min(100.0, normalized))
+
+    return round(subscore, 1), {
+        "regime": regime,
+        "raw_blend": round(raw_sum, 2),
+        "abs_weight_sum": round(abs_weight_sum, 2),
+        "normalized": round(normalized, 2),
+        "clamped_subscore": round(subscore, 1),
+        "breakdown": breakdown,
+        "n_components": n_contributing,
     }
 
 

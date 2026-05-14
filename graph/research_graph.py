@@ -48,6 +48,9 @@ from config import (
     NARRATIVE_BEAR_DEFENSIVE_BONUS,
     NARRATIVE_BEAR_GROWTH_PENALTY,
     NARRATIVE_MAX_MARKER_HITS,
+    FACTOR_BLEND_ENABLED,
+    FACTOR_BLEND_WEIGHT,
+    FACTOR_BLEND_REGIME_WEIGHTS,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -66,10 +69,12 @@ from data.population_selector import (
 )
 from scoring.composite import (
     compute_composite_score,
+    compute_factor_subscore,
     compute_narrative_regime_adjustment,
     normalize_conviction,
     score_to_rating,
 )
+from scoring.factor_scoring import read_factor_profiles_from_s3
 from archive.manager import ArchiveManager
 
 from alpha_engine_lib.decision_capture import (
@@ -1087,6 +1092,29 @@ def score_aggregator(state: ResearchState) -> dict:
     investment_theses = {}
     market_regime = state.get("market_regime", "neutral")
 
+    # Factor blend (Phase 3, 260513 plan): read the per-ticker factor profile
+    # once at the top so the recommendation loop stays O(N) S3-call-free. None
+    # is returned when no profile artifact exists yet — every per-ticker call
+    # site degrades gracefully via the ``factor_subscore=None`` path in
+    # ``compute_composite_score``.
+    factor_profiles_by_ticker: dict[str, dict] | None = None
+    factor_blend_applied_count = 0
+    factor_blend_skipped_count = 0
+    if FACTOR_BLEND_ENABLED:
+        factor_profiles_by_ticker = read_factor_profiles_from_s3()
+        if factor_profiles_by_ticker is None:
+            logger.warning(
+                "[score_aggregator] factor blend enabled but factors/profiles/"
+                "latest.json could not be read — degrading to quant+qual-only "
+                "scoring for this run"
+            )
+        else:
+            logger.info(
+                "[score_aggregator] factor blend enabled: %d ticker profiles "
+                "loaded (regime=%s, weight=%.2f)",
+                len(factor_profiles_by_ticker), market_regime, FACTOR_BLEND_WEIGHT,
+            )
+
     for team_id, output in team_outputs.items():
         # Score each recommendation
         for rec in output.get("recommendations", []):
@@ -1094,10 +1122,26 @@ def score_aggregator(state: ResearchState) -> dict:
             sector = sector_map.get(ticker, "Unknown")
             modifier = sector_modifiers.get(sector, 1.0)
 
+            factor_subscore_val: float | None = None
+            factor_breakdown: dict = {"reason": "factor_blend_disabled"}
+            if FACTOR_BLEND_ENABLED and factor_profiles_by_ticker is not None:
+                profile = factor_profiles_by_ticker.get(ticker)
+                factor_subscore_val, factor_breakdown = compute_factor_subscore(
+                    factor_profile=profile,
+                    market_regime=market_regime,
+                    regime_weights=FACTOR_BLEND_REGIME_WEIGHTS,
+                )
+                if factor_subscore_val is not None:
+                    factor_blend_applied_count += 1
+                else:
+                    factor_blend_skipped_count += 1
+
             score_result = compute_composite_score(
                 quant_score=rec.get("quant_score"),
                 qual_score=rec.get("qual_score"),
                 sector_modifier=modifier,
+                factor_subscore=factor_subscore_val,
+                factor_weight=FACTOR_BLEND_WEIGHT if FACTOR_BLEND_ENABLED else 0.0,
             )
 
             # Regime-conditional narrative adjustment (2026-05-13): in BULL,
@@ -1143,6 +1187,9 @@ def score_aggregator(state: ResearchState) -> dict:
                 "macro_shift": score_result["macro_shift"],
                 "narrative_regime_adj": narrative_adj_pts,
                 "narrative_regime_details": narrative_details,
+                "factor_subscore": score_result.get("factor_subscore"),
+                "factor_weight_applied": score_result.get("factor_weight_applied", 0.0),
+                "factor_blend_breakdown": factor_breakdown,
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
@@ -1253,6 +1300,15 @@ def score_aggregator(state: ResearchState) -> dict:
                 }
 
     logger.info("[score_aggregator] scored %d tickers", len(investment_theses))
+    if FACTOR_BLEND_ENABLED:
+        logger.info(
+            "[score_aggregator] factor_blend coverage: applied=%d skipped=%d "
+            "(regime=%s, weight=%.2f)",
+            factor_blend_applied_count,
+            factor_blend_skipped_count,
+            market_regime,
+            FACTOR_BLEND_WEIGHT,
+        )
 
     # Schema validation on every produced thesis (strict-by-default).
     for ticker, thesis in investment_theses.items():
@@ -2125,6 +2181,9 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "team_id": thesis.get("team_id"),
             "quant_score": thesis.get("quant_score"),
             "qual_score": thesis.get("qual_score"),
+            "factor_subscore": thesis.get("factor_subscore"),
+            "factor_weight_applied": thesis.get("factor_weight_applied", 0.0),
+            "factor_blend_breakdown": thesis.get("factor_blend_breakdown"),
             "sub_scores": {
                 "quant": thesis.get("quant_score"),
                 "qual": thesis.get("qual_score"),
