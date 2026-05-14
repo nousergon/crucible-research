@@ -121,10 +121,16 @@ def run_quant_analyst(
         callbacks=[get_cost_telemetry_callback()],
     )
 
-    # Create tools with shared context
+    # Create tools with shared context. market_regime + factor_blend_regime_weights
+    # are threaded for Phase 2's @tool get_factor_profile so it can render the
+    # regime-blended focus score alongside the within-sector factor composites.
+    # factor_profiles is read lazily inside the tool factory on cache miss.
+    from config import FACTOR_BLEND_REGIME_WEIGHTS
     tools = create_quant_tools({
         "price_data": price_data,
         "technical_scores": technical_scores,
+        "market_regime": market_regime,
+        "factor_blend_regime_weights": FACTOR_BLEND_REGIME_WEIGHTS,
     })
 
     # Build system prompt

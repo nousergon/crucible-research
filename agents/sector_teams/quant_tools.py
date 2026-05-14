@@ -13,6 +13,10 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from scoring.composite import compute_factor_subscore
+from scoring.factor_scoring import read_factor_profiles_from_s3
+from scoring.focus_list import _assign_stance
+
 log = logging.getLogger(__name__)
 
 
@@ -21,13 +25,31 @@ def create_quant_tools(context: dict) -> list:
     Create LangChain tools for the quant analyst, closing over shared context.
 
     Args:
-        context: Shared data dict with price_data, technical_scores, etc.
+        context: Shared data dict with price_data, technical_scores, and
+            optionally factor_profiles (Phase 1c artifact) + market_regime
+            + factor_blend_regime_weights for the get_factor_profile tool.
+            When factor_profiles isn't in the context, the tool factory
+            falls back to reading factors/profiles/latest.json from S3
+            once at create-time and closing over the result.
 
     Returns:
         List of LangChain tool callables.
     """
     price_data = context.get("price_data", {})
     technical_scores = context.get("technical_scores", {})
+    # Factor substrate Phase 2: per-ticker within-sector percentile-ranked
+    # factor composites (quality/momentum/value/low_vol) + a regime blend
+    # for stance / focus_score derivation. Cached at tool-creation time so
+    # the ReAct loop doesn't re-read S3 on every tool invocation. One read
+    # per sector team per Saturday SF run = 6 reads/week of a single small
+    # JSON, well within boto budget.
+    factor_profiles: dict[str, dict] | None = context.get("factor_profiles")
+    if factor_profiles is None:
+        factor_profiles = read_factor_profiles_from_s3() or {}
+    market_regime: str = context.get("market_regime", "neutral")
+    factor_blend_regime_weights: dict | None = context.get(
+        "factor_blend_regime_weights"
+    )
 
     # Set of valid tickers the LLM can reference. Used to reject
     # hallucinated tickers before they hit external APIs. Observed
@@ -181,6 +203,56 @@ def create_quant_tools(context: dict) -> list:
                 results[t] = {"error": str(e)}
         return json.dumps(results)
 
+    @tool
+    def get_factor_profile(tickers: list[str]) -> str:
+        """Get systematic factor exposures: within-sector percentile-ranked
+        quality / momentum / value / low_vol composites (0-100 within-sector,
+        higher = stronger on that axis) + the dominant factor stance +
+        regime-blended focus score. Use this to reason about WHY a name is
+        attractive in factor terms — is it a momentum bet, a quality
+        compounder, a value play, or low-vol defensive? In BULL regimes,
+        momentum + quality lead; in BEAR, low-vol + quality lead. Pair with
+        get_balance_sheet for fundamental cross-check and get_technical_indicators
+        for setup-quality confirmation. Coverage flag `_n` per composite
+        counts how many raw factors contributed (4 = full data, < 4 =
+        partial coverage / wider error band)."""
+        valid, errors = _validate_tickers(tickers, "get_factor_profile")
+        results: dict = dict(errors)
+        for t in valid[:20]:
+            profile = factor_profiles.get(t) if factor_profiles else None
+            if profile is None:
+                results[t] = {"error": "no factor profile available — ticker may be missing from factors/profiles/latest.json"}
+                continue
+
+            # Regime-blended focus score (same formula as score_aggregator's
+            # factor_subscore + scoring/focus_list.py — single source of
+            # truth so tuning one tunes both). None when blend weights
+            # aren't configured for the current regime.
+            focus_score: float | None = None
+            breakdown: dict = {}
+            if factor_blend_regime_weights:
+                focus_score, details = compute_factor_subscore(
+                    profile, market_regime, factor_blend_regime_weights,
+                )
+                breakdown = details.get("breakdown", {})
+
+            results[t] = {
+                "sector": profile.get("sector"),
+                "quality_score": profile.get("quality_score"),
+                "momentum_score": profile.get("momentum_score"),
+                "value_score": profile.get("value_score"),
+                "low_vol_score": profile.get("low_vol_score"),
+                "quality_n": profile.get("quality_n"),
+                "momentum_n": profile.get("momentum_n"),
+                "value_n": profile.get("value_n"),
+                "low_vol_n": profile.get("low_vol_n"),
+                "stance": _assign_stance(profile),
+                "focus_score": focus_score,
+                "regime": market_regime,
+                "factor_blend_breakdown": breakdown,
+            }
+        return json.dumps(results)
+
     # Wave 1 PR E (data-revamp-260513.md): RAG retrieval tools so the
     # quant agent can read news context that contextualizes a technical
     # setup (e.g. "RSI oversold — but what news happened in the last
@@ -198,5 +270,6 @@ def create_quant_tools(context: dict) -> list:
         get_balance_sheet,
         get_price_performance,
         get_options_flow,
+        get_factor_profile,
         *rag_tools,
     ]
