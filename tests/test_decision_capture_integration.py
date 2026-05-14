@@ -316,6 +316,57 @@ class TestMacroEconomistPayloadBuilder:
         assert snapshot["prior_snapshots_count"] == 1
         assert "prior_report_chars=500" in summary
 
+    def test_includes_regime_substrate_when_present(self):
+        """Stage C.2 T3 pin — the judge's regime_decision_process
+        rubric dimension scores the macro agent's regime call against
+        the substrate. The substrate must land in agent_input so the
+        judge can see it; if it's dropped here, the rubric becomes
+        unscoreable for that dimension."""
+        from graph.decision_capture_helpers import build_macro_economist_capture_payload
+        substrate = {
+            "run_id": "2605170230",
+            "hmm": {"argmax": "bear", "probs": {"bear": 0.7, "neutral": 0.2, "bull": 0.1}},
+            "composite": {"intensity_z": -1.8},
+            "bocpd": {"change_signal": True},
+        }
+        state = {
+            "run_date": "2026-05-17",
+            "macro_data": {"vix": 28.0},
+            "regime_substrate": substrate,
+        }
+        snapshot, summary = build_macro_economist_capture_payload(state)
+        assert snapshot["regime_substrate"] == substrate
+        # Summary surfaces a compact substrate marker for log + operator UX
+        assert "regime_substrate=present" in summary
+        assert "argmax=bear" in summary
+        assert "intensity_z=-1.80" in summary
+
+    def test_regime_substrate_none_marked_absent_in_summary(self):
+        """When the upstream substrate Lambda hasn't published yet
+        (pre-deploy state) or the non-blocking SF Catch tripped, state
+        has regime_substrate=None. The capture snapshot still includes
+        the field (judge sees None and skips the rubric dimension);
+        summary marks the absence for operator clarity."""
+        from graph.decision_capture_helpers import build_macro_economist_capture_payload
+        state = {
+            "run_date": "2026-05-17",
+            "macro_data": {"vix": 14.2},
+            "regime_substrate": None,
+        }
+        snapshot, summary = build_macro_economist_capture_payload(state)
+        assert snapshot["regime_substrate"] is None
+        assert "regime_substrate=absent" in summary
+
+    def test_regime_substrate_missing_key_treated_as_absent(self):
+        """Defensive — state with no regime_substrate key at all (older
+        graph code paths, tests) gets the same absent treatment as
+        explicit None."""
+        from graph.decision_capture_helpers import build_macro_economist_capture_payload
+        state = {"run_date": "2026-05-17", "macro_data": {"vix": 14.2}}
+        snapshot, summary = build_macro_economist_capture_payload(state)
+        assert snapshot["regime_substrate"] is None
+        assert "regime_substrate=absent" in summary
+
 
 class TestCIOPayloadBuilder:
     def test_minimal(self):

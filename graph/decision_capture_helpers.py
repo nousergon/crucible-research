@@ -242,7 +242,17 @@ def build_thesis_update_capture_payload(
 
 
 def build_macro_economist_capture_payload(state: dict) -> tuple[dict[str, Any], str]:
-    """Build (input_data_snapshot, summary) for the macro_economist node."""
+    """Build (input_data_snapshot, summary) for the macro_economist node.
+
+    Stage C.2 T3 addition (2026-05-14): includes ``regime_substrate``
+    from state when populated. The judge's
+    ``regime_decision_process`` rubric dimension scores the macro
+    agent's regime call against the substrate (when present), so the
+    substrate must be in agent_input for the judge to see it. ``None``
+    flows through cleanly — judge anchor handles substrate-absent
+    case (score the dimension as 5, mirroring the
+    no-prior-macro-report convention).
+    """
     macro_data = state.get("macro_data", {})
     prior_macro_report = state.get("prior_macro_report", "")
     prior_snapshots = state.get("prior_macro_snapshots", []) or []
@@ -250,18 +260,32 @@ def build_macro_economist_capture_payload(state: dict) -> tuple[dict[str, Any], 
     if prior_snapshots:
         prior_date = prior_snapshots[0].get("date", "") if isinstance(prior_snapshots[0], dict) else ""
 
+    regime_substrate = state.get("regime_substrate")
+
     snapshot: dict[str, Any] = {
         "run_date": state.get("run_date"),
         "macro_data": dict(macro_data) if isinstance(macro_data, dict) else macro_data,
         "prior_macro_report": prior_macro_report,
         "prior_date": prior_date,
         "prior_snapshots_count": len(prior_snapshots),
+        "regime_substrate": regime_substrate,
     }
+    substrate_marker = "absent"
+    if isinstance(regime_substrate, dict):
+        hmm_argmax = (regime_substrate.get("hmm") or {}).get("argmax", "?")
+        intensity_z = (regime_substrate.get("composite") or {}).get("intensity_z")
+        substrate_marker = (
+            f"present(argmax={hmm_argmax},"
+            f"intensity_z={intensity_z:+.2f})"
+            if isinstance(intensity_z, (int, float))
+            else f"present(argmax={hmm_argmax})"
+        )
     summary = (
         f"run_date={state.get('run_date')}, "
         f"macro_data_keys={len(macro_data) if isinstance(macro_data, dict) else 0}, "
         f"prior_report_chars={len(prior_macro_report)}, "
-        f"prior_snapshots={len(prior_snapshots)}"
+        f"prior_snapshots={len(prior_snapshots)}, "
+        f"regime_substrate={substrate_marker}"
     )
     return snapshot, summary
 

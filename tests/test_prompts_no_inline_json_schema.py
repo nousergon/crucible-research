@@ -191,6 +191,12 @@ def test_macro_agent_format_passes_canonical_sectors() -> None:
         sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),
         prior_date="2026-05-02",
         prior_report="NONE — initial report",
+        # Stage C.1 (alpha-engine-config v1.3.0): macro_agent.txt has
+        # a {regime_substrate} placeholder for the quant prior block.
+        # Pass the canonical "not available this run" fallback string
+        # so the format() call succeeds; the agent's
+        # _format_regime_substrate(None) emits this same message.
+        regime_substrate="QUANTITATIVE REGIME SUBSTRATE (Stage C): not available this run.",
         fed_funds="4.50",
         t2yr="3.90",
         t10yr="4.30",
