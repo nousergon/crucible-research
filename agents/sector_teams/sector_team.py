@@ -58,6 +58,17 @@ class SectorTeamContext:
     api_key: str | None = None
     episodic_memories: dict[str, list] = field(default_factory=dict)
     semantic_memories: dict[str, list] = field(default_factory=dict)
+    # PR 4 of scanner-placement arc — this team's regime-blended focus list
+    # (list of FocusListEntry.to_dict() entries) when factor blend is enabled
+    # and the prior regime + factor profiles are available. Empty list when
+    # the substrate is unavailable; the quant analyst falls back to the
+    # full sector slice in that case regardless of FOCUS_LIST_GATING_ENABLED.
+    focus_list: list[dict] = field(default_factory=list)
+    # Mutable accumulator for agent_override tool-call telemetry. Tools that
+    # touch tickers outside this team's focus_list append the ticker here so
+    # archive_writer can aggregate per-ticker override flags. Shared by
+    # reference into create_quant_tools' context for the @tool wrapper.
+    override_tickers: list[str] = field(default_factory=list)
 
 
 def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
@@ -100,6 +111,8 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         technical_scores=ctx.technical_scores,
         run_date=ctx.run_date,
         api_key=ctx.api_key,
+        focus_list=ctx.focus_list,
+        override_tickers=ctx.override_tickers,
     )
 
     quant_picks = quant_output.get("ranked_picks", [])
@@ -255,6 +268,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         "error": team_error,
         "partial": team_partial,
         "partial_reasons": partial_reasons,
+        # PR 4 of scanner-placement arc — tickers the quant agent looked up
+        # via @tool get_factor_profile that were NOT in this team's focus
+        # list. archive_writer projects these onto scanner_evaluations
+        # rows as agent_override=1 for the audit table.
+        "override_tickers": list(ctx.override_tickers),
     }
 
 

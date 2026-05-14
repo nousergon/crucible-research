@@ -128,6 +128,23 @@ FACTOR_BLEND_REGIME_WEIGHTS: dict = {
     "neutral": dict(_FACTOR_BLEND_CFG.get("neutral", {})),
 }
 
+# ── Focus list gating (PR 4 of scanner-placement arc, 260514 plan) ───────────
+# When enabled, the quant analyst's user prompt receives the regime-blended
+# focus list (top-N per team from the Phase 1c factor composites) as its
+# primary ranked input instead of the full sector ticker slice. The agent
+# can still reach outside the focus list via the @tool get_factor_profile
+# (Phase 2 of factor substrate) — those calls are tagged agent_override=1
+# in the scanner_evaluations audit table. Default OFF; flip via
+# alpha-engine-config research/scoring.yaml `aggregator.focus_list_gating`
+# block after a 2-week shadow-observation window confirms focus-list
+# precision/recall vs the agent's full-slice picks.
+_FOCUS_LIST_GATING_CFG: dict = _AGGREGATOR_CFG.get("focus_list_gating", {})
+FOCUS_LIST_GATING_ENABLED: bool = bool(_FOCUS_LIST_GATING_CFG.get("enabled", False))
+FOCUS_LIST_DEFAULT_TEAM_SIZE: int = int(_FOCUS_LIST_GATING_CFG.get("default_team_size", 18))
+FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES: dict[str, int] = {
+    k: int(v) for k, v in _FOCUS_LIST_GATING_CFG.get("per_team_size", {}).items()
+}
+
 # ── Factor quality floor (Phase 4 of factor substrate, 260513 plan) ──────────
 # Structural floor on within-sector quality_score percentile, applied at the
 # _build_signals_payload buy_candidates construction step. Blocks NEW ENTER
