@@ -441,7 +441,15 @@ class ArchiveManager:
             )
 
     def write_scanner_evaluations(self, evaluations: list[dict]) -> None:
-        """Log all ~900 stocks from the scanner with pass/fail flags."""
+        """Log all ~900 stocks from the scanner with pass/fail flags.
+
+        Focus list audit columns (v17 migration) are populated when the
+        evaluation dict carries them — archive_writer's shadow-mode
+        wiring fills them from the regime-blended factor composite.
+        Missing → NULL (the agent_override column defaults to 0 in the
+        schema, but we still pass through so a writer-side override is
+        respected when PR 4 lights up the @tool get_factor_profile boundary).
+        """
         if not self.db_conn:
             return
         for e in evaluations:
@@ -450,8 +458,12 @@ class ArchiveManager:
                    (ticker, eval_date, sector, tech_score, scan_path,
                     quant_filter_pass, liquidity_pass, volatility_pass,
                     balance_sheet_pass, filter_fail_reason, rsi_14, atr_pct,
-                    price_vs_ma200, current_price, avg_volume_20d)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    price_vs_ma200, current_price, avg_volume_20d,
+                    focus_score, focus_stance, focus_team_id,
+                    focus_rank_in_team, focus_rank_in_sector,
+                    focus_list_passed, agent_override)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("sector"),
                     e.get("tech_score"), e.get("scan_path"),
@@ -460,6 +472,10 @@ class ArchiveManager:
                     e.get("filter_fail_reason"), e.get("rsi_14"),
                     e.get("atr_pct"), e.get("price_vs_ma200"),
                     e.get("current_price"), e.get("avg_volume_20d"),
+                    e.get("focus_score"), e.get("focus_stance"),
+                    e.get("focus_team_id"), e.get("focus_rank_in_team"),
+                    e.get("focus_rank_in_sector"),
+                    e.get("focus_list_passed", 0), e.get("agent_override", 0),
                 ),
             )
 

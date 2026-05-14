@@ -69,6 +69,11 @@ from scoring.composite import (
     score_to_rating,
 )
 from scoring.factor_scoring import read_factor_profiles_from_s3
+from scoring.focus_list import (
+    build_focus_list,
+    compute_focus_scores,
+    summarize_focus_list,
+)
 from archive.manager import ArchiveManager
 
 from alpha_engine_lib.decision_capture import (
@@ -1654,6 +1659,93 @@ def _build_notable_developments(state: ResearchState) -> list[str]:
     return notable[:7]
 
 
+def _compute_focus_list_audit_lookup(
+    *,
+    market_regime: str,
+    sector_map: dict[str, str],
+) -> dict[str, dict]:
+    """Compute the regime-blended focus list and project per-ticker audit fields.
+
+    Returns ``{ticker: {focus_score, focus_stance, focus_team_id,
+    focus_rank_in_team, focus_rank_in_sector, focus_list_passed}}`` for every
+    ticker the factor substrate has a profile for. ``focus_list_passed=1``
+    for tickers that made any team's top-N; ``0`` for the rest.
+
+    Empty dict on any of: factor blend disabled, factor profile artifact
+    missing, no contributing tickers. archive_writer treats empty as
+    "shadow logging unavailable this run" — scanner_eval rows get NULL
+    focus_* fields rather than synthetic defaults.
+    """
+    if not FACTOR_BLEND_ENABLED:
+        logger.info(
+            "[focus_list] factor blend disabled — shadow logging skipped"
+        )
+        return {}
+
+    factor_profiles = read_factor_profiles_from_s3()
+    if not factor_profiles:
+        logger.warning(
+            "[focus_list] factor profile artifact missing — shadow logging "
+            "skipped (factors/profiles/latest.json read returned None)"
+        )
+        return {}
+
+    focus_scores = compute_focus_scores(
+        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+    )
+    if not focus_scores:
+        logger.warning(
+            "[focus_list] no factor scores computed for regime=%s — shadow "
+            "logging skipped",
+            market_regime,
+        )
+        return {}
+
+    focus_list = build_focus_list(focus_scores, SECTOR_TEAM_MAP)
+    summary = summarize_focus_list(focus_list)
+    logger.info(
+        "[focus_list] regime=%s, %d teams, summary=%s",
+        market_regime, len(focus_list), summary,
+    )
+
+    # Build per-ticker lookup with focus_list_passed=1 for top-N members
+    lookup: dict[str, dict] = {}
+    passed_tickers: set[str] = set()
+    for team_id, entries in focus_list.items():
+        for e in entries:
+            passed_tickers.add(e.ticker)
+            lookup[e.ticker] = {
+                "focus_score": e.focus_score,
+                "focus_stance": e.stance,
+                "focus_team_id": team_id,
+                "focus_rank_in_team": e.rank_in_team,
+                "focus_rank_in_sector": e.rank_in_sector,
+                "focus_list_passed": 1,
+            }
+
+    # Non-top-N tickers that still have a focus score (scored but ranked
+    # below the team cap) carry their score for downstream "near-miss"
+    # audit — same fields, focus_list_passed=0. team_id + ranks come from
+    # the score dict's sector → team mapping.
+    for ticker, entry in focus_scores.items():
+        if ticker in passed_tickers:
+            continue
+        sector = entry.get("sector")
+        team_id = SECTOR_TEAM_MAP.get(sector)
+        if team_id is None:
+            continue
+        lookup[ticker] = {
+            "focus_score": entry["focus_score"],
+            "focus_stance": entry["stance"],
+            "focus_team_id": team_id,
+            "focus_rank_in_team": None,
+            "focus_rank_in_sector": None,
+            "focus_list_passed": 0,
+        }
+
+    return lookup
+
+
 def archive_writer(state: ResearchState) -> dict:
     """Write all data to S3 + SQLite."""
     logger.info("[archive_writer] starting")
@@ -1815,6 +1907,7 @@ def archive_writer(state: ResearchState) -> dict:
     scanner_universe = state.get("scanner_universe", [])
     technical_scores = state.get("technical_scores", {})
     sector_map = state.get("sector_map", {})
+    market_regime = state.get("market_regime", "neutral")
     # Build set of tickers that any team picked (quant top-10 or recommended)
     team_picked_tickers: set[str] = set()
     for _tid, _out in team_outputs.items():
@@ -1824,8 +1917,21 @@ def archive_writer(state: ResearchState) -> dict:
             if isinstance(_pick, dict):
                 team_picked_tickers.add(_pick.get("ticker", ""))
 
-    scanner_evals = [
-        {
+    # ── Shadow focus list (PR 2 of scanner-placement arc) ────────────────────
+    # Compute the regime-blended factor composite focus list and project
+    # per-ticker membership onto scanner_eval rows for audit. This is
+    # shadow-mode only — the agent contract is unchanged; downstream
+    # analytics can compare focus_list_passed vs quant_filter_pass to
+    # measure focus-list precision/recall against the agent's picks.
+    # Plan doc: alpha-engine-docs/private/scanner-260514.md
+    focus_lookup: dict[str, dict] = _compute_focus_list_audit_lookup(
+        market_regime=market_regime, sector_map=sector_map,
+    )
+
+    scanner_evals = []
+    for ticker in scanner_universe:
+        ts = technical_scores.get(ticker, {})
+        row = {
             "ticker": ticker,
             "eval_date": run_date,
             "sector": sector_map.get(ticker),
@@ -1837,10 +1943,27 @@ def archive_writer(state: ResearchState) -> dict:
             "avg_volume_20d": ts.get("avg_volume_20d"),
             "quant_filter_pass": 1 if ticker in team_picked_tickers else 0,
         }
-        for ticker, ts in ((t, technical_scores.get(t, {})) for t in scanner_universe)
-    ]
+        # Project focus-list audit fields. focus_lookup is empty when factor
+        # profiles aren't readable — every row gets NULL focus_* fields +
+        # focus_list_passed=0, which the dashboard reads as "shadow logging
+        # didn't run this cycle" rather than "all tickers failed."
+        fl_entry = focus_lookup.get(ticker)
+        if fl_entry is not None:
+            row.update(fl_entry)
+        scanner_evals.append(row)
+
     am.write_scanner_evaluations(scanner_evals)
-    logger.info("[archive_writer] logged %d scanner evaluations", len(scanner_evals))
+    if focus_lookup:
+        n_passed = sum(1 for r in scanner_evals if r.get("focus_list_passed"))
+        logger.info(
+            "[archive_writer] logged %d scanner evaluations (focus list: %d passed)",
+            len(scanner_evals), n_passed,
+        )
+    else:
+        logger.info(
+            "[archive_writer] logged %d scanner evaluations (focus list: shadow logging unavailable this run)",
+            len(scanner_evals),
+        )
 
     # Log quant top-10 per team + final recommendations.
     #

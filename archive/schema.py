@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -258,22 +258,32 @@ CREATE TABLE IF NOT EXISTS memory_semantic (
 );
 
 CREATE TABLE IF NOT EXISTS scanner_evaluations (
-    id                  INTEGER PRIMARY KEY,
-    ticker              TEXT NOT NULL,
-    eval_date           TEXT NOT NULL,
-    sector              TEXT,
-    tech_score          REAL,
-    scan_path           TEXT,
-    quant_filter_pass   INTEGER NOT NULL DEFAULT 0,
-    liquidity_pass      INTEGER NOT NULL DEFAULT 1,
-    volatility_pass     INTEGER NOT NULL DEFAULT 1,
-    balance_sheet_pass  INTEGER NOT NULL DEFAULT 1,
-    filter_fail_reason  TEXT,
-    rsi_14              REAL,
-    atr_pct             REAL,
-    price_vs_ma200      REAL,
-    current_price       REAL,
-    avg_volume_20d      REAL,
+    id                      INTEGER PRIMARY KEY,
+    ticker                  TEXT NOT NULL,
+    eval_date               TEXT NOT NULL,
+    sector                  TEXT,
+    tech_score              REAL,
+    scan_path               TEXT,
+    quant_filter_pass       INTEGER NOT NULL DEFAULT 0,
+    liquidity_pass          INTEGER NOT NULL DEFAULT 1,
+    volatility_pass         INTEGER NOT NULL DEFAULT 1,
+    balance_sheet_pass      INTEGER NOT NULL DEFAULT 1,
+    filter_fail_reason      TEXT,
+    rsi_14                  REAL,
+    atr_pct                 REAL,
+    price_vs_ma200          REAL,
+    current_price           REAL,
+    avg_volume_20d          REAL,
+    -- Focus list audit columns (v17 migration). Populated by archive_writer
+    -- in shadow mode pre-cutover; agent contract change is gated behind
+    -- factor-substrate Phase 2 + the FOCUS_LIST_GATING_ENABLED flip.
+    focus_score             REAL,           -- regime-blended factor subscore (0-100)
+    focus_stance            TEXT,           -- dominant factor: momentum/quality/value/low_vol
+    focus_team_id           TEXT,           -- which sector team's focus list it falls in
+    focus_rank_in_team      INTEGER,        -- 1-indexed rank within team focus list; NULL if not in any
+    focus_rank_in_sector    INTEGER,        -- 1-indexed rank within sector
+    focus_list_passed       INTEGER NOT NULL DEFAULT 0,  -- 1 if in any team's top-N
+    agent_override          INTEGER NOT NULL DEFAULT 0,  -- 1 if @tool get_factor_profile called on this non-focus ticker
     UNIQUE(ticker, eval_date)
 );
 
@@ -435,6 +445,27 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # "no stance recorded" rather than coercing to a default label.
     16: ("Add stance column to score_performance for per-stance attribution",
          "ALTER TABLE score_performance ADD COLUMN stance TEXT"),
+    # Focus list audit columns (PR 2 of the scanner-placement arc,
+    # alpha-engine-docs/private/scanner-260514.md). Shadow-mode
+    # observability: archive_writer populates these from the regime-
+    # blended factor composite (Phase 1c + Phase 3 substrate) so the
+    # weekly Saturday SF produces a real focus-list-vs-agent-pick
+    # divergence audit without changing agent behavior. The
+    # agent_override column is reserved for the PR 4 wiring of the
+    # @tool get_factor_profile boundary; it stays 0 until then.
+    # NULL on rows persisted before this migration — downstream
+    # dashboards / backtester analytics treat NULL as "shadow logging
+    # not yet active" rather than coercing to a default value.
+    17: ("Add focus list audit columns to scanner_evaluations",
+         """
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_score REAL;
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_stance TEXT;
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_team_id TEXT;
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_rank_in_team INTEGER;
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_rank_in_sector INTEGER;
+         ALTER TABLE scanner_evaluations ADD COLUMN focus_list_passed INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE scanner_evaluations ADD COLUMN agent_override INTEGER NOT NULL DEFAULT 0;
+         """),
 }
 
 
