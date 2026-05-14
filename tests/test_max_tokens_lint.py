@@ -41,7 +41,7 @@ _ALLOWLIST: dict[str, set[int]] = {
     # oversized for this narrow case. Bumping would just slacken the
     # ceiling; leaving it at 512 keeps the failure-mode visible if the
     # critic ever generates verbose output.
-    "agents/macro_agent.py": {356},
+    "agents/macro_agent.py": {462},
 }
 
 

@@ -104,14 +104,110 @@ def _fmt(val, fmt=".1f", default="N/A") -> str:
         return default
 
 
+def _format_regime_substrate(substrate: Optional[dict]) -> str:
+    """Render the quantitative regime substrate into a compact prompt
+    block for the LLM. Returns a fallback message when None.
+
+    Surfaces: HMM posteriors + argmax + weeks-in-state + log-likelihood,
+    composite intensity_z + per-feature z-scores, BOCPD change_signal +
+    confidence, guardrail flag severity, raw macro features, and a
+    framing instruction that pins the substrate as STRONG-PRIOR not
+    AUTHORITY. The macro agent (this LLM) remains the final regime
+    decision-maker per regime-v3-260514.md §5.3.2.
+    """
+    if not substrate:
+        return (
+            "QUANTITATIVE REGIME SUBSTRATE (Stage C): not available this run.\n"
+            "Reason: the upstream Saturday SF RegimeSubstrate Lambda has not\n"
+            "yet written an artifact, or its non-blocking Catch tripped.\n"
+            "Proceed with LLM judgment + post-LLM quantitative guardrails as\n"
+            "before — these guardrails (VIX/SPY 30d/HY OAS severity\n"
+            "escalators) are still applied to your final regime call.\n"
+        )
+
+    hmm = substrate.get("hmm", {}) or {}
+    probs = hmm.get("probs", {}) or {}
+    composite = substrate.get("composite", {}) or {}
+    per_feat_z = composite.get("per_feature_z", {}) or {}
+    bocpd = substrate.get("bocpd", {}) or {}
+    guardrails = substrate.get("guardrails", {}) or {}
+
+    guard_lines: list[str] = []
+    for flag, label in [
+        ("vix_bear_breached",        "VIX BEAR threshold breached"),
+        ("vix_caution_breached",     "VIX CAUTION threshold breached"),
+        ("spy_30d_bear_breached",    "SPY 30d BEAR threshold breached"),
+        ("spy_30d_caution_breached", "SPY 30d CAUTION threshold breached"),
+        ("hy_oas_caution_breached",  "HY OAS CAUTION threshold breached"),
+    ]:
+        if guardrails.get(flag):
+            guard_lines.append(f"    - {label}")
+    if not guard_lines:
+        guard_lines.append("    - none breached")
+    floor = guardrails.get("active_severity_floor")
+
+    per_feat_lines = [
+        f"    - {feat}: z={z:+.2f}"
+        for feat, z in sorted(per_feat_z.items(), key=lambda kv: -abs(kv[1]))[:6]
+    ]
+    if not per_feat_lines:
+        per_feat_lines.append("    - (no per-feature z-scores available)")
+
+    return (
+        "QUANTITATIVE REGIME SUBSTRATE (Stage C — STRONG PRIOR):\n"
+        "Use as a strong prior for your regime classification. When you\n"
+        "AGREE with the substrate, cite the agreement in your rationale.\n"
+        "When you DEVIATE, explain explicitly what narrative or qualitative\n"
+        "signal you are weighing more heavily than the quantitative view.\n"
+        "You remain the FINAL authority on the regime call.\n"
+        "\n"
+        f"  HMM 3-state posterior (Hamilton-Kim filter, filter-only — no look-ahead):\n"
+        f"    - P(bear)    = {_fmt(probs.get('bear'),    '.2f')}\n"
+        f"    - P(neutral) = {_fmt(probs.get('neutral'), '.2f')}\n"
+        f"    - P(bull)    = {_fmt(probs.get('bull'),    '.2f')}\n"
+        f"    - argmax = {hmm.get('argmax', 'N/A')}, "
+        f"weeks_in_current_state = {hmm.get('weeks_in_current_state', 'N/A')}\n"
+        "\n"
+        f"  Composite intensity (AQR-style risk-on/risk-off, positive = risk-on):\n"
+        f"    - intensity_z = {_fmt(composite.get('intensity_z'), '+.2f')}  "
+        f"({composite.get('implied_severity', 'N/A')})\n"
+        f"  Top driving features (|z| sorted, max 6):\n"
+        + "\n".join(per_feat_lines) + "\n"
+        "\n"
+        f"  Change-point signal (Adams & MacKay 2007 BOCPD):\n"
+        f"    - change_signal = {bocpd.get('change_signal', False)}, "
+        f"confidence = {_fmt(bocpd.get('change_confidence'), '.2f')}, "
+        f"max_runlength_prob = {_fmt(bocpd.get('max_runlength_prob'), '.2f')}\n"
+        "\n"
+        f"  Severity-escalator guardrails (mirror your post-LLM gate):\n"
+        + "\n".join(guard_lines) + "\n"
+        f"    - active_severity_floor = {floor if floor else 'none'}\n"
+        "\n"
+        "Substrate metadata:\n"
+        f"  run_id = {substrate.get('run_id', 'N/A')}, "
+        f"trading_day = {substrate.get('trading_day', 'N/A')}, "
+        f"schema_version = {substrate.get('schema_version', 'N/A')}\n"
+    )
+
+
 def run_macro_agent(
     prior_report: Optional[str],
     prior_date: str,
     macro_data: dict,
     api_key: Optional[str] = None,
+    regime_substrate: Optional[dict] = None,
 ) -> dict:
     """
     Run the Macro & Market Environment Agent.
+
+    Stage C addition (2026-05-14): the agent is informed by a
+    quantitative ``regime_substrate`` produced upstream by the
+    Saturday SF ``RegimeSubstrate`` Lambda (HMM posteriors + composite
+    intensity_z + BOCPD change_signal + guardrail flags + raw macro
+    features). The substrate enters the prompt as a strong prior; the
+    macro agent remains the FINAL regime authority. When substrate is
+    None (pre-deploy state or non-blocking SF Catch tripped), the
+    agent falls back to its prior LLM + post-LLM-guardrail behavior.
 
     Returns dict with:
       report_md: str
@@ -146,10 +242,20 @@ def run_macro_agent(
         )
         breadth = {}
 
+    # Stage C: render the regime substrate as a strong-prior block.
+    # ``_format_regime_substrate`` handles None gracefully — emits a
+    # fallback message instructing the LLM to fall back to its prior
+    # LLM + post-LLM-guardrail behavior. The prompt template's
+    # ``{regime_substrate}`` placeholder is added in alpha-engine-config
+    # PR alongside this; if it's not present, the kwarg is silently
+    # unused by ``str.format``.
+    regime_substrate_block = _format_regime_substrate(regime_substrate)
+
     prompt = _PROMPT_TEMPLATE.format(
         sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),
         prior_date=prior_date,
         prior_report=prior_text,
+        regime_substrate=regime_substrate_block,
         fed_funds=_fmt(macro_data.get("fed_funds_rate")),
         t2yr=_fmt(macro_data.get("treasury_2yr")),
         t10yr=_fmt(macro_data.get("treasury_10yr")),
@@ -425,6 +531,7 @@ def run_macro_agent_with_reflection(
     max_iterations: int = 2,
     api_key: Optional[str] = None,
     prior_snapshots: list[dict] | None = None,
+    regime_substrate: Optional[dict] = None,
 ) -> dict:
     """
     Run macro agent with self-critique reflection loop.
@@ -433,6 +540,11 @@ def run_macro_agent_with_reflection(
     2. Critic evaluates the result
     3. If critic says "revise" and iterations remain, re-run with critique as context
     4. Quantitative guardrails apply as final gate after reflection
+
+    Stage C: ``regime_substrate`` (from upstream Saturday SF) threads
+    through every macro_agent call (initial + revision) as a strong
+    prior. ``None`` is graceful — macro agent falls back to its prior
+    behavior with a fallback substrate-message in the prompt.
 
     Returns the standard macro agent result dict plus a reflection_log field.
     """
@@ -455,6 +567,7 @@ def run_macro_agent_with_reflection(
         prior_date=prior_date,
         macro_data=macro_data,
         api_key=api_key,
+        regime_substrate=regime_substrate,
     )
     initial_regime = result["market_regime"]
 
@@ -491,6 +604,7 @@ def run_macro_agent_with_reflection(
             prior_date=prior_date,
             macro_data=macro_data,
             api_key=api_key,
+            regime_substrate=regime_substrate,
         )
         reflection_log["iterations"] = iteration + 1
 

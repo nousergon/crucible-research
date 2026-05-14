@@ -292,6 +292,32 @@ class ArchiveManager:
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
+    def load_regime_substrate(self) -> dict | None:
+        """Load the most recent regime substrate artifact.
+
+        Producer: ``alpha-engine-predictor-regime-substrate`` Lambda,
+        runs weekly in the Saturday SF ``RegimeSubstrate`` state
+        (between RAGIngestion and Research). Carries HMM posteriors +
+        composite intensity_z + BOCPD change_signal + guardrail flags
+        + raw macro features. The macro economist agent (Stage C)
+        consumes this as a strong prior; macro agent remains the final
+        regime authority.
+
+        Delegates to ``alpha_engine_lib.eval_artifacts.load_latest_eval_artifact``
+        for canonical sidecar→artifact resolution. The lib helper
+        returns ``None`` gracefully on any failure mode (missing
+        sidecar, malformed pointer, missing artifact body, parse
+        errors) — when None, the macro agent falls back to its prior
+        LLM + post-LLM-guardrail behavior. Stage C is observe-only at
+        the substrate-influences-LLM layer; the macro agent's final
+        regime call is still authoritative for downstream consumers.
+        """
+        from alpha_engine_lib.eval_artifacts import load_latest_eval_artifact
+
+        return load_latest_eval_artifact(
+            self.s3, bucket=self.bucket, prefix="regime",
+        )
+
     def load_predictions_json(self) -> dict[str, dict]:
         """
         Load predictor/predictions/latest.json from S3.

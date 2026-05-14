@@ -2,10 +2,14 @@
 Research Graph — Sector-Team Architecture with serial macro + LangGraph
 Send() fan-out to sectors.
 
-Topology (regime-v3 Stage B, 2026-05-14):
+Topology (regime-v3 Stage C, 2026-05-14):
   fetch_data
-  → macro_economist_node       (serial — writes market_regime, sector_modifiers,
-                                sector_ratings to state for sectors to read)
+  → load_regime_substrate_node (Stage C — S3 GET on regime/latest.json;
+                                None when unavailable, gracefully)
+  → macro_economist_node       (serial — substrate-as-strong-prior in the
+                                ReAct prompt; remains FINAL regime authority.
+                                Writes market_regime + sector_modifiers +
+                                sector_ratings to state for sectors to read.)
   → dispatch_sectors_and_exit  (Send: 6 sector teams + exit evaluator — parallel)
   → merge_results              (fan-in: team picks + exits → compute open slots)
   → score_aggregator           (composite scores for team recommendations)
@@ -300,6 +304,18 @@ class ResearchState(TypedDict, total=False):
     # ── Prior context (memory) ─────────────────────────────────────────────
     prior_macro_report: Annotated[str, take_last]
     prior_macro_snapshots: Annotated[list[dict], take_last]
+
+    # ── Regime substrate (Stage C, 2026-05-14) ─────────────────────────────
+    # Quantitative regime substrate produced upstream by the Saturday SF
+    # ``RegimeSubstrate`` Lambda (alpha-engine-predictor-regime-substrate).
+    # Carries HMM posteriors + composite intensity_z + BOCPD change_signal
+    # + guardrail flags + raw macro features. Loaded by
+    # ``load_regime_substrate_node`` between fetch_data and macro
+    # economist; consumed by macro_economist_node as a strong prior in
+    # the agent's ReAct prompt. ``None`` is graceful — macro agent falls
+    # back to its prior LLM + post-LLM-guardrail behavior. The macro
+    # agent remains the FINAL regime authority either way.
+    regime_substrate: Annotated[Optional[dict], take_last]
     episodic_memories: Annotated[dict[str, list], take_last]
     semantic_memories: Annotated[dict[str, list], take_last]
 
@@ -775,6 +791,54 @@ def fetch_data(state: ResearchState) -> dict:
     }
 
 
+def load_regime_substrate_node(state: ResearchState) -> dict:
+    """Load the quantitative regime substrate from S3 (regime-v3 Stage C).
+
+    Resolves the canonical eval_artifacts sidecar pointer at
+    ``regime/latest.json`` and reads the dated artifact. Returns
+    ``{"regime_substrate": None}`` gracefully when:
+
+    - The substrate has never been written (pre-deploy state).
+    - The Saturday SF ``RegimeSubstrate`` state's non-blocking Catch
+      tripped this week and no fresh artifact was produced.
+    - The S3 read fails for transient reasons.
+
+    A ``None`` regime_substrate flows through to ``macro_economist_node``
+    and the macro agent falls back to its prior LLM + post-LLM-
+    guardrail behavior — Stage C is observe-only at the substrate-
+    influences-LLM layer; the macro agent's final regime call is still
+    authoritative for downstream consumers either way.
+    """
+    am = state.get("archive_manager")
+    if am is None:
+        logger.warning(
+            "[load_regime_substrate] no archive_manager in state — "
+            "substrate cannot be loaded; macro agent will run without prior",
+        )
+        return {"regime_substrate": None}
+
+    substrate = am.load_regime_substrate()
+    if substrate is None:
+        logger.info(
+            "[load_regime_substrate] no substrate available; "
+            "macro agent will run without quant prior (Stage A pre-deploy "
+            "or non-blocking SF Catch tripped upstream)",
+        )
+        return {"regime_substrate": None}
+
+    hmm_argmax = (substrate.get("hmm") or {}).get("argmax")
+    intensity_z = (substrate.get("composite") or {}).get("intensity_z")
+    change_signal = (substrate.get("bocpd") or {}).get("change_signal")
+    logger.info(
+        "[load_regime_substrate] loaded run_id=%s hmm_argmax=%s intensity_z=%+.2f change_signal=%s",
+        substrate.get("run_id", "?"),
+        hmm_argmax,
+        intensity_z if isinstance(intensity_z, (int, float)) else 0.0,
+        change_signal,
+    )
+    return {"regime_substrate": substrate}
+
+
 def dispatch_sectors_and_exit(state: ResearchState) -> list:
     """
     Fan-out via Send(): launch 6 sector teams + exit evaluator in parallel.
@@ -982,6 +1046,12 @@ def macro_economist_node(state: ResearchState) -> dict:
             prior_date=prior_date,
             macro_data=macro_data,
             prior_snapshots=prior_snapshots,
+            # Stage C: load_regime_substrate_node populates this state
+            # field with the quant substrate (HMM + composite + BOCPD +
+            # guardrails). None when not yet available — the macro
+            # agent falls back to its prior LLM + post-LLM-guardrail
+            # behavior. Macro agent remains the final regime authority.
+            regime_substrate=state.get("regime_substrate"),
         )
 
     macro_state_update = {
@@ -2466,9 +2536,14 @@ def build_graph() -> StateGraph:
     """
     Sector-team graph with serial macro upstream + Send() fan-out to sectors.
 
-    Topology (regime-v3 Stage B, 2026-05-14):
+    Topology (regime-v3 Stage C, 2026-05-14):
       fetch_data
-        → macro_economist_node                (serial — runs alone)
+        → load_regime_substrate_node          (Stage C — S3 GET on
+                                              regime/latest.json; graceful
+                                              None when unavailable)
+        → macro_economist_node                (serial — consumes substrate
+                                              as strong prior, remains
+                                              final regime authority)
         → dispatch_sectors_and_exit           (Send: 6 teams + exit)
         → merge_results
         → score_aggregator → cio_node → population_entry_handler
@@ -2484,10 +2559,20 @@ def build_graph() -> StateGraph:
       4-class regime taxonomy (bull/neutral/caution/bear) now flows
       into every per-stock pick decision.
 
+    Why load_regime_substrate_node is its own step (Stage C):
+      Stage C adds a quantitative regime substrate (HMM + composite +
+      BOCPD) as a strong prior into the macro agent's ReAct prompt.
+      Reading it in a dedicated node makes the S3 fetch a discrete
+      step visible in LangGraph traces; if the substrate is missing
+      or malformed, the failure is isolated to this node (clearer
+      logs) and ``regime_substrate=None`` flows to macro which falls
+      back to its prior LLM + post-LLM-guardrail behavior.
+
     Trade-off: +1 macro-agent runtime (~1-2 min with reflection loop)
-    on Saturday SF wall-clock vs. structurally-guaranteed regime
-    awareness across all sector LLM analyses. Saturday is not latency-
-    critical; the trade is correct.
+    + 1 S3 GET (~50ms) on Saturday SF wall-clock vs. structurally-
+    guaranteed regime awareness across all sector LLM analyses +
+    quantitative substrate informing the macro authority. Saturday is
+    not latency-critical; the trade is correct.
 
     Macro fallback:
       run_macro_agent_with_reflection's LLM-failure path returns the
@@ -2500,6 +2585,7 @@ def build_graph() -> StateGraph:
 
     # Nodes
     graph.add_node("fetch_data", fetch_data)
+    graph.add_node("load_regime_substrate_node", load_regime_substrate_node)
     graph.add_node("macro_economist_node", macro_economist_node)
     graph.add_node("sector_team_node", sector_team_node)
     graph.add_node("exit_evaluator_node", exit_evaluator_node)
@@ -2514,9 +2600,10 @@ def build_graph() -> StateGraph:
     # Entry point
     graph.set_entry_point("fetch_data")
 
-    # Serial: fetch_data → macro_economist_node (writes market_regime,
-    # sector_modifiers, sector_ratings into state for sectors to read).
-    graph.add_edge("fetch_data", "macro_economist_node")
+    # Serial: fetch_data → load_regime_substrate_node → macro_economist_node
+    # (substrate flows into the macro agent's ReAct prompt as a strong prior).
+    graph.add_edge("fetch_data", "load_regime_substrate_node")
+    graph.add_edge("load_regime_substrate_node", "macro_economist_node")
 
     # Fan-out AFTER macro: dispatch to 6 sector teams + exit evaluator.
     graph.add_conditional_edges("macro_economist_node", dispatch_sectors_and_exit)
