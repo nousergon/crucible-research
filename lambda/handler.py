@@ -20,7 +20,7 @@ import sys
 import time
 
 # Ensure the project root is on sys.path so sibling modules
-# (graph.langsmith_pandas_patch, ssm_secrets) can be imported below.
+# (graph.langsmith_pandas_patch) can be imported below.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # Install the LangSmith pandas DataFrame serializer patch BEFORE any
@@ -85,8 +85,6 @@ def _ensure_init() -> None:
         return
     import exchange_calendars  # noqa: F401 — heavy; cached in sys.modules
     import pytz  # noqa: F401
-    from ssm_secrets import load_secrets
-    load_secrets()
     _init_done = True
 
 
@@ -210,8 +208,8 @@ def handler(event, context):
 
     # Preflight runs AFTER the skip gates — no point paying head_bucket +
     # ANTHROPIC_API_KEY validation on invocations we're about to skip.
-    # Must run AFTER _ensure_init so ANTHROPIC_API_KEY (fetched from SSM
-    # by load_secrets()) is populated in the environment.
+    # ANTHROPIC_API_KEY is resolved on-demand via
+    # alpha_engine_lib.secrets.get_secret() at consumer sites.
     from preflight import ResearchPreflight
     ResearchPreflight(
         bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),

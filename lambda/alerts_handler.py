@@ -56,13 +56,10 @@ import pytz
 from botocore.exceptions import ClientError
 from exchange_calendars import get_calendar
 
-# Load secrets from SSM Parameter Store (must run before any os.environ.get).
-# Populates env vars for the new alpha_engine_lib.telegram path, which
-# resolves TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID via get_secret() with env
-# fallback.
+# Ensure the project root is on sys.path so sibling modules can be imported.
+# Secrets resolve on-demand via alpha_engine_lib.secrets.get_secret() at
+# consumer sites — no module-top SSM fetch required.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from ssm_secrets import load_secrets
-load_secrets()
 
 # Structured logging + flow-doctor singleton from alpha-engine-lib.
 # See lambda/handler.py for the full rationale. flow-doctor.yaml ships

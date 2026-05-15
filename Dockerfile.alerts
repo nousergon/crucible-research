@@ -22,11 +22,6 @@ COPY config/ ${LAMBDA_TASK_ROOT}/config/
 COPY config.py ${LAMBDA_TASK_ROOT}/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
-# alerts_handler.py imports ssm_secrets at module-top to fetch the
-# Lambda's runtime credentials; without this COPY, cold-start hit
-# ModuleNotFoundError. Surfaced by the docker smoke for PR #71
-# (flow-doctor wiring standardization).
-COPY ssm_secrets.py ${LAMBDA_TASK_ROOT}/
 
 # Alerts Lambda handler
 COPY lambda/alerts_handler.py ${LAMBDA_TASK_ROOT}/alerts_handler.py

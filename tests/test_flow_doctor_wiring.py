@@ -255,22 +255,6 @@ class TestAlertsHandlerHasLogger:
         assert "logger = logging.getLogger(__name__)" in text
 
 
-class TestDockerfileAlertsCopiesSsmSecrets:
-    """Dockerfile.alerts must COPY ssm_secrets.py.
-
-    alerts_handler.py imports ssm_secrets at module-top; without the
-    COPY, cold-start crashes with ModuleNotFoundError. Caught by the
-    docker smoke for the PR 2 fixup arc 2026-05-01.
-    """
-
-    def test_dockerfile_alerts_copies_ssm_secrets(self):
-        dockerfile = (REPO_ROOT / "Dockerfile.alerts").read_text()
-        assert "COPY ssm_secrets.py" in dockerfile, (
-            "Dockerfile.alerts must COPY ssm_secrets.py — alerts_handler "
-            "imports it at module-top and the Lambda would crash without it"
-        )
-
-
 class TestNoDeadFlowDoctorPlumbing:
     """Lock in the deletion of the dead ``state["flow_doctor"]`` injections.
 

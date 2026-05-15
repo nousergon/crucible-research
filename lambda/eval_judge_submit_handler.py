@@ -74,15 +74,6 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    try:
-        from ssm_secrets import load_secrets
-        load_secrets()
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "[eval_judge_submit_handler] ssm_secrets.load_secrets() failed; "
-            "relying on existing env vars",
-            exc_info=True,
-        )
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     _init_done = True
 

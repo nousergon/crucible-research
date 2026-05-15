@@ -56,7 +56,6 @@ COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
 COPY health_status.py ${LAMBDA_TASK_ROOT}/
-COPY ssm_secrets.py ${LAMBDA_TASK_ROOT}/
 COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 

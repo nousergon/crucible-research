@@ -82,25 +82,14 @@ _init_done = False
 
 
 def _ensure_init() -> None:
-    """Defer expensive init (SSM secrets fetch) to first invocation.
+    """Defer expensive init to first invocation.
 
     Mirrors lambda/handler.py — the Lambda init phase has a 10-second
-    hard ceiling; pulling secrets at module-top has bitten us before
-    (cold-start INIT_REPORT timeout 2026-04-11). Idempotent."""
+    hard ceiling; module-top work has bitten us before (cold-start
+    INIT_REPORT timeout 2026-04-11). Idempotent."""
     global _init_done
     if _init_done:
         return
-    try:
-        from ssm_secrets import load_secrets
-        load_secrets()
-    except Exception:  # noqa: BLE001
-        # SSM may be unavailable in local-test contexts; log + proceed
-        # so unit tests of the handler don't require an SSM stub.
-        logger.warning(
-            "[eval_judge_handler] ssm_secrets.load_secrets() failed; "
-            "relying on existing env vars",
-            exc_info=True,
-        )
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     _init_done = True
 

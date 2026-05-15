@@ -44,7 +44,6 @@ Multi-agent investment-research pipeline — six sector teams, a CIO, a macro ec
 | Health status writer | [`health_status.py`](health_status.py) |
 | Dry-run / stub harness | [`dry_run.py`](dry_run.py) |
 | Strict-mode toggle (typed-state hard-fail) | [`strict_mode.py`](strict_mode.py) |
-| SSM secret loader | [`ssm_secrets.py`](ssm_secrets.py) |
 
 Proprietary files (gitignored locally; loaded at runtime from `alpha-engine-config`):
 
