@@ -30,6 +30,10 @@ from agents.sector_teams.team_config import (
     TEAM_SECTORS, TEAM_SCREENING_PARAMS, get_team_tickers,
 )
 from agents.prompt_loader import load_prompt
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_with_rate_limit_retry,
+)
 from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
 from agents.sector_teams.qual_analyst import run_qual_analyst
 from agents.sector_teams.peer_review import run_peer_review
@@ -447,6 +451,7 @@ def _update_thesis_for_held_stock(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_PER_STOCK,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -536,9 +541,12 @@ def _update_thesis_for_held_stock(
     last_error: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            extract_resp = structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={"metadata": loaded_prompt.langsmith_metadata()},
+            extract_resp = invoke_with_rate_limit_retry(
+                lambda: structured_llm.invoke(
+                    [HumanMessage(content=prompt)],
+                    config={"metadata": loaded_prompt.langsmith_metadata()},
+                ),
+                label=f"thesis_update:{team_id}:{ticker}",
             )
             update: HeldThesisUpdateLLMOutput | None = extract_resp.get("parsed")
             parsing_error = extract_resp.get("parsing_error")

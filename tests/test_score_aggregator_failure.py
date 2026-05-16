@@ -1,9 +1,20 @@
-"""Tests for score_aggregator hard-fail behavior on sector team errors.
+"""Tests for score_aggregator failure / isolation behavior.
 
-Regression: prior to PR #25 an exception in a team's ReAct agent was
-swallowed and the team returned an empty recommendations list identical
-to the legitimate "LLM produced no picks" path. Aggregator must now raise
-when any team carries a non-None `error` marker.
+Two layered contracts:
+
+1. Original (PR #25): an exception in a team's ReAct agent must not be
+   silently swallowed — a crashed team is distinguishable from a team
+   that legitimately produced no picks (the ``error`` marker).
+
+2. Per-team isolation (2026-05-16 multi-team-429 fix): a team that
+   *still* fails after 429 backoff is tolerated exactly like a partial
+   team. It contributes zero recommendations but does NOT nuke the run
+   when other teams produced usable picks. The run ERRORs ONLY when
+   every team is failed-or-partial AND not a single recommendation
+   survives ("nothing for CIO to rank"). Every team that *succeeded*
+   has already been persisted to S3 by ``sector_team_node`` before any
+   other team could fail, so an SF re-invocation reuses the completed
+   teams and only re-executes the failed ones.
 """
 
 from __future__ import annotations
@@ -22,7 +33,12 @@ def _state(team_outputs: dict) -> dict:
 
 
 class TestScoreAggregatorHardFail:
-    def test_raises_when_any_team_has_error(self):
+    """The run ERRORs only when there is genuinely nothing for CIO to
+    rank: every team failed-or-partial AND zero recommendations survive.
+    """
+
+    def test_raises_when_only_team_errored_with_no_picks(self):
+        # Single team, errored, no picks anywhere → nothing to rank.
         state = _state({
             "technology": {
                 "recommendations": [],
@@ -34,6 +50,7 @@ class TestScoreAggregatorHardFail:
             score_aggregator(state)
 
     def test_raises_with_all_failed_teams_listed(self):
+        # Every team errored, no picks → nothing to rank; both named.
         state = _state({
             "healthcare": {"recommendations": [], "thesis_updates": {},
                            "error": "APIError: 529"},
@@ -98,11 +115,11 @@ class TestScoreAggregatorPartialTolerance:
             for r in caplog.records
         ), f"Expected WARN naming the partial team; got: {[r.message for r in caplog.records]}"
 
-    def test_partial_team_with_error_still_raises(self):
-        """Belt-and-suspenders: if a team somehow has BOTH partial=True
-        AND a real error, the error path still wins (hard-fail). The
-        partial flag is for budget-exhausted runs that produced no
-        downstream-incompatible state, not for masking real failures.
+    def test_only_team_failed_with_no_picks_raises(self):
+        """A single team that errored (e.g. a 429 that survived backoff)
+        with no other team and no picks anywhere → nothing for CIO to
+        rank → raise. (Isolation only saves the run when *other* teams
+        produced usable picks — see TestScoreAggregatorIsolation.)
         """
         state = _state({
             "technology": {
@@ -128,7 +145,10 @@ class TestScoreAggregatorPartialTolerance:
                            "error": None, "partial": True,
                            "partial_reasons": ["quant:recursion_limit_exhausted"]},
         })
-        with pytest.raises(RuntimeError, match="all .* sector teams returned partial"):
+        with pytest.raises(
+            RuntimeError,
+            match="sector teams degraded with zero usable recommendations",
+        ):
             score_aggregator(state)
 
     def test_mixed_partial_and_full_teams_advances(self):
@@ -146,3 +166,97 @@ class TestScoreAggregatorPartialTolerance:
         # Should not raise.
         result = score_aggregator(state)
         assert result == {"investment_theses": {}}
+
+
+class TestScoreAggregatorIsolation:
+    """Per-team isolation — a team that still fails after 429 backoff
+    must NOT abort the run when other teams produced usable picks. This
+    is the load-bearing behavior change of the 2026-05-16 resilience
+    fix: re-runs reuse the persisted succeeded teams (already written to
+    S3 by sector_team_node) and only re-execute the failed ones.
+    """
+
+    def test_one_team_failed_others_have_picks_does_not_raise(self, caplog):
+        import logging
+        state = _state({
+            "technology": {
+                "recommendations": [],
+                "thesis_updates": {},
+                "error": (
+                    "RateLimitError: 429 — org rate limit of 450,000 "
+                    "input tokens/min, claude-haiku-4-5"
+                ),
+            },
+            "healthcare": {
+                "recommendations": [
+                    {"ticker": "LLY", "quant_score": 70, "qual_score": 65}
+                ],
+                "thesis_updates": {},
+                "error": None,
+            },
+        })
+        with caplog.at_level(logging.WARNING, logger="research"):
+            result = score_aggregator(state)
+        # Did NOT raise; the surviving team's pick was scored.
+        assert "LLY" in result["investment_theses"]
+        # The failed team is named in a WARN, not raised.
+        assert any(
+            "technology" in r.message and "FAILED" in r.message
+            for r in caplog.records
+        ), [r.message for r in caplog.records]
+
+    def test_2026_05_16_multi_team_429_does_not_abort_when_picks_survive(self):
+        """Regression: the exact 2026-05-16 shape — defensives /
+        financials / technology all 429 — must NOT abort the whole run
+        when ≥1 other team produced usable picks. Pre-fix this raised
+        ``RuntimeError("sector team(s) failed: ...")`` and the Lambda
+        returned status:ERROR, discarding every successful team.
+        """
+        msg_429 = (
+            "RateLimitError 429 — org rate limit of 450,000 input "
+            "tokens/min, claude-haiku-4-5"
+        )
+        state = _state({
+            "defensives": {"recommendations": [], "thesis_updates": {},
+                           "error": msg_429},
+            "financials": {"recommendations": [], "thesis_updates": {},
+                           "error": msg_429},
+            "technology": {"recommendations": [], "thesis_updates": {},
+                           "error": msg_429},
+            "healthcare": {"recommendations": [
+                    {"ticker": "LLY", "quant_score": 70, "qual_score": 65}
+                ],
+                           "thesis_updates": {}, "error": None},
+            "industrials": {
+                "recommendations": [
+                    {"ticker": "CAT", "quant_score": 60, "qual_score": 58}
+                ],
+                "thesis_updates": {}, "error": None},
+            "consumer": {
+                "recommendations": [
+                    {"ticker": "COST", "quant_score": 72, "qual_score": 68}
+                ],
+                "thesis_updates": {}, "error": None},
+        })
+        # Must NOT raise — 3 teams 429'd but 3 produced usable picks.
+        result = score_aggregator(state)
+        theses = result["investment_theses"]
+        # All 3 surviving teams' picks were scored (not discarded).
+        assert {"LLY", "CAT", "COST"}.issubset(set(theses))
+
+    def test_all_failed_no_picks_still_raises(self):
+        """Isolation does not mask a total wipeout — every team 429'd,
+        zero picks survive → nothing for CIO to rank → ERROR.
+        """
+        msg_429 = "RateLimitError 429 — org rate limit"
+        state = _state({
+            "defensives": {"recommendations": [], "thesis_updates": {},
+                           "error": msg_429},
+            "financials": {"recommendations": [], "thesis_updates": {},
+                           "error": msg_429},
+        })
+        with pytest.raises(
+            RuntimeError,
+            match="sector teams degraded with zero usable recommendations",
+        ):
+            score_aggregator(state)

@@ -292,6 +292,139 @@ class ArchiveManager:
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
+    # ── Per-sector-team run persistence (resumability) ────────────────────────
+    #
+    # The Research Lambda runs the LangGraph stateless (no checkpointer —
+    # see graph/research_graph.py build_graph()). A re-invocation
+    # (e.g. an SF retry after a 429) would re-dispatch all 6 sector
+    # teams via Send() and re-pay every Haiku call. To make a re-run
+    # reuse teams that already succeeded, each team's full output is
+    # persisted to a deterministic, run-date-scoped S3 key the moment
+    # it completes successfully — so it survives even when a *different*
+    # team later fails and the overall run would otherwise ERROR. On the
+    # next invocation sector_team_node short-circuits on a present,
+    # well-formed persisted output (zero Haiku calls for that team).
+    #
+    # Load-bearing invariant: a re-invocation must NEVER re-pay a sector
+    # team that already succeeded for that run_date. The key is scoped
+    # to run_date so a *new* run_date never reuses a prior date's teams.
+
+    @staticmethod
+    def _sector_team_run_key(run_date: str, team_id: str) -> str:
+        """Deterministic S3 key for one persisted sector-team run.
+
+        Mirrors the ``archive/{category}/...`` prefix convention used by
+        save_reports / save_stock_archive. greppable: ``sector_team_runs``.
+        """
+        return f"archive/sector_team_runs/{run_date}/{team_id}.json"
+
+    def save_sector_team_run(
+        self, run_date: str, team_id: str, output: dict,
+    ) -> None:
+        """Persist a successfully-completed sector team's output to S3.
+
+        Called from ``sector_team_node`` immediately after a team
+        finishes WITHOUT an ``error`` (a partial team — recursion
+        exhausted — is still persisted: it has no error and re-running
+        it would just re-burn budget for the same empty result).
+
+        ``default=str`` mirrors ``write_signals_json`` — the team output
+        carries only JSON-native types plus model_dump'd dicts, but the
+        defensive coercion guarantees a write can never crash the run.
+        Persistence failure is non-fatal: log + continue (the team's
+        in-memory output still flows; we only lose resumability for it).
+        """
+        key = self._sector_team_run_key(run_date, team_id)
+        envelope = {
+            "run_date": run_date,
+            "team_id": team_id,
+            "output": output,
+        }
+        try:
+            body = json.dumps(envelope, indent=2, default=str)
+            self._s3_put(key, body)
+            log.info(
+                "[sector_team_run] persisted %s (%d recommendations) → s3://%s/%s",
+                team_id,
+                len(output.get("recommendations", []) or []),
+                self.bucket, key,
+            )
+        except Exception as e:
+            log.warning(
+                "[sector_team_run] persist FAILED for %s (%s) — run "
+                "continues; this team just won't be resumable on a rerun",
+                team_id, e,
+            )
+
+    def load_sector_team_run(
+        self, run_date: str, team_id: str,
+    ) -> Optional[dict]:
+        """Load a previously-persisted sector-team output for resume.
+
+        Returns the team ``output`` dict iff a well-formed envelope
+        exists for EXACTLY this ``(run_date, team_id)``. Returns None
+        when:
+
+          * no object exists (first run / this team hasn't succeeded yet)
+          * the JSON is corrupt or the envelope shape is wrong
+          * the envelope's run_date / team_id don't match (stale/cross-
+            wired object — never reuse a prior date's team)
+
+        Any None outcome means the caller re-runs the team fresh. A
+        stale/corrupt object logs a structured warning and falls back
+        to re-run rather than crashing — resumability is best-effort,
+        never a new failure surface.
+        """
+        key = self._sector_team_run_key(run_date, team_id)
+        raw = self._s3_get(key)
+        if raw is None:
+            return None
+        try:
+            envelope = json.loads(raw)
+        except Exception as e:
+            log.warning(
+                "[sector_team_run] corrupt persisted JSON at %s (%s) — "
+                "ignoring, team %s will be re-run",
+                key, e, team_id,
+            )
+            return None
+        if not isinstance(envelope, dict):
+            log.warning(
+                "[sector_team_run] persisted object at %s is not a dict "
+                "— ignoring, team %s will be re-run",
+                key, team_id,
+            )
+            return None
+        # Idempotency guard: the envelope MUST self-identify with the
+        # exact (run_date, team_id) we asked for. A mismatch means a
+        # stale or cross-wired object — never reuse it.
+        if (
+            envelope.get("run_date") != run_date
+            or envelope.get("team_id") != team_id
+        ):
+            log.warning(
+                "[sector_team_run] envelope identity mismatch at %s "
+                "(envelope run_date=%r team_id=%r, expected %r/%r) — "
+                "ignoring, team will be re-run",
+                key, envelope.get("run_date"), envelope.get("team_id"),
+                run_date, team_id,
+            )
+            return None
+        output = envelope.get("output")
+        if not isinstance(output, dict) or "team_id" not in output:
+            log.warning(
+                "[sector_team_run] persisted output at %s is malformed "
+                "(not a dict with team_id) — ignoring, team %s re-runs",
+                key, team_id,
+            )
+            return None
+        log.info(
+            "[sector_team_run] RESUME: loaded persisted %s for %s from "
+            "s3://%s/%s — short-circuiting (zero Haiku calls)",
+            team_id, run_date, self.bucket, key,
+        )
+        return output
+
     def load_regime_substrate(self) -> dict | None:
         """Load the most recent regime substrate artifact.
 

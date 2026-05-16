@@ -889,9 +889,47 @@ def dispatch_sectors_and_exit(state: ResearchState) -> list:
 
 
 def sector_team_node(state: ResearchState) -> dict:
-    """Run a single sector team (dispatched via Send)."""
+    """Run a single sector team (dispatched via Send).
+
+    Resumability: the Research Lambda runs the graph stateless (no
+    checkpointer), so an SF re-invocation re-dispatches all 6 teams.
+    Before doing ANY LLM/tool work for this team we check S3 for a
+    persisted output for exactly this ``(run_date, team_id)`` — if a
+    well-formed one exists (a prior invocation already completed this
+    team for this run_date) we short-circuit and feed it straight into
+    ``sector_team_outputs``, paying ZERO Haiku calls. That is the
+    load-bearing invariant: a re-run must NEVER re-pay a team that
+    already succeeded for this run_date. On success below we persist
+    this team's output immediately (before any other team can fail and
+    ERROR the run) so the next invocation can reuse it.
+    """
     team_id = state.get("team_id", "unknown")
+    run_date = state["run_date"]
     logger.info("[sector_team:%s] starting", team_id)
+
+    # ── Resume short-circuit ──────────────────────────────────────────────
+    # If a prior invocation of THIS run_date already completed this team,
+    # reuse the persisted output and skip all LLM/tool work. Best-effort:
+    # any failure / staleness in the load path returns None and we run
+    # the team fresh (load_sector_team_run never raises).
+    _am = state.get("archive_manager")
+    if _am is not None:
+        try:
+            persisted = _am.load_sector_team_run(run_date, team_id)
+        except Exception as e:  # pragma: no cover — defensive; loader is safe
+            logger.warning(
+                "[sector_team:%s] resume load raised unexpectedly (%s) — "
+                "running team fresh", team_id, e,
+            )
+            persisted = None
+        if persisted is not None:
+            logger.info(
+                "[sector_team:%s] RESUME — reusing persisted output "
+                "(%d recommendations); zero Haiku calls this invocation",
+                team_id,
+                len(persisted.get("recommendations", []) or []),
+            )
+            return {"sector_team_outputs": {team_id: persisted}}
 
     # Stage D' Wire 1: extract intensity_z from the regime substrate
     # (loaded by load_regime_substrate_node upstream of macro). None
@@ -1025,6 +1063,23 @@ def sector_team_node(state: ResearchState) -> dict:
             input_data_summary=tu_summary,
             agent_output=updated,
         )
+
+    # ── Persist on success (resumability) ─────────────────────────────────
+    # Write this team's full output to S3 NOW — before any other team
+    # can fail and ERROR the overall run. A team is persisted iff it has
+    # no hard ``error`` (a partial/recursion-exhausted team is persisted
+    # too: re-running it would just re-burn budget for the same empty
+    # result, and the aggregator already tolerates partials). A team
+    # that errored is NOT persisted so a re-run gets a fresh attempt at
+    # it (the backoff / a TPM-window reset may let it succeed).
+    if _am is not None and not result.get("error"):
+        try:
+            _am.save_sector_team_run(run_date, team_id, result)
+        except Exception as e:  # pragma: no cover — saver is already safe
+            logger.warning(
+                "[sector_team:%s] persist raised unexpectedly (%s) — run "
+                "continues; team just won't be resumable", team_id, e,
+            )
 
     # Return partial state update — reject_on_conflict reducer merges team
     # outputs (each team_id is disjoint).
@@ -1223,11 +1278,21 @@ def merge_results_node(state: ResearchState) -> dict:
 def score_aggregator(state: ResearchState) -> dict:
     """Compute composite scores for all team recommendations.
 
-    Hard-fails if any sector team reported a non-None error — an exception
-    inside a team's ReAct agent was previously silently swallowed, making
-    a crashed team indistinguishable from a team that legitimately had
-    zero picks. Per the hard-fail rule, surface the failure here so
-    flow-doctor catches it at the Lambda boundary.
+    Per-team isolation (2026-05-16 multi-team-429 fix): a team that
+    *still* fails after 429-backoff is tolerated exactly like a partial
+    team — its zero contribution is logged loud and counted, but it does
+    NOT nuke the whole run when other teams produced usable picks. This
+    mirrors the long-standing ``partial_teams`` tolerance philosophy
+    (proceed with the teams CIO can actually rank). The run only ERRORs
+    when there is genuinely nothing for CIO to rank: every team either
+    errored or went partial AND no team contributed a single
+    recommendation (the old "all teams partial" guard, generalized to
+    "no usable picks survive").
+
+    By the time this node runs, every team that *succeeded* has already
+    had its output persisted to S3 by ``sector_team_node`` (before any
+    other team could fail), so an SF re-invocation reuses the completed
+    teams and only re-executes the previously-failed ones.
     """
     logger.info("[score_aggregator] starting")
 
@@ -1235,42 +1300,79 @@ def score_aggregator(state: ResearchState) -> dict:
     sector_modifiers = state.get("sector_modifiers", {})
     sector_map = state.get("sector_map", {})
 
+    # Teams that errored (e.g. a 429 that survived backoff) or went
+    # partial (recursion exhausted) are BOTH degraded-but-non-fatal —
+    # they contribute zero recommendations but must not crash the run
+    # when other teams succeeded.
     failed_teams = {
         tid: out.get("error")
         for tid, out in team_outputs.items()
         if out.get("error")
     }
-    if failed_teams:
-        msg = "sector team(s) failed: " + "; ".join(
-            f"{tid}: {err}" for tid, err in failed_teams.items()
-        )
-        logger.error("[score_aggregator] %s", msg)
-        raise RuntimeError(msg)
-
-    # Partial teams (recursion budget exhausted, etc.) contribute zero
-    # recommendations but don't crash the SF — degraded-but-non-fatal.
-    # Logged loud + counted so operators see the drift without the SF
-    # halting on a single team's bad day. If ALL teams are partial we
-    # surface that as an error since CIO would have nothing to rank.
     partial_teams = {
         tid: out.get("partial_reasons", [])
         for tid, out in team_outputs.items()
         if out.get("partial")
     }
-    if partial_teams:
-        if len(partial_teams) == len(team_outputs):
+
+    # Teams that produced at least one usable recommendation — the set
+    # CIO can actually rank. A failed/partial team contributes none.
+    teams_with_picks = {
+        tid
+        for tid, out in team_outputs.items()
+        if out.get("recommendations")
+    }
+    total_recs = sum(
+        len(out.get("recommendations", []) or [])
+        for out in team_outputs.values()
+    )
+
+    if failed_teams or partial_teams:
+        # ERROR only when there is nothing left for CIO to rank: every
+        # team is failed-or-partial AND not a single recommendation
+        # survives. Otherwise proceed with the usable teams.
+        degraded = set(failed_teams) | set(partial_teams)
+        nothing_to_rank = (
+            len(degraded) == len(team_outputs) and total_recs == 0
+        )
+        if nothing_to_rank:
+            parts = []
+            if failed_teams:
+                parts.append(
+                    "failed: "
+                    + "; ".join(
+                        f"{tid}: {err}"
+                        for tid, err in failed_teams.items()
+                    )
+                )
+            if partial_teams:
+                parts.append(f"partial: {partial_teams}")
             msg = (
-                f"all {len(team_outputs)} sector teams returned partial — CIO "
-                f"has nothing to rank. Reasons: {partial_teams}"
+                f"all {len(team_outputs)} sector teams degraded with zero "
+                f"usable recommendations — CIO has nothing to rank. "
+                + " | ".join(parts)
             )
             logger.error("[score_aggregator] %s", msg)
             raise RuntimeError(msg)
-        logger.warning(
-            "[score_aggregator] %d of %d sector teams returned partial "
-            "(0 recommendations contributed). Reasons: %s. SF advances; "
-            "investigate per-team observability.",
-            len(partial_teams), len(team_outputs), partial_teams,
-        )
+
+        if failed_teams:
+            logger.warning(
+                "[score_aggregator] %d of %d sector teams FAILED "
+                "(isolated, 0 recommendations contributed): %s. SF "
+                "advances on the %d team(s) with usable picks (%d recs "
+                "total). A re-invocation will reuse the persisted "
+                "succeeded teams and only re-execute the failed ones.",
+                len(failed_teams), len(team_outputs),
+                {tid: err for tid, err in failed_teams.items()},
+                len(teams_with_picks), total_recs,
+            )
+        if partial_teams:
+            logger.warning(
+                "[score_aggregator] %d of %d sector teams returned partial "
+                "(0 recommendations contributed). Reasons: %s. SF advances; "
+                "investigate per-team observability.",
+                len(partial_teams), len(team_outputs), partial_teams,
+            )
 
     investment_theses = {}
     market_regime = state.get("market_regime", "neutral")

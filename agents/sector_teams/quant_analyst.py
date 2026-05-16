@@ -163,6 +163,7 @@ def run_quant_analyst(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -283,12 +284,15 @@ def run_quant_analyst(
         # Token usage from this ReAct loop's multiple Anthropic calls
         # accumulates into the active ``track_llm_cost`` frame opened
         # by the outer ``sector_team_node`` in research_graph.py.
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": user_message}]},
-            config={
-                "recursion_limit": _QUANT_RECURSION_LIMIT,
-                "metadata": _ls_metadata,
-            },
+        result = invoke_with_rate_limit_retry(
+            lambda: agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config={
+                    "recursion_limit": _QUANT_RECURSION_LIMIT,
+                    "metadata": _ls_metadata,
+                },
+            ),
+            label=f"quant:{team_id}:react",
         )
 
         messages = result.get("messages", [])
@@ -316,9 +320,12 @@ def run_quant_analyst(
             "return an empty list.\n\n"
             f"--- ANALYST ANSWER ---\n{final_text}"
         ))
-        extract_resp = structured_llm.invoke(
-            [extract_msg],
-            config={"metadata": _ls_metadata},
+        extract_resp = invoke_with_rate_limit_retry(
+            lambda: structured_llm.invoke(
+                [extract_msg],
+                config={"metadata": _ls_metadata},
+            ),
+            label=f"quant:{team_id}:extract",
         )
         parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
@@ -577,3 +584,7 @@ def _build_system_prompt(
 
 from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
 from agents.langchain_utils import get_final_text as _get_final_text
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_with_rate_limit_retry,
+)
