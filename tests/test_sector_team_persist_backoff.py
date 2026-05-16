@@ -50,6 +50,7 @@ import tempfile
 
 import pytest
 
+from agents import langchain_utils
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     invoke_with_rate_limit_retry,
@@ -234,22 +235,72 @@ class TestRateLimitBackoff:
             invoke_with_rate_limit_retry(boom, label="t:x")
         assert calls["n"] == 1
 
-    def test_persistent_429_eventually_raises(self, monkeypatch):
+    def test_persistent_429_raises_at_deadline_not_attempt_count(
+        self, monkeypatch
+    ):
+        """REWRITTEN (was test_persistent_429_eventually_raises): the
+        wrapper is now deadline-bounded, NOT a fixed ``max_attempts``
+        cap (that kwarg was removed). A persistent 429 retries until
+        the deadline then re-raises the 429 — the all-agents-strict
+        caller turns that into status:ERROR (no signals.json/email)."""
         monkeypatch.setattr(
             "agents.langchain_utils.time.sleep", lambda s: None
         )
+        # Tiny deadline so the loop gives up fast.
+        monkeypatch.setattr(
+            langchain_utils, "RATE_LIMIT_RETRY_DEADLINE_SECONDS", 0.01
+        )
+
+        calls = {"n": 0}
 
         def always_429():
+            calls["n"] += 1
             raise _make_rate_limit_error()
 
         with pytest.raises(Exception) as exc:
-            invoke_with_rate_limit_retry(
-                always_429, label="t:x", max_attempts=3
-            )
-        # The final raised exception is still a rate-limit error.
+            invoke_with_rate_limit_retry(always_429, label="t:x")
         from agents.langchain_utils import _is_rate_limit_error
 
         assert _is_rate_limit_error(exc.value)
+        # It DID attempt at least once before the deadline check fired.
+        assert calls["n"] >= 1
+
+    def test_deadline_constant_default_is_75_min(self):
+        """The locked default: ~75 min wall-clock per-invoke 429
+        retry window (overridable via RATE_LIMIT_RETRY_DEADLINE_SECONDS,
+        clamped 5 min .. 3 hr)."""
+        assert langchain_utils._resolve_deadline_seconds.__module__
+        # Default (no env) resolves to 75 minutes.
+        import os
+
+        prev = os.environ.pop("RATE_LIMIT_RETRY_DEADLINE_SECONDS", None)
+        try:
+            assert langchain_utils._resolve_deadline_seconds() == 75 * 60
+        finally:
+            if prev is not None:
+                os.environ["RATE_LIMIT_RETRY_DEADLINE_SECONDS"] = prev
+
+    def test_long_429_then_success_within_deadline(self, monkeypatch):
+        """A team that 429s for a while then succeeds BEFORE the
+        deadline proceeds with its real output (the long-retry window
+        is what makes a 60-90 min org-TPM stall survivable)."""
+        monkeypatch.setattr(
+            "agents.langchain_utils.time.sleep", lambda s: None
+        )
+        monkeypatch.setattr(
+            langchain_utils, "RATE_LIMIT_RETRY_DEADLINE_SECONDS", 3600.0
+        )
+
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 8:  # 429 for the first 7 attempts
+                raise _make_rate_limit_error()
+            return "REAL"
+
+        assert invoke_with_rate_limit_retry(flaky, label="t:x") == "REAL"
+        assert calls["n"] == 8
 
 
 # ── Part B: per-team S3 persistence ───────────────────────────────────────

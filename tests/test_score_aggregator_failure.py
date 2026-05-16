@@ -1,26 +1,44 @@
-"""Tests for score_aggregator failure / isolation behavior.
+"""score_aggregator all-agents-strict hard-fail contract.
 
-Two layered contracts:
+CONTRACT CHANGE (Brian, 2026-05-16) — this file's #194-era classes
+(TestScoreAggregatorPartialTolerance / TestScoreAggregatorIsolation,
+which pinned "a failed/partial team is tolerated; the run only ERRORs
+when nothing survives for CIO to rank") are INTENTIONALLY REPLACED, not
+a regression to preserve:
 
-1. Original (PR #25): an exception in a team's ReAct agent must not be
-   silently swallowed — a crashed team is distinguishable from a team
-   that legitimately produced no picks (the ``error`` marker).
+  "If the sector agents don't run, Research shouldn't complete until
+   all sectors are run. ... We don't get anything from this process if
+   the sectors, or any other agent for that matter, fail/don't run."
 
-2. Per-team isolation (2026-05-16 multi-team-429 fix): a team that
-   *still* fails after 429 backoff is tolerated exactly like a partial
-   team. It contributes zero recommendations but does NOT nuke the run
-   when other teams produced usable picks. The run ERRORs ONLY when
-   every team is failed-or-partial AND not a single recommendation
-   survives ("nothing for CIO to rank"). Every team that *succeeded*
-   has already been persisted to S3 by ``sector_team_node`` before any
-   other team could fail, so an SF re-invocation reuses the completed
-   teams and only re-executes the failed ones.
+New contract: score_aggregator raises (-> handler status:ERROR, NO
+signals.json / email / DB write) if ANY sector team is missing
+(absent from ALL_TEAM_IDS coverage), failed (carries ``error``), or
+partial. Surviving picks from other teams do NOT save the run.
+
+What is KEPT (composes with the directive): teams that succeed are
+still persisted to S3 by sector_team_node, so an SF redrive reuses
+them and only re-attempts the still-missing team within the long
+429-retry window. That persistence/resume behavior is exercised in
+test_sector_team_persist_backoff.py.
+
+Pre-existing tests rewritten:
+  - test_passes_through_when_no_errors / _when_error_key_absent: a
+    SINGLE team with no error used to pass; now it fails because the
+    other 5 of ALL_TEAM_IDS are missing. Rewritten to supply a full
+    6-team clean set for the pass-through assertion.
+  - TestScoreAggregatorPartialTolerance.* : partial no longer
+    tolerated -> all rewritten to assert RAISE.
+  - TestScoreAggregatorIsolation.* : isolation removed -> the
+    multi-team-429 regression now asserts the run RAISES even when
+    other teams produced picks (the exact behavior the directive
+    mandates).
 """
 
 from __future__ import annotations
 
 import pytest
 
+from agents.sector_teams.team_config import ALL_TEAM_IDS
 from graph.research_graph import score_aggregator
 
 
@@ -32,13 +50,28 @@ def _state(team_outputs: dict) -> dict:
     }
 
 
-class TestScoreAggregatorHardFail:
-    """The run ERRORs only when there is genuinely nothing for CIO to
-    rank: every team failed-or-partial AND zero recommendations survive.
-    """
+def _clean(team_id: str, recs=None) -> dict:
+    return {
+        "team_id": team_id,
+        "recommendations": recs if recs is not None else [],
+        "thesis_updates": {},
+        "error": None,
+        "partial": False,
+        "partial_reasons": [],
+    }
 
-    def test_raises_when_only_team_errored_with_no_picks(self):
-        # Single team, errored, no picks anywhere → nothing to rank.
+
+def _all_clean(extra=None) -> dict:
+    """A full, complete, all-clean 6-team set (the only shape that
+    passes the all-agents-strict gate)."""
+    out = {tid: _clean(tid) for tid in ALL_TEAM_IDS}
+    if extra:
+        out.update(extra)
+    return out
+
+
+class TestAllAgentsStrictHardFail:
+    def test_single_errored_team_raises_and_names_it(self):
         state = _state({
             "technology": {
                 "recommendations": [],
@@ -49,8 +82,7 @@ class TestScoreAggregatorHardFail:
         with pytest.raises(RuntimeError, match="technology"):
             score_aggregator(state)
 
-    def test_raises_with_all_failed_teams_listed(self):
-        # Every team errored, no picks → nothing to rank; both named.
+    def test_all_errored_teams_listed(self):
         state = _state({
             "healthcare": {"recommendations": [], "thesis_updates": {},
                            "error": "APIError: 529"},
@@ -63,36 +95,50 @@ class TestScoreAggregatorHardFail:
         assert "healthcare" in msg
         assert "defensives" in msg
 
-    def test_passes_through_when_no_errors(self):
-        state = _state({
-            "technology": {
-                "recommendations": [],
-                "thesis_updates": {},
-                "error": None,
-            },
-        })
-        # Should not raise — error=None means the team legitimately had no picks.
-        result = score_aggregator(state)
-        assert result == {"investment_theses": {}}
+    def test_missing_teams_hard_fail(self):
+        """REWRITTEN from test_passes_through_when_no_errors: a single
+        clean team is NO LONGER a pass — the other 5 of ALL_TEAM_IDS
+        are missing, which is fatal under all-agents-strict."""
+        state = _state({"technology": _clean("technology")})
+        with pytest.raises(RuntimeError, match="missing"):
+            score_aggregator(state)
 
-    def test_passes_through_when_error_key_absent(self):
-        # Backward compat: team_outputs written before this change lack
-        # the `error` key entirely — aggregator should not raise.
+    def test_missing_teams_hard_fail_error_key_absent(self):
+        """REWRITTEN from test_passes_through_when_error_key_absent."""
         state = _state({
             "technology": {"recommendations": [], "thesis_updates": {}},
         })
-        result = score_aggregator(state)
+        with pytest.raises(RuntimeError, match="missing"):
+            score_aggregator(state)
+
+    def test_full_clean_set_passes_through(self):
+        """The ONLY pass shape: every ALL_TEAM_IDS team present, none
+        errored, none partial. (Recommendations may be empty — a clean
+        zero-pick team under the regime-conditional gate is valid.)"""
+        result = score_aggregator(_state(_all_clean()))
         assert result == {"investment_theses": {}}
 
 
-class TestScoreAggregatorPartialTolerance:
-    """2026-05-02: sector teams that hit recursion_limit must NOT crash the
-    SF. They return ``{partial: True, error: None}``; aggregator logs WARN
-    and proceeds. Distinct from real errors which still hard-fail.
-    """
+class TestPartialNoLongerTolerated:
+    """REWRITTEN TestScoreAggregatorPartialTolerance. #194/#2026-05-02
+    tolerated recursion-exhausted partial teams; the directive reverses
+    that — a partial team did not produce real output, so the run
+    hard-fails."""
 
-    def test_partial_team_does_not_raise(self, caplog):
-        import logging
+    def test_partial_team_raises_even_with_other_clean_teams(self):
+        state = _state(_all_clean({
+            "technology": {
+                "recommendations": [],
+                "thesis_updates": {},
+                "error": None,
+                "partial": True,
+                "partial_reasons": ["quant:recursion_limit_exhausted"],
+            },
+        }))
+        with pytest.raises(RuntimeError, match="partial"):
+            score_aggregator(state)
+
+    def test_single_partial_team_raises(self):
         state = _state({
             "technology": {
                 "recommendations": [],
@@ -101,84 +147,47 @@ class TestScoreAggregatorPartialTolerance:
                 "partial": True,
                 "partial_reasons": ["quant:recursion_limit_exhausted"],
             },
-            "healthcare": {
-                "recommendations": [],
-                "thesis_updates": {},
-                "error": None,
-            },
         })
-        with caplog.at_level(logging.WARNING, logger="research"):
-            result = score_aggregator(state)
-        assert result == {"investment_theses": {}}
-        assert any(
-            "partial" in r.message and "technology" in r.message
-            for r in caplog.records
-        ), f"Expected WARN naming the partial team; got: {[r.message for r in caplog.records]}"
+        with pytest.raises(RuntimeError):
+            score_aggregator(state)
 
-    def test_only_team_failed_with_no_picks_raises(self):
-        """A single team that errored (e.g. a 429 that survived backoff)
-        with no other team and no picks anywhere → nothing for CIO to
-        rank → raise. (Isolation only saves the run when *other* teams
-        produced usable picks — see TestScoreAggregatorIsolation.)
-        """
+    def test_all_partial_raises(self):
         state = _state({
+            "technology": {"recommendations": [], "thesis_updates": {},
+                           "error": None, "partial": True,
+                           "partial_reasons": ["quant:recursion_limit_exhausted"]},
+            "healthcare": {"recommendations": [], "thesis_updates": {},
+                           "error": None, "partial": True,
+                           "partial_reasons": ["quant:recursion_limit_exhausted"]},
+        })
+        with pytest.raises(RuntimeError, match="ALL-AGENTS-STRICT"):
+            score_aggregator(state)
+
+    def test_partial_with_picks_still_raises(self):
+        """The most pointed reversal: a partial team that even produced
+        picks still hard-fails (it did not COMPLETE — the directive is
+        about agents running, not just yielding something)."""
+        state = _state(_all_clean({
             "technology": {
-                "recommendations": [],
+                "recommendations": [{"ticker": "NVDA", "quant_score": 70,
+                                     "qual_score": 66}],
                 "thesis_updates": {},
-                "error": "APIError: 529",
-                "partial": True,
-                "partial_reasons": ["quant:recursion_limit_exhausted"],
+                "error": None, "partial": True,
+                "partial_reasons": ["qual:recursion_limit_exhausted"],
             },
-        })
-        with pytest.raises(RuntimeError, match="technology"):
+        }))
+        with pytest.raises(RuntimeError, match="partial"):
             score_aggregator(state)
 
-    def test_all_teams_partial_raises(self):
-        """If every team is partial, the CIO has nothing to rank — that's
-        a system-wide failure even though no single team errored. Hard-fail
-        so operators investigate the systemic cause."""
-        state = _state({
-            "technology": {"recommendations": [], "thesis_updates": {},
-                           "error": None, "partial": True,
-                           "partial_reasons": ["quant:recursion_limit_exhausted"]},
-            "healthcare": {"recommendations": [], "thesis_updates": {},
-                           "error": None, "partial": True,
-                           "partial_reasons": ["quant:recursion_limit_exhausted"]},
-        })
-        with pytest.raises(
-            RuntimeError,
-            match="sector teams degraded with zero usable recommendations",
-        ):
-            score_aggregator(state)
 
-    def test_mixed_partial_and_full_teams_advances(self):
-        """Most realistic scenario: 1-2 teams partial, rest fine. SF
-        advances; CIO ranks what it has."""
-        state = _state({
-            "technology": {"recommendations": [], "thesis_updates": {},
-                           "error": None, "partial": True,
-                           "partial_reasons": ["qual:recursion_limit_exhausted"]},
-            "consumer": {"recommendations": [], "thesis_updates": {},
-                         "error": None, "partial": False},
-            "healthcare": {"recommendations": [], "thesis_updates": {},
-                           "error": None, "partial": False},
-        })
-        # Should not raise.
-        result = score_aggregator(state)
-        assert result == {"investment_theses": {}}
+class TestNoIsolation:
+    """REWRITTEN TestScoreAggregatorIsolation. #194 isolation REMOVED:
+    a failed team aborts the run even when other teams produced usable
+    picks (the exact behavior Brian's directive mandates — we get
+    nothing from a process whose agents didn't all run)."""
 
-
-class TestScoreAggregatorIsolation:
-    """Per-team isolation — a team that still fails after 429 backoff
-    must NOT abort the run when other teams produced usable picks. This
-    is the load-bearing behavior change of the 2026-05-16 resilience
-    fix: re-runs reuse the persisted succeeded teams (already written to
-    S3 by sector_team_node) and only re-execute the failed ones.
-    """
-
-    def test_one_team_failed_others_have_picks_does_not_raise(self, caplog):
-        import logging
-        state = _state({
+    def test_one_team_failed_others_have_picks_RAISES(self):
+        state = _state(_all_clean({
             "technology": {
                 "recommendations": [],
                 "thesis_updates": {},
@@ -187,31 +196,21 @@ class TestScoreAggregatorIsolation:
                     "input tokens/min, claude-haiku-4-5"
                 ),
             },
-            "healthcare": {
-                "recommendations": [
-                    {"ticker": "LLY", "quant_score": 70, "qual_score": 65}
-                ],
-                "thesis_updates": {},
-                "error": None,
-            },
-        })
-        with caplog.at_level(logging.WARNING, logger="research"):
-            result = score_aggregator(state)
-        # Did NOT raise; the surviving team's pick was scored.
-        assert "LLY" in result["investment_theses"]
-        # The failed team is named in a WARN, not raised.
-        assert any(
-            "technology" in r.message and "FAILED" in r.message
-            for r in caplog.records
-        ), [r.message for r in caplog.records]
+            "healthcare": _clean(
+                "healthcare",
+                recs=[{"ticker": "LLY", "quant_score": 70,
+                       "qual_score": 65}],
+            ),
+        }))
+        with pytest.raises(RuntimeError, match="technology"):
+            score_aggregator(state)
 
-    def test_2026_05_16_multi_team_429_does_not_abort_when_picks_survive(self):
-        """Regression: the exact 2026-05-16 shape — defensives /
-        financials / technology all 429 — must NOT abort the whole run
-        when ≥1 other team produced usable picks. Pre-fix this raised
-        ``RuntimeError("sector team(s) failed: ...")`` and the Lambda
-        returned status:ERROR, discarding every successful team.
-        """
+    def test_2026_05_16_multi_team_429_now_hard_fails(self):
+        """The exact 2026-05-16 shape — defensives / financials /
+        technology all 429 while healthcare/industrials/consumer
+        produced picks. #194 made this NOT abort; the all-agents-strict
+        directive makes it abort (no signals.json / email). This is the
+        single most important behavior reversal of the rework."""
         msg_429 = (
             "RateLimitError 429 — org rate limit of 450,000 input "
             "tokens/min, claude-haiku-4-5"
@@ -223,31 +222,20 @@ class TestScoreAggregatorIsolation:
                            "error": msg_429},
             "technology": {"recommendations": [], "thesis_updates": {},
                            "error": msg_429},
-            "healthcare": {"recommendations": [
-                    {"ticker": "LLY", "quant_score": 70, "qual_score": 65}
-                ],
-                           "thesis_updates": {}, "error": None},
-            "industrials": {
-                "recommendations": [
-                    {"ticker": "CAT", "quant_score": 60, "qual_score": 58}
-                ],
-                "thesis_updates": {}, "error": None},
-            "consumer": {
-                "recommendations": [
-                    {"ticker": "COST", "quant_score": 72, "qual_score": 68}
-                ],
-                "thesis_updates": {}, "error": None},
+            "healthcare": _clean("healthcare", recs=[
+                {"ticker": "LLY", "quant_score": 70, "qual_score": 65}]),
+            "industrials": _clean("industrials", recs=[
+                {"ticker": "CAT", "quant_score": 60, "qual_score": 58}]),
+            "consumer": _clean("consumer", recs=[
+                {"ticker": "COST", "quant_score": 72, "qual_score": 68}]),
         })
-        # Must NOT raise — 3 teams 429'd but 3 produced usable picks.
-        result = score_aggregator(state)
-        theses = result["investment_theses"]
-        # All 3 surviving teams' picks were scored (not discarded).
-        assert {"LLY", "CAT", "COST"}.issubset(set(theses))
+        with pytest.raises(RuntimeError) as exc:
+            score_aggregator(state)
+        m = str(exc.value)
+        assert "ALL-AGENTS-STRICT" in m
+        assert "defensives" in m and "financials" in m and "technology" in m
 
     def test_all_failed_no_picks_still_raises(self):
-        """Isolation does not mask a total wipeout — every team 429'd,
-        zero picks survive → nothing for CIO to rank → ERROR.
-        """
         msg_429 = "RateLimitError 429 — org rate limit"
         state = _state({
             "defensives": {"recommendations": [], "thesis_updates": {},
@@ -255,8 +243,5 @@ class TestScoreAggregatorIsolation:
             "financials": {"recommendations": [], "thesis_updates": {},
                            "error": msg_429},
         })
-        with pytest.raises(
-            RuntimeError,
-            match="sector teams degraded with zero usable recommendations",
-        ):
+        with pytest.raises(RuntimeError, match="ALL-AGENTS-STRICT"):
             score_aggregator(state)

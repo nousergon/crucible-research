@@ -19,6 +19,10 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from agents.prompt_loader import load_prompt
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_with_rate_limit_retry,
+)
 from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY, ALL_SECTORS, REGIME_GUARDRAILS, PRIOR_REPORT_MAX_CHARS
 from agents.token_guard import check_prompt_size
 from graph.state_schemas import MacroCriticOutput, MacroEconomistRawOutput
@@ -223,6 +227,7 @@ def run_macro_agent(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -289,9 +294,18 @@ def run_macro_agent(
     structured_llm = llm.with_structured_output(
         MacroEconomistRawOutput, include_raw=True
     )
-    response = structured_llm.invoke(
-        [HumanMessage(content=prompt)],
-        config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
+    # ALL-AGENTS-STRICT (Brian, 2026-05-16): the macro economist is one
+    # of the agents in scope. Deadline-bounded (~75 min) 429 retry so
+    # an org TPM ceiling is ridden out; if it persists past the
+    # deadline the wrapper re-raises and the run hard-fails (no
+    # synthetic macro substitute is promoted). Non-429 errors propagate
+    # immediately to the include_raw / strict-mode path below unchanged.
+    response = invoke_with_rate_limit_retry(
+        lambda: structured_llm.invoke(
+            [HumanMessage(content=prompt)],
+            config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
+        ),
+        label="macro_economist",
     )
 
     raw_message = response.get("raw")
@@ -460,6 +474,7 @@ def run_macro_critic(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=512,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         callbacks=[get_cost_telemetry_callback()],
     )
     macro_json = initial_result.get("macro_json", {})
@@ -496,9 +511,17 @@ def run_macro_critic(
     # classification is the conservative behavior on critic failure.
     structured_llm = llm.with_structured_output(MacroCriticOutput)
     try:
-        verdict: MacroCriticOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
+        # Deadline-bounded 429 retry (all-agents-strict): the critic is
+        # part of the macro agent. A 429 rides out the ~75-min window;
+        # if it persists past the deadline the wrapper re-raises and
+        # (strict mode) the run hard-fails. Non-429 errors fall to the
+        # existing strict/lax editorial-accept path unchanged.
+        verdict: MacroCriticOutput = invoke_with_rate_limit_retry(
+            lambda: structured_llm.invoke(
+                [HumanMessage(content=prompt)],
+                config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
+            ),
+            label="macro_critic",
         )
         result = {
             "action": verdict.action,
