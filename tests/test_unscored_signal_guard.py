@@ -37,16 +37,22 @@ def _fake_llm_factory(response_content: str) -> MagicMock:
 
 
 def _fake_structured_llm_factory(parsed_model) -> MagicMock:
-    """Build a MagicMock that mimics ``llm.with_structured_output(Schema).invoke()``.
+    """Build a MagicMock that mimics ``llm.with_structured_output(Schema, include_raw=True).invoke()``.
 
-    The chain is: ``llm.with_structured_output(Schema)`` returns a wrapped
-    LLM whose ``.invoke(...)`` returns the parsed Pydantic model directly.
-    Used by tests covering agents migrated in PR 2.3.
+    The chain is: ``llm.with_structured_output(Schema, include_raw=True)``
+    returns a wrapped LLM whose ``.invoke(...)`` returns a dict with
+    ``parsed`` / ``raw`` / ``parsing_error`` keys (the include_raw
+    contract used across quant_analyst.py / ic_cio.py and, since the
+    2026-05-16 per-thesis-isolation fix, ``_update_thesis_for_held_stock``).
     """
     fake_llm = MagicMock()
     structured = MagicMock()
     fake_llm.with_structured_output.return_value = structured
-    structured.invoke.return_value = parsed_model
+    structured.invoke.return_value = {
+        "raw": MagicMock(content="..."),
+        "parsed": parsed_model,
+        "parsing_error": None,
+    }
     return fake_llm
 
 
@@ -150,8 +156,11 @@ def test_held_stock_llm_schema_has_no_score_fields():
 def test_held_stock_thesis_update_no_prior_marks_score_failed():
     """If the LLM succeeds but there's no prior thesis, mark score_failed."""
     from agents.sector_teams import sector_team
+    from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-    fake_llm = _fake_llm_factory('{"bull_case": "bull", "bear_case": "bear"}')
+    fake_llm = _fake_structured_llm_factory(
+        HeldThesisUpdateLLMOutput(bull_case="bull", bear_case="bear")
+    )
 
     with patch.object(sector_team, "ChatAnthropic", return_value=fake_llm), \
          patch.object(sector_team, "load_prompt") as mock_load, \

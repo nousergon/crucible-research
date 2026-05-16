@@ -501,37 +501,94 @@ def _update_thesis_for_held_stock(
     # the schema. This retires the strip-nulls workaround that existed to
     # defend against LNTH/LLY/PFE/VRTX/CME/JHG/COKE/HSY/KR's
     # `"final_score": null` overwrites in the 2026-04-11 run.
+    #
+    # Per-thesis isolation + structured-output retry (2026-05-16):
+    #   On the 2026-05-16 Saturday SF recovery the Research Lambda
+    #   aborted the ENTIRE weekly run (~25 theses + sector teams + CIO
+    #   all discarded) because ONE held-thesis-update LLM call emitted
+    #   `catalysts` as a string of leaked Anthropic tool-use XML
+    #   (`<parameter name="catalysts">…satellite programs`) instead of a
+    #   JSON list → Pydantic `list_type` ValidationError. In strict mode
+    #   that error re-raised here and propagated uncaught to
+    #   lambda/handler.py:520 (`return {"status":"ERROR", ...}`).
+    #
+    #   The standing rule is "one item must never fail the whole batch".
+    #   These `<parameter name=...>` tool-XML leaks are transient model
+    #   nondeterminism, so we (1) drive with_structured_output with
+    #   include_raw=True and retry the call ONCE on a parse/validation
+    #   error (matching the include_raw + parsing_error contract in
+    #   quant_analyst.py / ic_cio.py), then (2) if it STILL fails,
+    #   degrade this ONE thesis gracefully — carry the prior thesis
+    #   forward (no-update path) and continue the run. A single
+    #   held-thesis-update failure must NOT change the Lambda's overall
+    #   status away from OK/SKIPPED, so this path NEVER re-raises (even
+    #   in strict mode) — per-thesis isolation is the load-bearing
+    #   invariant, not strict-vs-lax. This deliberately diverges from
+    #   the CIO/quant strict-mode-raises contract: those stages MUST
+    #   yield output for the run to be meaningful, whereas a held thesis
+    #   that fails to update simply carries forward unchanged.
     from graph.state_schemas import HeldThesisUpdateLLMOutput
-    from strict_mode import is_strict_validation_enabled
 
-    structured_llm = llm.with_structured_output(HeldThesisUpdateLLMOutput)
-    try:
-        update: HeldThesisUpdateLLMOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": loaded_prompt.langsmith_metadata()},
-        )
-        # Convert to dict + drop default-empty fields so they don't overwrite
-        # a populated prior_thesis value with the default (e.g. an empty
-        # bull_case shouldn't blank out a non-empty prior bull_case).
-        llm_update_clean = {
-            k: v for k, v in update.model_dump().items()
-            if v not in (None, "", [])
-        }
-        if prior_thesis:
-            result = {**prior_thesis, **llm_update_clean}
-        else:
-            result = llm_update_clean
-            result["score_failed"] = True
-        result["last_updated"] = run_date
-        result["triggers"] = triggers
-        result["stale_days"] = 0
-        return result
-    except Exception as e:
-        log.warning("[thesis_update:%s] failed: %s", ticker, e)
-        if is_strict_validation_enabled():
-            raise
+    structured_llm = llm.with_structured_output(
+        HeldThesisUpdateLLMOutput, include_raw=True,
+    )
+    _MAX_ATTEMPTS = 2
+    last_error: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            extract_resp = structured_llm.invoke(
+                [HumanMessage(content=prompt)],
+                config={"metadata": loaded_prompt.langsmith_metadata()},
+            )
+            update: HeldThesisUpdateLLMOutput | None = extract_resp.get("parsed")
+            parsing_error = extract_resp.get("parsing_error")
+            if parsing_error is not None or update is None:
+                raise parsing_error or ValueError(
+                    "structured-output returned no parsed model"
+                )
+            # Convert to dict + drop default-empty fields so they don't
+            # overwrite a populated prior_thesis value with the default
+            # (e.g. an empty bull_case shouldn't blank out a non-empty
+            # prior bull_case).
+            llm_update_clean = {
+                k: v for k, v in update.model_dump().items()
+                if v not in (None, "", [])
+            }
+            if prior_thesis:
+                result = {**prior_thesis, **llm_update_clean}
+            else:
+                result = llm_update_clean
+                result["score_failed"] = True
+            result["last_updated"] = run_date
+            result["triggers"] = triggers
+            result["stale_days"] = 0
+            if attempt > 1:
+                log.info(
+                    "[thesis_update:%s] recovered on retry (attempt %d/%d)",
+                    ticker, attempt, _MAX_ATTEMPTS,
+                )
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt < _MAX_ATTEMPTS:
+                log.warning(
+                    "[thesis_update:%s] attempt %d/%d failed: %s — retrying once",
+                    ticker, attempt, _MAX_ATTEMPTS, e,
+                )
+                continue
+            # Final attempt failed — per-thesis isolation: log a
+            # structured warning (ticker + the validation error) and
+            # degrade THIS thesis only. NEVER re-raise: one bad
+            # held-thesis-update must not abort the weekly run.
+            log.warning(
+                "[thesis_update:%s] failed after %d attempts (%s) — "
+                "carrying prior thesis forward, run continues",
+                ticker, _MAX_ATTEMPTS, e,
+            )
 
-    # Lax-mode fallback: preserve prior thesis
+    # Isolation fallback: preserve prior thesis (no-update path). This is
+    # the same shape as the no-material-trigger preservation branch in
+    # _run_sector_team — the thesis is simply not updated this cycle.
     if prior_thesis:
         return {**prior_thesis, "triggers": triggers, "stale_days": 0}
     return {"triggers": triggers, "stale_days": 0, "score_failed": True}
