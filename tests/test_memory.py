@@ -1,9 +1,20 @@
 """Tests for episodic and semantic memory tables and retrieval."""
 
 import sqlite3
+from datetime import date, timedelta
+
 import pytest
 
 ArchiveManager = pytest.importorskip("archive.manager", reason="archive.manager requires gitignored config").ArchiveManager
+
+# Saved rows are read back through age-pruning loaders
+# (load_episodic_memories prunes created_date older than 12wk;
+# load_semantic_memories older than 8wk). Hardcoded absolute dates
+# time-bomb once wall-clock crosses that window (the 2026-03-20 semantic
+# fixtures started failing on 2026-05-16). Keep every created_date /
+# run_date relative to today so the suite is date-stable.
+RECENT = (date.today() - timedelta(days=3)).isoformat()
+RECENT_OLDER = (date.today() - timedelta(days=10)).isoformat()
 
 
 @pytest.fixture
@@ -26,7 +37,7 @@ class TestEpisodicMemory:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("NVDA", "2026-03-10", 78, "rising", "AI infrastructure",
              -0.12, -0.09, "Check margin sustainability", "Technology",
-             '["earnings"]', "2026-03-10"),
+             '["earnings"]', RECENT),
         )
         am.db_conn.commit()
 
@@ -40,7 +51,8 @@ class TestEpisodicMemory:
         am.db_conn.execute(
             "INSERT INTO memory_episodes "
             "(ticker, signal_date, score, lesson, created_date) "
-            "VALUES ('AAPL', '2026-03-01', 70, 'lesson1', '2026-03-01')"
+            "VALUES ('AAPL', '2026-03-01', 70, 'lesson1', ?)",
+            (RECENT,),
         )
         am.db_conn.commit()
 
@@ -48,14 +60,16 @@ class TestEpisodicMemory:
             am.db_conn.execute(
                 "INSERT INTO memory_episodes "
                 "(ticker, signal_date, score, lesson, created_date) "
-                "VALUES ('AAPL', '2026-03-01', 75, 'lesson2', '2026-03-01')"
+                "VALUES ('AAPL', '2026-03-01', 75, 'lesson2', ?)",
+                (RECENT,),
             )
 
     def test_sector_level_retrieval(self, am):
         am.db_conn.execute(
             "INSERT INTO memory_episodes "
             "(ticker, signal_date, score, lesson, sector, created_date) "
-            "VALUES ('MU', '2026-03-05', 72, 'Memory cycle lesson', 'Technology', '2026-03-05')"
+            "VALUES ('MU', '2026-03-05', 72, 'Memory cycle lesson', 'Technology', ?)",
+            (RECENT,),
         )
         am.db_conn.commit()
 
@@ -78,7 +92,7 @@ class TestSemanticMemory:
             content="Semiconductor inventory correction signals strengthening",
             sector="Technology",
             related_tickers=["NVDA", "AMD"],
-            run_date="2026-03-20",
+            run_date=RECENT,
         )
         assert saved is True
 
@@ -90,13 +104,13 @@ class TestSemanticMemory:
         am.save_semantic_memory(
             category="macro_reasoning", source="macro",
             content="Yield curve inversion deepening",
-            sector=None, related_tickers=None, run_date="2026-03-20",
+            sector=None, related_tickers=None, run_date=RECENT_OLDER,
         )
         # Save same content again — should not raise
         am.save_semantic_memory(
             category="macro_reasoning", source="macro",
             content="Yield curve inversion deepening",
-            sector=None, related_tickers=None, run_date="2026-03-25",
+            sector=None, related_tickers=None, run_date=RECENT,
         )
         # Should have at most 2 entries (no crash)
         count = am.db_conn.execute("SELECT count(*) FROM memory_semantic").fetchone()[0]
@@ -107,7 +121,7 @@ class TestSemanticMemory:
             category="cross_sector", source="cio",
             content="Rotation from growth to value",
             sector=None, related_tickers=["AAPL", "BRK.B"],
-            run_date="2026-03-20",
+            run_date=RECENT,
         )
         result = am.load_semantic_memories(sectors=["Technology"])
         assert "_cross_sector" in result
