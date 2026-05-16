@@ -21,13 +21,35 @@ import logging
 
 import pytest
 
+from agents.sector_teams.team_config import ALL_TEAM_IDS
 from graph.research_graph import score_aggregator
 
 
 def _state(team_outputs: dict, sector_modifiers: dict | None = None,
            sector_map: dict | None = None) -> dict:
+    # ALL-AGENTS-STRICT (Brian, 2026-05-16): score_aggregator now
+    # hard-fails if ANY of ALL_TEAM_IDS is missing/failed/partial
+    # (revert of #194 isolation). These tests exercise the
+    # thesis_update RECOMPUTE / conviction-normalization path that runs
+    # *after* the strict gate, so they only need the gate to pass —
+    # pad every absent team with a clean, empty, no-error stub. This
+    # contributes zero recommendations / theses, so each test's
+    # investment_theses assertions are unchanged; it just lets the
+    # strict gate through to the path under test. (Pre-existing tests
+    # adapted to the new contract — see PR body.)
+    padded = dict(team_outputs)
+    for tid in ALL_TEAM_IDS:
+        if tid not in padded:
+            padded[tid] = {
+                "team_id": tid,
+                "recommendations": [],
+                "thesis_updates": {},
+                "error": None,
+                "partial": False,
+                "partial_reasons": [],
+            }
     return {
-        "sector_team_outputs": team_outputs,
+        "sector_team_outputs": padded,
         "sector_modifiers": sector_modifiers or {},
         "sector_map": sector_map or {},
     }

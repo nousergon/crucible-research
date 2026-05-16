@@ -1089,8 +1089,37 @@ def sector_team_node(state: ResearchState) -> dict:
 
 
 def macro_economist_node(state: ResearchState) -> dict:
-    """Run the macro economist with reflection."""
+    """Run the macro economist with reflection.
+
+    ALL-AGENTS-STRICT (2026-05-16): extends #194's sector-team
+    persist+resume pattern to macro. On an SF redrive (the Lambda runs
+    the graph stateless), if this run_date's macro output was already
+    persisted we short-circuit and reuse it with ZERO LLM calls — so a
+    redrive triggered by a *different* agent's hard-fail does not
+    re-pay the (Sonnet) macro + critic calls. Macro runs upstream of
+    the sector dispatch (Stage B), so without this every redrive would
+    re-run macro before even reaching the still-missing sector team.
+    """
     logger.info("[macro] starting")
+
+    run_date = state.get("run_date", "")
+    _am = state.get("archive_manager")
+    if _am is not None and run_date:
+        try:
+            _persisted = _am.load_agent_run(run_date, "macro")
+        except Exception as e:  # pragma: no cover — loader is safe
+            logger.warning(
+                "[macro] resume load raised unexpectedly (%s) — "
+                "running macro fresh", e,
+            )
+            _persisted = None
+        if _persisted is not None:
+            logger.info(
+                "[macro] RESUME — reusing persisted output for %s "
+                "(zero LLM calls this invocation)", run_date,
+            )
+            return _persisted
+
     macro_data = state.get("macro_data", {})
     prior_report = state.get("prior_macro_report", "")
 
@@ -1147,6 +1176,21 @@ def macro_economist_node(state: ResearchState) -> dict:
         input_data_summary=summary,
         agent_output=macro_state_update,
     )
+
+    # ── Persist on success (resumability) ─────────────────────────────────
+    # We only reach here if the macro agent produced REAL output (a 429
+    # past the deadline / a strict-mode parse failure would have raised
+    # and hard-failed the run upstream). Persist so an SF redrive
+    # triggered by a different agent's failure resumes macro with zero
+    # LLM calls. Best-effort — save_agent_run never raises.
+    if _am is not None and run_date:
+        try:
+            _am.save_agent_run(run_date, "macro", macro_state_update)
+        except Exception as e:  # pragma: no cover — saver is already safe
+            logger.warning(
+                "[macro] persist raised unexpectedly (%s) — run "
+                "continues; macro just won't be resumable", e,
+            )
 
     return macro_state_update
 
@@ -1278,21 +1322,32 @@ def merge_results_node(state: ResearchState) -> dict:
 def score_aggregator(state: ResearchState) -> dict:
     """Compute composite scores for all team recommendations.
 
-    Per-team isolation (2026-05-16 multi-team-429 fix): a team that
-    *still* fails after 429-backoff is tolerated exactly like a partial
-    team — its zero contribution is logged loud and counted, but it does
-    NOT nuke the whole run when other teams produced usable picks. This
-    mirrors the long-standing ``partial_teams`` tolerance philosophy
-    (proceed with the teams CIO can actually rank). The run only ERRORs
-    when there is genuinely nothing for CIO to rank: every team either
-    errored or went partial AND no team contributed a single
-    recommendation (the old "all teams partial" guard, generalized to
-    "no usable picks survive").
+    ALL-AGENTS-STRICT (Brian, 2026-05-16) — REVERTS #194's per-team
+    degrade-and-continue isolation:
 
-    By the time this node runs, every team that *succeeded* has already
-    had its output persisted to S3 by ``sector_team_node`` (before any
-    other team could fail), so an SF re-invocation reuses the completed
-    teams and only re-executes the previously-failed ones.
+      "If the sector agents don't run, Research shouldn't complete
+       until all sectors are run. ... We don't get anything from this
+       process if the sectors, or any other agent for that matter,
+       fail/don't run."
+
+    So this node now HARD-FAILS the whole run (raises → handler returns
+    status:ERROR → NO signals.json / email / DB write) if ANY sector
+    team is:
+
+      * **missing** — not present in ``sector_team_outputs`` at all
+        (the expected set is ``ALL_TEAM_IDS``);
+      * **failed** — carries an ``error`` (e.g. a 429 that survived the
+        ~75-min deadline-bounded retry, or a held-thesis hard-raise);
+      * **partial** — recursion-exhausted / produced a degraded result.
+
+    What is KEPT from #194 (and composes with the directive): every
+    team that *succeeds* is still persisted to S3 by ``sector_team_node``
+    the moment it completes. So when a single team fails and this node
+    hard-fails the run, an SF redrive reuses the persisted succeeded
+    teams (zero Haiku calls) and the long retry only ever re-attempts
+    the still-missing team(s) — which is exactly what makes a 60-90 min
+    retry window affordable and bounded rather than re-paying the whole
+    6-team fan-out every redrive.
     """
     logger.info("[score_aggregator] starting")
 
@@ -1300,10 +1355,21 @@ def score_aggregator(state: ResearchState) -> dict:
     sector_modifiers = state.get("sector_modifiers", {})
     sector_map = state.get("sector_map", {})
 
-    # Teams that errored (e.g. a 429 that survived backoff) or went
-    # partial (recursion exhausted) are BOTH degraded-but-non-fatal —
-    # they contribute zero recommendations but must not crash the run
-    # when other teams succeeded.
+    # ── All-agents-strict gate ────────────────────────────────────────────
+    # The full expected set of sector teams. A team absent from
+    # team_outputs never produced output at all (dispatch failed, the
+    # node crashed before returning, or the reducer dropped it) — that
+    # is just as fatal as a team that errored. Empty team_outputs
+    # (e.g. the no-op exit-only test states) is left to the original
+    # downstream behavior; the strict gate only fires once teams exist.
+    expected_team_ids = set(ALL_TEAM_IDS)
+    present_team_ids = set(team_outputs)
+    missing_teams = (
+        sorted(expected_team_ids - present_team_ids)
+        if present_team_ids
+        else []
+    )
+
     failed_teams = {
         tid: out.get("error")
         for tid, out in team_outputs.items()
@@ -1315,64 +1381,31 @@ def score_aggregator(state: ResearchState) -> dict:
         if out.get("partial")
     }
 
-    # Teams that produced at least one usable recommendation — the set
-    # CIO can actually rank. A failed/partial team contributes none.
-    teams_with_picks = {
-        tid
-        for tid, out in team_outputs.items()
-        if out.get("recommendations")
-    }
-    total_recs = sum(
-        len(out.get("recommendations", []) or [])
-        for out in team_outputs.values()
-    )
-
-    if failed_teams or partial_teams:
-        # ERROR only when there is nothing left for CIO to rank: every
-        # team is failed-or-partial AND not a single recommendation
-        # survives. Otherwise proceed with the usable teams.
-        degraded = set(failed_teams) | set(partial_teams)
-        nothing_to_rank = (
-            len(degraded) == len(team_outputs) and total_recs == 0
-        )
-        if nothing_to_rank:
-            parts = []
-            if failed_teams:
-                parts.append(
-                    "failed: "
-                    + "; ".join(
-                        f"{tid}: {err}"
-                        for tid, err in failed_teams.items()
-                    )
-                )
-            if partial_teams:
-                parts.append(f"partial: {partial_teams}")
-            msg = (
-                f"all {len(team_outputs)} sector teams degraded with zero "
-                f"usable recommendations — CIO has nothing to rank. "
-                + " | ".join(parts)
-            )
-            logger.error("[score_aggregator] %s", msg)
-            raise RuntimeError(msg)
-
+    if missing_teams or failed_teams or partial_teams:
+        parts: list[str] = []
+        if missing_teams:
+            parts.append(f"missing (never produced output): {missing_teams}")
         if failed_teams:
-            logger.warning(
-                "[score_aggregator] %d of %d sector teams FAILED "
-                "(isolated, 0 recommendations contributed): %s. SF "
-                "advances on the %d team(s) with usable picks (%d recs "
-                "total). A re-invocation will reuse the persisted "
-                "succeeded teams and only re-execute the failed ones.",
-                len(failed_teams), len(team_outputs),
-                {tid: err for tid, err in failed_teams.items()},
-                len(teams_with_picks), total_recs,
+            parts.append(
+                "failed: "
+                + "; ".join(
+                    f"{tid}: {err}" for tid, err in failed_teams.items()
+                )
             )
         if partial_teams:
-            logger.warning(
-                "[score_aggregator] %d of %d sector teams returned partial "
-                "(0 recommendations contributed). Reasons: %s. SF advances; "
-                "investigate per-team observability.",
-                len(partial_teams), len(team_outputs), partial_teams,
-            )
+            parts.append(f"partial: {partial_teams}")
+        msg = (
+            f"ALL-AGENTS-STRICT: {len(missing_teams)} missing + "
+            f"{len(failed_teams)} failed + {len(partial_teams)} partial "
+            f"sector team(s) — Research HARD-FAILS (no signals.json / "
+            f"email / DB write). We get nothing from a process whose "
+            f"agents didn't all run. Succeeded teams are persisted to "
+            f"S3, so an SF redrive only re-attempts the still-missing "
+            f"team(s) within the long 429-retry window. "
+            + " | ".join(parts)
+        )
+        logger.error("[score_aggregator] %s", msg)
+        raise RuntimeError(msg)
 
     investment_theses = {}
     market_regime = state.get("market_regime", "neutral")
@@ -1581,8 +1614,33 @@ def score_aggregator(state: ResearchState) -> dict:
 
 
 def cio_node(state: ResearchState) -> dict:
-    """Run CIO batch evaluation."""
+    """Run CIO batch evaluation.
+
+    ALL-AGENTS-STRICT (2026-05-16): extends #194's persist+resume to
+    the CIO (the most expensive single call — a batch Sonnet
+    evaluation). On an SF redrive after a different agent's hard-fail,
+    if this run_date's CIO output was already persisted we reuse it
+    with ZERO LLM calls.
+    """
     logger.info("[cio] starting")
+
+    _run_date = state.get("run_date", "")
+    _am_resume = state.get("archive_manager")
+    if _am_resume is not None and _run_date:
+        try:
+            _persisted = _am_resume.load_agent_run(_run_date, "cio")
+        except Exception as e:  # pragma: no cover — loader is safe
+            logger.warning(
+                "[cio] resume load raised unexpectedly (%s) — running "
+                "CIO fresh", e,
+            )
+            _persisted = None
+        if _persisted is not None:
+            logger.info(
+                "[cio] RESUME — reusing persisted output for %s "
+                "(zero LLM calls this invocation)", _run_date,
+            )
+            return _persisted
 
     # Collect all team recommendations as candidate list
     team_outputs = state.get("sector_team_outputs", {})
@@ -1664,6 +1722,19 @@ def cio_node(state: ResearchState) -> dict:
         input_data_summary=summary,
         agent_output=cio_state_update,
     )
+
+    # ── Persist on success (resumability) ─────────────────────────────────
+    # Reached only if the CIO produced REAL output (a 429 past the
+    # deadline / strict-mode parse failure raised upstream). Persist so
+    # an SF redrive resumes CIO with zero LLM calls. Best-effort.
+    if _am_resume is not None and _run_date:
+        try:
+            _am_resume.save_agent_run(_run_date, "cio", cio_state_update)
+        except Exception as e:  # pragma: no cover — saver is already safe
+            logger.warning(
+                "[cio] persist raised unexpectedly (%s) — run continues; "
+                "CIO just won't be resumable", e,
+            )
 
     return cio_state_update
 
@@ -2081,10 +2152,36 @@ def _compute_focus_list_audit_lookup(
 
 
 def archive_writer(state: ResearchState) -> dict:
-    """Write all data to S3 + SQLite."""
+    """Write all data to S3 + SQLite.
+
+    ── Stub-quarantine gate (2026-05-16, the dangerous-bug fix) ──────────
+    This is the LAST line of defense before any promoted artifact is
+    written. ``assert_no_stub_output`` raises ``StubQuarantineError``
+    (→ handler returns status:ERROR, NO signals.json / email / DB
+    write) if ANY agent output is synthetic stub text (the
+    ``[DRY-RUN`` marker anywhere in the payload / report / theses /
+    sector-team outputs) or a sector team is missing. It runs FIRST,
+    before write_signals_json / upload_db, and because archive_writer
+    precedes email_sender in the graph a raise here also prevents the
+    email. A promoted artifact may ONLY be produced by a fully-real,
+    all-agents-complete pass.
+    """
     logger.info("[archive_writer] starting")
     am: ArchiveManager = state["archive_manager"]
     run_date = state["run_date"]
+
+    from graph.stub_quarantine import assert_no_stub_output
+
+    # Build the signals payload up front so the guard can scan exactly
+    # what would be promoted. _build_signals_payload is pure (no I/O);
+    # building it twice is cheap and keeps the guard authoritative over
+    # the precise bytes that would land in signals.json.
+    _candidate_signals_payload = _build_signals_payload(state)
+    assert_no_stub_output(
+        signals_payload=_candidate_signals_payload,
+        consolidated_report=state.get("consolidated_report", "") or "",
+        state=state,
+    )
     # Bind once at the top so the scanner evaluations and team candidates
     # blocks below can reference it. Previously lines 945 and 975 referenced
     # a bare `team_outputs` that was never defined in this scope, causing
@@ -2206,7 +2303,11 @@ def archive_writer(state: ResearchState) -> dict:
             tool_call_counts_by_team[team_id] = _walk_tool_calls(output)
 
     try:
-        signals_payload = _build_signals_payload(state)
+        # Reuse the payload the stub-quarantine guard already scanned at
+        # the top of this node so the promoted bytes are exactly the
+        # bytes the guard verified clean (no TOCTOU between guard +
+        # write). _build_signals_payload is pure so this is identical.
+        signals_payload = _candidate_signals_payload
         _validate_signals_payload(
             signals_payload,
             scanner_universe=universe_symbols,

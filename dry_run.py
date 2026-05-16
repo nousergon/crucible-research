@@ -30,6 +30,18 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+# Canonical synthetic-output marker. EVERY stub string emitted by this
+# module embeds this exact substring (e.g. "[DRY-RUN] Strong
+# fundamentals", "[DRY-RUN STUB] Macro environment ..."). The
+# stub-quarantine guard (graph.stub_quarantine) scans promoted
+# artifacts for this marker and REFUSES to write signals.json / send
+# the email / upload the DB if it appears anywhere — that is the
+# structural guarantee that synthetic stub text can never reach a
+# promoted artifact again. If you add a new stub string it MUST embed
+# this marker, or the quarantine guard cannot see it.
+DRY_RUN_MARKER = "[DRY-RUN"
+
+
 # ── LLM agent stubs ──────────────────────────────────────────────────────
 
 
@@ -437,7 +449,40 @@ def install_dry_run_stubs(archive_manager: Any | None = None) -> Callable[[], No
         setattr(mod, attr, stub)
 
     if archive_manager is not None:
-        for method_name in ("upload_db", "write_signals_json"):
+        # ── Stub-quarantine (2026-05-16 root-cause fix) ───────────────
+        # save_sector_team_run / save_agent_run are added here ON TOP OF
+        # the original upload_db / write_signals_json no-ops.
+        #
+        # Root cause of the 2026-05-15 promoted-stub bug
+        # (s3://alpha-engine-research/signals/2026-05-15/signals.json,
+        # written 2026-05-16T17:08:46Z, GOOG/AFL/AXP/ABT/APD/ADBE/AMD
+        # all shipped `"[DRY-RUN] Strong fundamentals…"`):
+        #
+        #   The stub-pass runs the FULL graph. ``sector_team_node``
+        #   calls ``save_sector_team_run`` the moment a team "succeeds"
+        #   — and the dry-run stub ``_stub_run_sector_team`` returns a
+        #   normal-looking dict with ``error=None``, so the stub-pass
+        #   PERSISTED synthetic ``[DRY-RUN]`` sector-team output to
+        #   ``archive/sector_team_runs/{run_date}/{team_id}.json``.
+        #   The subsequent REAL pass's ``sector_team_node`` resume
+        #   short-circuit (#194) then LOADED that stub-persisted output
+        #   and promoted the synthetic theses straight into
+        #   signals.json / the email — with ZERO real Haiku calls.
+        #   Only ``write_signals_json`` + ``upload_db`` were suppressed
+        #   for the stub-pass; the per-team persistence path was not,
+        #   so the stub-pass leaked synthetic state into the real pass.
+        #
+        # Structural fix: the stub-pass MUST NOT write the resume
+        # persistence keys at all. With these no-op'd, the real pass
+        # finds no persisted team and runs every agent for real (or
+        # hard-fails per all-agents-strict). The quarantine guard at
+        # the signals.json write site is the second line of defense.
+        for method_name in (
+            "upload_db",
+            "write_signals_json",
+            "save_sector_team_run",
+            "save_agent_run",
+        ):
             if hasattr(archive_manager, method_name):
                 saved_originals.append(
                     (archive_manager, method_name, getattr(archive_manager, method_name))

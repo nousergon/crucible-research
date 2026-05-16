@@ -16,6 +16,10 @@ from langchain_core.messages import HumanMessage
 
 from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY
 from agents.prompt_loader import load_prompt
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_with_rate_limit_retry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +125,7 @@ def run_cio(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -142,9 +147,25 @@ def run_cio(
 
     structured_llm = llm.with_structured_output(CIORawOutput)
     try:
-        raw_output: CIORawOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": load_prompt("ic_cio_evaluation").langsmith_metadata()},
+        # ALL-AGENTS-STRICT (Brian, 2026-05-16): the CIO is one of the
+        # agents in scope — "We don't get anything from this process if
+        # ... any other agent for that matter, fail/don't run." Wrap
+        # the single batch Sonnet call in the deadline-bounded (~75 min)
+        # 429 retry so an org TPM ceiling is ridden out rather than
+        # immediately failing the run; if the 429 STILL persists past
+        # the deadline the wrapper re-raises and (strict mode default)
+        # the run hard-fails — no synthetic/empty CIO substitute is
+        # promoted. Non-429 errors propagate immediately as before.
+        raw_output: CIORawOutput = invoke_with_rate_limit_retry(
+            lambda: structured_llm.invoke(
+                [HumanMessage(content=prompt)],
+                config={
+                    "metadata": load_prompt(
+                        "ic_cio_evaluation"
+                    ).langsmith_metadata()
+                },
+            ),
+            label="cio",
         )
         decisions_dicts = [d.model_dump() for d in raw_output.decisions]
         if not decisions_dicts:

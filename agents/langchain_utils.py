@@ -5,43 +5,99 @@ Two concerns:
 
   1. Extracting tool calls / final text from LangGraph message histories
      (used by the quant + qual ReAct agents).
-  2. A 429-aware retry wrapper for every sector-team Haiku call
-     (``invoke_with_rate_limit_retry``).
+  2. A 429-aware, *deadline-bounded* persistent retry wrapper for every
+     agent Haiku/Sonnet call (``invoke_with_rate_limit_retry``).
 
 The 429 wrapper exists because the 6-team parallel ``Send()`` fan-out
 in ``graph/research_graph.py`` bursts over the org's Haiku input-TPM
 ceiling (450,000 tokens/min, claude-haiku-4-5). On the 2026-05-16
 recovery run that surfaced as ``RateLimitError 429`` aborting
-defensives/financials/technology. langchain's ChatAnthropic default
-``max_retries`` is insufficient for a *sustained* org-level 429 (it
-backs off a couple of times then gives up), so we (a) bump the
-constructor ``max_retries`` at every call site and (b) wrap each
-``.invoke()`` in this helper, which honors the ``retry-after`` response
-header when Anthropic sends one. Only 429 / rate-limit errors are
-retried here — every other exception propagates unchanged so the
-existing strict-mode / partial / isolation contracts are preserved.
+defensives/financials/technology.
+
+ALL-AGENTS-STRICT rework (Brian, 2026-05-16) — supersedes the #194
+"~6 attempt cap then degrade-and-continue" philosophy:
+
+  "If the sector agents don't run, Research shouldn't complete until
+   all sectors are run. We should have a long retry mechanism and after
+   this long period if we still don't have all sectors it should fail.
+   We don't get anything from this process if the sectors, or any other
+   agent for that matter, fail/don't run."
+
+So the wrapper is now an **overall wall-clock deadline** (default
+``RATE_LIMIT_RETRY_DEADLINE_SECONDS`` = 75 min) of persistent 429
+retry with capped exponential backoff between attempts — NOT a small
+fixed attempt count. It honors the ``retry-after`` response header
+when Anthropic sends one. Only 429 / rate-limit errors are retried;
+every other exception propagates immediately and unchanged (then the
+caller's hard-fail rule applies — a non-429 failure still fails the
+run because we get nothing from a partial process).
+
+The long window is affordable because every agent that already
+succeeded for this ``run_date`` is persisted to S3 (sector teams via
+``ArchiveManager.save_sector_team_run``; CIO/macro via the agent-run
+persistence added in this rework). So the deadline is only ever spent
+re-attempting the *still-missing* agents — both within a single
+invocation and across a Step-Function redrive.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from typing import Callable, TypeVar
 
 log = logging.getLogger(__name__)
 
-# Constructor-level retry budget for every sector-team ChatAnthropic
+# Constructor-level retry budget for every agent ChatAnthropic
 # instance. langchain-anthropic defaults to 2, which is exhausted
 # almost immediately under a sustained org-wide 450K-TPM 429. This is
 # the inner SDK-level backoff; ``invoke_with_rate_limit_retry`` is the
-# outer, retry-after-aware backoff around the whole ``.invoke()``.
+# outer, retry-after-aware, deadline-bounded backoff around the whole
+# ``.invoke()``.
 SECTOR_TEAM_LLM_MAX_RETRIES = 8
 
-# Outer-wrapper attempt cap. With exponential backoff (base 4s, cap 60s)
-# 6 attempts spans up to ~3-4 min of org-429 wait per call — long enough
-# to ride out a TPM-window reset without unbounded Lambda time burn.
-_DEFAULT_MAX_ATTEMPTS = 6
+# ── All-agents-strict deadline (Brian, 2026-05-16) ────────────────────────
+# Overall wall-clock budget for persistent 429 retry of a SINGLE
+# ``.invoke()``. This is the "long retry mechanism" the directive asks
+# for: keep riding out the org TPM ceiling for up to this long, then —
+# if the call still cannot produce real output — propagate the 429 so
+# the caller's hard-fail rule turns the whole run into status:ERROR
+# (no signals.json / no email / no DB upload). 75 min default; env
+# override ``RATE_LIMIT_RETRY_DEADLINE_SECONDS`` (clamped to a sane
+# 5 min .. 3 hr band so a typo can't make it unbounded or trivial).
+#
+# This is per-``.invoke()``, NOT per-run, but it is bounded in
+# aggregate because every agent that already succeeded for this
+# run_date is persisted (sector teams → save_sector_team_run; CIO /
+# macro → save_agent_run) and short-circuited on resume with ZERO LLM
+# calls — so a retry / SF redrive only ever spends the deadline on the
+# agents still missing, not on the whole pipeline.
+def _resolve_deadline_seconds() -> float:
+    raw = os.environ.get("RATE_LIMIT_RETRY_DEADLINE_SECONDS")
+    if raw is None:
+        return 75.0 * 60.0
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "[rate_limit_retry] RATE_LIMIT_RETRY_DEADLINE_SECONDS=%r "
+            "unparseable — using 75 min default", raw,
+        )
+        return 75.0 * 60.0
+    # Clamp: never < 5 min (too short to ride a TPM window) and never
+    # > 3 hr (a typo must not make the Lambda hang past its own timeout).
+    return max(5.0 * 60.0, min(secs, 3.0 * 60.0 * 60.0))
+
+
+# Module-level constant (the deadline the rework is built around).
+# Resolved at import; tests monkeypatch this attribute directly.
+RATE_LIMIT_RETRY_DEADLINE_SECONDS: float = _resolve_deadline_seconds()
+
+# Backoff between 429 attempts. Capped so a single sleep can't blow
+# past the deadline check granularity; the deadline (not an attempt
+# count) is what bounds the loop.
 _BACKOFF_BASE_SECONDS = 4.0
 _BACKOFF_CAP_SECONDS = 60.0
 
@@ -104,37 +160,50 @@ def invoke_with_rate_limit_retry(
     fn: Callable[[], _T],
     *,
     label: str,
-    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    deadline_seconds: float | None = None,
 ) -> _T:
-    """Call ``fn()`` with 429-aware exponential backoff.
+    """Call ``fn()`` with 429-aware, deadline-bounded persistent retry.
 
     ``fn`` is a zero-arg thunk wrapping a single ``ChatAnthropic`` /
     structured-LLM / ReAct ``.invoke()``. On ``anthropic.RateLimitError``
     (or a 429 ``APIStatusError``) this honors the ``retry-after``
     response header when present, otherwise sleeps
-    ``min(base * 2**attempt, cap)`` with jitter, up to ``max_attempts``.
+    ``min(base * 2**attempt, cap)`` with jitter, and **keeps retrying
+    until an overall wall-clock deadline** (``deadline_seconds``,
+    default ``RATE_LIMIT_RETRY_DEADLINE_SECONDS`` ≈ 75 min) is reached
+    — NOT a small fixed attempt count.
+
+    This is the "long retry mechanism" of the all-agents-strict rework
+    (Brian, 2026-05-16). When the deadline is exceeded the 429 is
+    re-raised — the caller does NOT degrade-and-continue; the run
+    hard-fails (status:ERROR, nothing promoted) because we get nothing
+    from a process whose agents didn't all run.
 
     Any non-429 exception propagates immediately and unchanged — this
     wrapper deliberately does NOT swallow or retry schema errors,
     recursion exhaustion, missing-key errors, etc. Those keep flowing
-    to the existing strict-mode / partial / per-team-isolation paths.
+    to the caller's hard-fail path (a non-429 failure still fails the
+    run under the directive — a partial process produces nothing of
+    value).
     """
+    if deadline_seconds is None:
+        # Read at call time (NOT default-arg bind) so a test / Lambda
+        # env that monkeypatches the module constant takes effect.
+        deadline_seconds = RATE_LIMIT_RETRY_DEADLINE_SECONDS
+    start = time.monotonic()
+    deadline = start + deadline_seconds
     last_exc: BaseException | None = None
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return fn()
         except BaseException as exc:  # noqa: BLE001 — re-raised below if not 429
             if not _is_rate_limit_error(exc):
                 raise
             last_exc = exc
-            if attempt == max_attempts:
-                log.error(
-                    "[rate_limit_retry:%s] org 429 persisted after %d "
-                    "attempts — propagating (team will be recorded as "
-                    "failed; per-team isolation keeps the run alive)",
-                    label, max_attempts,
-                )
-                raise
+            now = time.monotonic()
+            elapsed = now - start
             hint = _retry_after_seconds(exc)
             if hint is not None:
                 delay = hint
@@ -143,20 +212,37 @@ def invoke_with_rate_limit_retry(
                     _BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
                     _BACKOFF_CAP_SECONDS,
                 )
-            # Decorrelated jitter so 6 parallel teams don't re-burst in
+            # Decorrelated jitter so parallel teams don't re-burst in
             # lockstep when the TPM window resets.
             delay += random.uniform(0.0, min(delay, 5.0))
+            # Deadline check: if even a minimal sleep would land us past
+            # the deadline, give up now and propagate the 429. The
+            # caller's hard-fail rule turns this into status:ERROR.
+            if now + delay >= deadline:
+                log.error(
+                    "[rate_limit_retry:%s] org 429 persisted past the "
+                    "%.0f min deadline (%.0fs elapsed, %d attempts) — "
+                    "propagating. Per the all-agents-strict directive "
+                    "the caller HARD-FAILS the run (no signals.json / "
+                    "email / DB write); already-succeeded agents stay "
+                    "persisted so an SF redrive only re-attempts the "
+                    "still-missing ones.",
+                    label, deadline_seconds / 60.0, elapsed, attempt,
+                )
+                raise
             log.warning(
-                "[rate_limit_retry:%s] Haiku 429 (org TPM ceiling) on "
-                "attempt %d/%d — backing off %.1fs (%s)",
-                label, attempt, max_attempts, delay,
+                "[rate_limit_retry:%s] Haiku/Sonnet 429 (org TPM "
+                "ceiling) attempt %d — backing off %.1fs (%s); %.0fs of "
+                "%.0fs deadline elapsed",
+                label, attempt, delay,
                 "retry-after header" if hint is not None
                 else "exponential",
+                elapsed, deadline_seconds,
             )
             time.sleep(delay)
     # Unreachable — the loop either returns or raises.
-    assert last_exc is not None
-    raise last_exc
+    assert last_exc is not None  # pragma: no cover
+    raise last_exc  # pragma: no cover
 
 
 def extract_tool_calls(messages: list) -> list[dict]:

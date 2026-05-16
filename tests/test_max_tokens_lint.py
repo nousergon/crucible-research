@@ -41,7 +41,11 @@ _ALLOWLIST: dict[str, set[int]] = {
     # oversized for this narrow case. Bumping would just slacken the
     # ceiling; leaving it at 512 keeps the failure-mode visible if the
     # critic ever generates verbose output.
-    "agents/macro_agent.py": {462},
+    # Line moved 462 → 476 by the all-agents-strict rework (added the
+    # langchain_utils import + an explicit max_retries=
+    # SECTOR_TEAM_LLM_MAX_RETRIES kwarg on the critic ChatAnthropic).
+    # Same intentional 512-literal critic call, just relocated.
+    "agents/macro_agent.py": {476},
 }
 
 

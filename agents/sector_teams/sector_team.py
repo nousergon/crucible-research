@@ -32,6 +32,7 @@ from agents.sector_teams.team_config import (
 from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    _is_rate_limit_error,
     invoke_with_rate_limit_retry,
 )
 from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
@@ -507,39 +508,45 @@ def _update_thesis_for_held_stock(
     # defend against LNTH/LLY/PFE/VRTX/CME/JHG/COKE/HSY/KR's
     # `"final_score": null` overwrites in the 2026-04-11 run.
     #
-    # Per-thesis isolation + structured-output retry (2026-05-16):
-    #   On the 2026-05-16 Saturday SF recovery the Research Lambda
-    #   aborted the ENTIRE weekly run (~25 theses + sector teams + CIO
-    #   all discarded) because ONE held-thesis-update LLM call emitted
-    #   `catalysts` as a string of leaked Anthropic tool-use XML
-    #   (`<parameter name="catalysts">…satellite programs`) instead of a
-    #   JSON list → Pydantic `list_type` ValidationError. In strict mode
-    #   that error re-raised here and propagated uncaught to
-    #   lambda/handler.py:520 (`return {"status":"ERROR", ...}`).
+    # ALL-AGENTS-STRICT rework (Brian, 2026-05-16) — REMOVES #193's
+    # carry-forward-prior-thesis fallback:
     #
-    #   The standing rule is "one item must never fail the whole batch".
-    #   These `<parameter name=...>` tool-XML leaks are transient model
-    #   nondeterminism, so we (1) drive with_structured_output with
-    #   include_raw=True and retry the call ONCE on a parse/validation
-    #   error (matching the include_raw + parsing_error contract in
-    #   quant_analyst.py / ic_cio.py), then (2) if it STILL fails,
-    #   degrade this ONE thesis gracefully — carry the prior thesis
-    #   forward (no-update path) and continue the run. A single
-    #   held-thesis-update failure must NOT change the Lambda's overall
-    #   status away from OK/SKIPPED, so this path NEVER re-raises (even
-    #   in strict mode) — per-thesis isolation is the load-bearing
-    #   invariant, not strict-vs-lax. This deliberately diverges from
-    #   the CIO/quant strict-mode-raises contract: those stages MUST
-    #   yield output for the run to be meaningful, whereas a held thesis
-    #   that fails to update simply carries forward unchanged.
+    #   "We don't get anything from this process if the sectors, or any
+    #    other agent for that matter, fail/don't run."
+    #
+    #   A held-thesis update is one of the agents in scope. #193 made a
+    #   failed held-thesis update silently carry the prior thesis
+    #   forward so the run continued; the directive reverses this — a
+    #   held-thesis update that still cannot produce REAL output after
+    #   the long 429 retry window MUST fail the run, not silently ship
+    #   a stale thesis dressed as a fresh one.
+    #
+    #   Resilience now lives in two complementary places:
+    #     (1) 429s: ``invoke_with_rate_limit_retry`` retries persistently
+    #         up to the ~75-min wall-clock deadline (long enough to ride
+    #         out the org TPM window), then propagates.
+    #     (2) Transient tool-XML schema leaks (the 2026-05-16 `catalysts`
+    #         string-not-list nondeterminism): a small bounded
+    #         parse/validation retry (these recover on a re-roll), then
+    #         — if STILL malformed — RAISE. No prior-thesis carry-forward.
+    #
+    #   The raise propagates through ``_run_sector_team`` →
+    #   ``run_sector_team`` and surfaces as the team's ``error``, which
+    #   ``score_aggregator`` now hard-fails on (revert of #194's
+    #   degrade-and-continue). The team is NOT persisted (errored teams
+    #   are never persisted), so an SF redrive re-attempts only it.
     from graph.state_schemas import HeldThesisUpdateLLMOutput
 
     structured_llm = llm.with_structured_output(
         HeldThesisUpdateLLMOutput, include_raw=True,
     )
-    _MAX_ATTEMPTS = 2
+    # Bounded parse/validation re-roll for the transient tool-XML leak
+    # ONLY. This is NOT a 429 retry (429s are handled by the deadline-
+    # bounded wrapper inside the thunk) and NOT a degrade path — after
+    # the last attempt we RAISE.
+    _MAX_PARSE_ATTEMPTS = 3
     last_error: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
+    for attempt in range(1, _MAX_PARSE_ATTEMPTS + 1):
         try:
             extract_resp = invoke_with_rate_limit_retry(
                 lambda: structured_llm.invoke(
@@ -572,31 +579,52 @@ def _update_thesis_for_held_stock(
             result["stale_days"] = 0
             if attempt > 1:
                 log.info(
-                    "[thesis_update:%s] recovered on retry (attempt %d/%d)",
-                    ticker, attempt, _MAX_ATTEMPTS,
+                    "[thesis_update:%s] recovered on parse-retry "
+                    "(attempt %d/%d)",
+                    ticker, attempt, _MAX_PARSE_ATTEMPTS,
                 )
             return result
         except Exception as e:
             last_error = e
-            if attempt < _MAX_ATTEMPTS:
+            if _is_rate_limit_error(e):
+                # The deadline-bounded wrapper already exhausted the
+                # ~75-min 429 window. Re-rolling the prompt won't help
+                # an org TPM ceiling — fail fast (the run hard-fails).
+                log.error(
+                    "[thesis_update:%s] org 429 persisted past the "
+                    "retry deadline — failing the run per "
+                    "all-agents-strict (no prior-thesis carry-forward)",
+                    ticker,
+                )
+                raise
+            if attempt < _MAX_PARSE_ATTEMPTS:
                 log.warning(
-                    "[thesis_update:%s] attempt %d/%d failed: %s — retrying once",
-                    ticker, attempt, _MAX_ATTEMPTS, e,
+                    "[thesis_update:%s] parse/validation attempt %d/%d "
+                    "failed: %s — re-rolling (transient tool-XML leak)",
+                    ticker, attempt, _MAX_PARSE_ATTEMPTS, e,
                 )
                 continue
-            # Final attempt failed — per-thesis isolation: log a
-            # structured warning (ticker + the validation error) and
-            # degrade THIS thesis only. NEVER re-raise: one bad
-            # held-thesis-update must not abort the weekly run.
-            log.warning(
-                "[thesis_update:%s] failed after %d attempts (%s) — "
-                "carrying prior thesis forward, run continues",
-                ticker, _MAX_ATTEMPTS, e,
+            # Final attempt still malformed. ALL-AGENTS-STRICT: this
+            # agent did NOT produce real output, so the run must fail.
+            # NO carry-forward of the prior thesis (that was #193, now
+            # removed). Raise — surfaces as the team's hard error.
+            log.error(
+                "[thesis_update:%s] still malformed after %d parse "
+                "attempts (%s) — RAISING. Per the all-agents-strict "
+                "directive a held-thesis update that cannot produce "
+                "real output fails the whole run; the prior thesis is "
+                "NOT carried forward.",
+                ticker, _MAX_PARSE_ATTEMPTS, last_error,
             )
+            raise RuntimeError(
+                f"held-thesis update for {ticker} ({team_id}) failed "
+                f"after {_MAX_PARSE_ATTEMPTS} attempts and cannot "
+                f"produce real output — all-agents-strict hard-fail "
+                f"(no prior-thesis carry-forward): {last_error}"
+            ) from last_error
 
-    # Isolation fallback: preserve prior thesis (no-update path). This is
-    # the same shape as the no-material-trigger preservation branch in
-    # _run_sector_team — the thesis is simply not updated this cycle.
-    if prior_thesis:
-        return {**prior_thesis, "triggers": triggers, "stale_days": 0}
-    return {"triggers": triggers, "stale_days": 0, "score_failed": True}
+    # Unreachable — the loop either returns or raises.
+    raise AssertionError(  # pragma: no cover
+        f"held-thesis update for {ticker} exited retry loop without "
+        f"returning or raising"
+    )

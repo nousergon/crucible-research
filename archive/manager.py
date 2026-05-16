@@ -425,6 +425,114 @@ class ArchiveManager:
         )
         return output
 
+    # ── Per-agent run persistence (CIO + macro) ───────────────────────────
+    # ALL-AGENTS-STRICT rework (2026-05-16): extends the #194
+    # sector-team persist+resume pattern to the CIO and macro economist
+    # agents. Rationale (from the directive): the long 429-retry window
+    # must stay affordable across an SF redrive — if CIO / macro
+    # weren't persisted, a redrive after a sector-team hard-fail would
+    # re-pay the (expensive Sonnet) CIO + macro calls every time. With
+    # this, a redrive resumes every already-completed agent (sector
+    # teams + CIO + macro) with zero LLM calls and only re-attempts the
+    # still-missing one(s). Same envelope shape + identity guard +
+    # best-effort never-raises contract as save_sector_team_run.
+
+    @staticmethod
+    def _agent_run_key(run_date: str, agent_id: str) -> str:
+        """Deterministic S3 key for one persisted non-team agent run.
+
+        ``agent_id`` is a stable slug ("cio" / "macro"). greppable:
+        ``agent_runs``.
+        """
+        return f"archive/agent_runs/{run_date}/{agent_id}.json"
+
+    def save_agent_run(
+        self, run_date: str, agent_id: str, output: dict,
+    ) -> None:
+        """Persist a successfully-completed non-team agent's output.
+
+        Called from the CIO / macro graph nodes immediately after the
+        agent produces REAL output (post all-agents-strict: a node only
+        reaches the persist call if it did NOT raise). Best-effort —
+        persistence failure is non-fatal (log + continue); the agent's
+        in-memory output still flows, we just lose resumability for it.
+        """
+        key = self._agent_run_key(run_date, agent_id)
+        envelope = {
+            "run_date": run_date,
+            "agent_id": agent_id,
+            "output": output,
+        }
+        try:
+            body = json.dumps(envelope, indent=2, default=str)
+            self._s3_put(key, body)
+            log.info(
+                "[agent_run] persisted %s → s3://%s/%s",
+                agent_id, self.bucket, key,
+            )
+        except Exception as e:
+            log.warning(
+                "[agent_run] persist FAILED for %s (%s) — run continues; "
+                "this agent just won't be resumable on a rerun",
+                agent_id, e,
+            )
+
+    def load_agent_run(
+        self, run_date: str, agent_id: str,
+    ) -> Optional[dict]:
+        """Load a previously-persisted non-team agent output for resume.
+
+        Same contract as ``load_sector_team_run``: returns the agent
+        ``output`` dict iff a well-formed envelope exists for EXACTLY
+        this ``(run_date, agent_id)``; any miss / corruption / identity
+        mismatch returns None (caller re-runs the agent fresh) and
+        never raises.
+        """
+        key = self._agent_run_key(run_date, agent_id)
+        raw = self._s3_get(key)
+        if raw is None:
+            return None
+        try:
+            envelope = json.loads(raw)
+        except Exception as e:
+            log.warning(
+                "[agent_run] corrupt persisted JSON at %s (%s) — "
+                "ignoring, agent %s will be re-run", key, e, agent_id,
+            )
+            return None
+        if not isinstance(envelope, dict):
+            log.warning(
+                "[agent_run] persisted object at %s is not a dict — "
+                "ignoring, agent %s will be re-run", key, agent_id,
+            )
+            return None
+        if (
+            envelope.get("run_date") != run_date
+            or envelope.get("agent_id") != agent_id
+        ):
+            log.warning(
+                "[agent_run] envelope identity mismatch at %s "
+                "(envelope run_date=%r agent_id=%r, expected %r/%r) — "
+                "ignoring, agent will be re-run",
+                key, envelope.get("run_date"), envelope.get("agent_id"),
+                run_date, agent_id,
+            )
+            return None
+        output = envelope.get("output")
+        if not isinstance(output, dict):
+            log.warning(
+                "[agent_run] persisted output at %s is malformed "
+                "(not a dict) — ignoring, agent %s re-runs",
+                key, agent_id,
+            )
+            return None
+        log.info(
+            "[agent_run] RESUME: loaded persisted %s for %s from "
+            "s3://%s/%s — short-circuiting (zero LLM calls)",
+            agent_id, run_date, self.bucket, key,
+        )
+        return output
+
     def load_regime_substrate(self) -> dict | None:
         """Load the most recent regime substrate artifact.
 
