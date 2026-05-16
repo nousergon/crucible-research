@@ -559,6 +559,33 @@ class ArchiveManager:
             self.s3, bucket=self.bucket, prefix="regime",
         )
 
+    def list_regime_substrates(self, n_recent: int = 8) -> list[dict]:
+        """Load the most recent weekly regime substrate artifacts.
+
+        Producer is the same Saturday-SF ``RegimeSubstrate`` Lambda as
+        :meth:`load_regime_substrate`. Artifacts live at the canonical
+        ``regime/{YYMMDDHHMM}.json`` shape; ``regime/latest.json`` is a
+        pure pointer sidecar (skipped by the lib helper).
+
+        Delegates to ``alpha_engine_lib.eval_artifacts.list_eval_artifacts``,
+        which returns the parsed payloads oldest → newest, caps to the
+        ``n_recent`` most-recent runs, and degrades gracefully to ``[]``
+        on any listing/read failure (pre-deploy state, S3 hiccup, parse
+        error). Used by the consolidated brief's regime-trend block;
+        callers must tolerate an empty / short list.
+        """
+        from alpha_engine_lib.eval_artifacts import list_eval_artifacts
+
+        try:
+            return list_eval_artifacts(
+                self.s3, bucket=self.bucket, prefix="regime",
+                n_recent=n_recent,
+            )
+        except Exception as e:  # defensive — lib already degrades, but
+            # never let the brief crash on a regime-trend lookup.
+            log.debug("list_regime_substrates failed: %s", e)
+            return []
+
     def load_predictions_json(self) -> dict[str, dict]:
         """
         Load predictor/predictions/latest.json from S3.

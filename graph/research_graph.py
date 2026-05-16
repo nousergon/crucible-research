@@ -1780,6 +1780,19 @@ def consolidator(state: ResearchState) -> dict:
         sections.append(macro_report)
     sections.append("")
 
+    # ── Section a.0: Regime Trend (quant substrate, ~8 weeks) ────────────────
+    # Replaces the prior static one-shot HMM-posterior snapshot with a
+    # compact trend over the most recent weekly regime artifacts so a
+    # reader can see the direction of the continuous risk-on/off dial
+    # rather than a single week's point estimate. Degrades gracefully
+    # (missing / few artifacts → render what's available, never crash).
+    regime_trend = _build_regime_trend(state.get("archive_manager"), n_weeks=8)
+    if regime_trend:
+        sections.append("---\n")
+        sections.append("## a.0. REGIME TREND\n")
+        sections.extend(regime_trend)
+        sections.append("")
+
     # ── Section a.1: Risk Posture (regime indicator) ─────────────────────────
     # Surfaces the ATR-distribution of the agent population so a reader can
     # eyeball whether the agents have positioned toward higher-vol names
@@ -1810,18 +1823,15 @@ def consolidator(state: ResearchState) -> dict:
             sections.append(f"| {sector} | {label} | {rationale} |")
         sections.append("")
 
-    # ── Section 3: Notable Developments ──────────────────────────────────────
-    notable = _build_notable_developments(state)
-    if notable:
-        sections.append("---\n")
-        sections.append("## c. NOTABLE DEVELOPMENTS\n")
-        for item in notable:
-            sections.append(f"- {item}")
-        sections.append("")
-
-    # ── Section 4: Universe Ratings (unified table) ─────────────────────────
+    # ── Section c: Universe Ratings (population-only, two clean axes) ─────────
+    # Notable Developments was dropped (2026-05-16 redesign): exits are
+    # already EXIT/Sell rows and CIO-advance lines are entry rationale, so
+    # the section was redundant. Per-ticker development notes (exit reasons,
+    # >2 ATR / news-spike flags, high-conviction calls) are now folded into
+    # that ticker's Rationale cell via ``_build_notable_developments`` —
+    # repurposed as a per-ticker note lookup (no longer renders a section).
     sections.append("---\n")
-    sections.append("## d. UNIVERSE RATINGS\n")
+    sections.append("## c. UNIVERSE RATINGS\n")
 
     current_pop = state.get("current_population", [])
     new_pop = state.get("new_population", [])
@@ -1835,20 +1845,59 @@ def consolidator(state: ResearchState) -> dict:
     theses = state.get("investment_theses", {})
     prior_theses = state.get("prior_theses", {})
     entry_theses = state.get("entry_theses", {})
-    team_outputs = state.get("sector_team_outputs", {})
-
-    # Collect tickers with material thesis updates from sector teams
-    updated_tickers = set()
-    for team_id, output in team_outputs.items():
-        for ticker in output.get("thesis_updates", {}):
-            updated_tickers.add(ticker)
 
     pop_lookup = {p["ticker"]: p for p in new_pop}
 
-    # Build unified rows: (ticker, status, rating, score, rationale)
+    # Per-ticker development notes (folded into Rationale cells). Repurposes
+    # the old Notable Developments builder as a {ticker: [note, ...]} lookup
+    # so every development stays attached to its stock.
+    notes_by_ticker = _build_notable_developments(state)
+
+    def _rating_to_recommendation(raw: str) -> str:
+        """Map the raw rating value → title-case action.
+
+        BUY → Buy, SELL (or exit) → Sell, anything else → Hold.
+        """
+        r = (raw or "").strip().upper()
+        if r == "BUY":
+            return "Buy"
+        if r == "SELL":
+            return "Sell"
+        return "Hold"
+
+    def _with_notes(ticker: str, rationale: str) -> str:
+        """Append any per-ticker development notes to the rationale cell.
+
+        Notes already substantively contained in the base rationale
+        (common for exits, where the reason is both the base text and
+        the folded "Exit: <reason>" note) are skipped to avoid an
+        echoed cell.
+        """
+        notes = notes_by_ticker.get(ticker)
+        if not notes:
+            return rationale
+        rationale_l = (rationale or "").lower()
+        fresh = []
+        for n in notes:
+            # Strip the "<Label>: " prefix before the containment check
+            # so "Exit: <reason>" dedupes against a base == "<reason>".
+            body = n.split(": ", 1)[1] if ": " in n else n
+            if body and body.lower() in rationale_l:
+                continue
+            fresh.append(n)
+        if not fresh:
+            return rationale
+        note_str = " ".join(fresh)
+        if not rationale:
+            return note_str
+        return f"{rationale} — {note_str}"
+
+    # Population rows: (ticker, status, recommendation, score, rationale)
+    # Status ∈ {New, Existing} (lifecycle only). Recommendation ∈
+    # {Buy, Hold, Sell} (action, from the raw rating). An exit is an
+    # Existing holding with Recommendation Sell.
     rows = []
 
-    # Current portfolio stocks
     for p in new_pop:
         ticker = p["ticker"]
         thesis = theses.get(ticker, {})
@@ -1857,50 +1906,88 @@ def consolidator(state: ResearchState) -> dict:
 
         rating = thesis.get("rating") or prior.get("rating") or pop_entry.get("long_term_rating", "HOLD")
         score = thesis.get("final_score") or prior.get("score") or pop_entry.get("long_term_score", 0)
+        recommendation = _rating_to_recommendation(rating)
 
         if ticker in entrant_tickers:
-            status = "NEW"
+            status = "New"
             et = entry_theses.get(ticker, {})
             rationale = et.get("bull_case") or thesis.get("bull_case", "New entry")
-        elif ticker in updated_tickers and thesis.get("bull_case"):
-            status = "UPDATED"
-            rationale = thesis.get("bull_case", "")
         else:
-            status = "HOLD"
-            rationale = prior.get("thesis_summary") or thesis.get("bull_case", "Continuing coverage — no material update")
+            status = "Existing"
+            rationale = (
+                thesis.get("bull_case")
+                or prior.get("thesis_summary")
+                or "Continuing coverage — no material update"
+            )
 
-        rows.append((ticker, status, rating, score, rationale))
+        rows.append((ticker, status, recommendation, score, _with_notes(ticker, rationale)))
 
-    # BUY recommendations not in portfolio (candidates that didn't get a slot)
-    buy_candidates = []
-    for ticker, thesis in theses.items():
-        if thesis.get("rating") == "BUY" and ticker not in new_tickers and ticker not in exit_tickers:
-            score = thesis.get("final_score", 0)
-            rationale = thesis.get("bull_case", "Buy recommendation — no open slot")
-            buy_candidates.append((ticker, "BUY REC", "BUY", score, rationale))
-
-    # Exited stocks
+    # Exited stocks — rotated out: Existing holding, Recommendation Sell.
     for e in exit_list:
         ticker = e.get("ticker_out", "?")
         score = e.get("score_out", 0)
         reason = e.get("reason", "Exited from population")
-        rows.append((ticker, "EXIT", "SELL", score, reason))
+        rows.append((ticker, "Existing", "Sell", score, _with_notes(ticker, reason)))
 
-    # Combine: portfolio + buy recs + exits
-    rows.extend(buy_candidates)
+    # Bench BUY-recs (rated BUY, no open population slot) — NOT in the main
+    # table; rendered in their own subsection below.
+    bench_buy_candidates = []
+    for ticker, thesis in theses.items():
+        if thesis.get("rating") == "BUY" and ticker not in new_tickers and ticker not in exit_tickers:
+            score = thesis.get("final_score", 0)
+            rationale = thesis.get("bull_case", "Buy recommendation — no open slot")
+            bench_buy_candidates.append(
+                (ticker, "Buy", score, _with_notes(ticker, rationale))
+            )
 
-    # Sort: NEW first, then BUY REC, then UPDATED, then HOLD by score desc, then EXIT
-    status_order = {"NEW": 0, "BUY REC": 1, "UPDATED": 2, "HOLD": 3, "EXIT": 4}
-    rows.sort(key=lambda r: (status_order.get(r[1], 9), -(r[3] or 0)))
+    # Sort: New first, then Existing by Score desc, exits (Sell) last.
+    def _row_sort_key(r):
+        ticker, status, recommendation, score, _rationale = r
+        if status == "New":
+            bucket = 0
+        elif recommendation == "Sell":
+            bucket = 2
+        else:
+            bucket = 1
+        return (bucket, -(score or 0))
 
-    n_buy_recs = len(buy_candidates)
-    sections.append(f"*{len(new_pop)} stocks in portfolio | {len(entrant_tickers)} new | {len(exit_list)} exited | {n_buy_recs} buy candidates*\n")
-    sections.append("| Ticker | Status | Rating | Score | Rationale |")
-    sections.append("|--------|--------|--------|-------|-----------|")
-    for ticker, status, rating, score, rationale in rows:
+    rows.sort(key=_row_sort_key)
+
+    n_exits = len(exit_list)
+    n_bench = len(bench_buy_candidates)
+    sections.append(
+        f"*{len(new_pop)} stocks in population | {len(entrant_tickers)} new | "
+        f"{len(new_pop) - len(entrant_tickers)} existing | {n_exits} exited | "
+        f"{n_bench} bench buy candidate{'s' if n_bench != 1 else ''}*\n"
+    )
+    sections.append("| Ticker | Status | Recommendation | Score (0–100) | Rationale |")
+    sections.append("|--------|--------|----------------|---------------|-----------|")
+    for ticker, status, recommendation, score, rationale in rows:
         score_str = f"{score:.0f}" if score else "—"
-        sections.append(f"| {ticker} | {status} | {rating} | {score_str} | {rationale} |")
+        sections.append(f"| {ticker} | {status} | {recommendation} | {score_str} | {rationale} |")
     sections.append("")
+    sections.append(
+        "*Score = composite of quant + qual sub-scores adjusted by the "
+        "sector-macro modifier (0–100); drives population ranking.*"
+    )
+    sections.append("")
+
+    # ── Section c.1: Buy Candidates (no slot) ────────────────────────────────
+    # Bench BUY-recs that didn't get a portfolio slot. Separate small table;
+    # omitted entirely when empty.
+    if bench_buy_candidates:
+        bench_buy_candidates.sort(key=lambda r: -(r[2] or 0))
+        sections.append("---\n")
+        sections.append("## c.1. BUY CANDIDATES (NO SLOT)\n")
+        sections.append(
+            "*Rated Buy but not currently held — no open population slot.*\n"
+        )
+        sections.append("| Ticker | Recommendation | Score | Rationale |")
+        sections.append("|--------|----------------|-------|-----------|")
+        for ticker, recommendation, score, rationale in bench_buy_candidates:
+            score_str = f"{score:.0f}" if score else "—"
+            sections.append(f"| {ticker} | {recommendation} | {score_str} | {rationale} |")
+        sections.append("")
 
     # Footer
     sections.append("---\n")
@@ -1981,9 +2068,31 @@ def _build_risk_posture(state: ResearchState) -> list[str]:
     return lines
 
 
-def _build_notable_developments(state: ResearchState) -> list[str]:
-    """Extract notable developments from team outputs and exits."""
-    notable = []
+def _build_notable_developments(state: ResearchState) -> dict[str, list[str]]:
+    """Per-ticker development-note lookup.
+
+    Repurposed 2026-05-16: was the source of the standalone "NOTABLE
+    DEVELOPMENTS" section (dropped in the email redesign — its content
+    was redundant with EXIT/Sell rows and entry rationale). Now returns
+    a ``{ticker: [note, ...]}`` mapping so the consolidator can fold each
+    development into that ticker's Universe-Ratings Rationale cell, keeping
+    every development attached to its stock.
+
+    Surfaces three classes of per-ticker note:
+      - high-conviction sector-team recommendations (conviction ≥ 70),
+      - exit reasons (e.g. ``min_rotation_floor`` / >2 ATR / news-spike),
+      - CIO ADVANCE rationale.
+
+    Note text is truncated to 200 chars and de-duplicated per ticker.
+    """
+    notes: dict[str, list[str]] = {}
+
+    def _add(ticker: str, note: str) -> None:
+        if not ticker or ticker == "?" or not note:
+            return
+        bucket = notes.setdefault(ticker, [])
+        if note not in bucket:
+            bucket.append(note)
 
     # High-conviction recommendations.
     # Option A 2026-04-30: agent-format conviction is int 0-100; ``high``
@@ -1996,14 +2105,14 @@ def _build_notable_developments(state: ResearchState) -> list[str]:
             bull = rec.get("bull_case", "")
             conviction = rec.get("conviction")
             if isinstance(conviction, (int, float)) and conviction >= 70 and bull:
-                notable.append(f"**{ticker} — High Conviction ({team_id.title()}):** {bull[:200]}")
+                _add(ticker, f"High conviction ({team_id.title()}): {bull[:200]}")
 
     # Exits with reasons
     for e in state.get("exits", []):
         ticker = e.get("ticker_out", "?")
         reason = e.get("reason", "")
         if reason:
-            notable.append(f"**{ticker} — Exit:** {reason[:200]}")
+            _add(ticker, f"Exit: {reason[:200]}")
 
     # CIO advances
     for d in state.get("ic_decisions", []):
@@ -2011,9 +2120,128 @@ def _build_notable_developments(state: ResearchState) -> list[str]:
             ticker = d.get("ticker", "?")
             rationale = d.get("rationale", "")
             if rationale:
-                notable.append(f"**{ticker} — CIO Advance:** {rationale[:200]}")
+                _add(ticker, f"CIO advance: {rationale[:200]}")
 
-    return notable[:7]
+    return notes
+
+
+def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
+    """Build the regime-trend block from the last ``n_weeks`` substrate
+    artifacts.
+
+    Replaces the prior static one-shot HMM-posterior snapshot. Loads the
+    most recent weekly ``regime/{run_id}.json`` artifacts (oldest →
+    newest) via ``ArchiveManager.list_regime_substrates`` and renders a
+    compact per-week table plus a one-line summary of the continuous
+    ``composite.intensity_z`` dial (current value + 8-week direction +
+    any breached guardrail).
+
+    Degrades gracefully — returns an empty list (consolidator skips the
+    section) when there is no archive manager, and a single informational
+    line when zero / one artifact is available. Never raises: a
+    regime-trend lookup failure must not prevent the brief from
+    generating.
+    """
+    if archive_manager is None:
+        return []
+
+    try:
+        artifacts = archive_manager.list_regime_substrates(n_recent=n_weeks)
+    except Exception as e:  # pragma: no cover — lib already degrades
+        logger.debug("[regime_trend] list_regime_substrates failed: %s", e)
+        return []
+
+    if not artifacts:
+        return ["_Regime substrate unavailable — no weekly artifacts found._"]
+
+    def _date_of(a: dict) -> str:
+        return a.get("trading_day") or a.get("calendar_date") or a.get("run_id", "?")
+
+    def _argmax_of(a: dict) -> str:
+        return (a.get("hmm") or {}).get("argmax") or a.get("hmm_argmax") or "?"
+
+    def _iz_of(a: dict):
+        comp = a.get("composite") or {}
+        iz = comp.get("intensity_z")
+        if iz is None:
+            iz = a.get("composite_intensity_z")
+        return iz
+
+    def _change_of(a: dict):
+        bocpd = a.get("bocpd") or {}
+        cs = bocpd.get("change_signal")
+        if cs is None:
+            cs = a.get("regime_change_signal")
+        return bool(cs)
+
+    def _weeks_in_state(a: dict):
+        return (a.get("hmm") or {}).get("weeks_in_current_state")
+
+    def _fmt_iz(iz) -> str:
+        return f"{iz:+.2f}" if isinstance(iz, (int, float)) else "—"
+
+    lines: list[str] = [
+        f"**Weekly regime substrate — last {len(artifacts)} run(s) "
+        f"(oldest → newest):**",
+        "",
+        "| Date | HMM Regime | Intensity-z | BOCPD Change | Weeks in State |",
+        "|------|------------|-------------|--------------|----------------|",
+    ]
+    for a in artifacts:
+        wic = _weeks_in_state(a)
+        wic_str = str(wic) if isinstance(wic, (int, float)) else "—"
+        lines.append(
+            f"| {_date_of(a)} | {_argmax_of(a)} | {_fmt_iz(_iz_of(a))} | "
+            f"{'yes' if _change_of(a) else 'no'} | {wic_str} |"
+        )
+    lines.append("")
+
+    if len(artifacts) == 1:
+        only = artifacts[0]
+        iz = _iz_of(only)
+        lines.append(
+            f"_Single artifact only — no trend yet. Current intensity-z "
+            f"{_fmt_iz(iz)} (HMM {_argmax_of(only)})._"
+        )
+        return lines
+
+    latest = artifacts[-1]
+    earliest = artifacts[0]
+    iz_now = _iz_of(latest)
+    iz_then = _iz_of(earliest)
+
+    if isinstance(iz_now, (int, float)) and isinstance(iz_then, (int, float)):
+        delta = iz_now - iz_then
+        if delta > 0.10:
+            direction = "rising (risk-off building)"
+        elif delta < -0.10:
+            direction = "falling (risk-on building)"
+        else:
+            direction = "flat"
+        iz_summary = (
+            f"current intensity-z {_fmt_iz(iz_now)} — "
+            f"{direction} over {len(artifacts)} weeks "
+            f"(Δ {_fmt_iz(delta)} vs {_date_of(earliest)})"
+        )
+    else:
+        iz_summary = f"current intensity-z {_fmt_iz(iz_now)}"
+
+    # Guardrail breach summary (latest artifact).
+    guardrails = (latest.get("guardrails") or {})
+    breached = [
+        k for k, v in guardrails.items()
+        if isinstance(v, bool) and v
+    ]
+    floor = guardrails.get("active_severity_floor")
+    if breached:
+        gr_summary = f"guardrail breached: {', '.join(sorted(breached))}"
+    elif floor:
+        gr_summary = f"active severity floor: {floor}"
+    else:
+        gr_summary = "no guardrail breached"
+
+    lines.append(f"**Summary:** {iz_summary}; {gr_summary}.")
+    return lines
 
 
 def _compute_focus_list_audit_lookup(
