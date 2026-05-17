@@ -1,13 +1,18 @@
 """
 Tests for scoring/performance_tracker.py.
 Uses in-memory SQLite — no network, no S3.
-yf.download is mocked for tests that would trigger it.
+
+The yfinance fallback leg was replaced by the alpha-engine-data
+daily_closes S3 reader (yfinance-centralization arc, 2026-05-16,
+plan doc: alpha-engine-docs/private/yfinance-centralization-260516.md,
+item R5 / PR 3). Polygon grouped-daily stays the PRIMARY path. The
+fallback tests below fake ``feature_store_reader.read_latest_daily_closes``
+via ``monkeypatch`` (NOT ``unittest.mock.patch`` — documented full-suite
+bleed in this repo; mirrors tests/test_held_thesis_strict.py style).
 """
 
 import sqlite3
 import pytest
-import pandas as pd
-from unittest.mock import patch
 
 _pt = pytest.importorskip("scoring.performance_tracker", reason="scoring.performance_tracker is gitignored")
 get_trading_day_offset = _pt.get_trading_day_offset
@@ -76,12 +81,27 @@ def _insert_tech_dates(conn, dates):
     conn.commit()
 
 
-def _mock_price_data(tickers_and_prices: dict) -> dict:
-    """Return a dict of {ticker: DataFrame} matching yf.download multi-ticker output."""
-    return {
-        ticker: pd.DataFrame({"Close": [price]})
-        for ticker, price in tickers_and_prices.items()
-    }
+def _fake_daily_closes(monkeypatch, tickers_and_prices: dict | None):
+    """Fake the daily_closes S3 fallback reader (no S3/network).
+
+    ``read_latest_daily_closes`` is imported *inside* run_performance_checks
+    from data.fetchers.feature_store_reader, so patch it there. Passing
+    None simulates an unavailable feature store (reader returns None).
+    """
+    import data.fetchers.feature_store_reader as fsr
+
+    monkeypatch.setattr(
+        fsr,
+        "read_latest_daily_closes",
+        lambda: dict(tickers_and_prices) if tickers_and_prices else None,
+    )
+
+
+def _disable_polygon(monkeypatch):
+    """Force the polygon grouped-daily PRIMARY path to yield nothing so the
+    daily_closes fallback is exercised (the in-function
+    `from polygon_client import polygon_client` then raises, caught)."""
+    monkeypatch.setitem(__import__("sys").modules, "polygon_client", None)
 
 
 # ── get_trading_day_offset ────────────────────────────────────────────────────
@@ -284,20 +304,29 @@ class TestRunPerformanceChecks:
         assert "accuracy_10d" in result
         assert "recalibration_flag" in result
 
-    @patch.dict("sys.modules", {"polygon_client": None})
-    @patch("scoring.performance_tracker.yf.download")
-    def test_skips_when_yfinance_fails(self, mock_dl, db):
+    def test_module_is_yfinance_free(self):
+        """Post-PR3 the module imports no yfinance and has no yf symbol."""
+        import inspect
+
+        src = inspect.getsource(_pt)
+        assert "import yfinance" not in src
+        assert "yf.download" not in src
+        assert not hasattr(_pt, "yf")
+
+    def test_degrades_when_fallback_unavailable(self, db, monkeypatch):
+        """Polygon empty + daily_closes reader returns None → graceful
+        degrade to accuracy-stats-only, never raises (replaces the old
+        'skips when yfinance fails' contract)."""
+        _disable_polygon(monkeypatch)
+        _fake_daily_closes(monkeypatch, None)  # reader returns None
         db.execute(
             "INSERT INTO score_performance(symbol, score_date, score, price_on_date) VALUES ('PLTR', '2025-12-01', 75.0, 100.0)"
         )
         db.commit()
-        mock_dl.side_effect = Exception("network error")
         result = run_performance_checks(db, "2026-03-05")
-        assert "accuracy_10d" in result  # falls back gracefully
+        assert "accuracy_10d" in result  # falls back gracefully, no raise
 
-    @patch.dict("sys.modules", {"polygon_client": None})
-    @patch("scoring.performance_tracker.yf.download")
-    def test_evaluates_10d_window(self, mock_dl, db):
+    def test_evaluates_10d_window_via_daily_closes_fallback(self, db, monkeypatch):
         score_date = "2025-12-01"
         today = "2026-03-05"
 
@@ -317,7 +346,8 @@ class TestRunPerformanceChecks:
         )
         db.commit()
 
-        mock_dl.return_value = _mock_price_data({"PLTR": 115.0, "SPY": 510.0})
+        _disable_polygon(monkeypatch)
+        _fake_daily_closes(monkeypatch, {"PLTR": 115.0, "SPY": 510.0})
 
         result = run_performance_checks(db, today)
         assert "accuracy_10d" in result
@@ -328,9 +358,7 @@ class TestRunPerformanceChecks:
         assert row[0] == 115.0
         assert abs(row[1] - 15.0) < 0.1  # (115/100 - 1) * 100 = 15%
 
-    @patch.dict("sys.modules", {"polygon_client": None})
-    @patch("scoring.performance_tracker.yf.download")
-    def test_beat_spy_flag_set(self, mock_dl, db):
+    def test_beat_spy_flag_set_via_daily_closes_fallback(self, db, monkeypatch):
         score_date = "2025-12-01"
         today = "2026-03-05"
 
@@ -347,7 +375,8 @@ class TestRunPerformanceChecks:
         db.commit()
 
         # PLTR +20%, SPY +2% → beats SPY
-        mock_dl.return_value = _mock_price_data({"PLTR": 120.0, "SPY": 510.0})
+        _disable_polygon(monkeypatch)
+        _fake_daily_closes(monkeypatch, {"PLTR": 120.0, "SPY": 510.0})
         run_performance_checks(db, today)
 
         row = db.execute(
@@ -355,9 +384,7 @@ class TestRunPerformanceChecks:
         ).fetchone()
         assert row[0] == 1
 
-    @patch.dict("sys.modules", {"polygon_client": None})
-    @patch("scoring.performance_tracker.yf.download")
-    def test_missing_current_price_skips_row(self, mock_dl, db):
+    def test_missing_current_price_skips_row(self, db, monkeypatch):
         score_date = "2025-12-01"
         td_dates = [f"2025-12-{i:02d}" for i in range(2, 12)]
         _insert_tech_dates(db, td_dates)
@@ -367,7 +394,65 @@ class TestRunPerformanceChecks:
         )
         db.commit()
 
-        # Price data missing for PLTR
-        mock_dl.return_value = _mock_price_data({"SPY": 510.0})
+        # PLTR absent from the fallback (only SPY present) → row skipped.
+        _disable_polygon(monkeypatch)
+        _fake_daily_closes(monkeypatch, {"SPY": 510.0})
         result = run_performance_checks(db, "2026-03-05")
         assert "accuracy_10d" in result
+        row = db.execute(
+            "SELECT price_10d FROM score_performance WHERE symbol='PLTR'"
+        ).fetchone()
+        assert row[0] is None  # no eval recorded — graceful skip
+
+    def test_polygon_primary_path_unaffected(self, db, monkeypatch):
+        """The yfinance→daily_closes swap is fallback-only: when polygon
+        grouped-daily returns prices, the daily_closes reader is never
+        called (primary path unchanged)."""
+        score_date = "2025-12-01"
+        today = "2026-03-05"
+        td_dates = [f"2025-12-{i:02d}" for i in range(2, 12)]
+        _insert_tech_dates(db, td_dates)
+        db.execute(
+            "INSERT INTO macro_snapshots(date, sp500_close) VALUES (?, ?)",
+            (score_date, 500.0),
+        )
+        db.execute(
+            "INSERT INTO score_performance(symbol, score_date, score, price_on_date) VALUES (?, ?, ?, ?)",
+            ("PLTR", score_date, 75.0, 100.0),
+        )
+        db.commit()
+
+        # Stub polygon_client so the PRIMARY path supplies all prices.
+        import sys
+        import types
+
+        fake_mod = types.ModuleType("polygon_client")
+
+        class _FakeClient:
+            def get_grouped_daily(self, _today):
+                return {
+                    "PLTR": {"close": 130.0},
+                    "SPY": {"close": 505.0},
+                }
+
+        fake_mod.polygon_client = lambda: _FakeClient()
+        monkeypatch.setitem(sys.modules, "polygon_client", fake_mod)
+
+        # Tripwire: the fallback reader must NOT be called when polygon
+        # covers every needed ticker.
+        import data.fetchers.feature_store_reader as fsr
+
+        def _boom():
+            raise AssertionError(
+                "read_latest_daily_closes called despite polygon covering all tickers"
+            )
+
+        monkeypatch.setattr(fsr, "read_latest_daily_closes", _boom)
+
+        result = run_performance_checks(db, today)
+        assert "accuracy_10d" in result
+        row = db.execute(
+            "SELECT price_10d, return_10d FROM score_performance WHERE symbol='PLTR'"
+        ).fetchone()
+        assert row[0] == 130.0
+        assert abs(row[1] - 30.0) < 0.1  # (130/100 - 1) * 100

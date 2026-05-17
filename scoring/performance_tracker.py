@@ -6,7 +6,9 @@ over subsequent 10 and 30 trading day windows.
 
 Invoked at the start of each daily run before any agents execute.
 Reads from investment_thesis and technical_scores tables, fetches current
-prices via yfinance, writes to score_performance table.
+prices via polygon grouped-daily (primary) with a daily_closes S3 fallback
+(alpha-engine-data's staging/daily_closes/ — yfinance removed in the
+yfinance-centralization arc, 2026-05-16), writes to score_performance table.
 No LLM involved.
 """
 
@@ -17,7 +19,6 @@ from datetime import date, datetime
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
 
 from config import (
     RATING_BUY_THRESHOLD,
@@ -91,34 +92,27 @@ def run_performance_checks(db_conn: sqlite3.Connection, today: str) -> dict:
     except Exception:
         pass
 
-    # Fallback to yfinance for any missing tickers
-    price_data = None
+    # Fallback for any missing tickers: alpha-engine-data's daily_closes
+    # S3 staging parquet (read via the in-repo feature_store_reader). This
+    # replaces the former yfinance batch-download fallback leg
+    # (yfinance-centralization arc, 2026-05-16). Polygon grouped-daily
+    # above stays the PRIMARY path; this only swaps the *fallback*.
+    # read_latest_daily_closes() returns {ticker: close} or None and never
+    # raises — same graceful-degrade as the old try/except: if both
+    # polygon and the fallback yield nothing, fall through to
+    # _compute_accuracy_stats with no new evaluations recorded.
+    daily_closes: dict[str, float] = {}
     if len(polygon_prices) < len(tickers_needed):
-        try:
-            price_data = yf.download(
-                tickers=tickers_needed,
-                period="2d",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                group_by="ticker",
-                threads=True,
-            )
-        except Exception:
-            if not polygon_prices:
-                return _compute_accuracy_stats(db_conn, today)
+        from data.fetchers.feature_store_reader import read_latest_daily_closes
+
+        daily_closes = read_latest_daily_closes() or {}
+        if not polygon_prices and not daily_closes:
+            return _compute_accuracy_stats(db_conn, today)
 
     def get_latest_price(ticker: str) -> Optional[float]:
         if ticker in polygon_prices:
             return polygon_prices[ticker]
-        if price_data is None:
-            return None
-        try:
-            if len(tickers_needed) == 1:
-                return float(price_data["Close"].dropna().iloc[-1])
-            return float(price_data[ticker]["Close"].dropna().iloc[-1])
-        except Exception:
-            return None
+        return daily_closes.get(ticker)
 
     spy_price = get_latest_price("SPY")
 
