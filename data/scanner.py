@@ -25,9 +25,6 @@ from config import (
     DEEP_VALUE_MAX_CANDIDATES,
     MAX_ATR_PCT,
     DEEP_VALUE_MAX_ATR_PCT,
-    MAX_DEBT_TO_EQUITY,
-    MIN_CURRENT_RATIO,
-    BALANCE_SHEET_EXEMPT_SECTORS,
     get_scanner_params,
 )
 from data.fetchers.price_fetcher import (
@@ -330,74 +327,6 @@ def confirm_deep_value_with_analyst(
             result.append(c)
         # else: drop this candidate — analyst conviction too low
 
-    return result
-
-
-def apply_balance_sheet_filter(
-    candidates: list[dict],
-    sector_map: dict[str, str] | None = None,
-    max_debt_to_equity: float = MAX_DEBT_TO_EQUITY,
-    min_current_ratio: float = MIN_CURRENT_RATIO,
-    exempt_sectors: list[str] | None = None,
-) -> list[dict]:
-    """
-    Task 2B: Reject overleveraged or illiquid-balance-sheet stocks.
-
-    Uses yfinance Ticker.info for debt_to_equity and current_ratio.
-    Only fetches for post-quant-filter candidates (~60 stocks), not full universe.
-    Financials and Real Estate are exempt from D/E check (leverage is structural).
-    """
-    import yfinance as yf
-
-    _sector_map = sector_map or {}
-    _exempt = set(exempt_sectors if exempt_sectors is not None else BALANCE_SHEET_EXEMPT_SECTORS)
-
-    result = []
-    rejected = 0
-    fetch_failures = 0
-    for c in candidates:
-        ticker = c["ticker"]
-        sector = _sector_map.get(ticker, c.get("sector", "Unknown"))
-
-        # Exempt sectors skip balance sheet check
-        if sector in _exempt:
-            result.append(c)
-            continue
-
-        try:
-            info = yf.Ticker(ticker).info
-            de_ratio = info.get("debtToEquity")  # yfinance returns as %, e.g. 150 = 1.5x
-            current_ratio = info.get("currentRatio")
-
-            # debtToEquity from yfinance is in % (e.g., 150 means 1.5x)
-            if de_ratio is not None:
-                de_ratio = de_ratio / 100.0
-
-            if de_ratio is not None and de_ratio > max_debt_to_equity:
-                rejected += 1
-                logger.debug("[balance_sheet] REJECT %s: D/E=%.1f > %.1f", ticker, de_ratio, max_debt_to_equity)
-                continue
-
-            if current_ratio is not None and current_ratio < min_current_ratio:
-                rejected += 1
-                logger.debug("[balance_sheet] REJECT %s: current_ratio=%.2f < %.2f", ticker, current_ratio, min_current_ratio)
-                continue
-
-        except Exception as e:
-            # Fail-closed: reject candidate when balance sheet data unavailable (M7 fix)
-            logger.warning("[balance_sheet] REJECT %s (fetch error, fail-closed): %s", ticker, e)
-            fetch_failures += 1
-            continue
-
-        result.append(c)
-
-    if rejected:
-        logger.info("[balance_sheet] rejected %d candidates (D/E>%.1f or CR<%.2f)", rejected, max_debt_to_equity, min_current_ratio)
-    if fetch_failures:
-        logger.warning("[balance_sheet] %d candidates rejected due to fetch failures", fetch_failures)
-        if len(candidates) > 0 and fetch_failures > len(candidates) * 0.5:
-            logger.warning("[balance_sheet] >50%% fetch failures (%d/%d) — yfinance data source may be down",
-                           fetch_failures, len(candidates))
     return result
 
 

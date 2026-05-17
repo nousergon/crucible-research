@@ -79,12 +79,6 @@ def _stub_fetch_sp500_sp400():
     return list(_SAMPLE_TICKERS), dict(_SECTOR_MAP)
 
 
-def _stub_fetch_short_interest(tickers):
-    logger.info("[offline] stub fetch_short_interest: %d tickers", len(tickers))
-    rng = random.Random(42)
-    return {t: {"short_pct_float": rng.uniform(1, 15), "short_ratio": rng.uniform(1, 5)} for t in tickers}
-
-
 def _stub_fetch_all_news(ticker, hours=48):
     logger.info("[offline] stub fetch_all_news: %s", ticker)
     return {
@@ -138,15 +132,6 @@ def _stub_compute_market_breadth(price_data):
 def _stub_fetch_revisions(tickers, reference_date=None):
     logger.info("[offline] stub fetch_revisions: %d tickers", len(tickers))
     return {}
-
-
-def _stub_fetch_options_signals(tickers, reference_date=None):
-    logger.info("[offline] stub fetch_options_signals: %d tickers", len(tickers))
-    return {}
-
-
-def _stub_cache_options_to_s3(data, date):
-    pass
 
 
 def _stub_fetch_insider_activity(tickers, lookback_days=90, reference_date=None):
@@ -246,14 +231,11 @@ def install_offline_stubs():
         # Data fetchers
         ("data.fetchers.price_fetcher.fetch_price_data", _stub_fetch_price_data),
         ("data.fetchers.price_fetcher.fetch_sp500_sp400_with_sectors", _stub_fetch_sp500_sp400),
-        ("data.fetchers.price_fetcher.fetch_short_interest", _stub_fetch_short_interest),
         ("data.fetchers.news_fetcher.fetch_all_news", _stub_fetch_all_news),
         ("data.fetchers.analyst_fetcher.fetch_analyst_consensus", _stub_fetch_analyst_consensus),
         ("data.fetchers.macro_fetcher.fetch_macro_data", _stub_fetch_macro_data),
         ("data.fetchers.macro_fetcher.compute_market_breadth", _stub_compute_market_breadth),
         ("data.fetchers.revision_fetcher.fetch_revisions", _stub_fetch_revisions),
-        ("data.fetchers.options_fetcher.fetch_options_signals", _stub_fetch_options_signals),
-        ("data.fetchers.options_fetcher.cache_options_to_s3", _stub_cache_options_to_s3),
         ("data.fetchers.insider_fetcher.fetch_insider_activity", _stub_fetch_insider_activity),
         ("data.fetchers.insider_fetcher.cache_insider_to_s3", _stub_cache_insider_to_s3),
 
@@ -430,14 +412,11 @@ def patch_graph_modules():
         # V1 data fetchers
         "fetch_price_data": _stub_fetch_price_data,
         "fetch_sp500_sp400_with_sectors": _stub_fetch_sp500_sp400,
-        "fetch_short_interest": _stub_fetch_short_interest,
         "fetch_all_news": _stub_fetch_all_news,
         "fetch_analyst_consensus": _stub_fetch_analyst_consensus,
         "fetch_macro_data": _stub_fetch_macro_data,
         "compute_market_breadth": _stub_compute_market_breadth,
         "fetch_revisions": _stub_fetch_revisions,
-        "fetch_options_signals": _stub_fetch_options_signals,
-        "cache_options_to_s3": _stub_cache_options_to_s3,
         "fetch_insider_activity": _stub_fetch_insider_activity,
         "cache_insider_to_s3": _stub_cache_insider_to_s3,
         # LLM agents

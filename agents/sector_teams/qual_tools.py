@@ -222,18 +222,16 @@ def create_qual_tools(context: dict) -> list:
                     "expected_move_pct": round(of.get("expected_move_pct", 0), 2),
                 })
 
-        from data.fetchers.options_fetcher import fetch_options_data
-
-        try:
-            data = fetch_options_data(ticker)
-            return json.dumps({
-                "ticker": ticker,
-                "put_call_ratio": round(data.get("put_call_ratio", 1.0), 2),
-                "iv_rank": round(data.get("iv_rank", 50), 1),
-                "expected_move_pct": round(data.get("expected_move_pct", 0), 2),
-            })
-        except Exception as e:
-            return json.dumps({"ticker": ticker, "error": str(e)})
+        # The yfinance options fetcher was removed (yfinance-centralization
+        # arc, 2026-05-16); the live `fetch_options_data` import was already
+        # dead (symbol never existed). S3-first above is the working path;
+        # graceful-degrade per the tool's `{"error": ...}` contract when the
+        # alternative collector hasn't populated options_flow — never raise
+        # (all-agents-strict).
+        return json.dumps({
+            "ticker": ticker,
+            "error": "options flow unavailable (no S3 options data; yfinance fetcher removed)",
+        })
 
     @tool
     def get_institutional_activity(ticker: str) -> str:

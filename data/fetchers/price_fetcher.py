@@ -14,8 +14,9 @@ Both sources hard-fail on miss — no yfinance / FRED / Wikipedia fallback.
 Matches the predictor's Phase 7a pattern and the ``feedback_hard_fail_until_stable``
 + ``feedback_no_silent_fails`` conventions.
 
-``fetch_short_interest`` still calls yfinance ``Ticker.info`` because short-float
-data isn't yet collected upstream — tracked as a Phase 7c follow-up in ROADMAP.
+This module is yfinance-free: the orphaned ``fetch_short_interest`` yfinance
+``Ticker.info`` path was removed (yfinance-centralization arc, 2026-05-16);
+short-interest ingestion belongs to alpha-engine-data's ``collectors/short_interest.py``.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ import arcticdb as adb  # Hard dep: matches predictor's Phase 7a pattern.
                         # If the Lambda image lacks arcticdb, fail loud at
                         # cold start rather than silently degrading.
 import pandas as pd
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +43,10 @@ _ARCTIC_OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 # a pipeline failure. Matches the predictor's Phase 7a threshold.
 _MAX_ERR_RATE = 0.05
 
-# yfinance request counter (short-interest path only; kept for telemetry).
-_yf_request_count = 0
-
 
 class PriceFetchError(RuntimeError):
     """Raised when ArcticDB reads fail to meet quality thresholds."""
     pass
-
-
-def get_yf_request_count() -> int:
-    """Return total yfinance requests made this invocation (short-interest only)."""
-    return _yf_request_count
 
 
 def _connect_arctic() -> object:
@@ -246,61 +238,6 @@ def fetch_sp500_sp400_tickers() -> list[str]:
     """Return the deduplicated S&P 500 + S&P 400 ticker list from S3."""
     tickers, _ = fetch_sp500_sp400_with_sectors()
     return tickers
-
-
-# ── Short interest (yfinance Ticker.info, not a price read) ──────────────────
-# Tracked for migration in ROADMAP.md: short interest collector in
-# alpha-engine-data. Kept here until that collector ships.
-
-def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
-    """
-    Fetch short interest from yfinance for a list of tickers.
-
-    Uses ``Ticker.info`` (not ``yf.download``) for ``shortPercentOfFloat``,
-    ``shortRatio``, ``sharesShort``. Only call for analyzed tickers (~35),
-    not the full S&P 900.
-
-    Note: yfinance short interest data is delayed (bi-monthly FINRA
-    reporting). Best used as a supplementary signal, not for precise timing.
-
-    Returns ``{ticker: {short_pct_float, short_ratio, shares_short}}``.
-    """
-    global _yf_request_count
-
-    results: dict[str, dict] = {}
-    n_ok = 0
-    for ticker in tickers:
-        try:
-            info = yf.Ticker(ticker).info
-            _yf_request_count += 1
-            short_pct = info.get("shortPercentOfFloat")
-            short_ratio = info.get("shortRatio")
-            shares_short = info.get("sharesShort")
-
-            if short_pct is not None:
-                short_pct = round(short_pct * 100, 2)
-
-            results[ticker] = {
-                "short_pct_float": short_pct,
-                "short_ratio": short_ratio,
-                "shares_short": shares_short,
-            }
-            if short_pct is not None:
-                n_ok += 1
-        except Exception as e:
-            _yf_request_count += 1
-            logger.debug("Short interest fetch failed for %s: %s", ticker, e)
-            results[ticker] = {
-                "short_pct_float": None,
-                "short_ratio": None,
-                "shares_short": None,
-            }
-
-    logger.info(
-        "Short interest: %d/%d tickers with data, %d total yf requests this run",
-        n_ok, len(tickers), _yf_request_count,
-    )
-    return results
 
 
 # ── Technical indicators (pure computation; no external calls) ───────────────

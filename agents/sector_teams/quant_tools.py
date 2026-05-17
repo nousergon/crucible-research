@@ -202,19 +202,17 @@ def create_quant_tools(context: dict) -> list:
     @tool
     def get_options_flow(tickers: list[str]) -> str:
         """Get options signals: put/call ratio, IV rank, expected move. Gauges market sentiment."""
-        from data.fetchers.options_fetcher import fetch_options_data
-
-        results = {}
-        for t in tickers[:10]:
-            try:
-                data = fetch_options_data(t)
-                results[t] = {
-                    "put_call_ratio": round(data.get("put_call_ratio", 1.0), 2),
-                    "iv_rank": round(data.get("iv_rank", 50), 1),
-                    "expected_move_pct": round(data.get("expected_move_pct", 0), 2),
-                }
-            except Exception as e:
-                results[t] = {"error": str(e)}
+        # The yfinance options fetcher was removed (yfinance-centralization
+        # arc, 2026-05-16); the live `fetch_options_data` import was already
+        # dead (symbol never existed) so this tool had no working data path.
+        # Graceful-degrade per the tool's existing `{"error": ...}` contract —
+        # never raise (all-agents-strict). Options positioning is sourced
+        # S3-first by qual_tools.get_options_flow when the alternative
+        # collector populates it.
+        results = {
+            t: {"error": "options flow unavailable (yfinance fetcher removed)"}
+            for t in tickers[:10]
+        }
         return json.dumps(results)
 
     @tool
