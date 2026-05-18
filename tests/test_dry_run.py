@@ -95,6 +95,16 @@ class TestInstallRestore:
         self._sentinels = {}
         self._created_modules = []
         self._saved_real_attrs: dict[tuple[str, str], object] = {}
+        # Save real ``sys.modules`` entries we're about to overwrite with
+        # fakes so teardown can RESTORE them (not just evict). Evicting a
+        # real, already-imported module forces a fresh re-import in a
+        # later test — that rebinds module globals like
+        # ``graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED`` from
+        # config, while functions imported by other test modules still
+        # close over the OLD module object, so their monkeypatches no
+        # longer take effect (order-dependent gate-flag leak — see
+        # tests/test_regime_stage_b_graph_topology.py docstring).
+        self._saved_sys_modules: dict[str, object] = {}
         for mod_path, attr in [
             ("agents.macro_agent", "run_macro_agent_with_reflection"),
             ("agents.macro_agent", "run_macro_agent"),
@@ -136,8 +146,17 @@ class TestInstallRestore:
             sentinel = MagicMock(name=f"graph.research_graph.{name}.original")
             setattr(gm, name, sentinel)
             self._sentinels[("graph.research_graph", name)] = sentinel
+        # If a REAL graph.research_graph is already imported, snapshot it
+        # for restore (don't evict it on teardown — that breaks later
+        # tests' monkeypatches of its module globals). Only schedule a
+        # pop if there was nothing here before.
+        if "graph.research_graph" in sys.modules:
+            self._saved_sys_modules["graph.research_graph"] = sys.modules[
+                "graph.research_graph"
+            ]
+        else:
+            self._created_modules.append("graph.research_graph")
         sys.modules["graph.research_graph"] = gm
-        self._created_modules.append("graph.research_graph")
 
     def teardown_method(self):
         # Restore real-module attributes BEFORE popping the shells —
@@ -150,6 +169,12 @@ class TestInstallRestore:
                 setattr(mod, attr, original)
         for mod_path in reversed(self._created_modules):
             sys.modules.pop(mod_path, None)
+        # Restore any REAL sys.modules entries we shadowed with fakes so
+        # later tests keep the same module object their imported
+        # functions close over (prevents the order-dependent gate-flag
+        # monkeypatch leak).
+        for mod_path, original in self._saved_sys_modules.items():
+            sys.modules[mod_path] = original
 
     def test_install_replaces_targets(self):
         dr = _import_dry_run()
@@ -325,16 +350,29 @@ class TestGraphModuleGuard:
         ]:
             setattr(sys.modules[mod_path], attr, MagicMock())
 
-        # Ensure graph.research_graph is NOT in sys.modules
-        sys.modules.pop("graph.research_graph", None)
+        # Ensure graph.research_graph is NOT in sys.modules — but SAVE
+        # the real module first and RESTORE it in a finally. Popping
+        # without restoring evicts the real, already-imported module:
+        # later test modules that did ``from graph.research_graph import
+        # _build_signals_payload`` at collection time keep a function
+        # whose ``__globals__`` is the orphaned old module, while their
+        # ``monkeypatch.setattr("graph.research_graph.<FLAG>", ...)``
+        # patches a DIFFERENT (re-imported) module object — so the patch
+        # silently doesn't take effect. That was the order-dependent
+        # gate-flag leak documented in
+        # tests/test_regime_stage_b_graph_topology.py.
+        _saved_rg = sys.modules.pop("graph.research_graph", None)
+        try:
+            dr = _import_dry_run()
+            import logging
+            with caplog.at_level(logging.WARNING):
+                restore = dr.install_dry_run_stubs(None)
+                restore()
 
-        dr = _import_dry_run()
-        import logging
-        with caplog.at_level(logging.WARNING):
-            restore = dr.install_dry_run_stubs(None)
-            restore()
-
-        # Should have warned about graph.research_graph absence
-        warnings_text = " ".join(r.message for r in caplog.records)
-        assert "graph.research_graph" in warnings_text
-        assert "not in sys.modules" in warnings_text
+            # Should have warned about graph.research_graph absence
+            warnings_text = " ".join(r.message for r in caplog.records)
+            assert "graph.research_graph" in warnings_text
+            assert "not in sys.modules" in warnings_text
+        finally:
+            if _saved_rg is not None:
+                sys.modules["graph.research_graph"] = _saved_rg

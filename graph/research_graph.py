@@ -10,6 +10,12 @@ Topology (regime-v3 Stage C, 2026-05-14):
                                 ReAct prompt; remains FINAL regime authority.
                                 Writes market_regime + sector_modifiers +
                                 sector_ratings to state for sectors to read.)
+  → compute_factor_profiles_node (un-orphan: writes factors/profiles/* from
+                                features/{run_date}/* so compute_focus_list_node
+                                + score_aggregator read a populated substrate
+                                this run; graceful-degrade, never hard-fails)
+  → compute_focus_list_node    (per-team regime-blended focus list; reads
+                                factors/profiles from S3)
   → dispatch_sectors_and_exit  (Send: 6 sector teams + exit evaluator — parallel)
   → merge_results              (fan-in: team picks + exits → compute open slots)
   → score_aggregator           (composite scores for team recommendations)
@@ -88,7 +94,10 @@ from scoring.composite import (
     normalize_conviction,
     score_to_rating,
 )
-from scoring.factor_scoring import read_factor_profiles_from_s3
+from scoring.factor_scoring import (
+    compute_and_write_factor_profiles,
+    read_factor_profiles_from_s3,
+)
 from scoring.focus_list import (
     build_focus_list,
     compute_focus_scores,
@@ -343,6 +352,17 @@ class ResearchState(TypedDict, total=False):
     # analyst's primary ranked input when FOCUS_LIST_GATING_ENABLED, and
     # projected onto scanner_evaluations rows by archive_writer for audit.
     focus_list_by_team: Annotated[dict[str, list[dict]], take_last]
+
+    # ── Factor-profile substrate (un-orphan arc) ────────────────────────────
+    # Observability-only delta written by compute_factor_profiles_node
+    # (spliced macro → compute_focus_list_node). The factor profiles
+    # themselves are NOT threaded through state — the consumers
+    # (compute_focus_list_node, score_aggregator) read them from
+    # s3://.../factors/profiles/latest.json by design; only this small
+    # written?/key pair flows for trace/audit. Both default False/"" when
+    # production failed (graceful-degrade — consumers skip the blend).
+    factor_profiles_written: Annotated[bool, take_last]
+    factor_profiles_s3_key: Annotated[str, take_last]
 
     # ── Exit evaluator output ────────────────────────────────────────────────
     remaining_population: Annotated[list[dict], take_last]
@@ -1193,6 +1213,79 @@ def macro_economist_node(state: ResearchState) -> dict:
             )
 
     return macro_state_update
+
+
+def compute_factor_profiles_node(state: ResearchState) -> dict:
+    """Produce the institutional factor-profile substrate for this run.
+
+    Spliced between ``macro_economist_node`` and ``compute_focus_list_node``
+    so it runs strictly AFTER ``fetch_data`` (which populates ``sector_map``
+    + ``run_date`` — neither is mutated by load_regime_substrate_node or
+    macro_economist_node) and strictly BEFORE both consumers
+    (``compute_focus_list_node`` ~:1198 and ``score_aggregator`` ~:1322),
+    each of which reads ``factors/profiles/latest.json`` from S3 via
+    ``read_factor_profiles_from_s3()``. Writing the substrate here makes
+    that read populated within the SAME run instead of the prior
+    orphaned state (zero production callers → ``factors/`` empty in prod).
+
+    Reads (produced upstream by alpha-engine-data DataPhase1):
+      - s3://{bucket}/features/{run_date}/technical.parquet
+      - s3://{bucket}/features/{run_date}/fundamental.parquet
+    Writes:
+      - s3://{bucket}/factors/profiles/{run_date}/by_ticker.json
+      - s3://{bucket}/factors/profiles/latest.json (sidecar)
+
+    Behavior-safety: ``config.FACTOR_BLEND_ENABLED`` and
+    ``config.FOCUS_LIST_GATING_ENABLED`` both default False, so producing
+    this substrate does NOT change scoring or agent behavior — it only
+    lets the focus-list shadow audit populate ``scanner_evaluations.focus_*``
+    and makes the factor substrate exist/ready. No flag is flipped here.
+
+    Robustness: this node MUST NOT make the weekly research run fragile
+    on this new dependency. ANY failure (missing/empty/short
+    ``features/{run_date}/*.parquet``, S3 error, compute exception) is
+    caught, logged flow-doctor-visibly, and the node returns cleanly so
+    the graph continues — the consumers then degrade exactly as they do
+    today (graceful skip when ``read_factor_profiles_from_s3()`` returns
+    None), i.e. no worse than the prior orphaned state. The research run
+    is never hard-failed because factor profiles couldn't be produced.
+
+    Returns a small observability delta (``factor_profiles_written`` +
+    ``factor_profiles_s3_key``). Profiles are NOT threaded through state —
+    the consumers read from S3 by design; that contract is preserved.
+    """
+    run_date = state.get("run_date", "")
+    sector_map = state.get("sector_map", {})
+
+    if not run_date:
+        logger.error(
+            "[compute_factor_profiles] no run_date in state — cannot "
+            "produce factor profiles; consumers will degrade gracefully "
+            "(read returns None). Graph continues.",
+        )
+        return {"factor_profiles_written": False, "factor_profiles_s3_key": ""}
+
+    try:
+        s3_key = compute_and_write_factor_profiles(
+            run_date=run_date,
+            sector_map=sector_map,
+        )
+        logger.info(
+            "[compute_factor_profiles] wrote factor substrate for %s "
+            "(%d sector-mapped tickers) → s3 key=%s",
+            run_date, len(sector_map), s3_key,
+        )
+        return {"factor_profiles_written": True, "factor_profiles_s3_key": s3_key}
+    except Exception as e:
+        logger.warning(
+            "[compute_factor_profiles] factor-profile production failed "
+            "for %s (%s) — likely missing/short features/%s/*.parquet or "
+            "an S3 error. Consumers (compute_focus_list_node, "
+            "score_aggregator) will degrade gracefully exactly as they "
+            "do when the substrate is absent. Research run continues.",
+            run_date, e, run_date,
+        )
+        return {"factor_profiles_written": False, "factor_profiles_s3_key": ""}
 
 
 def compute_focus_list_node(state: ResearchState) -> dict:
@@ -3140,6 +3233,13 @@ def build_graph() -> StateGraph:
         → macro_economist_node                (serial — consumes substrate
                                               as strong prior, remains
                                               final regime authority)
+        → compute_factor_profiles_node        (un-orphan: write
+                                              factors/profiles/* from
+                                              features/{run_date}/*;
+                                              graceful-degrade, never
+                                              hard-fails the run)
+        → compute_focus_list_node             (reads factors/profiles
+                                              from S3)
         → dispatch_sectors_and_exit           (Send: 6 teams + exit)
         → merge_results
         → score_aggregator → cio_node → population_entry_handler
@@ -3183,6 +3283,12 @@ def build_graph() -> StateGraph:
     graph.add_node("fetch_data", fetch_data)
     graph.add_node("load_regime_substrate_node", load_regime_substrate_node)
     graph.add_node("macro_economist_node", macro_economist_node)
+    # Un-orphan arc: produce the institutional factor-profile substrate
+    # AFTER fetch_data populated sector_map + run_date (macro does not
+    # mutate either) and BEFORE both consumers (compute_focus_list_node
+    # + score_aggregator) do their existing S3 read. Graceful-degrade
+    # on any failure — never hard-fails the research run.
+    graph.add_node("compute_factor_profiles_node", compute_factor_profiles_node)
     # PR 4 of scanner-placement arc: compute the per-team regime-blended
     # focus list AFTER macro has written market_regime to state, BEFORE
     # the sector team dispatch reads it.
@@ -3206,7 +3312,13 @@ def build_graph() -> StateGraph:
     # blend; focus list lands in state before sector teams dispatch.
     graph.add_edge("fetch_data", "load_regime_substrate_node")
     graph.add_edge("load_regime_substrate_node", "macro_economist_node")
-    graph.add_edge("macro_economist_node", "compute_focus_list_node")
+    # Splice compute_factor_profiles_node between macro and the focus
+    # list: it needs sector_map + run_date (set in fetch_data, unchanged
+    # by the substrate loader / macro) and must land the factor substrate
+    # in S3 before compute_focus_list_node AND score_aggregator do their
+    # existing read_factor_profiles_from_s3() this same run.
+    graph.add_edge("macro_economist_node", "compute_factor_profiles_node")
+    graph.add_edge("compute_factor_profiles_node", "compute_focus_list_node")
 
     # Fan-out AFTER focus list: dispatch to 6 sector teams + exit evaluator.
     graph.add_conditional_edges("compute_focus_list_node", dispatch_sectors_and_exit)
