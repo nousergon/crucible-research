@@ -71,11 +71,25 @@ def handler(event, context):
     import anthropic
 
     from config import ANTHROPIC_API_KEY
+    from evals.lambda_dry import dry_process_result, is_dry
     from evals.orchestrator import process_batch_results
 
     bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
     batch_id = event.get("batch_id")
     plan_s3_key = event.get("plan_s3_key")
+
+    # ── Shell-run dry path ───────────────────────────────────────────
+    # Boot + import ran for real. Submit threaded the dry sentinel
+    # batch_id; return BEFORE process_batch_results (S3 plan get_object,
+    # Anthropic results stream, per-artifact S3 persist, CW emit).
+    if is_dry(event):
+        logger.info(
+            "[eval_judge_process_handler] dry_run_llm sentinel: shell-run "
+            "no-op (no S3 plan read, no Anthropic stream, no persist) "
+            "batch_id=%s", batch_id,
+        )
+        return dry_process_result(batch_id)
+
     if not batch_id or not plan_s3_key:
         return {
             "status": "ERROR",
