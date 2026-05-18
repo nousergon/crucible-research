@@ -111,6 +111,134 @@ class TestBuildMetricDataQueries:
             assert q["ReturnData"] is True
 
 
+# ── _get_metric_data_all (chunk + paginate, AWS 500 cap) ──────────────────
+
+
+class TestGetMetricDataAll:
+    """The GetMetricData MetricDataQueries collection is hard-capped at
+    500 by AWS. As the rubric × dimension matrix grew past 500 combos
+    the single un-chunked call raised ``ValidationError: The collection
+    MetricDataQueries must not have a size greater than 500.`` — which
+    made the Sat-SF EvalRollingMean state ERROR on 2026-05-17. This
+    helper chunks ≤500 + follows NextToken pagination."""
+
+    def test_cap_constant_is_500(self):
+        from evals.rolling_mean import _GET_METRIC_DATA_MAX_QUERIES
+
+        assert _GET_METRIC_DATA_MAX_QUERIES == 500
+
+    def test_over_500_queries_split_into_multiple_calls_each_le_500(self):
+        from evals.rolling_mean import _get_metric_data_all
+
+        # 1201 queries → 3 chunks: 500, 500, 201.
+        queries = [{"Id": f"m{i}"} for i in range(1201)]
+        cw = MagicMock()
+        cw.get_metric_data.side_effect = lambda **kw: {
+            "MetricDataResults": [
+                {"Id": q["Id"], "Values": [1.0]}
+                for q in kw["MetricDataQueries"]
+            ],
+        }
+
+        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        out = _get_metric_data_all(cw, queries, start, end)
+
+        # Three calls, every chunk ≤ 500.
+        assert cw.get_metric_data.call_count == 3
+        chunk_sizes = [
+            len(c.kwargs["MetricDataQueries"])
+            for c in cw.get_metric_data.call_args_list
+        ]
+        assert chunk_sizes == [500, 500, 201]
+        assert all(n <= 500 for n in chunk_sizes)
+        # Every query's result merged exactly once, order preserved.
+        assert [r["Id"] for r in out] == [f"m{i}" for i in range(1201)]
+        # StartTime/EndTime threaded through unchanged on every call.
+        for c in cw.get_metric_data.call_args_list:
+            assert c.kwargs["StartTime"] == start
+            assert c.kwargs["EndTime"] == end
+            assert "NextToken" not in c.kwargs
+
+    def test_next_token_pagination_followed_within_chunk(self):
+        from evals.rolling_mean import _get_metric_data_all
+
+        queries = [{"Id": f"m{i}"} for i in range(3)]  # one chunk
+        responses = [
+            {"MetricDataResults": [{"Id": "m0", "Values": [1.0]}],
+             "NextToken": "pg2"},
+            {"MetricDataResults": [{"Id": "m1", "Values": [2.0]}],
+             "NextToken": "pg3"},
+            {"MetricDataResults": [{"Id": "m2", "Values": [3.0]}]},  # no token → stop
+        ]
+        cw = MagicMock()
+        cw.get_metric_data.side_effect = responses
+
+        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        out = _get_metric_data_all(cw, queries, start, end)
+
+        assert cw.get_metric_data.call_count == 3
+        # First call has no NextToken; subsequent calls carry the prior token.
+        calls = cw.get_metric_data.call_args_list
+        assert "NextToken" not in calls[0].kwargs
+        assert calls[1].kwargs["NextToken"] == "pg2"
+        assert calls[2].kwargs["NextToken"] == "pg3"
+        assert [r["Id"] for r in out] == ["m0", "m1", "m2"]
+
+    def test_le_500_single_call_unchanged_path(self):
+        from evals.rolling_mean import _get_metric_data_all
+
+        queries = [{"Id": f"m{i}"} for i in range(7)]
+        cw = MagicMock()
+        cw.get_metric_data.return_value = {
+            "MetricDataResults": [{"Id": q["Id"], "Values": [4.0]} for q in queries],
+        }
+
+        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        out = _get_metric_data_all(cw, queries, start, end)
+
+        # Exactly one call, no NextToken, all results returned.
+        assert cw.get_metric_data.call_count == 1
+        assert "NextToken" not in cw.get_metric_data.call_args.kwargs
+        assert len(out) == 7
+
+    def test_over_500_end_to_end_results_merged_back_to_combos(self):
+        """compute_and_emit_4w_mean with >500 combos must split the
+        GetMetricData calls AND still map every result back to its
+        combo via the unique m{idx} Id scheme."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        n = 1100
+        combos = [_dims(f"agent{i}", f"c{i}") for i in range(n)]
+        cw = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {"Metrics": [{"Dimensions": d} for d in combos]},
+        ]
+        cw.get_paginator.return_value = paginator
+        # Echo back one result per query in the chunk.
+        cw.get_metric_data.side_effect = lambda **kw: {
+            "MetricDataResults": [
+                {"Id": q["Id"], "Values": [3.5]}
+                for q in kw["MetricDataQueries"]
+            ],
+        }
+        s3 = MagicMock()
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+
+        # 1100 combos → 3 GetMetricData calls (500 + 500 + 100), each ≤ 500.
+        assert cw.get_metric_data.call_count == 3
+        for c in cw.get_metric_data.call_args_list:
+            assert len(c.kwargs["MetricDataQueries"]) <= 500
+        # All combos mapped back + emitted (no "missing result" failures).
+        assert result["combos_discovered"] == n
+        assert result["datapoints_emitted"] == n
+        assert result["failed"] == []
+
+
 # ── compute_and_emit_4w_mean ──────────────────────────────────────────────
 
 

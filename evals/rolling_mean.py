@@ -96,6 +96,59 @@ def _list_metric_combos(
     return combos
 
 
+_GET_METRIC_DATA_MAX_QUERIES = 500
+"""AWS hard cap on ``MetricDataQueries`` per ``GetMetricData`` call.
+
+Exceeding this raises ``ValidationError: The collection
+MetricDataQueries must not have a size greater than 500.`` As the
+rubric × dimension matrix grew (more sector teams / sub-agents /
+criteria / judge models) ``len(queries)`` crossed 500, which made the
+Saturday-SF ``EvalRollingMean`` state return ``{"status":"ERROR"}``
+(observed on the 2026-05-17 weekend run). ``_get_metric_data_all``
+chunks below this cap and paginates each chunk."""
+
+
+def _get_metric_data_all(
+    cw: Any,
+    queries: list[dict[str, Any]],
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Run ``GetMetricData`` over arbitrarily many queries.
+
+    AWS caps ``MetricDataQueries`` at ``_GET_METRIC_DATA_MAX_QUERIES``
+    (500) per call, and each call may itself paginate via ``NextToken``.
+    This chunks ``queries`` into ≤500-query batches, follows
+    ``NextToken`` to exhaustion within every chunk, and returns the
+    flat-merged ``MetricDataResults`` across all chunks/pages.
+
+    The flat merge is correct because every query Id (``m{idx}``, idx
+    over the whole ``combos`` list) is globally unique, so the
+    downstream ``by_id = {r["Id"]: r for r in ...}`` mapping stays
+    intact regardless of which chunk/page a result came back on. The
+    ≤500 case is unchanged behaviourally: a single chunk, paginated
+    only if AWS returns a ``NextToken``.
+    """
+    merged: list[dict[str, Any]] = []
+    for chunk_start in range(0, len(queries), _GET_METRIC_DATA_MAX_QUERIES):
+        chunk = queries[chunk_start:chunk_start + _GET_METRIC_DATA_MAX_QUERIES]
+        next_token: Optional[str] = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "MetricDataQueries": chunk,
+                "StartTime": start,
+                "EndTime": end,
+            }
+            if next_token is not None:
+                kwargs["NextToken"] = next_token
+            response = cw.get_metric_data(**kwargs)
+            merged.extend(response.get("MetricDataResults", []))
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+    return merged
+
+
 def _build_metric_data_queries(
     combos: list[list[dict[str, str]]],
     *,
@@ -105,8 +158,8 @@ def _build_metric_data_queries(
 ) -> list[dict[str, Any]]:
     """One GetMetricData query per combo. The query Id is the combo
     index — used to map results back to dimensions on the response side.
-    CloudWatch caps queries at 500 per call; with ~6 sector teams ×
-    3 sub-agents × 4-6 criteria × 2 judge models = ~290 we're well below.
+    CloudWatch caps queries at 500 per call; ``_get_metric_data_all``
+    chunks + paginates so the matrix can grow past 500 combos safely.
     """
     return [
         {
@@ -193,18 +246,20 @@ def compute_and_emit_4w_mean(
         len(combos), start.isoformat(), end.isoformat(),
     )
 
-    response = cw.get_metric_data(
-        MetricDataQueries=queries,
-        StartTime=start,
-        EndTime=end,
-    )
+    # AWS caps MetricDataQueries at 500 per GetMetricData call; chunk +
+    # paginate so the rubric × dimension matrix can grow past 500
+    # combos without raising ValidationError (the 2026-05-17 Sat-SF
+    # EvalRollingMean ERROR root cause).
+    metric_data_results = _get_metric_data_all(cw, queries, start, end)
 
     derived_data: list[dict[str, Any]] = []
     skipped_no_data = 0
     failed: list[dict[str, str]] = []
 
     # Map response Id back to combo dimensions for the derived emission.
-    by_id = {r["Id"]: r for r in response.get("MetricDataResults", [])}
+    # Ids (m{idx}) are unique across the whole combos list, so a flat
+    # merge across chunks/pages is correct.
+    by_id = {r["Id"]: r for r in metric_data_results}
 
     for idx, dims in enumerate(combos):
         result = by_id.get(f"m{idx}")
