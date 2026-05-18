@@ -84,6 +84,7 @@ def handler(event, context):
     import anthropic
 
     from config import ANTHROPIC_API_KEY
+    from evals.lambda_dry import dry_submit_result, is_dry
     from evals.orchestrator import (
         DEFAULT_HAIKU_MODEL,
         DEFAULT_SONNET_MODEL,
@@ -94,6 +95,19 @@ def handler(event, context):
 
     bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
     date = event.get("date") or str(datetime.date.today())
+
+    # ── Shell-run dry path ───────────────────────────────────────────
+    # Boot + import (above) ran for real — that's the keystone's whole
+    # point. Return BEFORE build_batch_plan / _persist_client_side_skips
+    # (S3 put_object) / submit_batch (Anthropic Message Batches create).
+    # The sentinel batch_id + status=EMPTY makes the SF Choice skip the
+    # poll loop and route straight to Process, which also short-circuits.
+    if is_dry(event):
+        logger.info(
+            "[eval_judge_submit_handler] dry_run_llm=True: shell-run "
+            "no-op (no Anthropic batch, no S3 plan persist) date=%s", date,
+        )
+        return dry_submit_result(date)
     force_sonnet_pass = bool(event.get("force_sonnet_pass", False))
     haiku_model = event.get("haiku_model", DEFAULT_HAIKU_MODEL)
     sonnet_model = event.get("sonnet_model", DEFAULT_SONNET_MODEL)

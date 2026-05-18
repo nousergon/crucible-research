@@ -78,9 +78,24 @@ def handler(event, context):
     import anthropic
 
     from config import ANTHROPIC_API_KEY
+    from evals.lambda_dry import dry_poll_result, is_dry
     from evals.orchestrator import poll_batch
 
     batch_id = event.get("batch_id")
+
+    # ── Shell-run dry path ───────────────────────────────────────────
+    # Boot + import ran for real. Detect the dry sentinel threaded from
+    # Submit (or the raw flag) and return a terminal `ended` WITHOUT any
+    # anthropic.messages.batches.retrieve call. (Under the keystone the
+    # SF skips Poll entirely via status=EMPTY → Process; this branch is
+    # the defensive belt-and-braces if Poll is reached.)
+    if is_dry(event):
+        logger.info(
+            "[eval_judge_poll_handler] dry_run_llm sentinel: shell-run "
+            "no-op (no Anthropic poll) batch_id=%s", batch_id,
+        )
+        return dry_poll_result(batch_id)
+
     if not batch_id:
         return {
             "processing_status": "error",

@@ -71,10 +71,26 @@ def handler(event, context):
     """Compute + emit per-agent rationale-template concentration."""
     _ensure_init()
 
+    from evals.lambda_dry import dry_clustering_result, is_dry
     from evals.rationale_clustering import (
         DEFAULT_WINDOW_DAYS,
         compute_and_emit,
     )
+
+    # ── Shell-run dry path ───────────────────────────────────────────
+    # Boot + the evals.rationale_clustering import (above) ran for real
+    # — that's the keystone's bootstrap smoke. Return BEFORE
+    # compute_and_emit, which reads decision_artifacts/, clusters, and
+    # (the documented gap) S3-persists _analysis/ JSON via
+    # _persist_analysis regardless of the existing `dry_run` flag — that
+    # flag only suppresses the CW metric. dry_run_llm short-circuits the
+    # entire read+cluster+persist, no Anthropic call.
+    if is_dry(event):
+        logger.info(
+            "[rationale_clustering_handler] dry_run_llm=True: shell-run "
+            "no-op (no S3 read/persist, no CW emit)",
+        )
+        return dry_clustering_result()
 
     end_time_iso = event.get("end_time_iso")
     end_time = (
