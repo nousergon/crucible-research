@@ -5,9 +5,10 @@ research graph.
 Covers:
   (a) the node calls compute_and_write_factor_profiles with the state's
       run_date + sector_map and on success returns the observability delta;
-  (b) on producer exception (and on missing run_date) the node logs +
-      returns cleanly — graph continues, no raise (graceful-degrade,
-      no worse than the prior orphaned state);
+  (b) on producer exception (and on missing run_date) the node logs an
+      error and RAISES — fail-loud per feedback_no_silent_fails (a
+      graceful-degrade here would silently recreate the orphaned-producer
+      bug this wiring exists to fix);
   (c) graph-wiring assertions (static AST inspection of build_graph,
       mirroring tests/test_regime_stage_b_graph_topology.py) that the
       new node runs AFTER fetch_data and strictly BEFORE
@@ -94,13 +95,13 @@ def test_node_defaults_sector_map_to_empty_when_absent():
     assert delta["factor_profiles_written"] is True
 
 
-# ── (b) graceful-degrade paths ───────────────────────────────────────────────
+# ── (b) fail-loud paths (feedback_no_silent_fails) ───────────────────────────
 
-def test_node_returns_cleanly_on_producer_exception(caplog):
+def test_node_raises_on_producer_exception(caplog):
     """ANY producer failure (missing features parquet, S3 error, compute
-    exception) → node logs + returns the not-written delta WITHOUT
-    raising. The graph must continue; consumers degrade exactly as they
-    do today when the substrate is absent."""
+    exception) → node logs an ERROR and RAISES. The Research SF state must
+    fail loudly; graceful-degrade would silently recreate the exact
+    orphaned-producer class this wiring exists to fix."""
     from graph.research_graph import compute_factor_profiles_node
 
     state = {"run_date": "2026-05-18", "sector_map": {"NVDA": "Tech"}}
@@ -111,40 +112,29 @@ def test_node_returns_cleanly_on_producer_exception(caplog):
             "NoSuchKey: features/2026-05-18/technical.parquet"
         ),
     ):
-        # Must NOT raise — the research run is never hard-failed here.
-        delta = compute_factor_profiles_node(state)
+        with pytest.raises(RuntimeError, match="NoSuchKey"):
+            compute_factor_profiles_node(state)
 
-    assert delta == {
-        "factor_profiles_written": False,
-        "factor_profiles_s3_key": "",
-    }
-    # Flow-doctor-visible log at WARNING (or worse).
+    # Flow-doctor-visible ERROR log emitted before the re-raise.
     assert any(
-        rec.levelno >= 30 and "compute_factor_profiles" in rec.message
+        rec.levelno >= 40 and "compute_factor_profiles" in rec.message
         for rec in caplog.records
-    ), f"expected a >=WARNING log mentioning the node; got {caplog.records!r}"
+    ), f"expected an ERROR log mentioning the node; got {caplog.records!r}"
 
 
-def test_node_returns_cleanly_when_run_date_missing(caplog):
-    """No run_date in state → cannot produce; node logs an error and
-    returns the not-written delta without raising (consumers degrade)."""
+def test_node_raises_when_run_date_missing():
+    """No run_date in state → cannot produce; node RAISES without calling
+    the producer (fail-loud, not a silent degrade)."""
     from graph.research_graph import compute_factor_profiles_node
 
     with patch(
         "graph.research_graph.compute_and_write_factor_profiles",
     ) as mock_producer:
-        delta = compute_factor_profiles_node({"sector_map": {"NVDA": "Tech"}})
+        with pytest.raises(RuntimeError, match="no run_date"):
+            compute_factor_profiles_node({"sector_map": {"NVDA": "Tech"}})
 
     # Producer must not even be called without a run_date.
     mock_producer.assert_not_called()
-    assert delta == {
-        "factor_profiles_written": False,
-        "factor_profiles_s3_key": "",
-    }
-    assert any(
-        rec.levelno >= 30 and "compute_factor_profiles" in rec.message
-        for rec in caplog.records
-    )
 
 
 # ── (c) graph-wiring invariants (static AST, mirrors stage-b topology) ────────

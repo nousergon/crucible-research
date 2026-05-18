@@ -1241,14 +1241,16 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
     lets the focus-list shadow audit populate ``scanner_evaluations.focus_*``
     and makes the factor substrate exist/ready. No flag is flipped here.
 
-    Robustness: this node MUST NOT make the weekly research run fragile
-    on this new dependency. ANY failure (missing/empty/short
-    ``features/{run_date}/*.parquet``, S3 error, compute exception) is
-    caught, logged flow-doctor-visibly, and the node returns cleanly so
-    the graph continues — the consumers then degrade exactly as they do
-    today (graceful skip when ``read_factor_profiles_from_s3()`` returns
-    None), i.e. no worse than the prior orphaned state. The research run
-    is never hard-failed because factor profiles couldn't be produced.
+    Fail-loud (per feedback_no_silent_fails): this node HARD-FAILS the
+    research run if it cannot produce the substrate. Graceful-degrade
+    here would silently recreate the exact orphaned-producer class this
+    wiring exists to fix (4+ days of inert focus-list / factor-blend that
+    nobody noticed). ``features/{run_date}/*.parquet`` is produced by
+    DataPhase1 UPSTREAM in the same Saturday SF, so its absence is already
+    an incident (DataPhase1 should have failed) — raising here surfaces
+    real breakage and cannot spuriously fail a healthy run. Any failure
+    (missing run_date, missing/short feature parquets, S3 error, compute
+    exception) raises → the Research SF state fails loudly and alerts.
 
     Returns a small observability delta (``factor_profiles_written`` +
     ``factor_profiles_s3_key``). Profiles are NOT threaded through state —
@@ -1258,12 +1260,12 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
     sector_map = state.get("sector_map", {})
 
     if not run_date:
-        logger.error(
+        raise RuntimeError(
             "[compute_factor_profiles] no run_date in state — cannot "
-            "produce factor profiles; consumers will degrade gracefully "
-            "(read returns None). Graph continues.",
+            "produce the factor substrate. Hard-failing the research run "
+            "(feedback_no_silent_fails) rather than letting focus-list + "
+            "factor-blend silently degrade."
         )
-        return {"factor_profiles_written": False, "factor_profiles_s3_key": ""}
 
     try:
         s3_key = compute_and_write_factor_profiles(
@@ -1277,15 +1279,16 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
         )
         return {"factor_profiles_written": True, "factor_profiles_s3_key": s3_key}
     except Exception as e:
-        logger.warning(
-            "[compute_factor_profiles] factor-profile production failed "
-            "for %s (%s) — likely missing/short features/%s/*.parquet or "
-            "an S3 error. Consumers (compute_focus_list_node, "
-            "score_aggregator) will degrade gracefully exactly as they "
-            "do when the substrate is absent. Research run continues.",
+        logger.error(
+            "[compute_factor_profiles] factor-profile production FAILED "
+            "for %s: %s — features/%s/*.parquet missing/short or an S3 "
+            "error. features/ is produced by DataPhase1 upstream in this "
+            "same SF, so this is a real incident, not a tolerable degrade. "
+            "Hard-failing the research run (feedback_no_silent_fails) "
+            "rather than silently recreating the orphaned-producer bug.",
             run_date, e, run_date,
         )
-        return {"factor_profiles_written": False, "factor_profiles_s3_key": ""}
+        raise
 
 
 def compute_focus_list_node(state: ResearchState) -> dict:
