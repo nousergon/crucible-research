@@ -56,8 +56,10 @@ def _artifact(
     change: bool = False,
     weeks_in_state: int = 1,
     guardrails: dict | None = None,
+    drawdown: dict | None = None,
+    effective_regime: dict | str | None = None,
 ) -> dict:
-    return {
+    art = {
         "run_id": run_id,
         "trading_day": trading_day,
         "calendar_date": trading_day,
@@ -73,6 +75,12 @@ def _artifact(
             "active_severity_floor": None,
         },
     }
+    # Additive drawdown leg (present only post-#176/#179 producer).
+    if drawdown is not None:
+        art["drawdown"] = drawdown
+    if effective_regime is not None:
+        art["effective_regime"] = effective_regime
+    return art
 
 
 def _base_state(**overrides) -> dict:
@@ -357,3 +365,97 @@ class TestRegimeTrendBlock:
         lines = _build_regime_trend(am, n_weeks=8)
         joined = "\n".join(lines)
         assert "guardrail breached: vix_bear_breached" in joined
+
+    # ── Drawdown leg (3rd ensemble leg, #176/#179) ──────────────────────
+
+    def _dd_block(self, *, spy_dd, spy_tier, excess=None):
+        block = {
+            "spy": {
+                "tier": spy_tier,
+                "drawdown": spy_dd,
+                "peak": 600.0,
+                "regime_contribution": (
+                    {"risk_on": None, "caution": "caution",
+                     "risk_off": "bear"}.get(spy_tier)
+                ),
+            },
+            "excess": excess or {
+                "available": False, "tier": "risk_on",
+                "nav_drawdown": None, "excess_depth": None,
+                "regime_contribution": None,
+            },
+        }
+        return block
+
+    def test_drawdown_columns_and_continuous_summary(self):
+        """The dropped 'weeks in state' count is reframed to a
+        continuous SPY-drawdown column + composed effective regime, and
+        the summary carries the market-grounded continuous statement."""
+        am = _FakeArchiveManager([
+            _artifact(run_id="2605010000", trading_day="2026-05-01",
+                      argmax="neutral", iz=0.1,
+                      drawdown=self._dd_block(spy_dd=-0.012, spy_tier="risk_on"),
+                      effective_regime={"effective_regime": "neutral",
+                                        "drivers": {"hmm": "neutral"}}),
+            _artifact(run_id="2605080000", trading_day="2026-05-08",
+                      argmax="bear", iz=1.2,
+                      drawdown=self._dd_block(
+                          spy_dd=-0.082, spy_tier="caution",
+                          excess={"available": True, "tier": "alpha_bleed",
+                                  "nav_drawdown": -0.115,
+                                  "excess_depth": 0.033,
+                                  "regime_contribution": "bear"}),
+                      effective_regime={"effective_regime": "bear",
+                                        "drivers": {"hmm": "bear",
+                                                    "drawdown_excess": "bear"}}),
+        ])
+        lines = _build_regime_trend(am, n_weeks=8)
+        joined = "\n".join(lines)
+        # New columns present; legacy column header gone.
+        assert "SPY Drawdown" in joined and "Effective" in joined
+        assert "Weeks in State" not in joined
+        # Continuous depth + tier in the row, composed regime surfaced.
+        assert "8.2% (caution)" in joined
+        assert "| bear |" in joined
+        # Run-length explicitly de-emphasised as a diagnostic.
+        assert "label-stability diagnostic" in joined
+        # Continuous market-grounded summary clause.
+        assert "Drawdown leg:" in joined
+        assert "SPY 8.2% off trailing peak" in joined
+        assert "book 11.5% off NAV HWM" in joined
+        assert "3.3pp deeper than market" in joined
+        assert "effective=bear" in joined
+
+    def test_drawdown_absent_key_no_behavior_change(self):
+        """Pre-#176/#179 artifacts (no drawdown block) render '—' in the
+        new cells and the summary carries no Drawdown-leg clause."""
+        am = _FakeArchiveManager([
+            _artifact(run_id="2605010000", trading_day="2026-05-01",
+                      argmax="neutral", iz=0.1),
+            _artifact(run_id="2605080000", trading_day="2026-05-08",
+                      argmax="neutral", iz=0.3),
+        ])
+        lines = _build_regime_trend(am, n_weeks=8)
+        joined = "\n".join(lines)
+        assert "**Summary:**" in joined
+        assert "Drawdown leg:" not in joined  # absent-key fallback
+        assert "| — | — |" in joined  # SPY DD + Effective both em-dash
+
+    def test_drawdown_portfolio_unavailable_falls_back_to_spy_only(self):
+        am = _FakeArchiveManager([
+            _artifact(run_id="2605010000", trading_day="2026-05-01",
+                      argmax="neutral", iz=0.1,
+                      drawdown=self._dd_block(spy_dd=-0.02, spy_tier="risk_on"),
+                      effective_regime={"effective_regime": "neutral",
+                                        "drivers": {}}),
+            _artifact(run_id="2605080000", trading_day="2026-05-08",
+                      argmax="caution", iz=0.9,
+                      drawdown=self._dd_block(spy_dd=-0.061, spy_tier="caution"),
+                      effective_regime={"effective_regime": "caution",
+                                        "drivers": {"drawdown_spy": "caution"}}),
+        ])
+        lines = _build_regime_trend(am, n_weeks=8)
+        joined = "\n".join(lines)
+        assert "SPY 6.1% off trailing peak" in joined
+        assert "book NAV unavailable — SPY leg only" in joined
+        assert "effective=caution" in joined
