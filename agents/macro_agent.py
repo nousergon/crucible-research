@@ -108,6 +108,87 @@ def _fmt(val, fmt=".1f", default="N/A") -> str:
         return default
 
 
+def _format_drawdown_leg(substrate: dict) -> str:
+    """Render the deterministic drawdown de-risk leg (3rd ensemble leg)
+    + the composed ``effective_regime`` as a continuous, market-grounded
+    statement.
+
+    Absent-key fallback: when the upstream substrate carries no
+    ``drawdown`` block (pre-#176/#179 producer, or producer omitted it),
+    returns ``""`` so the prompt is byte-identical to the prior HMM-only
+    path — zero behavior change for the macro agent.
+
+    Portfolio-unavailable fallback: when ``drawdown.excess.available`` is
+    False (paper NAV short/gappy or not wired), the SPY leg still renders
+    and the excess line states it is unavailable — never raises.
+    """
+    dd = substrate.get("drawdown")
+    if not isinstance(dd, dict):
+        return ""
+
+    spy = dd.get("spy") or {}
+    excess = dd.get("excess") or {}
+    spy_dd = spy.get("drawdown")
+    spy_tier = spy.get("tier", "N/A")
+    spy_off = (
+        f"{-float(spy_dd) * 100:.1f}% off its trailing peak"
+        if isinstance(spy_dd, (int, float))
+        else "depth N/A"
+    )
+
+    if excess.get("available"):
+        nav_dd = excess.get("nav_drawdown")
+        depth = excess.get("excess_depth")
+        nav_off = (
+            f"{-float(nav_dd) * 100:.1f}% off NAV high-water mark"
+            if isinstance(nav_dd, (int, float))
+            else "NAV depth N/A"
+        )
+        depth_str = (
+            f"{float(depth) * 100:.1f}pp deeper than the market"
+            if isinstance(depth, (int, float))
+            else "excess depth N/A"
+        )
+        excess_line = (
+            f"    - book: {nav_off}; {depth_str} "
+            f"(tier = {excess.get('tier', 'N/A')})\n"
+        )
+    else:
+        excess_line = (
+            "    - book-vs-market excess: UNAVAILABLE (paper NAV "
+            "short/gappy or not wired) — the SPY leg still acts.\n"
+        )
+
+    eff = substrate.get("effective_regime") or {}
+    if isinstance(eff, dict):
+        eff_label = eff.get("effective_regime", "N/A")
+        drivers = eff.get("drivers", {}) or {}
+        driver_str = ", ".join(
+            f"{k}={v}" for k, v in drivers.items() if v
+        ) or "none escalating"
+    else:
+        # latest.json sidecar carries effective_regime as a bare string
+        eff_label = eff if isinstance(eff, str) else "N/A"
+        driver_str = "n/a (sidecar shape)"
+
+    return (
+        "\n"
+        "  DETERMINISTIC DRAWDOWN DE-RISK LEG (3rd ensemble leg — "
+        "pure-level hysteresis, zero estimation risk):\n"
+        "  This is the continuous, market-grounded reframe of the HMM "
+        "filter run-length above — a real peak-to-trough statement, not "
+        "a label-stability artifact.\n"
+        f"    - SPY: {spy_off} (tier = {spy_tier})\n"
+        f"{excess_line}"
+        f"    - composed effective_regime = {eff_label} "
+        f"(most-protective over {{{driver_str}}})\n"
+        "  The composed effective_regime is what the discrete gates "
+        "(entry halt, bear caps, veto) act on downstream — observe-mode "
+        "until promoted. You remain the FINAL authority on the regime "
+        "narrative; weigh this leg as a strong de-risk prior.\n"
+    )
+
+
 def _format_regime_substrate(substrate: Optional[dict]) -> str:
     """Render the quantitative regime substrate into a compact prompt
     block for the LLM. Returns a fallback message when None.
@@ -169,8 +250,13 @@ def _format_regime_substrate(substrate: Optional[dict]) -> str:
         f"    - P(bear)    = {_fmt(probs.get('bear'),    '.2f')}\n"
         f"    - P(neutral) = {_fmt(probs.get('neutral'), '.2f')}\n"
         f"    - P(bull)    = {_fmt(probs.get('bull'),    '.2f')}\n"
-        f"    - argmax = {hmm.get('argmax', 'N/A')}, "
-        f"weeks_in_current_state = {hmm.get('weeks_in_current_state', 'N/A')}\n"
+        f"    - argmax = {hmm.get('argmax', 'N/A')}\n"
+        f"    - filter run-length = "
+        f"{hmm.get('weeks_in_current_state', 'N/A')} week(s) "
+        f"(HMM filter-argmax stability DIAGNOSTIC — NOT a "
+        f"market-duration statement; see the drawdown leg below for the "
+        f"continuous market-grounded view)\n"
+        f"{_format_drawdown_leg(substrate)}"
         "\n"
         f"  Composite intensity (AQR-style risk-on/risk-off, positive = risk-on):\n"
         f"    - intensity_z = {_fmt(composite.get('intensity_z'), '+.2f')}  "

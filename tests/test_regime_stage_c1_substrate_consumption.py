@@ -203,6 +203,99 @@ def test_format_regime_substrate_renders_full_block() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Drawdown de-risk leg (3rd ensemble leg, predictor #176/#179)
+# ---------------------------------------------------------------------------
+
+
+def _substrate_with_drawdown(*, excess_available: bool) -> dict:
+    excess = (
+        {"available": True, "tier": "alpha_bleed",
+         "nav_drawdown": -0.118, "excess_depth": 0.041,
+         "regime_contribution": "bear"}
+        if excess_available else
+        {"available": False, "tier": "risk_on", "nav_drawdown": None,
+         "excess_depth": None, "regime_contribution": None}
+    )
+    return {
+        "run_id": "2605190230", "calendar_date": "2026-05-19",
+        "trading_day": "2026-05-19", "schema_version": 1,
+        "hmm": {"argmax": "neutral", "weeks_in_current_state": 50,
+                "probs": {"bear": 0.0, "neutral": 1.0, "bull": 0.0}},
+        "composite": {"intensity_z": 0.3, "implied_severity": "neutral",
+                      "per_feature_z": {"vix_level": 0.4}},
+        "bocpd": {"change_signal": False},
+        "guardrails": {"active_severity_floor": None},
+        "drawdown": {
+            "spy": {"tier": "caution", "drawdown": -0.072, "peak": 600.0,
+                    "regime_contribution": "caution"},
+            "excess": excess,
+        },
+        "effective_regime": {
+            "effective_regime": "bear" if excess_available else "caution",
+            "drivers": {"hmm": "neutral", "drawdown_spy": "caution",
+                        "drawdown_excess": (
+                            "bear" if excess_available else None)},
+        },
+    }
+
+
+def test_format_drawdown_leg_renders_continuous_statement() -> None:
+    """The drawdown leg reframes the misleading HMM run-length into a
+    continuous, market-grounded statement + composed effective regime."""
+    from agents.macro_agent import _format_regime_substrate
+    block = _format_regime_substrate(
+        _substrate_with_drawdown(excess_available=True))
+    # Run-length explicitly demoted to a diagnostic, not market duration.
+    assert "filter run-length" in block
+    assert "NOT a market-duration statement" in block
+    # Continuous SPY + book statement.
+    assert "7.2% off its trailing peak" in block
+    assert "tier = caution" in block
+    assert "11.8% off NAV high-water mark" in block
+    assert "4.1pp deeper than the market" in block
+    # Composed effective regime + drivers surfaced.
+    assert "composed effective_regime = bear" in block
+    assert "DETERMINISTIC DRAWDOWN DE-RISK LEG" in block
+
+
+def test_format_drawdown_leg_portfolio_unavailable_fallback() -> None:
+    """NAV unavailable ⇒ SPY leg still renders; excess line states it is
+    unavailable; never raises."""
+    from agents.macro_agent import _format_regime_substrate
+    block = _format_regime_substrate(
+        _substrate_with_drawdown(excess_available=False))
+    assert "7.2% off its trailing peak" in block
+    assert "book-vs-market excess: UNAVAILABLE" in block
+    assert "the SPY leg still acts" in block
+    assert "composed effective_regime = caution" in block
+
+
+def test_format_drawdown_leg_absent_key_is_byte_identical() -> None:
+    """Pre-#176/#179 substrate (no drawdown key) ⇒ the drawdown block is
+    omitted entirely — zero behavior change vs the HMM-only path."""
+    from agents.macro_agent import (
+        _format_drawdown_leg,
+        _format_regime_substrate,
+    )
+    no_dd = {
+        "run_id": "2605190230", "trading_day": "2026-05-19",
+        "schema_version": 1,
+        "hmm": {"argmax": "neutral", "weeks_in_current_state": 3,
+                "probs": {"bear": 0.1, "neutral": 0.8, "bull": 0.1}},
+        "composite": {"intensity_z": 0.2, "implied_severity": "neutral",
+                      "per_feature_z": {}},
+        "bocpd": {"change_signal": False},
+        "guardrails": {"active_severity_floor": None},
+    }
+    assert _format_drawdown_leg(no_dd) == ""
+    block = _format_regime_substrate(no_dd)
+    assert "DETERMINISTIC DRAWDOWN DE-RISK LEG" not in block
+    # The run-length is still reframed as a diagnostic even without the
+    # drawdown leg (the misleading framing is fixed regardless).
+    assert "filter run-length" in block
+
+
+# ---------------------------------------------------------------------------
 # Macro agent threads substrate through reflection wrapper
 # ---------------------------------------------------------------------------
 

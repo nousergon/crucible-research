@@ -2270,8 +2270,19 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
             cs = a.get("regime_change_signal")
         return bool(cs)
 
-    def _weeks_in_state(a: dict):
-        return (a.get("hmm") or {}).get("weeks_in_current_state")
+    def _eff_of(a: dict) -> str:
+        eff = a.get("effective_regime")
+        if isinstance(eff, dict):
+            return eff.get("effective_regime") or "—"
+        # latest.json sidecar carries it as a bare string
+        return eff if isinstance(eff, str) else "—"
+
+    def _spy_dd_cell(a: dict) -> str:
+        spy = ((a.get("drawdown") or {}).get("spy")) or {}
+        dd = spy.get("drawdown")
+        if not isinstance(dd, (int, float)):
+            return "—"
+        return f"{-dd * 100:.1f}% ({spy.get('tier', '?')})"
 
     def _fmt_iz(iz) -> str:
         return f"{iz:+.2f}" if isinstance(iz, (int, float)) else "—"
@@ -2280,16 +2291,24 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
         f"**Weekly regime substrate — last {len(artifacts)} run(s) "
         f"(oldest → newest):**",
         "",
-        "| Date | HMM Regime | Intensity-z | BOCPD Change | Weeks in State |",
-        "|------|------------|-------------|--------------|----------------|",
+        "| Date | HMM Regime | Intensity-z | BOCPD Change | "
+        "SPY Drawdown | Effective |",
+        "|------|------------|-------------|--------------|"
+        "--------------|-----------|",
     ]
     for a in artifacts:
-        wic = _weeks_in_state(a)
-        wic_str = str(wic) if isinstance(wic, (int, float)) else "—"
         lines.append(
             f"| {_date_of(a)} | {_argmax_of(a)} | {_fmt_iz(_iz_of(a))} | "
-            f"{'yes' if _change_of(a) else 'no'} | {wic_str} |"
+            f"{'yes' if _change_of(a) else 'no'} | {_spy_dd_cell(a)} | "
+            f"{_eff_of(a)} |"
         )
+    lines.append("")
+    lines.append(
+        "_HMM filter run-length (\"weeks in state\") is intentionally "
+        "omitted — it is a label-stability diagnostic, not a "
+        "market-duration statement; the continuous drawdown depth below "
+        "is the market-grounded view._"
+    )
     lines.append("")
 
     if len(artifacts) == 1:
@@ -2336,7 +2355,33 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
     else:
         gr_summary = "no guardrail breached"
 
-    lines.append(f"**Summary:** {iz_summary}; {gr_summary}.")
+    # Continuous drawdown statement (latest artifact) — the
+    # market-grounded reframe of the dropped "weeks in state" count.
+    # Absent-key fallback: omit the clause entirely when the producer
+    # wrote no drawdown block (pre-#176/#179) — no behavior change.
+    dd = latest.get("drawdown") or {}
+    spy = dd.get("spy") or {}
+    spy_dd = spy.get("drawdown")
+    dd_clause = ""
+    if isinstance(spy_dd, (int, float)):
+        parts = [
+            f"SPY {-spy_dd * 100:.1f}% off trailing peak "
+            f"(tier {spy.get('tier', '?')})"
+        ]
+        ex = dd.get("excess") or {}
+        if ex.get("available"):
+            nav_dd = ex.get("nav_drawdown")
+            depth = ex.get("excess_depth")
+            if isinstance(nav_dd, (int, float)):
+                parts.append(f"book {-nav_dd * 100:.1f}% off NAV HWM")
+            if isinstance(depth, (int, float)):
+                parts.append(f"{depth * 100:.1f}pp deeper than market")
+        else:
+            parts.append("book NAV unavailable — SPY leg only")
+        eff = _eff_of(latest)
+        dd_clause = f" Drawdown leg: {'; '.join(parts)}; effective={eff}."
+
+    lines.append(f"**Summary:** {iz_summary}; {gr_summary}.{dd_clause}")
     return lines
 
 

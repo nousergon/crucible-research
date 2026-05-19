@@ -43,9 +43,11 @@ _ALLOWLIST: dict[str, set[int]] = {
     # critic ever generates verbose output.
     # Line moved 462 → 476 by the all-agents-strict rework (added the
     # langchain_utils import + an explicit max_retries=
-    # SECTOR_TEAM_LLM_MAX_RETRIES kwarg on the critic ChatAnthropic).
+    # SECTOR_TEAM_LLM_MAX_RETRIES kwarg on the critic ChatAnthropic),
+    # then 476 → 562 by the drawdown-leg surface (added
+    # _format_drawdown_leg + the continuous-statement reframe).
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {476},
+    "agents/macro_agent.py": {562},
 }
 
 
