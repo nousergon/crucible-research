@@ -56,6 +56,27 @@ def _put_parquet(s3, *, bucket, key, df):
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
 
 
+def _put_canonical(
+    s3, *, bucket="alpha-engine-research", prefix, df, run_id="2605131934",
+):
+    """Plant a canonical-shape substrate artifact: parquet at the
+    run-id key + ``latest.json`` sidecar pointing at it.
+
+    Mirrors the producer's write path (alpha-engine-data PR #234)."""
+    import json as _json
+    artifact_key = f"{prefix}/{run_id}_result.parquet"
+    _put_parquet(s3, bucket=bucket, key=artifact_key, df=df)
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{prefix}/latest.json",
+        Body=_json.dumps({
+            "run_id": run_id,
+            "artifact_key": artifact_key,
+            "row_count": int(len(df)),
+        }).encode("utf-8"),
+    )
+
+
 # ── Per-parquet readers ────────────────────────────────────────────────
 
 
@@ -77,19 +98,14 @@ class TestReadNewsAggregates:
             "event_categories": "earnings_release,product_launch",
             "top_event_descriptions": "Q4 beat | New product unveiled",
         }])
-        _put_parquet(
-            s3,
-            bucket="alpha-engine-research",
-            key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
-            df=df_in,
-        )
-        df_out = read_news_aggregates(date(2026, 5, 13), s3_client=s3)
+        _put_canonical(s3, prefix=NEWS_AGGREGATES_PREFIX, df=df_in)
+        df_out = read_news_aggregates(s3_client=s3)
         assert len(df_out) == 1
         assert df_out.iloc[0]["ticker"] == "AAPL"
 
     def test_missing_parquet_returns_empty_df(self):
         s3 = _InMemoryS3()
-        df = read_news_aggregates(date(2026, 1, 1), s3_client=s3)
+        df = read_news_aggregates(s3_client=s3)
         assert len(df) == 0
 
 
@@ -112,43 +128,38 @@ class TestReadAnalystRevisions:
             "rating_changed_30d": True,
             "n_snapshot_days_observed": 30,
         }])
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{ANALYST_REVISIONS_PREFIX}/2026-05-13.parquet",
-            df=df_in,
-        )
-        df = read_analyst_revisions(date(2026, 5, 13), s3_client=s3)
+        _put_canonical(s3, prefix=ANALYST_REVISIONS_PREFIX, df=df_in)
+        df = read_analyst_revisions(s3_client=s3)
         assert df.iloc[0]["mean_target_delta_30d"] == 10.0
 
 
 class TestReadInsiderTransactionsWindow:
-    def test_concatenates_across_window(self):
+    def test_filters_window_from_consolidated_parquet(self):
+        """Canonical shape: one consolidated parquet per run with
+        ``filed_date`` as a row column. Reader filters rows by window."""
         s3 = _InMemoryS3()
-        # Two days of insider transactions, both within 90-day window
-        for d, ticker in [
-            (date(2026, 5, 10), "AAPL"),
-            (date(2026, 5, 1), "MSFT"),
-        ]:
-            df = pd.DataFrame([{
-                "ticker": ticker, "filed_date": d,
-                "transaction_date": d, "acquired_disposed_code": "D",
-                "transaction_value_usd": 1_000_000.0,
-                "reporting_owner_name": "Insider",
-            }])
-            _put_parquet(
-                s3, bucket="alpha-engine-research",
-                key=f"{INSIDER_TRANSACTIONS_PREFIX}/{d.isoformat()}.parquet",
-                df=df,
-            )
+        df_in = pd.DataFrame([
+            {"ticker": "AAPL", "filed_date": date(2026, 5, 10),
+             "transaction_date": date(2026, 5, 10),
+             "acquired_disposed_code": "D",
+             "transaction_value_usd": 1_000_000.0,
+             "reporting_owner_name": "Insider"},
+            {"ticker": "MSFT", "filed_date": date(2026, 5, 1),
+             "transaction_date": date(2026, 5, 1),
+             "acquired_disposed_code": "D",
+             "transaction_value_usd": 1_000_000.0,
+             "reporting_owner_name": "Insider"},
+        ])
+        _put_canonical(s3, prefix=INSIDER_TRANSACTIONS_PREFIX, df=df_in)
         combined = read_insider_transactions_window(
             date(2026, 5, 13), window_days=30, s3_client=s3,
         )
         assert len(combined) == 2
         assert {combined.iloc[i]["ticker"] for i in range(2)} == {"AAPL", "MSFT"}
 
-    def test_missing_dates_tolerated(self):
-        """Most weekdays have no Form 4 filings for a given ticker —
-        missing parquets just contribute nothing."""
+    def test_missing_sidecar_returns_empty(self):
+        """No canonical artifact → empty DataFrame, no per-date probe
+        walk-back."""
         s3 = _InMemoryS3()
         combined = read_insider_transactions_window(
             date(2026, 5, 13), window_days=7, s3_client=s3,
@@ -163,9 +174,8 @@ class TestSubstrateReader:
     def test_full_snapshot_with_all_3_streams(self):
         s3 = _InMemoryS3()
         # News
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
+        _put_canonical(
+            s3, prefix=NEWS_AGGREGATES_PREFIX,
             df=pd.DataFrame([{
                 "ticker": "AAPL", "aggregate_date": date(2026, 5, 13),
                 "schema_version": 1, "n_articles": 8,
@@ -181,9 +191,8 @@ class TestSubstrateReader:
             }]),
         )
         # Insider — 2 buys + 1 sell within window
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{INSIDER_TRANSACTIONS_PREFIX}/2026-05-10.parquet",
+        _put_canonical(
+            s3, prefix=INSIDER_TRANSACTIONS_PREFIX,
             df=pd.DataFrame([
                 {"ticker": "AAPL", "filed_date": date(2026, 5, 10),
                  "acquired_disposed_code": "A",
@@ -200,9 +209,8 @@ class TestSubstrateReader:
             ]),
         )
         # Analyst revisions
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{ANALYST_REVISIONS_PREFIX}/2026-05-13.parquet",
+        _put_canonical(
+            s3, prefix=ANALYST_REVISIONS_PREFIX,
             df=pd.DataFrame([{
                 "ticker": "AAPL", "as_of_date": date(2026, 5, 13),
                 "schema_version": 1, "primary_source": "yfinance",
@@ -272,9 +280,8 @@ class TestSubstrateReader:
         """A ticker in the population that the producer hadn't seen
         yet shouldn't crash; it just gets empty fields."""
         s3 = _InMemoryS3()
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
+        _put_canonical(
+            s3, prefix=NEWS_AGGREGATES_PREFIX,
             df=pd.DataFrame([{
                 "ticker": "AAPL", "aggregate_date": date(2026, 5, 13),
                 "schema_version": 1, "n_articles": 5,
@@ -316,33 +323,19 @@ class TestCanonicalSidecarReads:
             "event_categories": "",
             "top_event_descriptions": "",
         }])
-        # Producer-side canonical layout: parquet under run_id key,
-        # latest.json sidecar points to it.
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{NEWS_AGGREGATES_PREFIX}/2605170200_result.parquet",
-            df=df_in,
+        _put_canonical(
+            s3, prefix=NEWS_AGGREGATES_PREFIX,
+            df=df_in, run_id="2605170200",
         )
-        import json as _json
-        s3.put_object(
-            Bucket="alpha-engine-research",
-            Key=f"{NEWS_AGGREGATES_PREFIX}/latest.json",
-            Body=_json.dumps({
-                "run_id": "2605170200",
-                "artifact_key": f"{NEWS_AGGREGATES_PREFIX}/2605170200_result.parquet",
-                "aggregate_date": "2026-05-17",
-                "row_count": 1,
-            }).encode("utf-8"),
-        )
-        # Read with an arbitrary date — canonical path ignores it and
-        # follows the sidecar pointer.
-        df = read_news_aggregates(date(2026, 5, 13), s3_client=s3)
+        df = read_news_aggregates(s3_client=s3)
         assert len(df) == 1
         assert df.iloc[0]["ticker"] == "AAPL"
 
-    def test_falls_back_to_legacy_date_key_when_no_sidecar(self):
-        """Backward-compat: if a legacy {date}.parquet exists but no
-        canonical sidecar, the reader still finds the data."""
+    def test_legacy_date_key_is_ignored_when_no_sidecar(self):
+        """Regression guard (ROADMAP L178): post-canonical-key migration,
+        a bare ``{prefix}/{date}.parquet`` file with NO ``latest.json``
+        sidecar must NOT be read. The legacy fallback that previously
+        walked back per-date keys has been retired."""
         s3 = _InMemoryS3()
         df_in = pd.DataFrame([{
             "ticker": "AAPL",
@@ -364,9 +357,33 @@ class TestCanonicalSidecarReads:
             key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
             df=df_in,
         )
-        # No latest.json sidecar — reader should fall back
-        df = read_news_aggregates(date(2026, 5, 13), s3_client=s3)
-        assert len(df) == 1
+        # No latest.json sidecar planted → canonical-only contract
+        # yields empty DataFrame.
+        df = read_news_aggregates(s3_client=s3)
+        assert len(df) == 0
+
+    def test_insider_legacy_per_date_keys_are_ignored(self):
+        """Regression guard: legacy per-filed_date parquets
+        (``{prefix}/{date}.parquet`` × N for the window) MUST NOT be
+        read. Canonical contract is one consolidated parquet under
+        ``latest.json``; absent that, empty result."""
+        s3 = _InMemoryS3()
+        for d in (date(2026, 5, 1), date(2026, 5, 10)):
+            _put_parquet(
+                s3, bucket="alpha-engine-research",
+                key=f"{INSIDER_TRANSACTIONS_PREFIX}/{d.isoformat()}.parquet",
+                df=pd.DataFrame([{
+                    "ticker": "AAPL", "filed_date": d,
+                    "acquired_disposed_code": "D",
+                    "transaction_value_usd": 1.0,
+                    "reporting_owner_name": "Insider",
+                }]),
+            )
+        # No latest.json planted → no per-date walk-back; empty.
+        df = read_insider_transactions_window(
+            date(2026, 5, 13), window_days=90, s3_client=s3,
+        )
+        assert len(df) == 0
 
     def test_insider_window_via_latest_filters_by_filed_date(self):
         """Canonical shape: one consolidated parquet with filed_date as
@@ -412,9 +429,8 @@ class TestReadSubstrateForPopulation:
     def test_covers_every_input_ticker(self):
         s3 = _InMemoryS3()
         # Only AAPL has news data
-        _put_parquet(
-            s3, bucket="alpha-engine-research",
-            key=f"{NEWS_AGGREGATES_PREFIX}/2026-05-13.parquet",
+        _put_canonical(
+            s3, prefix=NEWS_AGGREGATES_PREFIX,
             df=pd.DataFrame([{
                 "ticker": "AAPL", "aggregate_date": date(2026, 5, 13),
                 "schema_version": 1, "n_articles": 5,
@@ -442,8 +458,6 @@ class TestReadSubstrateForPopulation:
         from unittest.mock import MagicMock
 
         s3 = MagicMock()
-        # Empty body for all reads
-        from io import BytesIO as _BytesIO
 
         def get_object(*, Bucket, Key):
             raise RuntimeError("NoSuchKey")
@@ -453,12 +467,11 @@ class TestReadSubstrateForPopulation:
             [f"T{i}" for i in range(25)],
             as_of_date=date(2026, 5, 13), s3_client=s3,
         )
-        # Canonical-shape: 3 latest.json reads (news + analyst + insider)
-        # each fail-fast on missing sidecar, then legacy fallbacks
-        # iterate per-date. Max ~3 + 1 (news legacy) + 1 (analyst legacy)
-        # + (window_days+1) (insider legacy) ≈ ~95 calls for 25 tickers.
-        # The pin is "O(1) per parquet type — not O(ticker count)".
-        assert s3.get_object.call_count <= 100
+        # Canonical-only shape: exactly 3 latest.json reads (news +
+        # analyst + insider), each fail-fast on missing sidecar — no
+        # per-date legacy walk-back any more. Pin tightened to 3 from
+        # the pre-retirement ~95 budget.
+        assert s3.get_object.call_count == 3
         assert len(snapshots) == 25
 
 

@@ -1,12 +1,13 @@
 """Producer-substrate reader — read-only consumer side of the
 institutional data-revamp arc (Wave 1).
 
-The producer side lives in alpha-engine-data:
+The producer side lives in alpha-engine-data. Canonical-shape S3
+layout (post-#234; legacy ``{date}``-keyed fallback retired 2026-05-19):
 
-  - news_aggregates/{date}.parquet           (PR A.2 #228)
-  - insider_transactions/{date}.parquet      (PR B #230)
-  - analyst_revisions/{date}.parquet         (PR C #231)
-  - analyst_snapshots/{ticker}/{date}.json   (PR C #231)
+  - news_aggregates/{run_id}_result.parquet  +  news_aggregates/latest.json
+  - insider_transactions/{run_id}_result.parquet  +  insider_transactions/latest.json
+  - analyst_revisions/{run_id}_result.parquet  +  analyst_revisions/latest.json
+  - analyst_snapshots/{ticker}/{run_id}.json  +  analyst_snapshots/{ticker}/latest.json
 
 This package reads those parquets and exposes typed per-ticker
 accessors that ``fetch_data`` joins onto ``input_data_snapshot`` for

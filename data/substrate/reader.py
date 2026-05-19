@@ -156,7 +156,7 @@ def _read_via_latest(
 ) -> pd.DataFrame | None:
     """Canonical-shape read: GET ``{prefix}/latest.json`` → resolve
     ``artifact_key`` → GET parquet body. Returns None if either step
-    fails (logged at INFO so legacy-fallback callers can degrade).
+    fails (logged at INFO).
     """
     import json as _json
     latest_key = f"{prefix}/latest.json"
@@ -176,44 +176,31 @@ def _read_via_latest(
 
 
 def read_news_aggregates(
-    as_of_date: Date,
     *,
     s3_client: Any,
     bucket: str = DEFAULT_S3_BUCKET,
     prefix: str = NEWS_AGGREGATES_PREFIX,
 ) -> pd.DataFrame:
-    """Read news aggregates via canonical ``latest.json`` sidecar
-    indirection. Falls back to legacy ``{as_of_date}.parquet`` shape
-    during the transition window. Returns empty DataFrame if missing.
+    """Read news aggregates via the canonical ``latest.json`` sidecar.
 
-    ``as_of_date`` is used only for the legacy-shape fallback path —
-    under the canonical shape, ``latest.json`` always points at the
-    most recent run regardless of date; the parquet itself carries
-    ``aggregate_date`` per row.
+    ``latest.json`` always points at the most recent run regardless of
+    date; the parquet itself carries ``aggregate_date`` per row, so any
+    date filtering happens at the DataFrame layer. Returns an empty
+    DataFrame when no canonical artifact exists.
     """
     df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
-    if df is not None:
-        return df
-    # Legacy fallback
-    legacy_key = f"{prefix}/{as_of_date.isoformat()}.parquet"
-    df = _read_parquet_safely(s3_client, bucket=bucket, key=legacy_key)
     return df if df is not None else pd.DataFrame()
 
 
 def read_analyst_revisions(
-    as_of_date: Date,
     *,
     s3_client: Any,
     bucket: str = DEFAULT_S3_BUCKET,
     prefix: str = ANALYST_REVISIONS_PREFIX,
 ) -> pd.DataFrame:
-    """Read analyst-revisions via canonical ``latest.json`` indirection
-    + legacy fallback. Same shape as :func:`read_news_aggregates`."""
+    """Read analyst-revisions via the canonical ``latest.json`` sidecar.
+    Same shape as :func:`read_news_aggregates`."""
     df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
-    if df is not None:
-        return df
-    legacy_key = f"{prefix}/{as_of_date.isoformat()}.parquet"
-    df = _read_parquet_safely(s3_client, bucket=bucket, key=legacy_key)
     return df if df is not None else pd.DataFrame()
 
 
@@ -227,35 +214,22 @@ def read_insider_transactions_window(
 ) -> pd.DataFrame:
     """Read insider transactions covering the trailing ``window_days``.
 
-    Canonical shape: the producer writes one consolidated parquet per
-    run (containing all Form 4 filings collected in that run, with
-    ``filed_date`` as a row column). Read via ``latest.json`` → filter
-    rows where ``filed_date`` falls within the window. Falls back to
-    the legacy per-filed_date parquets if canonical sidecar missing.
+    The producer writes one consolidated parquet per run (containing
+    all Form 4 filings collected in that run, with ``filed_date`` as
+    a row column). Read via ``latest.json`` → filter rows where
+    ``filed_date`` falls within the window. Returns an empty
+    DataFrame when no canonical artifact exists.
     """
     df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
-    if df is not None and len(df) > 0 and "filed_date" in df.columns:
-        cutoff = as_of_date - timedelta(days=window_days)
-        # filed_date is stored as ISO date string OR pandas datetime;
-        # convert defensively
-        filed_dates = pd.to_datetime(df["filed_date"]).dt.date
-        return df[
-            (filed_dates >= cutoff) & (filed_dates <= as_of_date)
-        ].reset_index(drop=True)
-
-    # Legacy fallback: per-filed_date parquets
-    frames: list[pd.DataFrame] = []
-    for offset in range(window_days + 1):
-        d = as_of_date - timedelta(days=offset)
-        legacy_key = f"{prefix}/{d.isoformat()}.parquet"
-        legacy_df = _read_parquet_safely(
-            s3_client, bucket=bucket, key=legacy_key,
-        )
-        if legacy_df is not None and len(legacy_df) > 0:
-            frames.append(legacy_df)
-    if not frames:
+    if df is None or len(df) == 0 or "filed_date" not in df.columns:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    cutoff = as_of_date - timedelta(days=window_days)
+    # filed_date is stored as ISO date string OR pandas datetime;
+    # convert defensively
+    filed_dates = pd.to_datetime(df["filed_date"]).dt.date
+    return df[
+        (filed_dates >= cutoff) & (filed_dates <= as_of_date)
+    ].reset_index(drop=True)
 
 
 # ── Per-ticker rollup ─────────────────────────────────────────────────
@@ -408,7 +382,7 @@ class SubstrateReader:
         """
         if news_df is None:
             news_df = read_news_aggregates(
-                as_of_date, s3_client=self._s3, bucket=self._bucket,
+                s3_client=self._s3, bucket=self._bucket,
             )
         if insider_df is None:
             insider_df = read_insider_transactions_window(
@@ -418,7 +392,7 @@ class SubstrateReader:
             )
         if analyst_df is None:
             analyst_df = read_analyst_revisions(
-                as_of_date, s3_client=self._s3, bucket=self._bucket,
+                s3_client=self._s3, bucket=self._bucket,
             )
 
         fields: dict = {"ticker": ticker, "as_of_date": as_of_date}
@@ -462,16 +436,12 @@ def read_substrate_for_population(
         s3_client, bucket=bucket,
         insider_window_days=insider_window_days,
     )
-    news_df = read_news_aggregates(
-        as_of_date, s3_client=s3_client, bucket=bucket,
-    )
+    news_df = read_news_aggregates(s3_client=s3_client, bucket=bucket)
     insider_df = read_insider_transactions_window(
         as_of_date, window_days=insider_window_days,
         s3_client=s3_client, bucket=bucket,
     )
-    analyst_df = read_analyst_revisions(
-        as_of_date, s3_client=s3_client, bucket=bucket,
-    )
+    analyst_df = read_analyst_revisions(s3_client=s3_client, bucket=bucket)
     return {
         ticker: reader.snapshot_for_ticker(
             ticker, as_of_date=as_of_date,
