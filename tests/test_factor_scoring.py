@@ -15,6 +15,8 @@ import pytest
 
 from scoring.factor_scoring import (
     _COMPOSITE_DEFS,
+    _DERIVED_FACTOR_DEFS,
+    _add_derived_factors,
     _within_sector_pct_rank,
     compute_factor_composites,
     read_factor_profiles_from_s3,
@@ -113,6 +115,14 @@ def _make_test_dfs():
         "pe_ratio": [50.0, 30.0, 18.0, 10.0],
         "pb_ratio": [40.0, 12.0, 4.0, 1.5],
         "fcf_yield": [0.02, 0.04, 0.06, 0.10],
+        # Phase 3a fundamental fields backing the Phase 3b composites.
+        # NVDA growth-leader on revenue + EPS; PFE the laggard. NVDA retains
+        # (low payout) + reinvests; PFE high payout (dividend-heavy pharma).
+        "revenue_growth_3y": [0.45, 0.18, 0.06, -0.02],
+        "eps_growth_3y": [0.60, 0.20, 0.05, -0.10],
+        "payout_ratio": [0.0, 0.30, 0.55, 0.85],
+        "dividend_yield": [0.0, 0.008, 0.025, 0.045],
+        "capex_growth_5y": [0.35, 0.12, 0.04, -0.05],
     })
     return technical, fundamental
 
@@ -291,3 +301,220 @@ def test_each_composite_weights_sum_to_one():
     for composite, components in _COMPOSITE_DEFS.items():
         total = sum(weight for _, weight, _ in components)
         assert abs(total - 1.0) < 1e-9, f"{composite} weights sum to {total}, not 1.0"
+
+
+# ── Phase 3b of attractiveness-pillars-260520 — Growth + Stewardship
+# composites. The 4 legacy composites continue to work identically (guarded
+# by the existing tests above); these tests target the 2 new composites
+# and the derived sustainable_growth_rate factor.
+
+
+class TestPillarComposites:
+    """Phase 3b composites built on top of Phase 3a fundamental fields."""
+
+    def test_definitions_include_growth_and_stewardship(self):
+        """The 6-composite contract: legacy 4 + growth + stewardship."""
+        assert "growth_score" in _COMPOSITE_DEFS
+        assert "stewardship_score" in _COMPOSITE_DEFS
+        # Sanity: 6 total composites; existing 4 preserved.
+        assert set(_COMPOSITE_DEFS.keys()) == {
+            "quality_score",
+            "momentum_score",
+            "low_vol_score",
+            "value_score",
+            "growth_score",
+            "stewardship_score",
+        }
+
+    def test_growth_composite_components(self):
+        """Growth composite must reference the 4 expected raw factors,
+        including the derived sustainable_growth_rate."""
+        components = _COMPOSITE_DEFS["growth_score"]
+        component_cols = {col for col, _, _ in components}
+        assert component_cols == {
+            "revenue_growth_3y",
+            "eps_growth_3y",
+            "sustainable_growth_rate",
+            "capex_growth_5y",
+        }
+
+    def test_stewardship_composite_components(self):
+        """Stewardship is thin-quant by design — 2 components only."""
+        components = _COMPOSITE_DEFS["stewardship_score"]
+        component_cols = {col for col, _, _ in components}
+        assert component_cols == {"payout_ratio", "capex_growth_5y"}
+        # payout_ratio MUST be inverted (low payout = better stewardship for
+        # the cross-sectional rank); capex_growth_5y NOT inverted (sustained
+        # reinvestment is good stewardship).
+        for col, _, invert in components:
+            if col == "payout_ratio":
+                assert invert is True, "payout_ratio must be inverted"
+            if col == "capex_growth_5y":
+                assert invert is False
+
+    def test_derived_factor_defs_documents_sustainable_growth_rate(self):
+        """_DERIVED_FACTOR_DEFS is the audit trail for non-raw columns."""
+        assert "sustainable_growth_rate" in _DERIVED_FACTOR_DEFS
+
+    def test_add_derived_factors_computes_sustainable_growth_rate(self):
+        """sustainable_growth_rate = roe × (1 - payout_ratio); NaN inputs
+        propagate to NaN outputs."""
+        df = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D"],
+            "roe": [0.30, 0.10, 0.20, float("nan")],
+            "payout_ratio": [0.20, 0.50, float("nan"), 0.40],
+        })
+        out = _add_derived_factors(df)
+        # A: 0.30 × (1 - 0.20) = 0.24
+        # B: 0.10 × (1 - 0.50) = 0.05
+        # C: NaN payout → NaN
+        # D: NaN roe → NaN
+        assert out.loc[0, "sustainable_growth_rate"] == pytest.approx(0.24)
+        assert out.loc[1, "sustainable_growth_rate"] == pytest.approx(0.05)
+        assert pd.isna(out.loc[2, "sustainable_growth_rate"])
+        assert pd.isna(out.loc[3, "sustainable_growth_rate"])
+
+    def test_add_derived_factors_handles_missing_columns(self):
+        """Pre-Phase-3a-deploy: roe or payout_ratio missing → emit NaN
+        sustainable_growth_rate column rather than crashing."""
+        # Missing payout_ratio
+        df_no_payout = pd.DataFrame({"ticker": ["A"], "roe": [0.20]})
+        out = _add_derived_factors(df_no_payout)
+        assert "sustainable_growth_rate" in out.columns
+        assert pd.isna(out["sustainable_growth_rate"]).all()
+
+        # Missing roe
+        df_no_roe = pd.DataFrame({"ticker": ["A"], "payout_ratio": [0.20]})
+        out2 = _add_derived_factors(df_no_roe)
+        assert "sustainable_growth_rate" in out2.columns
+        assert pd.isna(out2["sustainable_growth_rate"]).all()
+
+    def test_compute_returns_all_six_composites_with_phase3a_columns(self):
+        """When Phase 3a fields are present, all 6 composites populate."""
+        tech, fund = _make_test_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        out = compute_factor_composites(tech, fund, sector_map)
+        for col in (
+            "quality_score", "momentum_score", "low_vol_score", "value_score",
+            "growth_score", "stewardship_score",
+        ):
+            assert col in out.columns, f"missing {col}"
+            assert out[col].notna().all(), f"{col} has NaN — partial-data path broken"
+        # _n columns also present
+        for col in (
+            "quality_n", "momentum_n", "low_vol_n", "value_n",
+            "growth_n", "stewardship_n",
+        ):
+            assert col in out.columns, f"missing {col}"
+
+    def test_growth_score_ranks_higher_growth_higher(self):
+        """Within Tech, NVDA (45% revenue 3y CAGR + 60% EPS 3y + 0% payout +
+        35% capex growth) should score higher than MSFT (18% / 20% / 30% /
+        12%) on growth."""
+        tech, fund = _make_test_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
+        assert out.loc["NVDA", "growth_score"] > out.loc["MSFT", "growth_score"]
+        # Within Healthcare: JNJ > PFE on every growth component
+        assert out.loc["JNJ", "growth_score"] > out.loc["PFE", "growth_score"]
+
+    def test_stewardship_score_low_payout_high_capex_wins(self):
+        """Within Tech, NVDA (0% payout, 35% capex growth) outranks MSFT
+        (30% payout, 12% capex growth) on stewardship."""
+        tech, fund = _make_test_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
+        assert out.loc["NVDA", "stewardship_score"] > out.loc["MSFT", "stewardship_score"]
+        # Within Healthcare: JNJ outranks PFE on both stewardship components
+        assert out.loc["JNJ", "stewardship_score"] > out.loc["PFE", "stewardship_score"]
+
+    def test_phase3a_columns_absent_yields_nan_composites_for_new_two(self):
+        """Tolerant-reader: when Phase 3a fields aren't in fundamental.parquet
+        (pre-merge or first SF firing after merge), growth_score +
+        stewardship_score emit NaN; the legacy 4 composites continue to
+        populate normally."""
+        tickers = ["A", "B", "C"]
+        tech = pd.DataFrame({
+            "ticker": tickers,
+            "date": ["2026-05-13"] * 3,
+            "momentum_20d": [0.10, 0.05, 0.01],
+            "momentum_5d": [0.02, 0.01, 0.0],
+            "return_60d": [0.20, 0.10, 0.02],
+            "return_120d": [0.40, 0.20, 0.05],
+            "dist_from_52w_high": [-0.05, -0.10, -0.20],
+            "realized_vol_20d": [0.15, 0.20, 0.30],
+            "vol_ratio_10_60": [1.0, 1.1, 1.2],
+            "atr_14_pct": [1.5, 2.0, 3.0],
+        })
+        # Legacy fundamentals only — no Phase 3a fields.
+        fund = pd.DataFrame({
+            "ticker": tickers,
+            "date": ["2026-05-13"] * 3,
+            "roe": [0.20, 0.15, 0.10],
+            "debt_to_equity": [0.50, 0.80, 1.20],
+            "gross_margin": [0.50, 0.40, 0.30],
+            "current_ratio": [2.0, 1.5, 1.0],
+            "pe_ratio": [25.0, 20.0, 15.0],
+            "pb_ratio": [4.0, 3.0, 2.0],
+            "fcf_yield": [0.04, 0.05, 0.06],
+        })
+        sector_map = {t: "Tech" for t in tickers}
+        out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
+
+        # Legacy 4 composites populate normally — Phase 3b is non-breaking.
+        for col in ("quality_score", "momentum_score", "low_vol_score", "value_score"):
+            assert out[col].notna().all(), f"legacy {col} regressed under tolerant-reader path"
+        # New 2 composites emit NaN (no underlying data).
+        assert pd.isna(out["growth_score"]).all()
+        assert pd.isna(out["stewardship_score"]).all()
+        # _n columns reflect zero contributing factors.
+        assert (out["growth_n"] == 0).all()
+        assert (out["stewardship_n"] == 0).all()
+
+    def test_phase3a_partial_columns_reallocates_within_growth(self):
+        """If only some Phase 3a fields are present (e.g. revenue_growth_3y
+        but no eps_growth_3y), growth_score still computes from the
+        available components — same partial-coverage handling as the legacy
+        composites."""
+        tickers = ["A", "B", "C"]
+        tech = pd.DataFrame({
+            "ticker": tickers,
+            "date": ["2026-05-13"] * 3,
+            "momentum_20d": [0.10, 0.05, 0.01],
+            "momentum_5d": [0.02, 0.01, 0.0],
+            "return_60d": [0.20, 0.10, 0.02],
+            "return_120d": [0.40, 0.20, 0.05],
+            "dist_from_52w_high": [-0.05, -0.10, -0.20],
+            "realized_vol_20d": [0.15, 0.20, 0.30],
+            "vol_ratio_10_60": [1.0, 1.1, 1.2],
+            "atr_14_pct": [1.5, 2.0, 3.0],
+        })
+        fund = pd.DataFrame({
+            "ticker": tickers,
+            "date": ["2026-05-13"] * 3,
+            "roe": [0.20, 0.15, 0.10],
+            "debt_to_equity": [0.50, 0.80, 1.20],
+            "gross_margin": [0.50, 0.40, 0.30],
+            "current_ratio": [2.0, 1.5, 1.0],
+            "pe_ratio": [25.0, 20.0, 15.0],
+            "pb_ratio": [4.0, 3.0, 2.0],
+            "fcf_yield": [0.04, 0.05, 0.06],
+            # Only revenue_growth_3y of the 5 Phase 3a fields is present.
+            "revenue_growth_3y": [0.30, 0.15, 0.05],
+        })
+        sector_map = {t: "Tech" for t in tickers}
+        out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
+        # growth_score populates from the 1 available component (weight
+        # reallocates 100% to revenue_growth_3y). sustainable_growth_rate
+        # is also NaN because payout_ratio is missing.
+        assert out["growth_score"].notna().all()
+        assert (out["growth_n"] == 1).all()
