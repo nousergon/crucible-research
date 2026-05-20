@@ -290,3 +290,110 @@ class TestPagination:
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
         assert summary["rows_in"] == 50
         assert summary["files_read"] == 50
+
+
+# ── Implausibility filter ────────────────────────────────────────────────
+#
+# Regression coverage for the 2026-05-13 incident: a unit test running
+# with real AWS creds wrote ~$1014 of fake-agent rows into the
+# _cost_raw partition, inflating the dashboard's weekly trend chart
+# 700x. The filter is structural (run_id prefix + token ceiling), not
+# a name blocklist — robust against new test fixture names.
+
+
+class TestImplausibleRowFilter:
+    def test_plausible_production_run_id_passes(self):
+        from scripts.aggregate_costs import _is_plausible_cost_row
+        for run_id in ("2026-05-13", "2026-05-15",
+                       "2026-05-20-001", "2026-05-20_run1"):
+            ok, reason = _is_plausible_cost_row({
+                "run_id": run_id,
+                "input_tokens": 4000, "output_tokens": 1200,
+            })
+            assert ok, f"{run_id!r} should pass — reason: {reason}"
+
+    def test_test_fixture_run_id_fails(self):
+        from scripts.aggregate_costs import _is_plausible_cost_row
+        # The exact run_ids the 2026-05-13 incident left in S3.
+        for run_id in ("run-1", "run-2", "run-budget-test", "run-x", "", None):
+            ok, reason = _is_plausible_cost_row({
+                "run_id": run_id,
+                "input_tokens": 4000, "output_tokens": 1200,
+            })
+            assert not ok
+            assert "run_id" in reason
+
+    def test_implausible_token_count_fails(self):
+        from scripts.aggregate_costs import _is_plausible_cost_row
+        # The big_spender row had input_tokens=1e9 — 200x the Claude
+        # Opus 4.7 context window. Real API calls cannot reach this.
+        ok, reason = _is_plausible_cost_row({
+            "run_id": "2026-05-13",
+            "input_tokens": 1_000_000_000, "output_tokens": 0,
+        })
+        assert not ok
+        assert "input_tokens" in reason
+        assert "1,000,000,000" in reason
+
+    def test_aggregate_day_drops_polluted_rows(self, s3):
+        from scripts.aggregate_costs import aggregate_day
+        # Mix: 3 real rows + 2 test pollution rows in the same JSONL.
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-13/sector_team:tech.jsonl",
+            [
+                _make_row(agent_id="sector_team:tech",
+                          sector_team_id="tech",
+                          model_name="claude-haiku-4-5",
+                          input_tokens=4000, output_tokens=1200,
+                          cost_usd=0.012, call_seq=1),
+                _make_row(agent_id="sector_team:tech",
+                          sector_team_id="tech",
+                          model_name="claude-haiku-4-5",
+                          input_tokens=2000, output_tokens=800,
+                          cost_usd=0.006, call_seq=2),
+                _make_row(agent_id="sector_team:tech",
+                          sector_team_id="tech",
+                          model_name="claude-haiku-4-5",
+                          input_tokens=3000, output_tokens=1000,
+                          cost_usd=0.008, call_seq=3),
+                # The exact 2026-05-13 pollution shape.
+                {**_make_row(agent_id="big_spender", sector_team_id=None,
+                             model_name="claude-haiku-4-5",
+                             input_tokens=1_000_000_000, output_tokens=0,
+                             cost_usd=1000.0),
+                 "run_id": "run-x"},
+                {**_make_row(agent_id="runaway_agent", sector_team_id=None,
+                             model_name="claude-haiku-4-5",
+                             input_tokens=10_000_000, output_tokens=0,
+                             cost_usd=10.0),
+                 "run_id": "run-budget-test"},
+            ],
+        )
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 13))
+        # 3 real rows survive; 2 pollution rows dropped (one by run_id,
+        # one by token count — both filters catch each).
+        assert summary["rows_in"] == 3
+        # Total cost is real-only, not inflated.
+        assert abs(summary["total_cost_usd"] - 0.026) < 1e-6
+        # by_agent_id has only the real agent (float tolerance).
+        assert set(summary["by_agent_id"].keys()) == {"sector_team:tech"}
+        assert abs(summary["by_agent_id"]["sector_team:tech"] - 0.026) < 1e-6
+
+    def test_aggregate_day_skips_when_all_rows_polluted(self, s3, caplog):
+        # All-pollution day → no parquet written (same shape as
+        # zero-rows case, distinguishable in logs).
+        from scripts.aggregate_costs import aggregate_day
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-13/run-x/big_spender.jsonl",
+            [
+                {**_make_row(agent_id="big_spender", sector_team_id=None,
+                             model_name="claude-haiku-4-5",
+                             input_tokens=1_000_000_000, output_tokens=0,
+                             cost_usd=1000.0),
+                 "run_id": "run-x"},
+            ],
+        )
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 13))
+        assert summary is None
