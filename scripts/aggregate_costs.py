@@ -33,6 +33,7 @@ import argparse
 import io
 import json
 import logging
+import re
 import sys
 from datetime import date as date_type
 from typing import Any, Optional
@@ -45,6 +46,49 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BUCKET = "alpha-engine-research"
 _INPUT_PREFIX = "decision_artifacts/_cost_raw"
 _OUTPUT_PREFIX = "decision_artifacts/_cost"
+
+# Production run_id format in the cost-tracker is ISO date
+# (YYYY-MM-DD, sometimes with a hyphen-tail like YYYY-MM-DD-{seq}).
+# Test fixtures use ad-hoc strings like "run-x", "run-budget-test",
+# "run-1". Anchoring on the ISO-date prefix is the strong structural
+# discriminator — robust against new test fixture names.
+_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(\b|[-_])")
+
+# Anthropic's largest context window (Claude Opus 4.7) is ~1M tokens.
+# A single API response cannot exceed that. 5M is 5x the API ceiling
+# and would mark any single call as impossible-from-real-API. This is
+# the implausibility threshold — anything above it is test pollution.
+_MAX_PLAUSIBLE_TOKENS_PER_ROW = 5_000_000
+
+
+def _is_plausible_cost_row(row: dict) -> tuple[bool, Optional[str]]:
+    """Reject obvious test pollution before it reaches the daily parquet.
+
+    Two structural invariants any real production row must satisfy:
+
+    1. ``run_id`` starts with an ISO date (``YYYY-MM-DD``). Tests use
+       ad-hoc strings like ``run-x`` / ``run-budget-test``; pinning the
+       regex discriminates structurally rather than via name
+       blocklisting, which would be brittle against new test fixtures.
+    2. Every token-count column is below the Claude API ceiling. The
+       2026-05-13 pollution had ``input_tokens=1_000_000_000`` — 1000x
+       the real ceiling — which the producer would have to fabricate.
+
+    Returns ``(ok, reason)``. ``ok=False`` → drop the row, log reason.
+    Pure function — no I/O, deterministic for the same input.
+    """
+    run_id = row.get("run_id")
+    if not run_id or not _RUN_ID_RE.match(str(run_id)):
+        return False, f"run_id={run_id!r} does not start with YYYY-MM-DD"
+    for col in ("input_tokens", "output_tokens",
+                "cache_read_tokens", "cache_create_tokens"):
+        v = row.get(col)
+        if v is not None and v > _MAX_PLAUSIBLE_TOKENS_PER_ROW:
+            return False, (
+                f"{col}={v:,} exceeds plausible "
+                f"{_MAX_PLAUSIBLE_TOKENS_PER_ROW:,} (Claude API ceiling)"
+            )
+    return True, None
 
 
 # ── S3 read helpers ──────────────────────────────────────────────────────
@@ -135,7 +179,35 @@ def aggregate_day(
         )
         return None
 
-    df = pd.DataFrame(all_rows)
+    # Drop implausible rows (test pollution). Source: 2026-05-13 incident
+    # where a unit-test run with real AWS creds wrote ~$1014 of fake-agent
+    # rows into the _cost_raw partition, inflating the dashboard's weekly
+    # trend chart 700x. The filter is structural (run_id pattern + token
+    # ceiling), not a name blocklist — robust against new test fixtures.
+    clean_rows: list[dict] = []
+    drop_reasons: list[str] = []
+    for row in all_rows:
+        ok, reason = _is_plausible_cost_row(row)
+        if ok:
+            clean_rows.append(row)
+        elif len(drop_reasons) < 10:  # cap log noise
+            drop_reasons.append(reason or "implausible")
+    n_dropped = len(all_rows) - len(clean_rows)
+    if n_dropped:
+        logger.warning(
+            "[aggregate_costs] dropped %d implausible row(s) from "
+            "_cost_raw — sample reasons: %s",
+            n_dropped, "; ".join(drop_reasons[:5]),
+        )
+    if not clean_rows:
+        logger.warning(
+            "[aggregate_costs] all %d rows dropped as implausible — "
+            "skipping parquet write",
+            len(all_rows),
+        )
+        return None
+
+    df = pd.DataFrame(clean_rows)
 
     # Write parquet to a buffer + put_object so we don't need s3fs as a dep.
     output_key = output_key_override or f"{_OUTPUT_PREFIX}/{date_str}/cost.parquet"
