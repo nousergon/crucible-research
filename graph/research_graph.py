@@ -2687,6 +2687,19 @@ def archive_writer(state: ResearchState) -> dict:
     except Exception as e:
         logger.error("Failed to write signals.json: %s", e)
 
+    # Persist the consolidated morning brief alongside signals.json so
+    # the dashboard's Research Briefing Archive page can read it. The
+    # brief is the same body that goes out in the morning email
+    # (`email_sender` node downstream) — emailing it without persisting
+    # it leaves no audit trail and the archive page stales out, which
+    # is what happened from 2026-03-16 through 2026-05-20.
+    consolidated = state.get("consolidated_report", "") or ""
+    if consolidated:
+        try:
+            am.save_consolidated_report(run_date, consolidated)
+        except Exception as e:
+            logger.error("Failed to save consolidated_report: %s", e)
+
     # Extract semantic memories from this run (Phase 3)
     try:
         from memory.semantic import extract_semantic_memories
