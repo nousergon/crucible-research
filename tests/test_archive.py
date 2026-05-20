@@ -428,3 +428,51 @@ class TestSavePopulationMacroFields:
             if call.kwargs.get("Key", "").startswith("population/")
         }
         assert bodies["population/latest.json"] == bodies["population/2026-05-11.json"]
+
+
+# ── Consolidated morning brief persistence ──────────────────────────────
+#
+# Regression coverage for the 2026-05-20 finding: archive_writer was
+# building the consolidated_report state field, emailing it via
+# email_sender, and then dropping it on the floor — save_consolidated_report
+# existed but had no caller for ~2 months (last morning.md write
+# 2026-03-16). The dashboard's Research Briefing Archive page was
+# correctly reading what was in S3, which was nothing.
+
+
+class TestConsolidatedReportPersistence:
+    def test_save_consolidated_report_writes_morning_md_to_s3(
+        self, archive_in_memory
+    ):
+        archive_in_memory.save_consolidated_report(
+            "2026-05-20", "# Weekly research brief\n\nTop picks: ..."
+        )
+        calls = archive_in_memory.s3.put_object.call_args_list
+        morning_calls = [
+            c for c in calls
+            if c.kwargs.get("Key", "").endswith("/morning.md")
+        ]
+        assert len(morning_calls) == 1
+        c = morning_calls[0]
+        assert c.kwargs["Key"] == "consolidated/2026-05-20/morning.md"
+        body = c.kwargs["Body"]
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        assert "Weekly research brief" in body
+
+    def test_archive_writer_wires_save_consolidated_report(self):
+        # Structural regression: pin that archive_writer's source calls
+        # save_consolidated_report. If the call is removed again, this
+        # test fails at CI time instead of staling the archive page
+        # silently for two months.
+        import inspect
+        rg = pytest.importorskip(
+            "graph.research_graph",
+            reason="graph.research_graph requires gitignored config",
+        )
+        src = inspect.getsource(rg.archive_writer)
+        assert "save_consolidated_report" in src, (
+            "archive_writer must persist consolidated_report — without "
+            "this call the dashboard's Research Briefing Archive stales "
+            "out (regression of 2026-03-16 silent drop, fixed 2026-05-20)"
+        )
