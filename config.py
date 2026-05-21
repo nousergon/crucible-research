@@ -213,6 +213,34 @@ if abs(_total - 1.0) > 1e-6:
         f"in {_SCORING_CFG_PATH}"
     )
 
+
+def _validate_pillar_emit_coherence(
+    pillar_weights_sum: float,
+    pillar_emit_enabled: bool,
+    source_path: Path,
+) -> None:
+    """Coherence guard between pillar_weights and PILLAR_EMIT_ENABLED.
+
+    If ``Σ pillar_weights > 0`` the composite reads per-ticker
+    ``pillar_assessments``, which the qual analyst only emits when
+    ``aggregator.pillar_emit.enabled`` is true. A non-zero pillar weight
+    with the emit flag off → 5/21-class composite collapse (composite
+    degenerates to 0 because every pick carries empty pillar inputs).
+    The reverse case (emit on, weights zero) is allowed — a wasted second
+    extraction call but no behavior bug.
+    """
+    if pillar_weights_sum > 1e-6 and not pillar_emit_enabled:
+        raise ValueError(
+            f"aggregator.pillar_composite.pillar_weights sum to "
+            f"{pillar_weights_sum:.6f} > 0 but aggregator.pillar_emit.enabled "
+            f"is false in {source_path} — non-zero pillar_weights require "
+            "PILLAR_EMIT_ENABLED=true to populate pillar_assessments. "
+            "Either flip pillar_emit.enabled to true or zero pillar_weights."
+        )
+
+
+_validate_pillar_emit_coherence(_pillar_sum, PILLAR_EMIT_ENABLED, _SCORING_CFG_PATH)
+
 # ── Focus list gating (PR 4 of scanner-placement arc, 260514 plan) ───────────
 # When enabled, the quant analyst's user prompt receives the regime-blended
 # focus list (top-N per team from the Phase 1c factor composites) as its
