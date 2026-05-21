@@ -11,6 +11,7 @@ compute_technical_score = _technical.compute_technical_score
 compute_momentum_percentiles = _technical.compute_momentum_percentiles
 
 from scoring.composite import (
+    PillarCoverageError,
     compute_composite_breakdown,
     compute_composite_score,
     score_to_rating,
@@ -562,4 +563,99 @@ class TestCompositeBreakdownLegacyRegression:
             assert c.within_pillar_qual_weight == 0.0
             assert c.blended == 65.0
             assert c.qual_component is None
+
+
+class TestPillarCoverageGuard:
+    """Hardening Item 1 (2026-05-21 AQR cutover incident): when config
+    has Σ pillar_weights > 0 but a ticker has no pillar inputs, the
+    consumer raises PillarCoverageError rather than silently producing
+    a degenerate composite."""
+
+    def test_raises_when_pillar_weights_nonzero_and_no_inputs(self):
+        """AQR-cutover-equivalent config (pillar Σ=1.0, legacy Σ=0.0) +
+        ticker with no pillar_assessment + no factor_profile → raise."""
+        with pytest.raises(PillarCoverageError):
+            compute_composite_breakdown(
+                quant_score=70.0, qual_score=80.0, factor_subscore=60.0,
+                pillar_assessment=None, factor_profile=None,
+                sector_modifier=1.0,
+                pillar_weights={
+                    "quality": 0.25, "value": 0.20, "momentum": 0.20,
+                    "growth": 0.15, "defensiveness": 0.10,
+                    "stewardship": 0.10,
+                },
+                legacy_blend_weights={
+                    "w_legacy_quant": 0.0, "w_legacy_qual": 0.0,
+                    "w_factor": 0.0,
+                },
+            )
+
+    def test_no_raise_at_phase4_default_weights_when_no_inputs(self):
+        """At Phase 4 defaults (pillar_weights all 0, legacy_blend
+        0.35/0.35/0.30), no pillar inputs is fine — legacy_blend carries
+        the composite by construction. This is the safe fallback the
+        revert config restored."""
+        breakdown = compute_composite_breakdown(
+            quant_score=70.0, qual_score=80.0, factor_subscore=60.0,
+            pillar_assessment=None, factor_profile=None,
+            sector_modifier=1.0,
+            # Default weights (omitted) — pillar all 0, legacy 0.35/0.35/0.30
+        )
+        assert breakdown.final_score is not None
+        assert breakdown.score_failed is False
+        assert breakdown.pillar_contributions == []
+
+    def test_no_raise_when_pillar_assessment_present(self):
+        """AQR weights + pillar_assessment present → no raise; pillar
+        path takes over."""
+        pillar_assessment = {
+            p: {"pillar": p, "score": 70, "confidence": "high"}
+            for p in ("quality", "value", "momentum", "growth",
+                      "stewardship", "defensiveness")
+        }
+        pillar_assessment["catalyst_horizon_modulation"] = 0
+        breakdown = compute_composite_breakdown(
+            quant_score=70.0, qual_score=80.0, factor_subscore=60.0,
+            pillar_assessment=pillar_assessment,
+            factor_profile=None,
+            sector_modifier=1.0,
+            pillar_weights={
+                "quality": 0.25, "value": 0.20, "momentum": 0.20,
+                "growth": 0.15, "defensiveness": 0.10, "stewardship": 0.10,
+            },
+            legacy_blend_weights={
+                "w_legacy_quant": 0.0, "w_legacy_qual": 0.0,
+                "w_factor": 0.0,
+            },
+        )
+        assert breakdown.final_score is not None
+        assert len(breakdown.pillar_contributions) == 6
+
+    def test_no_raise_when_factor_profile_present(self):
+        """AQR weights + factor_profile present (but pillar_assessment
+        None) → no raise; quant-only pillar path."""
+        breakdown = compute_composite_breakdown(
+            quant_score=70.0, qual_score=80.0, factor_subscore=60.0,
+            pillar_assessment=None,
+            factor_profile={
+                "quality_score": 65.0, "value_score": 65.0,
+                "momentum_score": 65.0, "growth_score": 65.0,
+                "stewardship_score": 65.0, "low_vol_score": 65.0,
+            },
+            sector_modifier=1.0,
+            pillar_weights={
+                "quality": 0.25, "value": 0.20, "momentum": 0.20,
+                "growth": 0.15, "defensiveness": 0.10, "stewardship": 0.10,
+            },
+            legacy_blend_weights={
+                "w_legacy_quant": 0.0, "w_legacy_qual": 0.0,
+                "w_factor": 0.0,
+            },
+        )
+        assert breakdown.final_score is not None
+        assert len(breakdown.pillar_contributions) == 6
+
+    def test_PillarCoverageError_is_RuntimeError_subclass(self):
+        """Per-ticker callers catching RuntimeError continue to work."""
+        assert issubclass(PillarCoverageError, RuntimeError)
         assert score_to_rating(35) == "SELL"

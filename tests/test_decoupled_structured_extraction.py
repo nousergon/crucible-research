@@ -293,9 +293,19 @@ def test_qual_extraction_parsing_error_strict_raises(fresh_modules, monkeypatch)
 
 
 def test_qual_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatch):
+    """Legacy-extraction lax mode: parsing_error on QualAnalystOutput
+    extraction → return success-with-empty-assessments. Pillar emission
+    disabled in this test so the shared mock doesn't also fire the
+    pillar-extraction code path (which ALWAYS raises post-hardening
+    Item 2, see test_qual_extraction_pillar_parse_failure_always_raises
+    below)."""
     monkeypatch.setenv("STRICT_VALIDATION", "false")
     from agents.sector_teams import qual_analyst as _qual
     importlib.reload(_qual)
+    # Pillar-hardening Item 2 (2026-05-21): pillar parse failure always
+    # raises. This test exercises the LEGACY extraction's lax path, so
+    # disable pillar emit locally to keep the test scoped.
+    monkeypatch.setattr(_qual, "PILLAR_EMIT_ENABLED", False)
 
     fake_agent = MagicMock()
     fake_agent.invoke.return_value = _react_result("Some assessment text.")
@@ -314,6 +324,61 @@ def test_qual_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatch
 
     assert result["error"] is None
     assert result["assessments"] == []
+    monkeypatch.setenv("STRICT_VALIDATION", "true")
+
+
+def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monkeypatch):
+    """Hardening Item 2 (2026-05-21 AQR cutover incident): the pillar-
+    extraction parse failure path now ALWAYS raises, regardless of
+    STRICT_VALIDATION. Empty-dict propagation under non-zero
+    pillar_weights produced the degenerate composite that triggered the
+    revert; the silent-fail class the new CLAUDE.md fail-loud rule
+    prohibits.
+
+    Asserts: lax mode + PILLAR_EMIT enabled + pillar parse error →
+    run_qual_analyst's outer except catches the RuntimeError and surfaces
+    it on the result dict as ``error`` (not silently returns empty).
+    """
+    monkeypatch.setenv("STRICT_VALIDATION", "false")
+    from agents.sector_teams import qual_analyst as _qual
+    importlib.reload(_qual)
+    monkeypatch.setattr(_qual, "PILLAR_EMIT_ENABLED", True)
+
+    from graph.state_schemas import QualAnalystOutput, QualAssessment
+
+    # First invoke (legacy extraction) returns valid output. Second invoke
+    # (pillar extraction) returns parsing_error — used to silently return
+    # empty dict pre-hardening; now ALWAYS raises.
+    parsed_ok = QualAnalystOutput(assessments=[
+        QualAssessment(ticker="AAPL", qual_score=80.0,
+                       bull_case="strong fundamentals"),
+    ])
+    fake_agent = MagicMock()
+    fake_agent.invoke.return_value = _react_result(
+        "Assessment: AAPL strong fundamentals."
+    )
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = [
+        {"raw": MagicMock(content="..."), "parsed": parsed_ok,
+         "parsing_error": None},  # legacy extraction succeeds
+        {"raw": MagicMock(content="..."), "parsed": None,
+         "parsing_error": ValueError("pillar schema mismatch")},  # pillar fails
+    ]
+    fake_llm = MagicMock()
+    fake_llm.with_structured_output.return_value = fake_structured_llm
+
+    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
+         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+        result = _qual.run_qual_analyst(**_qual_kwargs())
+
+    # Outer except in run_qual_analyst catches the RuntimeError from
+    # _extract_pillar_assessments — error surfaces on the result dict,
+    # NOT silently swallowed into empty pillar_assessments={}.
+    assert result["error"] is not None, (
+        "pillar parse failure must surface as result['error'], not silently "
+        "produce empty pillar_assessments — see hardening Item 2"
+    )
+    assert "pillar-assessment parse failed" in result["error"]
     monkeypatch.setenv("STRICT_VALIDATION", "true")
 
 

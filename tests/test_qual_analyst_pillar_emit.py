@@ -219,12 +219,22 @@ class TestOnFlagBehavior:
 
 
 class TestParseFailureModes:
-    def test_lax_mode_returns_empty_dict_on_pillar_parse_error(
+    def test_pillar_parse_error_always_raises_regardless_of_lax_mode(
         self, reloaded_qual,
     ):
-        """Lax-mode parse failure on the pillar extraction call must not
-        crash the team — log + degrade to empty dict + keep legacy
-        assessments intact."""
+        """Hardening Item 2 (2026-05-21 AQR cutover incident): the
+        pillar-extraction parse failure path now ALWAYS raises,
+        REGARDLESS of the STRICT_VALIDATION flag. The prior lax-mode
+        return-empty-dict path was the silent-fail class that produced
+        the degenerate composite in the AQR cutover incident — see
+        [[zero-legacy-weight-degenerates-on-pillar-emit-failure]].
+
+        Run completes with error surfaced on result['error'] (caught by
+        run_qual_analyst's outer except). Legacy assessments may still
+        be present in result['assessments'] depending on where the
+        exception lands relative to the legacy extraction (here: legacy
+        succeeded first, pillar extraction then raises, outer except
+        catches → assessments populated but error field set)."""
         from alpha_engine_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
         qual_parsed = QualAnalystOutput(
@@ -237,6 +247,7 @@ class TestParseFailureModes:
             pillar_parse_error=ValueError("malformed JSON"),
         )
 
+        # Even with strict=False (lax mode), pillar parse failure raises.
         with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True), \
              patch.object(reloaded_qual, "is_strict_validation_enabled", return_value=False), \
              patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
@@ -249,11 +260,10 @@ class TestParseFailureModes:
             mock_load_prompt.return_value = mock_prompt
             result = reloaded_qual.run_qual_analyst(**_qual_kwargs())
 
-        # Legacy assessments intact.
-        assert len(result["assessments"]) == 1
-        # Pillar dict empty (lax-degraded), no crash.
+        # Error surfaced (not silently swallowed); pillar dict empty.
+        assert result["error"] is not None
+        assert "pillar-assessment parse failed" in result["error"]
         assert result["pillar_assessments"] == {}
-        assert result["error"] is None
 
     def test_strict_mode_raises_on_pillar_parse_error(self, reloaded_qual):
         """Strict-mode parse failure on the pillar extraction must raise —

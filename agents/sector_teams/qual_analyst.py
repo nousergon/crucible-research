@@ -376,14 +376,22 @@ def _extract_pillar_assessments(
     parsed: _QualPillarBatch | None = extract_resp.get("parsed")
     parsing_error = extract_resp.get("parsing_error")
     if parsing_error is not None:
+        # Pillar-hardening item 2 (2026-05-21 AQR cutover incident):
+        # promoted from lax-mode-return-empty to ALWAYS-RAISE. Empty-dict
+        # propagation under non-zero pillar_weights produces a degenerate
+        # composite (per [[zero-legacy-weight-degenerates-on-pillar-emit-
+        # failure]]); silent-fail class the new CLAUDE.md fail-loud rule
+        # prohibits. Matches the all-agents-strict pattern shipped via
+        # research #195 (2026-05-16) — all-or-nothing for pillar emission.
+        # The consumer-side coverage guard in compute_composite_breakdown
+        # is the per-ticker safety net for missing-input cases this raise
+        # WOULDN'T have caught (e.g. factor_profile absent on a held
+        # stock with no pillar_assessment).
         msg = (
             f"[qual:{team_id}] pillar-assessment parse failed: "
             f"{type(parsing_error).__name__}: {parsing_error}"
         )
-        if is_strict_validation_enabled():
-            raise RuntimeError(msg)
-        log.warning("%s — falling back to empty pillar dict (lax mode)", msg)
-        return {}
+        raise RuntimeError(msg)
     assert parsed is not None
     return {
         item.ticker: item.pillar_assessment.model_dump()

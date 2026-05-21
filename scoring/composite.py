@@ -71,6 +71,26 @@ _PILLAR_TO_FACTOR_KEY: dict[str, str] = {
 }
 
 
+class PillarCoverageError(RuntimeError):
+    """Raised by ``compute_composite_breakdown`` when the configured
+    ``pillar_weights`` carry non-zero mass BUT no pillar inputs are
+    available for this ticker (both ``pillar_assessment`` and
+    ``factor_profile`` are absent / empty).
+
+    Without this guard the composite would silently collapse to
+    ``legacy_blend.contribution`` alone — which under cutover configs
+    where ``legacy_blend`` is also zeroed (AQR-prior cutover, 2026-05-21)
+    produces ``weighted_base = 0`` for every affected ticker. The
+    sanity check at the score_aggregator end-of-loop would surface this
+    after the fact; this exception surfaces it at the per-ticker compute
+    so the caller can choose its policy (per-ticker skip OR whole-run
+    hard-fail per all-agents-strict).
+
+    Codified after the 2026-05-21 AQR cutover incident — see feedback
+    memory [[zero-legacy-weight-degenerates-on-pillar-emit-failure]].
+    """
+
+
 def compute_composite_score(
     quant_score: float | None,
     qual_score: float | None,
@@ -365,6 +385,29 @@ def compute_composite_breakdown(
     lbw = dict(DEFAULT_LEGACY_BLEND_WEIGHTS)
     if legacy_blend_weights:
         lbw.update(legacy_blend_weights)
+
+    # Coverage guard — pillar-hardening item 1 (2026-05-21 incident).
+    # When the operator's config has flipped to a non-trivial pillar
+    # weighting (Σ pillar_weights > 0) AND no pillar inputs are
+    # available for this ticker (both pillar_assessment AND
+    # factor_profile None/empty), the composite would compute to just
+    # legacy_blend.contribution. Under cutover configs where
+    # legacy_blend is also zeroed (the AQR-prior config that triggered
+    # the 5/21 incident), that means weighted_base = 0 — degenerate
+    # composite per [[zero-legacy-weight-degenerates-on-pillar-emit-failure]].
+    # Fail loud at the consumer so the caller can choose per-ticker
+    # skip vs whole-run hard-fail, rather than silently emitting a
+    # final_score of ~0.
+    if sum(pw.values()) > 0 and not pillar_assessment and not factor_profile:
+        raise PillarCoverageError(
+            f"compute_composite_breakdown: Σ pillar_weights={sum(pw.values()):.3f} "
+            f"> 0 but no pillar_assessment or factor_profile available for this "
+            f"ticker — would produce degenerate composite. Caller must skip the "
+            f"ticker, raise the whole run, OR config must keep legacy_blend "
+            f"non-zero so the composite degrades gracefully when pillars miss. "
+            f"See feedback memory [[zero-legacy-weight-degenerates-on-pillar-"
+            f"emit-failure]] + ROADMAP P1 hardening item 1."
+        )
 
     # Hard-fail unscoreable: every input None → score_failed
     if (

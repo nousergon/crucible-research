@@ -1549,6 +1549,17 @@ def score_aggregator(state: ResearchState) -> dict:
         for tid, out in team_outputs.items()
     }
     pillar_assessment_applied_count = 0
+    pillar_coverage_skip_count = 0
+
+    # PillarCoverageError raised by compute_composite_breakdown when config
+    # has Σ pillar_weights > 0 but a ticker has no pillar inputs. Per-ticker
+    # policy here is skip-with-WARN-and-counter — run completes with partial
+    # signals; the existing pillar-distribution sanity check + Telegram
+    # alert surface the aggregate. Whole-run hard-fail is the alternative
+    # (matches all-agents-strict) but produces nothing-of-value when a
+    # single ticker's pillar emission fails. Codified after the 2026-05-21
+    # AQR cutover incident; closes the consumer-side silent-fail.
+    from scoring.composite import PillarCoverageError
 
     for team_id, output in team_outputs.items():
         # Score each recommendation
@@ -1578,17 +1589,26 @@ def score_aggregator(state: ResearchState) -> dict:
             if ticker_pillar_assessment:
                 pillar_assessment_applied_count += 1
 
-            breakdown = compute_composite_breakdown(
-                quant_score=rec.get("quant_score"),
-                qual_score=rec.get("qual_score"),
-                factor_subscore=factor_subscore_val,
-                pillar_assessment=ticker_pillar_assessment,
-                factor_profile=ticker_factor_profile,
-                sector_modifier=modifier,
-                pillar_weights=PILLAR_COMPOSITE_WEIGHTS,
-                within_pillar_qual_weight=PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
-                legacy_blend_weights=PILLAR_COMPOSITE_LEGACY_BLEND,
-            )
+            try:
+                breakdown = compute_composite_breakdown(
+                    quant_score=rec.get("quant_score"),
+                    qual_score=rec.get("qual_score"),
+                    factor_subscore=factor_subscore_val,
+                    pillar_assessment=ticker_pillar_assessment,
+                    factor_profile=ticker_factor_profile,
+                    sector_modifier=modifier,
+                    pillar_weights=PILLAR_COMPOSITE_WEIGHTS,
+                    within_pillar_qual_weight=PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
+                    legacy_blend_weights=PILLAR_COMPOSITE_LEGACY_BLEND,
+                )
+            except PillarCoverageError as e:
+                pillar_coverage_skip_count += 1
+                logger.warning(
+                    "[score_aggregator] PillarCoverageError for %s/%s — "
+                    "skipping signal: %s",
+                    team_id, ticker, e,
+                )
+                continue
 
             # Per-ticker raw quality_score (within-sector percentile) carried
             # through to _build_signals_payload's structural quality floor
@@ -1746,12 +1766,41 @@ def score_aggregator(state: ResearchState) -> dict:
         )
     logger.info(
         "[score_aggregator] composite_breakdown emitted for %d tickers "
-        "(pillar_assessment_applied=%d of %d) — Phase 4 of "
+        "(pillar_assessment_applied=%d of %d, "
+        "pillar_coverage_skipped=%d) — Phase 4 of "
         "attractiveness-pillars-260520",
         len(investment_theses),
         pillar_assessment_applied_count,
         len(investment_theses),
+        pillar_coverage_skip_count,
     )
+    # Emit a Telegram alert when coverage-skip count is non-zero — the
+    # hardening Item 1 surface for the 2026-05-21 incident class. Best-
+    # effort, secondary observability per the new CLAUDE.md fail-loud
+    # rule's clause (i); the WARN logs per-ticker above + CW Logs alarm
+    # path remain load-bearing.
+    if pillar_coverage_skip_count > 0:
+        try:
+            from alpha_engine_lib.alerts import publish as alerts_publish
+            alerts_publish(
+                message=(
+                    f"[score_aggregator] pillar coverage gap — skipped "
+                    f"{pillar_coverage_skip_count} signal(s) due to "
+                    f"PillarCoverageError (Σ pillar_weights > 0 but pillar "
+                    f"inputs absent for these tickers). Run completed with "
+                    f"partial signals; investigate qual_analyst pillar emission."
+                ),
+                severity="WARN",
+                source="research:score_aggregator",
+                sns=True,
+                telegram=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[score_aggregator] pillar-coverage-skip Telegram publish "
+                "failed: %s (WARN log + CW Logs alarm remain the failure "
+                "surface)", e,
+            )
 
     # Pillar-distribution structural sanity check (first-cycle observation
     # gate for the 2026-05-21 AQR-prior cutover — pillar_weights are
