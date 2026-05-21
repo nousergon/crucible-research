@@ -213,9 +213,19 @@ def test_quant_recursion_error_unchanged_by_refactor(fresh_modules):
 # ── Qual analyst: same contract ───────────────────────────────────────────────
 
 
-def test_qual_extraction_happy_path(fresh_modules):
+def test_qual_extraction_happy_path(fresh_modules, monkeypatch):
     from agents.sector_teams import qual_analyst as _qual
     from graph.state_schemas import QualAnalystOutput, QualAssessment
+
+    # PILLAR_EMIT_ENABLED flipped to True at the Phase 4 cutover
+    # (config #258, 2026-05-21). The single shared structured_llm mock
+    # in this test returns a QualAnalystOutput shape — fine for the
+    # legacy extraction (call #1), but the pillar extraction (call #2)
+    # expects a _QualPillarBatch with an `items` attribute. This test
+    # exercises the LEGACY extraction path only; disable pillar emit
+    # locally so the second call doesn't fire. Pillar extraction has
+    # its own dedicated test coverage in test_pillar_emit*.py.
+    monkeypatch.setattr(_qual, "PILLAR_EMIT_ENABLED", False)
 
     fake_agent = MagicMock()
     fake_agent.invoke.return_value = _react_result(

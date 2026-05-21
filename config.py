@@ -165,6 +165,54 @@ FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS: list[str] = list(
 _PILLAR_EMIT_CFG: dict = _AGGREGATOR_CFG.get("pillar_emit", {})
 PILLAR_EMIT_ENABLED: bool = bool(_PILLAR_EMIT_CFG.get("enabled", False))
 
+# ── Pillar composite (Phase 4 cutover-with-AQR-seed, 2026-05-21) ────────────
+# Per-pillar weights + within-pillar α + legacy_blend weights used by
+# `scoring/composite.py::compute_composite_breakdown`. Σ all weights MUST
+# equal 1.0 (enforced by alpha_engine_lib.pillars.CompositeBreakdown
+# validator). Seeded with AQR/Asness institutional prior at Phase 4 cutover
+# (2026-05-21): quality 0.25 / value 0.20 / momentum 0.20 / growth 0.15 /
+# defensiveness 0.10 / stewardship 0.10, legacy_blend 0/0/0 — pure
+# pillar-driven composite.
+#
+# Operator override flows: yaml here is the cold-start fallback; the
+# backtester's Phase 6 `weight_optimizer` writes auto-tuned values to
+# S3 `config/scoring_weights.json` `pillar_composite` block weekly (the
+# S3-override path is not yet wired in research's cold-start loader; this
+# entry reads yaml only at Phase 4 cutover, S3 override lands when the
+# config/scoring_weights.json loader plumbs the new block in a follow-up
+# — listed as ROADMAP item for the post-first-SF iteration).
+_PILLAR_COMPOSITE_CFG: dict = _AGGREGATOR_CFG.get("pillar_composite", {})
+_PILLAR_WEIGHTS_CFG: dict = _PILLAR_COMPOSITE_CFG.get("pillar_weights", {})
+PILLAR_COMPOSITE_WEIGHTS: dict[str, float] = {
+    "quality": float(_PILLAR_WEIGHTS_CFG.get("quality", 0.0)),
+    "value": float(_PILLAR_WEIGHTS_CFG.get("value", 0.0)),
+    "momentum": float(_PILLAR_WEIGHTS_CFG.get("momentum", 0.0)),
+    "growth": float(_PILLAR_WEIGHTS_CFG.get("growth", 0.0)),
+    "stewardship": float(_PILLAR_WEIGHTS_CFG.get("stewardship", 0.0)),
+    "defensiveness": float(_PILLAR_WEIGHTS_CFG.get("defensiveness", 0.0)),
+}
+_WITHIN_PILLAR_CFG: dict = _PILLAR_COMPOSITE_CFG.get("within_pillar", {})
+PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT: float = float(
+    _WITHIN_PILLAR_CFG.get("qual_weight", 0.5)
+)
+_LEGACY_BLEND_CFG: dict = _PILLAR_COMPOSITE_CFG.get("legacy_blend", {})
+PILLAR_COMPOSITE_LEGACY_BLEND: dict[str, float] = {
+    "w_legacy_quant": float(_LEGACY_BLEND_CFG.get("w_legacy_quant", 0.35)),
+    "w_legacy_qual": float(_LEGACY_BLEND_CFG.get("w_legacy_qual", 0.35)),
+    "w_factor": float(_LEGACY_BLEND_CFG.get("w_factor", 0.30)),
+}
+# Validate Σ = 1.0 at load — catches yaml typos before they become runtime
+# ValidationErrors deep inside CompositeBreakdown construction per ticker.
+_pillar_sum = sum(PILLAR_COMPOSITE_WEIGHTS.values())
+_legacy_sum = sum(PILLAR_COMPOSITE_LEGACY_BLEND.values())
+_total = _pillar_sum + _legacy_sum
+if abs(_total - 1.0) > 1e-6:
+    raise ValueError(
+        f"aggregator.pillar_composite weights must sum to 1.0; got "
+        f"pillar={_pillar_sum:.6f} + legacy={_legacy_sum:.6f} = {_total:.6f} "
+        f"in {_SCORING_CFG_PATH}"
+    )
+
 # ── Focus list gating (PR 4 of scanner-placement arc, 260514 plan) ───────────
 # When enabled, the quant analyst's user prompt receives the regime-blended
 # focus list (top-N per team from the Phase 1c factor composites) as its
