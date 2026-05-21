@@ -1841,8 +1841,35 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
     rationale (the load-bearing surface is the WARN log + this function's
     return-via-raise pathway for the calling node, which there isn't here
     — sanity check is observation-only at Phase 4 cutover, not a hard gate).
+
+    Skip when ``Σ PILLAR_COMPOSITE_WEIGHTS ≈ 0``: at zero pillar weights the
+    composite reduces to legacy by construction (see
+    ``scoring/composite.py::compute_composite_breakdown``), so empty
+    ``pillar_contributions`` are harmless rather than a regression. Firing
+    the check here produces false positives in two real situations:
+
+    * **Phase-4-cutover-defaults state** (current live config 2026-05-21
+      post-revert of config #260) — all pillar weights are 0; the composite
+      uses only legacy components; empty pillar_contributions are by
+      design, not a parse failure.
+    * **Dry-run / smoke-test paths** (``local/run.py --dry-run``) — the
+      ``_stub_run_qual_analyst`` stub does not synthesize ``pillar_assessments``,
+      so theses always have empty pillar_contributions. The smoke run is
+      not exercising the live LLM extraction path the check measures.
+
+    The check is only meaningful when pillar weights are load-bearing.
     """
     import statistics
+
+    pillar_weights_sum = sum(PILLAR_COMPOSITE_WEIGHTS.values())
+    if pillar_weights_sum <= 1e-6:
+        logger.debug(
+            "[score_aggregator] pillar-distribution sanity skipped "
+            "(Σ pillar_weights=%.6f ≈ 0; composite reduces to legacy "
+            "so pillar coverage is not load-bearing)",
+            pillar_weights_sum,
+        )
+        return
 
     n_total = len(investment_theses)
     if n_total == 0:
