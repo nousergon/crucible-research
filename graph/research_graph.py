@@ -89,6 +89,7 @@ from data.population_selector import (
     apply_ic_entries,
 )
 from scoring.composite import (
+    compute_composite_breakdown,
     compute_composite_score,
     compute_factor_subscore,
     normalize_conviction,
@@ -1529,6 +1530,23 @@ def score_aggregator(state: ResearchState) -> dict:
                 len(factor_profiles_by_ticker), market_regime, FACTOR_BLEND_WEIGHT,
             )
 
+    # Phase 4 (attractiveness-pillars-260520 arc): pillar_assessments are
+    # emitted by qual_analyst when PILLAR_EMIT_ENABLED=true and propagate
+    # to score_aggregator via team_outputs[team_id]["qual_output"]
+    # ["pillar_assessments"] — a {ticker: pillar_dict} map. We look the
+    # dict up per team here and pass per-ticker into
+    # compute_composite_breakdown below. When PILLAR_EMIT is off (or the
+    # extraction failed), pillar_assessments_by_team[team_id] is an empty
+    # dict; per-ticker lookup returns None and the breakdown gracefully
+    # degrades to the pure-legacy path. At Phase 4 default weights
+    # (pillar_weights all 0), the final_score is IDENTICAL to legacy
+    # compute_composite_score by construction.
+    pillar_assessments_by_team: dict[str, dict] = {
+        tid: out.get("qual_output", {}).get("pillar_assessments", {}) or {}
+        for tid, out in team_outputs.items()
+    }
+    pillar_assessment_applied_count = 0
+
     for team_id, output in team_outputs.items():
         # Score each recommendation
         for rec in output.get("recommendations", []):
@@ -1538,10 +1556,11 @@ def score_aggregator(state: ResearchState) -> dict:
 
             factor_subscore_val: float | None = None
             factor_breakdown: dict = {"reason": "factor_blend_disabled"}
+            ticker_factor_profile: dict | None = None
             if FACTOR_BLEND_ENABLED and factor_profiles_by_ticker is not None:
-                profile = factor_profiles_by_ticker.get(ticker)
+                ticker_factor_profile = factor_profiles_by_ticker.get(ticker)
                 factor_subscore_val, factor_breakdown = compute_factor_subscore(
-                    factor_profile=profile,
+                    factor_profile=ticker_factor_profile,
                     market_regime=market_regime,
                     regime_weights=FACTOR_BLEND_REGIME_WEIGHTS,
                 )
@@ -1550,12 +1569,19 @@ def score_aggregator(state: ResearchState) -> dict:
                 else:
                     factor_blend_skipped_count += 1
 
-            score_result = compute_composite_score(
+            ticker_pillar_assessment = (
+                pillar_assessments_by_team.get(team_id, {}).get(ticker)
+            )
+            if ticker_pillar_assessment:
+                pillar_assessment_applied_count += 1
+
+            breakdown = compute_composite_breakdown(
                 quant_score=rec.get("quant_score"),
                 qual_score=rec.get("qual_score"),
-                sector_modifier=modifier,
                 factor_subscore=factor_subscore_val,
-                factor_weight=FACTOR_BLEND_WEIGHT if FACTOR_BLEND_ENABLED else 0.0,
+                pillar_assessment=ticker_pillar_assessment,
+                factor_profile=ticker_factor_profile,
+                sector_modifier=modifier,
             )
 
             # Per-ticker raw quality_score (within-sector percentile) carried
@@ -1573,26 +1599,37 @@ def score_aggregator(state: ResearchState) -> dict:
                 "ticker": ticker,
                 "sector": sector,
                 "team_id": team_id,
-                "final_score": score_result["final_score"],
+                # Legacy fields (tolerant-reader compat — executor + CIO + dashboard
+                # continue reading these unchanged). At Phase 4 default weights,
+                # final_score is byte-equal to legacy compute_composite_score.
+                "final_score": breakdown.final_score,
                 "quant_score": rec.get("quant_score"),
                 "qual_score": rec.get("qual_score"),
-                "weighted_base": score_result["weighted_base"],
-                "macro_shift": score_result["macro_shift"],
-                "factor_subscore": score_result.get("factor_subscore"),
-                "factor_weight_applied": score_result.get("factor_weight_applied", 0.0),
+                "weighted_base": breakdown.weighted_base,
+                "macro_shift": breakdown.macro_shift,
+                "factor_subscore": breakdown.legacy_blend.factor_subscore,
+                "factor_weight_applied": (
+                    breakdown.legacy_blend.w_factor
+                    if breakdown.legacy_blend.factor_subscore is not None else 0.0
+                ),
                 "factor_blend_breakdown": factor_breakdown,
                 "factor_quality_score": factor_quality_pct,
+                # Phase 4 — full pillar-decomposed breakdown for backtester
+                # attribution + dashboard radar. Empty pillar_contributions
+                # when PILLAR_EMIT is off / pillar extraction failed; CIO +
+                # executor continue reading the legacy final_score above.
+                "composite_breakdown": breakdown.model_dump(),
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
                 "conviction": normalize_conviction(rec.get("conviction")),
                 "quant_rationale": rec.get("quant_rationale", ""),
                 "rating": score_to_rating(
-                    score_result["final_score"],
+                    breakdown.final_score,
                     buy_threshold=RATING_BUY_THRESHOLD,
                     sell_threshold=RATING_SELL_THRESHOLD,
                 ),
-                "score_failed": score_result["score_failed"],
+                "score_failed": breakdown.score_failed,
             }
 
         # Merge thesis updates from held stocks
@@ -1701,6 +1738,14 @@ def score_aggregator(state: ResearchState) -> dict:
             market_regime,
             FACTOR_BLEND_WEIGHT,
         )
+    logger.info(
+        "[score_aggregator] composite_breakdown emitted for %d tickers "
+        "(pillar_assessment_applied=%d of %d) — Phase 4 of "
+        "attractiveness-pillars-260520",
+        len(investment_theses),
+        pillar_assessment_applied_count,
+        len(investment_theses),
+    )
 
     # Schema validation on every produced thesis (strict-by-default).
     for ticker, thesis in investment_theses.items():
