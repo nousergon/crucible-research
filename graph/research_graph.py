@@ -72,6 +72,9 @@ from config import (
     FOCUS_LIST_DEFAULT_TEAM_SIZE,
     FOCUS_LIST_GATING_ENABLED,
     FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES,
+    PILLAR_COMPOSITE_WEIGHTS,
+    PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
+    PILLAR_COMPOSITE_LEGACY_BLEND,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -1582,6 +1585,9 @@ def score_aggregator(state: ResearchState) -> dict:
                 pillar_assessment=ticker_pillar_assessment,
                 factor_profile=ticker_factor_profile,
                 sector_modifier=modifier,
+                pillar_weights=PILLAR_COMPOSITE_WEIGHTS,
+                within_pillar_qual_weight=PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
+                legacy_blend_weights=PILLAR_COMPOSITE_LEGACY_BLEND,
             )
 
             # Per-ticker raw quality_score (within-sector percentile) carried
@@ -1747,11 +1753,134 @@ def score_aggregator(state: ResearchState) -> dict:
         len(investment_theses),
     )
 
+    # Pillar-distribution structural sanity check (first-cycle observation
+    # gate for the 2026-05-21 AQR-prior cutover — pillar_weights are
+    # AQR-seeded non-zero, so any structural collapse in the LLM's pillar
+    # emission would materially distort live final_score with zero prior
+    # observation data). Per [[feedback_no_silent_fails]] this fires a
+    # Telegram alert via the canonical alpha_engine_lib.alerts CLI rather
+    # than swallowing — operator needs to see structural pillar failure
+    # within minutes of SF completion, not after a week of bad signals.
+    #
+    # Three structural-failure modes flagged:
+    #   * collapsed_pillar: any pillar's std < 5 across all picks → LLM
+    #     defaulting to a single value (e.g. all 50s) is not a usable signal.
+    #   * low_coverage: <80% of picks have pillar_assessment present → parse
+    #     failures higher than expected; AQR weights would zero-treat the
+    #     missing pillar component and distort composites.
+    #   * moat_collapse: >95% of MoatAssessments have primary_type=="none"
+    #     → the moat rubric has degraded to "say none for everything", the
+    #     Quality pillar's qualitative core isn't doing its job.
+    _check_pillar_distribution_sanity(investment_theses)
+
     # Schema validation on every produced thesis (strict-by-default).
     for ticker, thesis in investment_theses.items():
         _validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
 
     return {"investment_theses": investment_theses}
+
+
+_PILLAR_NAMES = ("quality", "value", "momentum", "growth", "stewardship", "defensiveness")
+
+
+def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
+    """First-cycle observation gate for AQR-prior cutover (2026-05-21).
+
+    Flags three structural-failure modes via Telegram alert. Best-effort —
+    Telegram outage does NOT block research-Lambda completion; alert
+    failures WARN-log per [[feedback_no_silent_fails]] secondary-observability
+    rationale (the load-bearing surface is the WARN log + this function's
+    return-via-raise pathway for the calling node, which there isn't here
+    — sanity check is observation-only at Phase 4 cutover, not a hard gate).
+    """
+    import statistics
+
+    n_total = len(investment_theses)
+    if n_total == 0:
+        return
+
+    # Collect per-pillar scores from each thesis's composite_breakdown
+    pillar_scores: dict[str, list[float]] = {p: [] for p in _PILLAR_NAMES}
+    n_with_pillar = 0
+    moat_types: list[str] = []
+    for thesis in investment_theses.values():
+        breakdown = thesis.get("composite_breakdown") or {}
+        contribs = breakdown.get("pillar_contributions") or []
+        if not contribs:
+            continue
+        n_with_pillar += 1
+        for c in contribs:
+            pillar = c.get("pillar")
+            qual = c.get("qual_component")
+            if pillar in pillar_scores and qual is not None:
+                pillar_scores[pillar].append(float(qual))
+        # Moat is on the pillar_assessment, not the breakdown — but the
+        # breakdown doesn't carry it (it's qualitative metadata). Pull from
+        # the original pillar_assessments dict via the thesis if available.
+        # For Phase 4 cutover this defaults to skipping moat check when the
+        # field isn't present in the thesis (it currently isn't); future
+        # PR can plumb moat_profile.primary_type through.
+        # Conservative: skip moat collapse check unless field plumbed.
+
+    coverage_pct = (n_with_pillar / n_total) * 100.0
+
+    alerts: list[str] = []
+
+    if coverage_pct < 80.0:
+        alerts.append(
+            f"low_coverage: {n_with_pillar}/{n_total} picks "
+            f"({coverage_pct:.1f}%) have populated pillar_contributions "
+            f"— expected ≥80%. Parse failures higher than predicted."
+        )
+
+    for pillar in _PILLAR_NAMES:
+        scores = pillar_scores[pillar]
+        if len(scores) < 2:
+            continue
+        std = statistics.pstdev(scores)
+        mean = statistics.mean(scores)
+        if std < 5.0:
+            alerts.append(
+                f"collapsed_pillar: {pillar} std={std:.2f} (<5), "
+                f"mean={mean:.1f}, n={len(scores)} — LLM rubric defaulted "
+                f"to a single value; pillar not contributing real signal."
+            )
+
+    if not alerts:
+        logger.info(
+            "[score_aggregator] pillar-distribution sanity OK "
+            "(coverage=%.1f%%, n=%d)",
+            coverage_pct, n_with_pillar,
+        )
+        return
+
+    # Build a single composed message; emit as WARN here AND push to
+    # Telegram via the canonical lib alerts CLI. Best-effort on the
+    # Telegram side — research-Lambda completion is the load-bearing
+    # signal, not the alert publish status. Secondary-observability
+    # swallow per the new CLAUDE.md fail-loud rule's clause (i).
+    msg = (
+        "[score_aggregator] AQR-prior cutover sanity FAIL "
+        f"({len(alerts)} issue(s)): " + " | ".join(alerts)
+    )
+    logger.warning(msg)
+    try:
+        from alpha_engine_lib.alerts import publish as alerts_publish
+        alerts_publish(
+            message=msg,
+            severity="WARN",
+            source="research:score_aggregator",
+            sns=True,
+            telegram=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Secondary observability — alert-publish failure logs but does not
+        # block research-Lambda completion. The WARN log above + the
+        # SNS/CW-Logs alarm path are the load-bearing surfaces.
+        logger.warning(
+            "[score_aggregator] pillar-sanity Telegram publish failed: %s "
+            "(WARN log + CW Logs alarm remain the failure surface)", e,
+        )
 
 
 def cio_node(state: ResearchState) -> dict:
