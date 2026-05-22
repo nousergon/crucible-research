@@ -357,12 +357,17 @@ else:
     bash "$(dirname "$0")/rollback.sh"
     # Independent-channel surveillance per ROADMAP L221 — the 2-day
     # silent rollback chain (alpha-engine-data #274 retrospective)
-    # showed the GitHub Actions red-icon is not load-bearing. Best-
-    # effort; ``|| true`` never overrides this script's ``exit 1``.
-    # Lib alerts CLI exits 0 if any channel (SNS or Telegram) succeeded.
+    # showed the GitHub Actions red-icon is not load-bearing.
+    # ``dedup_key`` collapses an image-wide rebuild that breaks N
+    # Lambdas' canaries within the hour into one alert per (Lambda,
+    # version) — lib v0.24.0 substrate (L221 retrofit 2026-05-22).
+    # Best-effort; ``|| true`` never overrides this script's
+    # ``exit 1``. Lib alerts CLI exits 0 if any channel (SNS or
+    # Telegram) succeeded.
     python3 -m alpha_engine_lib.alerts publish \
       --severity error \
       --source "alpha-engine-research/infrastructure/deploy.sh" \
+      --dedup-key "canary-fail-${FUNCTION_MAIN}-v${VERSION}" \
       --message "Canary rolled back: ${FUNCTION_MAIN} canary returned status='${CANARY_STATUS}' — live alias reverted to prior version. See GitHub Actions log for full canary payload." \
       || true
     exit 1
