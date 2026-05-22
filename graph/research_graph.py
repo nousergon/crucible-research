@@ -1645,6 +1645,17 @@ def score_aggregator(state: ResearchState) -> dict:
                 # when PILLAR_EMIT is off / pillar extraction failed; CIO +
                 # executor continue reading the legacy final_score above.
                 "composite_breakdown": breakdown.model_dump(),
+                # Quality pillar's qualitative core — plumbed through 2026-05-22
+                # so `_check_pillar_distribution_sanity` can run the
+                # `moat_collapse` check (>95% primary_type=="none" means the
+                # moat rubric has degraded). `None` when ticker_pillar_assessment
+                # is absent (PILLAR_EMIT off / extraction skipped). Future
+                # archive/universe/{TICKER}/moat_profile.json time-series
+                # persistence reads the same field.
+                "quality_moat": (
+                    ticker_pillar_assessment.get("quality_moat")
+                    if ticker_pillar_assessment else None
+                ),
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
@@ -1890,13 +1901,16 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
             qual = c.get("qual_component")
             if pillar in pillar_scores and qual is not None:
                 pillar_scores[pillar].append(float(qual))
-        # Moat is on the pillar_assessment, not the breakdown — but the
-        # breakdown doesn't carry it (it's qualitative metadata). Pull from
-        # the original pillar_assessments dict via the thesis if available.
-        # For Phase 4 cutover this defaults to skipping moat check when the
-        # field isn't present in the thesis (it currently isn't); future
-        # PR can plumb moat_profile.primary_type through.
-        # Conservative: skip moat collapse check unless field plumbed.
+        # Moat collapse check (plumbed 2026-05-22): pull from the
+        # thesis's `quality_moat` field — populated by score_aggregator
+        # from the qual_analyst's QualitativePillarAssessment. Absent
+        # when PILLAR_EMIT is off / extraction skipped; counted only
+        # when present so the threshold reflects the live signal, not
+        # the legacy path's silence.
+        moat = thesis.get("quality_moat") or {}
+        primary_type = moat.get("primary_type")
+        if primary_type:
+            moat_types.append(primary_type)
 
     coverage_pct = (n_with_pillar / n_total) * 100.0
 
@@ -1920,6 +1934,21 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
                 f"collapsed_pillar: {pillar} std={std:.2f} (<5), "
                 f"mean={mean:.1f}, n={len(scores)} — LLM rubric defaulted "
                 f"to a single value; pillar not contributing real signal."
+            )
+
+    # Moat collapse check — fires when the qualitative core of the
+    # Quality pillar has degraded to "no moat for everything." Requires
+    # ≥5 sampled moat assessments to avoid spurious alerts on tiny pick
+    # counts (early in the week or sector-team thin firings).
+    if len(moat_types) >= 5:
+        none_count = sum(1 for m in moat_types if m == "none")
+        none_pct = (none_count / len(moat_types)) * 100.0
+        if none_pct > 95.0:
+            alerts.append(
+                f"moat_collapse: {none_count}/{len(moat_types)} picks "
+                f"({none_pct:.1f}%) have moat.primary_type=='none' "
+                f"— the Quality pillar's qualitative core has degraded "
+                f"to 'say none for everything'; rubric needs review."
             )
 
     if not alerts:

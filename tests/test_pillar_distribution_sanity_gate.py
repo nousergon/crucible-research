@@ -43,12 +43,14 @@ def _thesis_without_pillar() -> dict:
     }
 
 
-def _thesis_with_pillar(seed: int = 0) -> dict:
+def _thesis_with_pillar(seed: int = 0, moat: str = "narrow") -> dict:
     """Live LLM thesis under PILLAR_EMIT_ENABLED=true.
 
     `seed` shifts the per-pillar qual scores so multi-thesis fixtures
     keep std above the collapsed_pillar threshold (5.0) — a real LLM
     rubric assigns different values to different tickers.
+    `moat` populates the plumbed quality_moat field (default "narrow"
+    matches a healthy mid-quality pick).
     """
     return {
         "composite_breakdown": {
@@ -62,6 +64,7 @@ def _thesis_with_pillar(seed: int = 0) -> dict:
                 for i, p in enumerate(("quality", "value", "momentum", "growth", "stewardship", "defensiveness"))
             ],
         },
+        "quality_moat": {"primary_type": moat},
     }
 
 
@@ -237,3 +240,47 @@ def test_dedup_key_varies_by_coverage_bucket():
         "dedup_key must distinguish coverage buckets — 0% vs 60% are "
         "different operational signals."
     )
+
+
+# ── moat_collapse check (plumbed 2026-05-22) ──────────────────────────────────
+
+
+def test_moat_collapse_fires_when_all_picks_have_no_moat():
+    """Quality pillar's qualitative core has degraded: every pick comes
+    back primary_type=='none'. Fires only with ≥5 sampled moats.
+    """
+    theses = {
+        f"TICK{i}": _thesis_with_pillar(seed=i, moat="none") for i in range(6)
+    }
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+    mock_publish.assert_called_once()
+    call_msg = mock_publish.call_args.kwargs["message"]
+    assert "moat_collapse: 6/6" in call_msg
+    assert "Quality pillar's qualitative core has degraded" in call_msg
+
+
+def test_moat_collapse_does_not_fire_on_mixed_moat_distribution():
+    """Healthy LLM rubric: variety of moat types. No moat_collapse alert."""
+    moats = ["wide", "narrow", "narrow", "none", "wide", "narrow"]
+    theses = {
+        f"TICK{i}": _thesis_with_pillar(seed=i, moat=m)
+        for i, m in enumerate(moats)
+    }
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+    mock_publish.assert_not_called()
+
+
+def test_moat_collapse_requires_min_sample_size():
+    """Tiny pick counts: even if all none, suppress to avoid false alarms."""
+    theses = {
+        f"TICK{i}": _thesis_with_pillar(seed=i, moat="none") for i in range(4)
+    }
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+    # 4 < 5 sampled moats → check does not run; no alert.
+    mock_publish.assert_not_called()
