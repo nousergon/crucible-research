@@ -142,3 +142,98 @@ def test_half_pillar_ramp_with_low_coverage_still_fires():
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_called_once()
     assert "low_coverage: 0/5" in mock_publish.call_args.kwargs["message"]
+
+
+# ── dedup_key contract (lib v0.24.0) ──────────────────────────────────────────
+
+
+def test_publish_carries_dedup_key():
+    """Same incident across same SF run (canary + main + rebroadcasts) must
+    collapse to one alert via the v0.24.0 dedup substrate. A real
+    cutover-bad day would otherwise spam the channel N times — same defect
+    class as the 2026-05-21 storm thread that motivated the lib lift.
+    """
+    theses = {
+        "AAPL": _thesis_without_pillar(),
+        "NVDA": _thesis_without_pillar(),
+        "MSFT": _thesis_without_pillar(),
+    }
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+
+    mock_publish.assert_called_once()
+    kwargs = mock_publish.call_args.kwargs
+    assert "dedup_key" in kwargs, (
+        "publish must carry a dedup_key so within-window rebroadcasts "
+        "collapse to one alert (lib v0.24.0 substrate, ROADMAP L68)."
+    )
+    assert kwargs["dedup_key"].startswith("pillar_sanity_"), (
+        f"dedup_key must namespace this incident class; got "
+        f"{kwargs['dedup_key']!r}"
+    )
+
+
+def test_dedup_key_uses_run_date_from_thesis_when_present():
+    """``run_date`` from the first thesis is the canonical bucket — so a
+    fresh next-day incident re-fires (different run_date) while same-day
+    rebroadcasts collapse (same run_date + same coverage bucket).
+    """
+    thesis = _thesis_without_pillar()
+    thesis["run_date"] = "2026-05-30"
+    theses = {"AAPL": thesis}
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+
+    dedup_key = mock_publish.call_args.kwargs["dedup_key"]
+    assert "2026-05-30" in dedup_key, (
+        f"dedup_key must embed thesis run_date for per-day bucketing; got "
+        f"{dedup_key!r}"
+    )
+
+
+def test_dedup_key_falls_back_to_utc_today_when_thesis_lacks_run_date():
+    """Phase-4 thesis fixtures don't carry run_date today; the resolver
+    falls back to UTC today so dedup still works for current production
+    callers. Once the producer plumbs run_date into the thesis dict,
+    this fallback becomes dead code — but until then it matters.
+    """
+    from datetime import datetime, timezone
+    theses = {"AAPL": _thesis_without_pillar()}  # no run_date
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(theses)
+
+    dedup_key = mock_publish.call_args.kwargs["dedup_key"]
+    utc_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert utc_today in dedup_key, (
+        f"dedup_key must fall back to UTC today when thesis run_date "
+        f"is absent; got {dedup_key!r}"
+    )
+
+
+def test_dedup_key_varies_by_coverage_bucket():
+    """Different coverage levels (50% vs 0%) ARE different incidents —
+    bucketed dedup_key keeps the second one from being silenced by the
+    first within the same 60-min window.
+    """
+    # 0% coverage
+    low_theses = {f"TICK{i}": _thesis_without_pillar() for i in range(5)}
+    # 60% coverage (3 pillar, 2 without)
+    mixed_theses = {
+        **{f"TICK{i}": _thesis_with_pillar(seed=i) for i in range(3)},
+        **{f"TICK{i+3}": _thesis_without_pillar() for i in range(2)},
+    }
+
+    with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
+         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+        _check_pillar_distribution_sanity(low_theses)
+        low_key = mock_publish.call_args.kwargs["dedup_key"]
+        _check_pillar_distribution_sanity(mixed_theses)
+        mixed_key = mock_publish.call_args.kwargs["dedup_key"]
+
+    assert low_key != mixed_key, (
+        "dedup_key must distinguish coverage buckets — 0% vs 60% are "
+        "different operational signals."
+    )

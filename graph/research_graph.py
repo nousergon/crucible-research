@@ -1940,6 +1940,20 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         f"({len(alerts)} issue(s)): " + " | ".join(alerts)
     )
     logger.warning(msg)
+    # Dedup the publish on (run_date, coverage_bucket, n_failures). A real
+    # cutover-bad day would otherwise spam the channel on every
+    # research-Lambda invocation across the SF (canary + main + any
+    # rebroadcasts) — N alerts for one incident, same defect class as
+    # the 2026-05-21 alert-storm thread that motivated the v0.24.0 lib
+    # dedup substrate. Lib v0.24.0's default 60-min window collapses
+    # within-hour bursts; we omit the window override (60 min default
+    # is right for an hourly research cadence — same incident a second
+    # day re-fires intentionally).
+    run_date = _resolve_run_date_for_dedup(investment_theses)
+    coverage_bucket = f"{int(coverage_pct // 10) * 10}"  # 10-pct bucket
+    dedup_key = (
+        f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
+    )
     try:
         from alpha_engine_lib.alerts import publish as alerts_publish
         alerts_publish(
@@ -1948,6 +1962,7 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
             source="research:score_aggregator",
             sns=True,
             telegram=True,
+            dedup_key=dedup_key,
         )
     except Exception as e:  # noqa: BLE001
         # Secondary observability — alert-publish failure logs but does not
@@ -1957,6 +1972,21 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
             "[score_aggregator] pillar-sanity Telegram publish failed: %s "
             "(WARN log + CW Logs alarm remain the failure surface)", e,
         )
+
+
+def _resolve_run_date_for_dedup(investment_theses: dict) -> str:
+    """Best-effort run_date for the pillar-sanity dedup key. Pulls from
+    the first thesis's ``run_date`` metadata when present, otherwise
+    falls back to today's UTC date. Same-day rebroadcast within the
+    60-min default window collapses to one alert; a fresh next-day
+    incident re-fires.
+    """
+    for thesis in investment_theses.values():
+        rd = thesis.get("run_date")
+        if rd:
+            return str(rd)
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def cio_node(state: ResearchState) -> dict:
