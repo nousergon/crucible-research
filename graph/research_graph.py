@@ -2949,6 +2949,30 @@ def archive_writer(state: ResearchState) -> dict:
             n_theses_written, len(investment_theses),
         )
 
+    # Per-ticker moat-profile time-series — ROADMAP L1650. Moats decay
+    # slowly; the time derivative is the real signal, so we append a
+    # snapshot per Saturday SF to ``archive/universe/{ticker}/moat_profile.json``
+    # rather than overwriting. Only fires when `quality_moat` is present
+    # on the thesis (PILLAR_EMIT on + qual analyst returned a moat
+    # assessment); silently skipped otherwise so legacy / dry-run paths
+    # don't write empty stubs. Best-effort per ticker — a single ticker's
+    # S3 failure doesn't fail-out the archive_writer.
+    n_moats_written = 0
+    for ticker, thesis in investment_theses.items():
+        moat = thesis.get("quality_moat")
+        if not moat or not isinstance(moat, dict):
+            continue
+        try:
+            am.save_moat_profile(ticker, run_date, moat)
+            n_moats_written += 1
+        except Exception as e:  # noqa: BLE001 — secondary observability
+            logger.warning("Failed to save moat_profile for %s: %s", ticker, e)
+    if n_moats_written:
+        logger.info(
+            "[archive_writer] wrote %d/%d moat_profile snapshots",
+            n_moats_written, len(investment_theses),
+        )
+
     # Write signals.json (backward compatible).
     # Universe-membership check sourced from alpha_engine_lib.arcticdb so
     # producer (research preflight) and consumer (executor's

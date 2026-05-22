@@ -476,3 +476,148 @@ class TestConsolidatedReportPersistence:
             "this call the dashboard's Research Briefing Archive stales "
             "out (regression of 2026-03-16 silent drop, fixed 2026-05-20)"
         )
+
+
+# ── save_moat_profile (ROADMAP L1650) ─────────────────────────────────────
+
+
+class TestSaveMoatProfile:
+    """Pin the append-only time-series semantics of moat_profile.json."""
+
+    def _captured_put_body(self, manager) -> str:
+        """Return the most recent put_object body decoded as UTF-8.
+        ``_s3_put`` calls put_object(Bucket=, Key=, Body=) all-kwargs.
+        """
+        call = manager.s3.put_object.call_args
+        if call is None:
+            raise AssertionError("no put_object call captured")
+        body = call.kwargs.get("Body")
+        if body is None:
+            raise AssertionError("put_object called without Body kwarg")
+        return body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else str(body)
+
+    def test_empty_assessment_is_noop(self, archive_in_memory):
+        archive_in_memory.save_moat_profile("AAPL", "2026-05-23", {})
+        archive_in_memory.save_moat_profile("AAPL", "2026-05-23", None)  # type: ignore[arg-type]
+        archive_in_memory.s3.put_object.assert_not_called()
+
+    def test_first_write_seeds_single_entry_list(self, archive_in_memory):
+        # No prior file — _s3_get raises (mocked), treated as miss.
+        archive_in_memory.save_moat_profile(
+            "AAPL", "2026-05-23",
+            {"primary_type": "wide", "trend": "stable"},
+        )
+        archive_in_memory.s3.put_object.assert_called_once()
+        call = archive_in_memory.s3.put_object.call_args
+        assert call.kwargs["Key"] == "archive/universe/AAPL/moat_profile.json"
+        body = self._captured_put_body(archive_in_memory)
+        parsed = json.loads(body)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 1
+        assert parsed[0]["run_date"] == "2026-05-23"
+        assert parsed[0]["primary_type"] == "wide"
+        assert parsed[0]["trend"] == "stable"
+
+    def test_append_preserves_prior_entries(self, archive_in_memory):
+        prior = json.dumps([
+            {"run_date": "2026-05-09", "primary_type": "narrow"},
+            {"run_date": "2026-05-16", "primary_type": "narrow"},
+        ])
+        archive_in_memory.s3.get_object.side_effect = None
+        archive_in_memory.s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: prior.encode("utf-8"))
+        }
+        archive_in_memory.save_moat_profile(
+            "AAPL", "2026-05-23",
+            {"primary_type": "wide"},
+        )
+        body = self._captured_put_body(archive_in_memory)
+        parsed = json.loads(body)
+        assert len(parsed) == 3
+        assert [e["run_date"] for e in parsed] == [
+            "2026-05-09", "2026-05-16", "2026-05-23",
+        ]
+        assert parsed[-1]["primary_type"] == "wide"
+
+    def test_idempotent_on_same_run_date(self, archive_in_memory):
+        """Re-running the Saturday SF for the same run_date must NOT
+        duplicate the snapshot — the second call replaces the first.
+        """
+        prior = json.dumps([
+            {"run_date": "2026-05-23", "primary_type": "narrow"},
+        ])
+        archive_in_memory.s3.get_object.side_effect = None
+        archive_in_memory.s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: prior.encode("utf-8"))
+        }
+        archive_in_memory.save_moat_profile(
+            "AAPL", "2026-05-23",
+            {"primary_type": "wide"},  # updated assessment same run_date
+        )
+        body = self._captured_put_body(archive_in_memory)
+        parsed = json.loads(body)
+        assert len(parsed) == 1
+        assert parsed[0]["primary_type"] == "wide"  # new value won
+
+    def test_corrupt_prior_starts_fresh_does_not_lose_current_run(
+        self, archive_in_memory,
+    ):
+        """If the existing JSON is unparseable, we DON'T drop this run's
+        data — we start a fresh list with this entry as the only one.
+        """
+        archive_in_memory.s3.get_object.side_effect = None
+        archive_in_memory.s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: b"not-json")
+        }
+        archive_in_memory.save_moat_profile(
+            "AAPL", "2026-05-23",
+            {"primary_type": "wide"},
+        )
+        body = self._captured_put_body(archive_in_memory)
+        parsed = json.loads(body)
+        assert len(parsed) == 1
+        assert parsed[0]["primary_type"] == "wide"
+
+    def test_chronological_sort_normalizes_out_of_order_history(
+        self, archive_in_memory,
+    ):
+        """Defensive sort — if prior writes ever landed out-of-order
+        (e.g. operator backfill), the next regular append normalizes."""
+        prior = json.dumps([
+            {"run_date": "2026-05-23", "primary_type": "wide"},
+            {"run_date": "2026-05-09", "primary_type": "narrow"},
+            {"run_date": "2026-05-16", "primary_type": "narrow"},
+        ])
+        archive_in_memory.s3.get_object.side_effect = None
+        archive_in_memory.s3.get_object.return_value = {
+            "Body": MagicMock(read=lambda: prior.encode("utf-8"))
+        }
+        archive_in_memory.save_moat_profile(
+            "AAPL", "2026-05-30",
+            {"primary_type": "wide"},
+        )
+        body = self._captured_put_body(archive_in_memory)
+        parsed = json.loads(body)
+        assert [e["run_date"] for e in parsed] == [
+            "2026-05-09", "2026-05-16", "2026-05-23", "2026-05-30",
+        ]
+
+
+class TestArchiveWriterWiresSaveMoatProfile:
+    """Structural regression — pin that archive_writer calls save_moat_profile
+    on every thesis carrying a `quality_moat` field. Mirrors the analogous
+    test for save_consolidated_report (closes a 2-month silent-drop class).
+    """
+
+    def test_archive_writer_calls_save_moat_profile(self):
+        import inspect
+        rg = pytest.importorskip(
+            "graph.research_graph",
+            reason="graph.research_graph requires gitignored config",
+        )
+        src = inspect.getsource(rg.archive_writer)
+        assert "save_moat_profile" in src, (
+            "archive_writer must persist quality_moat via save_moat_profile — "
+            "without this call the per-ticker moat time-series stops "
+            "accreting Saturday SF snapshots (ROADMAP L1650)"
+        )

@@ -221,6 +221,61 @@ class ArchiveManager:
             self._s3_put(f"{base}/thesis.json", thesis_json)
             self._s3_put(f"{hist}/thesis.json", thesis_json)
 
+    def save_moat_profile(
+        self,
+        ticker: str,
+        run_date: str,
+        moat_assessment: dict,
+    ) -> None:
+        """Append a moat-assessment snapshot to the per-ticker time-series
+        archive at ``archive/universe/{ticker}/moat_profile.json``.
+
+        Closes ROADMAP L1650 P2 — moats decay slowly; the time derivative
+        is the real signal, so we keep an append-only series rather than
+        a snapshot replaced each Saturday. The plumbing pipeline:
+
+          qual_analyst → QualitativePillarAssessment.quality_moat
+            → score_aggregator → investment_thesis.quality_moat (PR #219)
+              → archive_writer → save_moat_profile (this method)
+
+        ``moat_assessment`` shape: dict-dump of
+        ``alpha_engine_lib.pillars.MoatAssessment`` — at minimum carries
+        ``primary_type``; usually also ``secondary_types``, ``trend``,
+        and ``rationale``. Permissive (extra="allow") on the lib side so
+        forward-compat LLM drift is tolerated here too.
+
+        Append semantics: read existing JSON list (or ``[]`` on miss),
+        push ``{run_date, **moat_assessment}``, write back. Idempotent
+        on (ticker, run_date) — a second call for the same key replaces
+        the prior row in place rather than duplicating, so a re-run of
+        the Saturday SF doesn't double-count the snapshot.
+        """
+        if not moat_assessment or not isinstance(moat_assessment, dict):
+            return
+        key = f"archive/universe/{ticker}/moat_profile.json"
+        existing: Optional[str] = None
+        try:
+            existing = self._s3_get(key)
+        except Exception:  # noqa: BLE001 — fetch failure means no prior file (or transient S3); start fresh, don't lose this run
+            existing = None
+        history: list[dict] = []
+        if existing:
+            try:
+                parsed = json.loads(existing)
+                if isinstance(parsed, list):
+                    history = parsed
+            except Exception:  # noqa: BLE001 — corrupt prior snapshot: start fresh, don't lose this run
+                pass
+
+        new_entry = {"run_date": run_date, **moat_assessment}
+        # Idempotency: replace any prior entry with the same run_date.
+        history = [e for e in history if e.get("run_date") != run_date]
+        history.append(new_entry)
+        # Keep chronological order. ``run_date`` is ISO so lex sort works.
+        history.sort(key=lambda e: str(e.get("run_date") or ""))
+
+        self._s3_put(key, json.dumps(history, indent=2))
+
     def save_macro_report(self, run_date: str, macro_report: str) -> None:
         self._s3_put("archive/macro/macro_report.md", macro_report)
         self._s3_put(f"archive/macro/history/{run_date}/macro_report.md", macro_report)
