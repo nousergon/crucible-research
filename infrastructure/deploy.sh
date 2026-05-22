@@ -36,50 +36,6 @@ ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FUNCTION_MAIN}"
 
 TARGET="${1:-both}"
 
-# ── Lambda env vars from lambda.env ──────────────────────────────────────────
-# Reads lambda.env (gitignored) and builds the JSON for --environment.
-
-# Master .env lives in alpha-engine-data; fall back to local .env
-LAMBDA_ENV_FILE="$(dirname "$(pwd)")/alpha-engine-data/.env"
-if [ ! -f "$LAMBDA_ENV_FILE" ]; then
-  LAMBDA_ENV_FILE=".env"
-fi
-
-build_lambda_env_json() {
-  if [ ! -f "$LAMBDA_ENV_FILE" ]; then
-    echo "WARNING: $LAMBDA_ENV_FILE not found — Lambda will have no env vars configured." >&2
-    echo ""
-    return
-  fi
-  # Parse KEY=VALUE lines from .env, stopping at LAMBDA_SKIP marker.
-  # Vars after LAMBDA_SKIP are local-only (AWS creds etc).
-  python3 -c "
-import json
-env = {}
-with open('$LAMBDA_ENV_FILE') as f:
-    for line in f:
-        line = line.strip()
-        if line == '# LAMBDA_SKIP':
-            break
-        if not line or line.startswith('#'):
-            continue
-        if '=' not in line:
-            continue
-        key, val = line.split('=', 1)
-        key, val = key.strip(), val.strip()
-        # Strip surrounding quotes (single or double)
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('\"', \"'\"):
-            val = val[1:-1]
-        if key and val:
-            env[key] = val
-if env:
-    print(json.dumps({'Variables': env}))
-else:
-    print('')
-"
-}
-
-LAMBDA_ENV_JSON=$(build_lambda_env_json)
 
 # ── Lambda existence check (fail-loud on non-NotFound errors) ────────────────
 #
@@ -234,13 +190,6 @@ build_and_deploy_main() {
   # Update or create Lambda function
   echo "Deploying $FUNCTION_MAIN..."
 
-  # Build env var args from lambda.env
-  ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-    echo "  Env vars from lambda.env: $(echo "$LAMBDA_ENV_JSON" | python3 -c "import sys,json; print(', '.join(json.load(sys.stdin).get('Variables',{}).keys()))")"
-  fi
-
   if _lambda_function_exists "$FUNCTION_MAIN"; then
     # Check if existing function is zip-based (can't switch to image in-place)
     EXISTING_PKG=$(aws lambda get-function-configuration \
@@ -253,15 +202,6 @@ build_and_deploy_main() {
         --function-name "$FUNCTION_MAIN" \
         --image-uri "$IMAGE_URI" \
         --region "$REGION" > /dev/null
-      # Sync env vars from lambda.env
-      if [ -n "$LAMBDA_ENV_JSON" ]; then
-        echo "  Waiting for code update to complete..."
-        aws lambda wait function-updated --function-name "$FUNCTION_MAIN" --region "$REGION" 2>/dev/null || sleep 5
-        aws lambda update-function-configuration \
-          --function-name "$FUNCTION_MAIN" \
-          --environment "$LAMBDA_ENV_JSON" \
-          --region "$REGION" > /dev/null
-      fi
     else
       # Zip → Image migration: delete and recreate
       echo "  Migrating from zip to container image..."
@@ -275,7 +215,6 @@ build_and_deploy_main() {
         --role "$ROLE_ARN" \
         --timeout 900 \
         --memory-size 1024 \
-        "${ENV_ARGS[@]}" \
         --region "$REGION" > /dev/null
 
       echo "  NOTE: EventBridge triggers were removed with the old function."
@@ -290,7 +229,6 @@ build_and_deploy_main() {
       --role "$ROLE_ARN" \
       --timeout 900 \
       --memory-size 1024 \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_MAIN deployed (container image)."
@@ -410,10 +348,6 @@ build_and_deploy_alerts() {
   echo "Deploying $FUNCTION_ALERTS..."
 
   # Build env var args
-  ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-  fi
 
   if _lambda_function_exists "$FUNCTION_ALERTS"; then
     EXISTING_PKG=$(aws lambda get-function-configuration \
@@ -425,14 +359,6 @@ build_and_deploy_alerts() {
         --function-name "$FUNCTION_ALERTS" \
         --image-uri "$IMAGE_URI" \
         --region "$REGION" > /dev/null
-      if [ -n "$LAMBDA_ENV_JSON" ]; then
-        echo "  Waiting for code update to complete..."
-        aws lambda wait function-updated --function-name "$FUNCTION_ALERTS" --region "$REGION" 2>/dev/null || sleep 5
-        aws lambda update-function-configuration \
-          --function-name "$FUNCTION_ALERTS" \
-          --environment "$LAMBDA_ENV_JSON" \
-          --region "$REGION" > /dev/null
-      fi
     else
       # Zip → Image migration
       echo "  Migrating from zip to container image..."
@@ -445,7 +371,6 @@ build_and_deploy_alerts() {
         --role "$ROLE_ARN" \
         --timeout 60 \
         --memory-size 256 \
-        "${ENV_ARGS[@]}" \
         --region "$REGION" > /dev/null
       echo "  NOTE: EventBridge triggers were removed. Re-run setup-eventbridge.sh to restore."
     fi
@@ -457,7 +382,6 @@ build_and_deploy_alerts() {
       --role "$ROLE_ARN" \
       --timeout 60 \
       --memory-size 256 \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_ALERTS deployed (container image)."
@@ -482,10 +406,6 @@ deploy_eval_judge() {
   IMAGE_URI="$ECR_REPO:latest"
   IMAGE_CONFIG='{"Command":["eval_judge_handler.handler"]}'
 
-  ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-  fi
 
   if _lambda_function_exists "$FUNCTION_EVAL_JUDGE"; then
     aws lambda update-function-code \
@@ -497,7 +417,6 @@ deploy_eval_judge() {
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_EVAL_JUDGE" \
       --image-config "$IMAGE_CONFIG" \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -508,7 +427,6 @@ deploy_eval_judge() {
       --role "$ROLE_ARN" \
       --timeout 900 \
       --memory-size 1024 \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
@@ -547,10 +465,6 @@ deploy_eval_rolling_mean() {
   IMAGE_URI="$ECR_REPO:latest"
   IMAGE_CONFIG='{"Command":["eval_rolling_mean_handler.handler"]}'
 
-  ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-  fi
 
   if _lambda_function_exists "$FUNCTION_EVAL_ROLLING_MEAN"; then
     aws lambda update-function-code \
@@ -562,7 +476,6 @@ deploy_eval_rolling_mean() {
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_EVAL_ROLLING_MEAN" \
       --image-config "$IMAGE_CONFIG" \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -573,7 +486,6 @@ deploy_eval_rolling_mean() {
       --role "$ROLE_ARN" \
       --timeout 300 \
       --memory-size 512 \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_ROLLING_MEAN deployed (CMD=eval_rolling_mean_handler.handler)."
@@ -611,10 +523,6 @@ deploy_rationale_clustering() {
   IMAGE_URI="$ECR_REPO:latest"
   IMAGE_CONFIG='{"Command":["rationale_clustering_handler.handler"]}'
 
-  ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-  fi
 
   if _lambda_function_exists "$FUNCTION_RATIONALE_CLUSTERING"; then
     aws lambda update-function-code \
@@ -626,7 +534,6 @@ deploy_rationale_clustering() {
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
       --image-config "$IMAGE_CONFIG" \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -637,7 +544,6 @@ deploy_rationale_clustering() {
       --role "$ROLE_ARN" \
       --timeout 600 \
       --memory-size 1024 \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
@@ -695,10 +601,6 @@ _deploy_image_shared_lambda() {
   local IMAGE_CONFIG
   IMAGE_CONFIG="{\"Command\":[\"${handler_module}.handler\"]}"
 
-  local ENV_ARGS=()
-  if [ -n "$LAMBDA_ENV_JSON" ]; then
-    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
-  fi
 
   if _lambda_function_exists "$fn_name"; then
     aws lambda update-function-code \
@@ -712,7 +614,6 @@ _deploy_image_shared_lambda() {
       --image-config "$IMAGE_CONFIG" \
       --timeout "$timeout_s" \
       --memory-size "$memory_mb" \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -723,7 +624,6 @@ _deploy_image_shared_lambda() {
       --role "$ROLE_ARN" \
       --timeout "$timeout_s" \
       --memory-size "$memory_mb" \
-      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
   echo "  $fn_name deployed (CMD=${handler_module}.handler timeout=${timeout_s}s memory=${memory_mb}MB)."
