@@ -82,6 +82,21 @@ DEFAULT_CAPTURE_PREFIX = "decision_artifacts"
 DEFAULT_ANALYSIS_PREFIX = "decision_artifacts/_analysis"
 
 DEFAULT_WINDOW_DAYS = 56
+
+# Per-agent scope cap — bounds clustering wall-clock on agents with
+# unusually large rationale corpora (e.g. a quant agent that ran 50
+# tool-calls in one cycle generates ≥50 rationale strings per artifact,
+# multiplied by ~56 days = up to ~3000 rationales for one agent before
+# this cap). Mirrors the Counterfactual Lambda's
+# DEFAULT_MAX_ARTIFACTS_PER_AGENT=500 precedent
+# (alpha-engine-backtester #228, 2026-05-19). Closes 5/23-SF P0 (a) —
+# the 2026-05-24 trading-day-fix recovery's RationaleClustering Lambda
+# timed out at 600s (SF event 269), dropping the analysis artifact +
+# leaving downstream consumers reading a stale corpus signature. Cap
+# applied AFTER artifact load but BEFORE clustering (most expensive
+# stage); truncation logged + reported in the summary so operators see
+# when caps fire.
+DEFAULT_MAX_RATIONALES_PER_AGENT = 500
 """8-week (56-day) trailing window — matches ROADMAP wording. Captures
 8 Saturdays of weekly research runs. Configurable via the
 ``window_days`` arg on ``compute_and_emit``."""
@@ -569,6 +584,7 @@ def compute_and_emit(
     s3_client: Optional[Any] = None,
     cloudwatch_client: Optional[Any] = None,
     emit_metrics: bool = True,
+    max_rationales_per_agent: int = DEFAULT_MAX_RATIONALES_PER_AGENT,
 ) -> dict[str, Any]:
     """Read captured artifacts in the trailing window, cluster
     rationales per ``agent_id``, persist per-agent analysis JSON, and
@@ -629,6 +645,7 @@ def compute_and_emit(
     per_agent_summary: list[dict[str, Any]] = []
     skipped_thin: list[dict[str, Any]] = []
     cluster_failures: list[dict[str, str]] = []
+    truncated_agents: list[dict[str, int]] = []  # scope-cap audit
 
     for agent_id, rationales in sorted(by_agent.items()):
         if len(rationales) < MIN_RATIONALES_FOR_CLUSTERING:
@@ -636,6 +653,23 @@ def compute_and_emit(
                 {"agent_id": agent_id, "n_rationales": len(rationales)}
             )
             continue
+        # Scope cap — Counterfactual Lambda #228 precedent. Truncate to
+        # the N most-recent rationales (preserves clustering signal on
+        # the trailing-edge corpus; the older tail informs less than
+        # recent template-drift).
+        if len(rationales) > max_rationales_per_agent:
+            truncated_agents.append({
+                "agent_id": agent_id,
+                "original_n": len(rationales),
+                "capped_n": max_rationales_per_agent,
+            })
+            logger.warning(
+                "[rationale_clustering] agent %s rationales capped %d → %d "
+                "(scope-cap fired — bound clustering wall-clock per "
+                "alpha-engine-backtester #228 precedent)",
+                agent_id, len(rationales), max_rationales_per_agent,
+            )
+            rationales = rationales[-max_rationales_per_agent:]
 
         try:
             clusters = cluster_rationales(
@@ -723,6 +757,8 @@ def compute_and_emit(
         "agents_skipped_thin_sample": skipped_thin,
         "load_failures": load_failures,
         "cluster_failures": cluster_failures,
+        "agents_truncated_by_scope_cap": truncated_agents,
+        "max_rationales_per_agent": max_rationales_per_agent,
         "per_agent": per_agent_summary,
     }
 

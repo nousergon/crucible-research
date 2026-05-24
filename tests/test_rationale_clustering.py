@@ -476,3 +476,81 @@ class TestComputeAndEmit:
         assert summary["load_failures"][0]["key"] == bad_key
         # Good artifact still processed → 1 agent analyzed.
         assert summary["agents_analyzed"] == 1
+
+
+class TestScopeCapTruncation:
+    """Pin DEFAULT_MAX_RATIONALES_PER_AGENT scope cap behavior (5/23-SF P0 (a)).
+
+    Mirrors Counterfactual Lambda #228 precedent: bound wall-clock per
+    agent so corpus growth doesn't push the Lambda past its timeout.
+    """
+
+    def test_truncates_when_rationales_exceed_cap(self):
+        from evals.rationale_clustering import compute_and_emit
+
+        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        # Generate 600 templated rationales across one artifact — exceeds
+        # default cap of 500.
+        templates = [
+            f"sector_quant rationale {n} drives the pick"
+            for n in range(600)
+        ]
+        key = "decision_artifacts/2026/05/09/sector_quant/run-1.json"
+        artifacts = {
+            key: {
+                "agent_id": "sector_quant",
+                "agent_output": {
+                    "ranked_picks": [
+                        {"ticker": f"T{n}", "rationale": t}
+                        for n, t in enumerate(templates)
+                    ]
+                },
+            }
+        }
+        s3 = _build_s3_stub_with_artifacts(artifacts)
+        cw = MagicMock()
+        summary = compute_and_emit(
+            end_time=end,
+            window_days=1,
+            s3_client=s3,
+            cloudwatch_client=cw,
+            max_rationales_per_agent=500,
+        )
+        # Truncation audit captures the agent + cap details.
+        assert summary["max_rationales_per_agent"] == 500
+        truncated = summary["agents_truncated_by_scope_cap"]
+        assert len(truncated) == 1
+        assert truncated[0]["agent_id"] == "sector_quant"
+        assert truncated[0]["original_n"] == 600
+        assert truncated[0]["capped_n"] == 500
+
+    def test_no_truncation_when_below_cap(self):
+        from evals.rationale_clustering import compute_and_emit
+
+        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        templates = [f"r{n}" for n in range(30)]  # well under cap
+        key = "decision_artifacts/2026/05/09/sector_quant/run-1.json"
+        artifacts = {
+            key: {
+                "agent_id": "sector_quant",
+                "agent_output": {
+                    "ranked_picks": [
+                        {"ticker": f"T{n}", "rationale": t}
+                        for n, t in enumerate(templates)
+                    ]
+                },
+            }
+        }
+        s3 = _build_s3_stub_with_artifacts(artifacts)
+        cw = MagicMock()
+        summary = compute_and_emit(
+            end_time=end, window_days=1,
+            s3_client=s3, cloudwatch_client=cw, max_rationales_per_agent=500,
+        )
+        assert summary["agents_truncated_by_scope_cap"] == []
+
+    def test_default_cap_value(self):
+        """Pin the default to the published value (mirrors Counterfactual
+        #228's DEFAULT_MAX_ARTIFACTS_PER_AGENT=500)."""
+        from evals.rationale_clustering import DEFAULT_MAX_RATIONALES_PER_AGENT
+        assert DEFAULT_MAX_RATIONALES_PER_AGENT == 500

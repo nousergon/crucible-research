@@ -531,9 +531,15 @@ deploy_rationale_clustering() {
       --region "$REGION" > /dev/null
     echo "  Waiting for code update to complete..."
     aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
+    # Bump timeout 600s → 900s (Lambda max) to absorb corpus growth.
+    # Closes 5/23-SF P0 (a) — the 2026-05-24 trading-day-fix recovery
+    # hit the 600s ceiling at event 269. Setting timeout on EVERY
+    # update (not just create) so existing Lambdas pick up the bump
+    # without a destroy-recreate cycle.
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
       --image-config "$IMAGE_CONFIG" \
+      --timeout 900 \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -542,7 +548,7 @@ deploy_rationale_clustering() {
       --code "ImageUri=$IMAGE_URI" \
       --image-config "$IMAGE_CONFIG" \
       --role "$ROLE_ARN" \
-      --timeout 600 \
+      --timeout 900 \
       --memory-size 1024 \
       --region "$REGION" > /dev/null
   fi
