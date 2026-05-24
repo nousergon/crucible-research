@@ -245,6 +245,131 @@ def invoke_with_rate_limit_retry(
     raise last_exc  # pragma: no cover
 
 
+# ── SOTA structured-output retry with validation feedback ─────────────────────
+
+
+# Default retry budget for a single ``with_structured_output(...).invoke()``
+# call. Industry-standard tool-use SOTA is "retry with validation error fed
+# back as correction context" — surfaced in this codebase by the 2026-05-24
+# Saturday SF healthcare-team failure where the LLM emitted 'medium_high'
+# for a Pydantic ``Literal['low','medium','high']`` field. A single bad roll
+# on a 6-agent fan-out should not hard-fail the cycle when the fix is to
+# re-prompt with the schema violation as context.
+STRUCTURED_OUTPUT_MAX_RETRIES = 2
+
+
+def invoke_structured_with_validation_retry(
+    structured_llm,
+    messages: list,
+    *,
+    label: str,
+    ls_metadata: dict | None = None,
+    max_retries: int = STRUCTURED_OUTPUT_MAX_RETRIES,
+) -> dict:
+    """Invoke a structured-output handle, retrying on Pydantic
+    ``ValidationError`` with the specific schema violation fed back to the
+    model as correction context.
+
+    The SOTA tool-use pattern for structured output: when the LLM emits a
+    value that doesn't fit the schema (e.g., ``'medium_high'`` for a
+    ``Literal['low','medium','high']`` field, or a string where a float
+    was expected), don't hard-fail — re-prompt with the exact
+    ``ValidationError`` so the model can correct the specific field on the
+    retry. Anthropic + OpenAI tool-use docs both describe this pattern as
+    the institutional default for production structured-output pipelines.
+
+    Composes with ``invoke_with_rate_limit_retry`` (called inside each
+    attempt) — the rate-limit retry handles 429 backoff; this outer
+    retry handles schema-validation correction. Different failure classes,
+    different cures; the wrappers stack cleanly.
+
+    Args:
+        structured_llm: a structured-output-bound LLM handle (typically
+            produced via the langchain ``with_structured_output`` call at
+            the consumer's bind site with ``include_raw=True`` so this
+            wrapper can inspect ``parsing_error``).
+        messages: list of input messages (typically a single ``HumanMessage``).
+        label: log/metric label for retry traces (``f'qual:{team}:extract'``).
+        ls_metadata: LangSmith metadata dict forwarded as
+            ``config={'metadata': ls_metadata}``.
+        max_retries: max retry attempts on validation error (default 2 →
+            up to 3 total LLM calls per logical extraction).
+
+    Returns:
+        The final ``extract_resp`` dict — ``{'raw': AIMessage, 'parsed':
+        Schema | None, 'parsing_error': Exception | None}``. On success
+        ``parsed`` is populated and ``parsing_error`` is None. On terminal
+        failure (all retries exhausted) ``parsing_error`` carries the LAST
+        ``ValidationError`` and the caller's existing fail-loud branch
+        (e.g., ``raise RuntimeError(...)``) fires as before.
+    """
+    from langchain_core.messages import HumanMessage
+
+    current_messages = list(messages)
+    ls_metadata = ls_metadata or {}
+    final_resp: dict = {}
+
+    for attempt in range(max_retries + 1):
+        attempt_label = f"{label}:attempt={attempt + 1}/{max_retries + 1}"
+        final_resp = invoke_with_rate_limit_retry(
+            lambda: structured_llm.invoke(
+                current_messages,
+                config={"metadata": ls_metadata},
+            ),
+            label=attempt_label,
+        )
+        parsing_error = final_resp.get("parsing_error")
+        if parsing_error is None:
+            if attempt > 0:
+                log.info(
+                    "[%s] structured-output succeeded after %d validation-retry "
+                    "attempt(s)",
+                    label, attempt,
+                )
+            return final_resp
+
+        # Parse failed; decide whether to retry.
+        if attempt >= max_retries:
+            log.warning(
+                "[%s] structured-output failed after %d validation-retry "
+                "attempt(s) — propagating last ValidationError: %s",
+                label, max_retries, parsing_error,
+            )
+            return final_resp
+
+        # Build a correction message that names the specific schema violation
+        # so the LLM can fix the offending field directly. The raw AIMessage
+        # from the failed attempt is included so the model sees its own prior
+        # output in context (full conversation, not just a fresh prompt).
+        correction = HumanMessage(content=(
+            f"Your prior response failed schema validation:\n\n"
+            f"{type(parsing_error).__name__}: {parsing_error}\n\n"
+            f"Please re-submit your response with the schema corrections "
+            f"applied. Use ONLY exact values specified in the schema — "
+            f"for enum/Literal fields use the listed values verbatim "
+            f"(no synonyms, no compound values like 'medium_high', no "
+            f"rephrasings, no additions). For other typed fields match "
+            f"the exact type (string vs number vs boolean vs list). "
+            f"Preserve all the substantive content from your prior "
+            f"response — only fix the schema violation."
+        ))
+
+        raw = final_resp.get("raw")
+        if raw is not None:
+            current_messages = list(messages) + [raw, correction]
+        else:
+            current_messages = list(messages) + [correction]
+
+        log.info(
+            "[%s] structured-output parse failed on attempt %d/%d "
+            "(%s: %s) — re-prompting with schema-violation context",
+            label, attempt + 1, max_retries + 1,
+            type(parsing_error).__name__, parsing_error,
+        )
+
+    return final_resp  # pragma: no cover — loop always returns
+
+
 def extract_tool_calls(messages: list) -> list[dict]:
     """Extract tool call records from LangGraph message history."""
     calls = []

@@ -357,12 +357,24 @@ def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monke
     fake_agent.invoke.return_value = _react_result(
         "Assessment: AAPL strong fundamentals."
     )
+    # 2026-05-24 update: pillar extraction now retries up to 2x on
+    # ValidationError (SOTA structured-output retry-with-validation-feedback,
+    # research #224) before propagating. The fail-loud invariant tested here
+    # still holds — when ALL retries exhaust, the parse_error propagates and
+    # _extract_pillar_assessments raises RuntimeError as before. Mock provides
+    # 3 pillar_fail entries (initial + 2 retries) so the retry budget is
+    # exhausted within the test.
+    pillar_fail_response = {
+        "raw": MagicMock(content="..."), "parsed": None,
+        "parsing_error": ValueError("pillar schema mismatch"),
+    }
     fake_structured_llm = MagicMock()
     fake_structured_llm.invoke.side_effect = [
         {"raw": MagicMock(content="..."), "parsed": parsed_ok,
          "parsing_error": None},  # legacy extraction succeeds
-        {"raw": MagicMock(content="..."), "parsed": None,
-         "parsing_error": ValueError("pillar schema mismatch")},  # pillar fails
+        pillar_fail_response,  # pillar initial attempt fails
+        pillar_fail_response,  # pillar retry 1 fails
+        pillar_fail_response,  # pillar retry 2 fails — budget exhausted
     ]
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm

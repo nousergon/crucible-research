@@ -205,12 +205,11 @@ def run_qual_analyst(
             "If the analyst produced no assessments, return an empty list.\n\n"
             f"--- ANALYST ANSWER ---\n{final_text}"
         ))
-        extract_resp = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [extract_msg],
-                config={"metadata": _ls_metadata},
-            ),
+        extract_resp = invoke_structured_with_validation_retry(
+            structured_llm,
+            [extract_msg],
             label=f"qual:{team_id}:extract",
+            ls_metadata=_ls_metadata,
         )
         parsed: QualAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
@@ -366,12 +365,11 @@ def _extract_pillar_assessments(
         "list.\n\n"
         f"--- ANALYST ANSWER ---\n{final_text}"
     ))
-    extract_resp = invoke_with_rate_limit_retry(
-        lambda: structured_llm.invoke(
-            [extract_msg],
-            config={"metadata": ls_metadata},
-        ),
+    extract_resp = invoke_structured_with_validation_retry(
+        structured_llm,
+        [extract_msg],
         label=f"qual:{team_id}:extract-pillars",
+        ls_metadata=ls_metadata,
     )
     parsed: _QualPillarBatch | None = extract_resp.get("parsed")
     parsing_error = extract_resp.get("parsing_error")
@@ -405,5 +403,6 @@ from agents.langchain_utils import (
 )
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_structured_with_validation_retry,
     invoke_with_rate_limit_retry,
 )
