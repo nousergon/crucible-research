@@ -51,6 +51,12 @@ _DEFAULT_BUCKET = "alpha-engine-research"
 _INPUT_PREFIX = "decision_artifacts/_cost_raw"
 _OUTPUT_PREFIX = "decision_artifacts/_cost"
 
+# CloudWatch metric namespace for cost telemetry (Phase 4 #2 + #3).
+# Joins ``AlphaEngine/Agents``, ``AlphaEngine/Predictor``,
+# ``AlphaEngine/Eval``, etc. as a load-bearing observability surface.
+# Per-agent_id dimension lets alarms rank-by-regressor.
+_COST_CW_NAMESPACE = "AlphaEngine/Cost"
+
 # Production run_id format in the cost-tracker is ISO date
 # (YYYY-MM-DD, sometimes with a hyphen-tail like YYYY-MM-DD-{seq}).
 # Test fixtures use ad-hoc strings like "run-x", "run-budget-test",
@@ -148,6 +154,7 @@ def aggregate_day(
     target_date: date_type,
     *,
     output_key_override: Optional[str] = None,
+    cw_client: Any | None = None,
 ) -> Optional[dict]:
     """Read all JSONL files for ``target_date`` and write a parquet.
 
@@ -229,7 +236,129 @@ def aggregate_day(
         len(df), bucket, output_key,
     )
 
-    return _build_summary(df, output_key=output_key, files_read=len(keys))
+    summary = _build_summary(df, output_key=output_key, files_read=len(keys))
+    # Phase 4 #2 + #3 — emit per-agent_id CloudWatch metrics so alarms +
+    # weekly cost-regression alerts can rank by regressor. Best-effort:
+    # CW emit failure does NOT block the parquet write (the
+    # ``[[feedback_no_silent_fails]]`` rule applies to the load-bearing
+    # producer, which is the parquet; CW emit is the observability layer
+    # on top, gracefully degraded on permissions / region drift).
+    _emit_per_agent_cw_metrics(df, target_date=target_date, s3_client_or_cw=cw_client)
+    return summary
+
+
+def _emit_per_agent_cw_metrics(
+    df: pd.DataFrame,
+    *,
+    target_date: date_type,
+    s3_client_or_cw: Any | None = None,
+) -> None:
+    """Emit per-agent_id cost + cache-hit-ratio metrics to CloudWatch.
+
+    Phase 4 #2 + #3 of the cost-telemetry workstream. Per-agent_id
+    dimensioning lets alarms identify which agent regressed when total
+    cost spikes (vs the existing total-cost anomaly detection which
+    only fires once per parquet).
+
+    Metrics emitted (namespace ``AlphaEngine/Cost``):
+
+    - ``WeeklyCostUsd`` (Unit=None, ``agent_id`` dimension) — sum of
+      ``cost_usd`` for the agent in this parquet.
+    - ``CacheHitRatio`` (Unit=Percent, ``agent_id`` dimension) —
+      ``cache_read_tokens / (cache_read_tokens + input_tokens)`` × 100.
+      Only emitted when the agent has non-zero cache activity OR
+      non-zero input — otherwise the ratio is undefined.
+    - ``ToolFeeRequests`` (Unit=Count, ``agent_id`` + ``tool`` dimensions
+      for web_search / web_fetch) — server-tool request counts.
+
+    Best-effort: any CW exception is logged at WARN and swallowed; the
+    parquet write upstream is the load-bearing artifact, this is the
+    observability layer.
+
+    ``s3_client_or_cw`` parameter is named generically because the test
+    pattern in this module passes mocked S3 clients; in production we
+    construct a fresh CloudWatch client. Tests pass an explicit CW
+    stub via this kwarg.
+    """
+    if df.empty or "agent_id" not in df.columns:
+        return
+    try:
+        if s3_client_or_cw is None:
+            cw = boto3.client("cloudwatch")
+        else:
+            cw = s3_client_or_cw
+    except Exception as exc:
+        logger.warning(
+            "[aggregate_costs] CloudWatch client construction failed; "
+            "skipping CW metric emit: %s", exc,
+        )
+        return
+
+    metric_data: list[dict] = []
+    df_clean = df.copy()
+    df_clean["agent_id"] = df_clean["agent_id"].fillna("(none)").astype(str)
+
+    grouped = df_clean.groupby("agent_id")
+    for agent_id, group in grouped:
+        cost = float(group["cost_usd"].fillna(0).sum()) if "cost_usd" in group.columns else 0.0
+        input_tok = int(group["input_tokens"].fillna(0).sum()) if "input_tokens" in group.columns else 0
+        cache_read_tok = int(group["cache_read_tokens"].fillna(0).sum()) if "cache_read_tokens" in group.columns else 0
+
+        metric_data.append({
+            "MetricName": "WeeklyCostUsd",
+            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+            "Value": cost,
+            "Unit": "None",
+        })
+
+        if input_tok + cache_read_tok > 0:
+            hit_ratio = 100.0 * cache_read_tok / (input_tok + cache_read_tok)
+            metric_data.append({
+                "MetricName": "CacheHitRatio",
+                "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+                "Value": hit_ratio,
+                "Unit": "Percent",
+            })
+
+        # Schema v2: server-tool request counts (per agent + per tool).
+        for tool_col, tool_label in (
+            ("web_search_requests", "web_search"),
+            ("web_fetch_requests", "web_fetch"),
+        ):
+            if tool_col not in group.columns:
+                continue
+            count = int(group[tool_col].fillna(0).sum())
+            if count <= 0:
+                continue
+            metric_data.append({
+                "MetricName": "ToolFeeRequests",
+                "Dimensions": [
+                    {"Name": "agent_id", "Value": agent_id},
+                    {"Name": "tool", "Value": tool_label},
+                ],
+                "Value": count,
+                "Unit": "Count",
+            })
+
+    if not metric_data:
+        return
+
+    # CloudWatch PutMetricData caps at 20 entries per call.
+    try:
+        for i in range(0, len(metric_data), 20):
+            cw.put_metric_data(
+                Namespace=_COST_CW_NAMESPACE,
+                MetricData=metric_data[i:i + 20],
+            )
+        logger.info(
+            "[aggregate_costs] emitted %d CW metrics under %s for %d agents",
+            len(metric_data), _COST_CW_NAMESPACE, df_clean["agent_id"].nunique(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[aggregate_costs] CW metric emit failed (parquet write "
+            "succeeded above; this is observability-only): %s", exc,
+        )
 
 
 def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dict:
