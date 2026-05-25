@@ -25,6 +25,7 @@ FUNCTION_EVAL_JUDGE_POLL="alpha-engine-research-eval-judge-poll"
 FUNCTION_EVAL_JUDGE_PROCESS="alpha-engine-research-eval-judge-process"
 FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
+FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -661,6 +662,14 @@ deploy_eval_judge_batch() {
   _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_PROCESS" "eval_judge_process_handler" 900 1024
 }
 
+# Daily cost aggregation Lambda — ROADMAP L1146. Shared image with the
+# main runner; CMD override sets the entry point. Timeout 300s (5min)
+# is comfortable for the ~minutes-of-S3-reads on a Saturday's _cost_raw
+# partition (~thousands of JSONL files × small parquet write).
+deploy_aggregate_costs() {
+  _deploy_image_shared_lambda "$FUNCTION_AGGREGATE_COSTS" "aggregate_costs_handler" 300 512
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -670,9 +679,10 @@ case "$TARGET" in
   eval_judge_batch)      deploy_eval_judge_batch ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
+  aggregate_costs)       deploy_aggregate_costs ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering ;;
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs ;;
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|both|all]"; exit 1 ;;
 esac
 
 echo ""
