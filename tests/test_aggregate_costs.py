@@ -57,9 +57,17 @@ def _make_row(
     cost_usd: float,
     run_type: str = "weekly_research",
     call_seq: int = 1,
+    schema_version: int = 2,
+    web_search_requests: int = 0,
+    web_fetch_requests: int = 0,
 ) -> dict:
-    return {
-        "schema_version": 1,
+    """Builder for synthetic JSONL rows. Defaults to schema v2 (tool-fee
+    columns present + zero-defaulted). Tests of the v1 → v2 migration
+    backfill path pass ``schema_version=1`` to omit the new columns
+    entirely — exercises the aggregator's missing-as-zero handling.
+    """
+    row: dict = {
+        "schema_version": schema_version,
         "timestamp": "2026-05-02T13:30:00+00:00",
         "run_id": "2026-05-02",
         "agent_id": agent_id,
@@ -77,6 +85,10 @@ def _make_row(
         "cache_create_tokens": 0,
         "cost_usd": cost_usd,
     }
+    if schema_version >= 2:
+        row["web_search_requests"] = web_search_requests
+        row["web_fetch_requests"] = web_fetch_requests
+    return row
 
 
 # ── aggregate_day happy path ──────────────────────────────────────────────
@@ -397,3 +409,49 @@ class TestImplausibleRowFilter:
         )
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 13))
         assert summary is None
+
+
+# ── Tool-fee column handling (schema v2) ──────────────────────────────────
+
+
+class TestToolRequestTotals:
+    """Lock down ``total_web_search_requests`` + ``total_web_fetch_requests``
+    on the summary surface — the keystone metric for the dashboard's
+    tool-fee cost panel."""
+
+    def test_sums_tool_request_counts_across_files(self, s3):
+        from scripts.aggregate_costs import aggregate_day
+
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_a.jsonl", [
+            _make_row(agent_id="qual_a", sector_team_id="tech",
+                      model_name="claude-haiku-4-5",
+                      input_tokens=1000, output_tokens=200, cost_usd=0.502,
+                      web_search_requests=50, web_fetch_requests=2),
+        ])
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_b.jsonl", [
+            _make_row(agent_id="qual_b", sector_team_id="financials",
+                      model_name="claude-haiku-4-5",
+                      input_tokens=500, output_tokens=100, cost_usd=0.301,
+                      web_search_requests=30, web_fetch_requests=0),
+        ])
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30))
+        assert summary is not None
+        assert summary["total_web_search_requests"] == 80
+        assert summary["total_web_fetch_requests"] == 2
+
+    def test_zero_default_when_v1_only_partition(self, s3):
+        """A day's worth of pre-v2 rows (no tool-fee columns) aggregates
+        to zero totals — backfill safety. The aggregator must not raise
+        when the schema-v2 columns are entirely absent from the DataFrame."""
+        from scripts.aggregate_costs import aggregate_day
+
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/legacy.jsonl", [
+            _make_row(agent_id="legacy", sector_team_id=None,
+                      model_name="claude-haiku-4-5",
+                      input_tokens=1000, output_tokens=200, cost_usd=0.002,
+                      schema_version=1),
+        ])
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
+        assert summary is not None
+        assert summary["total_web_search_requests"] == 0
+        assert summary["total_web_fetch_requests"] == 0

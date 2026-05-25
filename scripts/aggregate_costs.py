@@ -20,9 +20,13 @@ Schema posture (matches the JSONL row shape):
 - ``schema_version``, ``timestamp``, ``run_id``, ``agent_id``, ``sector_team_id``,
   ``node_name``, ``run_type``, ``prompt_id``, ``prompt_version``,
   ``prompt_version_hash``, ``model_name``, ``call_seq``, ``input_tokens``,
-  ``output_tokens``, ``cache_read_tokens``, ``cache_create_tokens``, ``cost_usd``.
+  ``output_tokens``, ``cache_read_tokens``, ``cache_create_tokens``,
+  ``web_search_requests`` (schema v2), ``web_fetch_requests`` (schema v2),
+  ``cost_usd``.
 - All additive going forward — never rename or remove a column without a
-  ``schema_version`` bump per CLAUDE.md S3 contract safety rules.
+  ``schema_version`` bump per CLAUDE.md S3 contract safety rules. v1 rows
+  predate the tool-fee columns; the aggregator treats missing as zero so
+  v1 + v2 rows can be summed in the same daily parquet.
 
 Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708.
 """
@@ -241,6 +245,11 @@ def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dic
     total_output = int(df["output_tokens"].fillna(0).sum()) if "output_tokens" in df.columns else 0
     total_cache_read = int(df["cache_read_tokens"].fillna(0).sum()) if "cache_read_tokens" in df.columns else 0
     total_cache_create = int(df["cache_create_tokens"].fillna(0).sum()) if "cache_create_tokens" in df.columns else 0
+    # Schema v2 (additive): server-tool request counts. Missing column on
+    # all-v1-rows partitions returns 0 — keeps the path safe during the
+    # backfill window where pre-v2 days are read alongside fresh v2 days.
+    total_web_search = int(df["web_search_requests"].fillna(0).sum()) if "web_search_requests" in df.columns else 0
+    total_web_fetch = int(df["web_fetch_requests"].fillna(0).sum()) if "web_fetch_requests" in df.columns else 0
 
     def _group_sum(col: str) -> dict:
         if col not in df.columns or "cost_usd" not in df.columns:
@@ -263,6 +272,8 @@ def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dic
         "total_output_tokens": total_output,
         "total_cache_read_tokens": total_cache_read,
         "total_cache_create_tokens": total_cache_create,
+        "total_web_search_requests": total_web_search,
+        "total_web_fetch_requests": total_web_fetch,
         "by_sector_team": _group_sum("sector_team_id"),
         "by_model": _group_sum("model_name"),
         "by_run_type": _group_sum("run_type"),
@@ -289,6 +300,8 @@ def print_summary(summary: dict, *, target_date: date_type) -> None:
     print(f"- Total output tokens:      {summary['total_output_tokens']:,}")
     print(f"- Total cache_read tokens:  {summary['total_cache_read_tokens']:,}")
     print(f"- Total cache_create tokens:{summary['total_cache_create_tokens']:,}")
+    print(f"- Total web_search requests:{summary.get('total_web_search_requests', 0):,}")
+    print(f"- Total web_fetch requests: {summary.get('total_web_fetch_requests', 0):,}")
     print()
     for label, key in (
         ("By sector team", "by_sector_team"),

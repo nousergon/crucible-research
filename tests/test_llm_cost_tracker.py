@@ -43,7 +43,12 @@ from alpha_engine_lib.decision_capture import FullPromptContext, ModelMetadata
 
 @pytest.fixture
 def fake_price_table_yaml(tmp_path: Path) -> Path:
-    """Write a minimal model_pricing.yaml the tracker can load."""
+    """Write a minimal model_pricing.yaml the tracker can load.
+
+    Includes a ``tool_fees:`` section so the tool-fee load path exercises
+    the full surface in tests. Individual tests that need the no-tool-fees
+    path use ``fake_price_table_yaml_no_tool_fees`` below.
+    """
     yaml_path = tmp_path / "model_pricing.yaml"
     yaml_path.write_text(
         "cards:\n"
@@ -59,6 +64,31 @@ def fake_price_table_yaml(tmp_path: Path) -> Path:
         "    output_per_1m: 15.0\n"
         "    cache_read_per_1m: 0.3\n"
         "    cache_create_per_1m: 3.75\n"
+        "tool_fees:\n"
+        "  - tool_name: web_search\n"
+        "    effective_from: 2026-01-01\n"
+        "    per_1k_requests_usd: 10.0\n"
+        "  - tool_name: web_fetch\n"
+        "    effective_from: 2026-01-01\n"
+        "    per_1k_requests_usd: 0.0\n"
+    )
+    return yaml_path
+
+
+@pytest.fixture
+def fake_price_table_yaml_no_tool_fees(tmp_path: Path) -> Path:
+    """Variant without a ``tool_fees:`` section — exercises the
+    pre-tool-fee-wiring path (loader returns None, no requests = no raise).
+    """
+    yaml_path = tmp_path / "model_pricing_no_tool_fees.yaml"
+    yaml_path.write_text(
+        "cards:\n"
+        "  - model_name: claude-haiku-4-5\n"
+        "    effective_from: 2026-01-01\n"
+        "    input_per_1m: 1.0\n"
+        "    output_per_1m: 5.0\n"
+        "    cache_read_per_1m: 0.1\n"
+        "    cache_create_per_1m: 1.25\n"
     )
     return yaml_path
 
@@ -96,8 +126,16 @@ def _make_modern_response(
     cache_read: int = 0,
     cache_create: int = 0,
     model_name: str = "claude-haiku-4-5",
+    web_search_requests: int = 0,
+    web_fetch_requests: int = 0,
 ) -> MagicMock:
-    """Build a fake LLMResult mimicking modern langchain-anthropic shape."""
+    """Build a fake LLMResult mimicking modern langchain-anthropic shape.
+
+    ``web_search_requests`` + ``web_fetch_requests`` simulate the
+    Anthropic SDK's ``usage.server_tool_use`` payload, stashed by
+    langchain-anthropic at ``message.response_metadata['usage']
+    ['server_tool_use']``. Zero-defaulted to keep existing tests untouched.
+    """
     message = MagicMock()
     message.usage_metadata = {
         "input_tokens": input_tokens,
@@ -108,7 +146,17 @@ def _make_modern_response(
             "cache_creation": cache_create,
         },
     }
-    message.response_metadata = {"model_name": model_name}
+    response_metadata: dict = {"model_name": model_name}
+    if web_search_requests or web_fetch_requests:
+        response_metadata["usage"] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "server_tool_use": {
+                "web_search_requests": web_search_requests,
+                "web_fetch_requests": web_fetch_requests,
+            },
+        }
+    message.response_metadata = response_metadata
 
     generation = MagicMock()
     generation.message = message
@@ -163,6 +211,8 @@ class TestCostTelemetryCallback:
             "output_tokens": 1200,
             "cache_read_tokens": 2000,
             "cache_create_tokens": 500,
+            "web_search_requests": 0,
+            "web_fetch_requests": 0,
         }
 
     def test_legacy_shape_extracted_no_cache(self):
@@ -177,6 +227,8 @@ class TestCostTelemetryCallback:
             "output_tokens": 500,
             "cache_read_tokens": 0,
             "cache_create_tokens": 0,
+            "web_search_requests": 0,
+            "web_fetch_requests": 0,
         }
 
     def test_empty_shape_hard_fails(self):
@@ -583,8 +635,14 @@ class TestJsonlFlushHappyPath:
         assert row["model_name"] == "claude-haiku-4-5"
         # cost_usd computed: (4000*1.0 + 1200*5.0) / 1M = 0.01
         assert row["cost_usd"] == pytest.approx(0.01)
-        # Schema versioning present for future migrations.
-        assert row["schema_version"] == 1
+        # Schema versioning present for future migrations. v2 added the
+        # web_search_requests + web_fetch_requests columns (cost-telemetry
+        # tool-fee wiring).
+        assert row["schema_version"] == 2
+        # Schema v2 columns present + zero-defaulted on this Anthropic
+        # response (no server_tool_use payload in the test fixture).
+        assert row["web_search_requests"] == 0
+        assert row["web_fetch_requests"] == 0
 
     def test_react_loop_writes_multiple_rows(
         self, mocked_s3, capture_enabled, patched_pricing_path,
@@ -1087,3 +1145,215 @@ class TestSnapshotSuffixMatchesFamilyCard:
         # normalization yields a string the table actually has a card for.
         card = table.get(family_name, datetime(2026, 5, 2, tzinfo=timezone.utc))
         assert card.model_name == "claude-haiku-4-5"
+
+
+# ── Server-tool-use capture (cost-telemetry tool-fee wiring) ─────────────
+
+
+class TestServerToolUseCapture:
+    """Lock down the Anthropic ``server_tool_use`` capture path.
+
+    Origin: ROADMAP P1 (research-cost-tool-fees) — wire
+    ``ModelMetadata.web_search_requests`` + ``.web_fetch_requests``
+    through the LangChain callback so the cost stream prices the
+    per-request server-tool fees rather than reporting them as zero.
+    """
+
+    def test_extract_server_tool_use_returns_zeros_when_absent(self):
+        from graph.llm_cost_tracker import CostTelemetryCallback
+
+        message = MagicMock()
+        message.response_metadata = {"model_name": "claude-haiku-4-5"}
+        counts = CostTelemetryCallback._extract_server_tool_use(message)
+        assert counts == {"web_search_requests": 0, "web_fetch_requests": 0}
+
+    def test_extract_server_tool_use_pulls_from_response_metadata(self):
+        from graph.llm_cost_tracker import CostTelemetryCallback
+
+        message = MagicMock()
+        message.response_metadata = {
+            "model_name": "claude-haiku-4-5",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "server_tool_use": {
+                    "web_search_requests": 7,
+                    "web_fetch_requests": 3,
+                },
+            },
+        }
+        counts = CostTelemetryCallback._extract_server_tool_use(message)
+        assert counts == {"web_search_requests": 7, "web_fetch_requests": 3}
+
+    def test_extract_usage_passes_tool_counts_through(self):
+        from graph.llm_cost_tracker import CostTelemetryCallback
+
+        cb = CostTelemetryCallback()
+        usage = cb._extract_usage(_make_modern_response(
+            input_tokens=400, output_tokens=120,
+            web_search_requests=5, web_fetch_requests=2,
+        ))
+        assert usage["web_search_requests"] == 5
+        assert usage["web_fetch_requests"] == 2
+
+    def test_legacy_shape_zero_defaults_tool_counts(self):
+        """Legacy llm_output shape doesn't carry server_tool_use — zero-default
+        the tool fields (additive at the schema boundary) and continue."""
+        from graph.llm_cost_tracker import CostTelemetryCallback
+
+        cb = CostTelemetryCallback()
+        usage = cb._extract_usage(_make_legacy_response(
+            input_tokens=100, output_tokens=50,
+        ))
+        assert usage["web_search_requests"] == 0
+        assert usage["web_fetch_requests"] == 0
+
+    def test_frame_accumulates_tool_request_counts(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="qual_tools_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=100, output_tokens=50,
+                web_search_requests=3, web_fetch_requests=1,
+            ))
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=200, output_tokens=80,
+                web_search_requests=2, web_fetch_requests=0,
+            ))
+            assert frame.web_search_requests == 5
+            assert frame.web_fetch_requests == 1
+
+    def test_per_call_row_carries_tool_request_counts(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="qual_tools_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=100, output_tokens=50,
+                web_search_requests=4, web_fetch_requests=2,
+            ))
+            row = frame.per_call_rows[0]
+            assert row["web_search_requests"] == 4
+            assert row["web_fetch_requests"] == 2
+
+    def test_metadata_stashes_tool_request_counts(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="qual_tools_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=1000, output_tokens=300,
+                web_search_requests=6, web_fetch_requests=0,
+            ))
+        metadata, _ = pop_metadata_for("qual_tools_agent")
+        assert metadata.web_search_requests == 6
+        assert metadata.web_fetch_requests == 0
+
+    def test_frame_exit_prices_tool_fees(self, patched_pricing_path):
+        """A frame with 100 web_search requests should land 100 × $10/1k
+        = $1.00 of tool fee in addition to the token cost."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="qual_tools_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=1000, output_tokens=200,
+                web_search_requests=100, web_fetch_requests=0,
+            ))
+        metadata, _ = pop_metadata_for("qual_tools_agent")
+        # Tokens: (1000 * 1.0 + 200 * 5.0) / 1M = 0.002
+        # Tool fee: 100 * 10.0 / 1000 = 1.0
+        # Total: ~1.002
+        assert metadata.cost_usd == pytest.approx(1.002, abs=1e-6)
+
+    def test_frame_exit_no_raise_when_yaml_missing_tool_fees(
+        self, monkeypatch, fake_price_table_yaml_no_tool_fees,
+    ):
+        """When the pricing yaml has no ``tool_fees:`` section AND the
+        frame accumulated zero server-tool requests, the load is best-
+        effort (returns None) and the frame exit does not raise.
+        """
+        from graph import llm_cost_tracker
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+        )
+
+        monkeypatch.setattr(
+            llm_cost_tracker, "_resolve_pricing_path",
+            lambda: fake_price_table_yaml_no_tool_fees,
+        )
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="no_tools_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=100, output_tokens=50))
+        metadata, _ = pop_metadata_for("no_tools_agent")
+        # Token cost only — no fee added since requests were zero.
+        # (100 * 1.0 + 50 * 5.0) / 1M = 0.00035
+        assert metadata.cost_usd == pytest.approx(0.00035, abs=1e-6)
+
+
+class TestPerCallRowToolFeePricing:
+    """Lock down per-row cost recompute when tool requests are present.
+
+    The aggregator's daily parquet recomputes cost per row from token
+    counts + tool requests, so the per-row pricing path in
+    ``_enrich_row_with_frame_dimensions`` must match the frame-level path.
+    """
+
+    def test_per_call_row_cost_includes_tool_fees(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="qual_tools_agent",
+            sector_team_id="technology",
+            node_name="sector_team_node",
+            run_type="weekly_research",
+            run_id="2026-05-25",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(
+                input_tokens=1000, output_tokens=200,
+                web_search_requests=50, web_fetch_requests=0,
+            ))
+
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET,
+            Prefix="decision_artifacts/_cost_raw/",
+        )
+        keys = [obj["Key"] for obj in listing.get("Contents", [])]
+        rows = _read_jsonl_object(mocked_s3, _TEST_BUCKET, keys[0])
+        row = rows[0]
+        # Tokens: (1000 * 1.0 + 200 * 5.0) / 1M = 0.002
+        # Tool fee: 50 * 10.0 / 1000 = 0.5
+        # Total: 0.502
+        assert row["web_search_requests"] == 50
+        assert row["web_fetch_requests"] == 0
+        assert row["cost_usd"] == pytest.approx(0.502, abs=1e-6)

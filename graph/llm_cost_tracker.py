@@ -106,8 +106,10 @@ from alpha_engine_lib.cost import (
     PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
+    ToolFeeTable,
     compute_cost,
     load_pricing,
+    load_tool_fees,
     recompute_cost,
 )
 from alpha_engine_lib.decision_capture import (
@@ -127,7 +129,12 @@ logger = logging.getLogger(__name__)
 
 _COST_RAW_BUCKET = "alpha-engine-research"
 _COST_RAW_PREFIX = "decision_artifacts/_cost_raw"
-_PER_CALL_SCHEMA_VERSION = 1
+# Schema v2 (additive): adds ``web_search_requests`` + ``web_fetch_requests``
+# per-call columns to capture Anthropic server-tool usage. Backwards-compat
+# at the aggregator side — older v1 rows omit the new fields and the daily
+# parquet treats missing as zero. Bump again whenever a column is added or
+# renamed (per CLAUDE.md S3 contract safety).
+_PER_CALL_SCHEMA_VERSION = 2
 _DECISION_CAPTURE_ENV_VAR = "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"
 
 
@@ -288,6 +295,7 @@ def _normalize_model_for_pricing(model_name: str) -> str:
     """
     return _SNAPSHOT_SUFFIX_RE.sub("", model_name)
 _price_table: Optional[PriceTable] = None
+_tool_fee_table: Optional[ToolFeeTable] = None
 
 
 def _resolve_pricing_path() -> Path:
@@ -319,12 +327,42 @@ def _load_price_table() -> PriceTable:
     return _price_table
 
 
-def _reset_price_table_for_tests() -> None:
-    """Clear the cached price table — exposed for tests that swap yaml
-    fixtures between cases. Not used in production code paths.
+def _load_tool_fee_table() -> Optional[ToolFeeTable]:
+    """Load + cache the server-tool fee table from the same yaml.
+
+    Returns ``None`` when the yaml has no ``tool_fees:`` section so the
+    frame-exit + per-call pricing paths can short-circuit without
+    raising. Once a section is present, hard-fails on malformed entries
+    per ``load_tool_fees`` semantics — silent-zero on a real fee slice
+    would bury cost regressions (per ``feedback_no_silent_fails``).
     """
-    global _price_table
+    global _tool_fee_table
+    if _tool_fee_table is None:
+        path = _resolve_pricing_path()
+        try:
+            _tool_fee_table = load_tool_fees(path)
+            logger.info(
+                "[cost_tracker] loaded tool-fee table from %s (%d fees)",
+                path, len(_tool_fee_table.fees),
+            )
+        except PriceTableLoadError as exc:
+            logger.info(
+                "[cost_tracker] no tool_fees: section in %s — server-tool "
+                "request counts will flow through to JSONL but cost-USD "
+                "for tool fees will be left at None (%s)",
+                path, exc,
+            )
+            return None
+    return _tool_fee_table
+
+
+def _reset_price_table_for_tests() -> None:
+    """Clear the cached price + tool-fee tables — exposed for tests that
+    swap yaml fixtures between cases. Not used in production code paths.
+    """
+    global _price_table, _tool_fee_table
     _price_table = None
+    _tool_fee_table = None
 
 
 # ── Per-frame accumulator (one frame = one ``track_llm_cost`` scope) ─────
@@ -358,6 +396,13 @@ class _Frame:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_create_tokens: int = 0
+    # Server-side tool request counts (Anthropic ``Message.usage.server_tool_use``).
+    # Flat per-request fees, billed via ``ToolFee`` rather than the per-1M-token
+    # rate on ``PriceCard``. Zero-defaulted; the frame-exit pricing path passes
+    # a ``ToolFeeTable`` only when the cumulative requests > 0 — the wiring is
+    # dormant on agents that don't bind Anthropic server tools.
+    web_search_requests: int = 0
+    web_fetch_requests: int = 0
     call_count: int = 0
     enter_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # Per-call rows buffered in memory for the JSONL sink. One dict per
@@ -427,6 +472,8 @@ class CostTelemetryCallback(BaseCallbackHandler):
         frame.output_tokens += usage["output_tokens"]
         frame.cache_read_tokens += usage["cache_read_tokens"]
         frame.cache_create_tokens += usage["cache_create_tokens"]
+        frame.web_search_requests += usage["web_search_requests"]
+        frame.web_fetch_requests += usage["web_fetch_requests"]
         frame.call_count += 1
 
         # Lock model_name on first call. ChatAnthropic doesn't expose
@@ -451,16 +498,27 @@ class CostTelemetryCallback(BaseCallbackHandler):
             "output_tokens": usage["output_tokens"],
             "cache_read_tokens": usage["cache_read_tokens"],
             "cache_create_tokens": usage["cache_create_tokens"],
+            "web_search_requests": usage["web_search_requests"],
+            "web_fetch_requests": usage["web_fetch_requests"],
         })
 
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
-        """Extract token counts from an LLMResult.
+        """Extract token counts + server-tool request counts from an LLMResult.
 
-        Returns a dict with the four fields populated. Hard-fails if the
+        Returns a dict with six fields populated. Hard-fails if the
         response carries no usage information at all.
+
+        Server-tool request counts (``web_search_requests`` /
+        ``web_fetch_requests``) come from the Anthropic raw-usage payload
+        on ``message.response_metadata['usage']['server_tool_use']`` (the
+        full SDK response that langchain-anthropic stashes alongside the
+        normalized ``usage_metadata``). Zero-defaulted when absent — the
+        modern-shape path is the one consumers exercise; agents that
+        don't bind Anthropic server tools simply emit zero requests.
         """
-        # Modern path: AIMessage.usage_metadata.
+        # Modern path: AIMessage.usage_metadata for token counts +
+        # response_metadata['usage']['server_tool_use'] for tool requests.
         try:
             generations = response.generations
             if generations and generations[0]:
@@ -468,29 +526,36 @@ class CostTelemetryCallback(BaseCallbackHandler):
                 if message is not None and getattr(message, "usage_metadata", None):
                     um = message.usage_metadata
                     details = um.get("input_token_details") or {}
+                    tool_counts = CostTelemetryCallback._extract_server_tool_use(message)
                     return {
                         "input_tokens": int(um.get("input_tokens", 0)),
                         "output_tokens": int(um.get("output_tokens", 0)),
                         "cache_read_tokens": int(details.get("cache_read", 0)),
                         "cache_create_tokens": int(details.get("cache_creation", 0)),
+                        "web_search_requests": tool_counts["web_search_requests"],
+                        "web_fetch_requests": tool_counts["web_fetch_requests"],
                     }
         except (AttributeError, IndexError, KeyError, TypeError):
             pass
 
-        # Legacy path: response.llm_output["token_usage"]. No cache fields.
+        # Legacy path: response.llm_output["token_usage"]. No cache or
+        # server-tool fields available — both zero-defaulted.
         llm_output = getattr(response, "llm_output", None) or {}
         token_usage = llm_output.get("token_usage") if isinstance(llm_output, dict) else None
         if token_usage:
             logger.warning(
                 "[cost_tracker] response carried legacy token_usage shape — "
-                "cache_read + cache_create token counts are not available; "
-                "consider upgrading langchain-anthropic for cache visibility",
+                "cache_read + cache_create + server_tool_use counts are not "
+                "available; consider upgrading langchain-anthropic for cache "
+                "+ tool-fee visibility",
             )
             return {
                 "input_tokens": int(token_usage.get("input_tokens", 0)),
                 "output_tokens": int(token_usage.get("output_tokens", 0)),
                 "cache_read_tokens": 0,
                 "cache_create_tokens": 0,
+                "web_search_requests": 0,
+                "web_fetch_requests": 0,
             }
 
         raise RuntimeError(
@@ -499,6 +564,35 @@ class CostTelemetryCallback(BaseCallbackHandler):
             "SDK shape change worth investigating. "
             "Per feedback_no_silent_fails, refusing to record a 0-token call."
         )
+
+    @staticmethod
+    def _extract_server_tool_use(message: Any) -> dict[str, int]:
+        """Pull web_search / web_fetch request counts off the response.
+
+        langchain-anthropic stashes the raw Anthropic SDK response on
+        ``message.response_metadata`` (mapping shape: keys like
+        ``"model_name"``, ``"usage"``, ``"stop_reason"``). The ``usage``
+        sub-dict mirrors ``anthropic.types.Usage`` and includes
+        ``server_tool_use`` when the model exercised server tools in the
+        turn. Field names match the SDK's ``ServerToolUsage``.
+
+        Returns zero-defaulted dict on every miss path (no
+        ``response_metadata`` mapping, no ``usage`` sub-key, no
+        ``server_tool_use`` sub-key, or non-int values). Server-tool
+        usage is optional in the SDK; absence is not a failure mode.
+        """
+        try:
+            md = getattr(message, "response_metadata", None) or {}
+            raw_usage = md.get("usage") if isinstance(md, dict) else None
+            stu = raw_usage.get("server_tool_use") if isinstance(raw_usage, dict) else None
+            if not isinstance(stu, dict):
+                return {"web_search_requests": 0, "web_fetch_requests": 0}
+            return {
+                "web_search_requests": int(stu.get("web_search_requests", 0) or 0),
+                "web_fetch_requests": int(stu.get("web_fetch_requests", 0) or 0),
+            }
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return {"web_search_requests": 0, "web_fetch_requests": 0}
 
     @staticmethod
     def _extract_model_name(response: Any) -> Optional[str]:
@@ -534,6 +628,7 @@ _callback_singleton: Optional[CostTelemetryCallback] = None
 
 def _enrich_row_with_frame_dimensions(
     row: dict, frame: _Frame, *, table: Optional[PriceTable],
+    tool_fee_table: Optional[ToolFeeTable] = None,
 ) -> dict:
     """Stamp frame-level dimensions onto a per-call row + compute cost_usd.
 
@@ -566,12 +661,33 @@ def _enrich_row_with_frame_dimensions(
             row_dt = datetime.fromisoformat(enriched["timestamp"].replace("Z", "+00:00")) \
                 if isinstance(enriched.get("timestamp"), str) else frame.enter_time
             card = table.get(_normalize_model_for_pricing(model_name), row_dt)
+            # Per-row tool-fee pricing: build {tool_name: count} from the
+            # row's request fields; resolve fees from the table only when
+            # the row has non-zero requests (compute_cost raises if a
+            # count has no matching fee). Per-row granularity matches the
+            # JSONL contract — each row's cost_usd reflects its own tokens
+            # AND its own tool requests, not a frame-level rollup.
+            tool_requests: dict[str, int] = {}
+            ws = int(enriched.get("web_search_requests", 0) or 0)
+            wf = int(enriched.get("web_fetch_requests", 0) or 0)
+            if ws > 0:
+                tool_requests["web_search"] = ws
+            if wf > 0:
+                tool_requests["web_fetch"] = wf
+            tool_fees = None
+            if tool_requests and tool_fee_table is not None:
+                tool_fees = {
+                    name: tool_fee_table.get(name, row_dt)
+                    for name in tool_requests
+                }
             cost = compute_cost(
                 input_tokens=enriched["input_tokens"],
                 output_tokens=enriched["output_tokens"],
                 cache_read_tokens=enriched["cache_read_tokens"],
                 cache_create_tokens=enriched["cache_create_tokens"],
                 card=card,
+                tool_requests=tool_requests or None,
+                tool_fees=tool_fees,
             )
         except PriceCardLookupError as exc:
             # Unknown model in the price table — log and leave cost None.
@@ -591,6 +707,7 @@ def _flush_cost_rows_to_s3(
     *,
     frame: _Frame,
     table: Optional[PriceTable],
+    tool_fee_table: Optional[ToolFeeTable] = None,
     s3_client: Any | None = None,
 ) -> Optional[str]:
     """Serialize ``frame.per_call_rows`` to JSONL + write to S3.
@@ -617,7 +734,9 @@ def _flush_cost_rows_to_s3(
         return None
 
     enriched_rows = [
-        _enrich_row_with_frame_dimensions(row, frame, table=table)
+        _enrich_row_with_frame_dimensions(
+            row, frame, table=table, tool_fee_table=tool_fee_table,
+        )
         for row in frame.per_call_rows
     ]
     body = "\n".join(json.dumps(row, default=str) for row in enriched_rows).encode("utf-8")
@@ -800,6 +919,8 @@ def track_llm_cost(
         output_tokens=frame.output_tokens,
         cache_read_tokens=frame.cache_read_tokens,
         cache_create_tokens=frame.cache_create_tokens,
+        web_search_requests=frame.web_search_requests,
+        web_fetch_requests=frame.web_fetch_requests,
         run_type=run_type,
         node_name=node_name,
         sector_team_id=sector_team_id,
@@ -811,9 +932,16 @@ def track_llm_cost(
     # The same loaded table is reused for the JSONL flush below — one load
     # covers the aggregate ModelMetadata + every per-call row.
     table_for_flush: Optional[PriceTable] = None
+    tool_fee_table_for_flush: Optional[ToolFeeTable] = None
     if model_name != "unknown":
         try:
             table_for_flush = _load_price_table()
+            # Tool-fee table is loaded best-effort — when the yaml has no
+            # ``tool_fees:`` section, the loader returns None and the
+            # recompute_cost path below only raises if the frame actually
+            # accumulated non-zero server-tool requests. Dormant wiring on
+            # agents that don't bind Anthropic server tools.
+            tool_fee_table_for_flush = _load_tool_fee_table()
             # Normalize the snapshot suffix (e.g. -20251001) before lookup —
             # see _normalize_model_for_pricing docstring for the 2026-05-02
             # incident this fixes. We pass a copy with the family-only name
@@ -822,7 +950,11 @@ def track_llm_cost(
             metadata_for_pricing = metadata.model_copy(update={
                 "model_name": _normalize_model_for_pricing(metadata.model_name),
             })
-            recompute_cost(metadata_for_pricing, table_for_flush, at=frame.enter_time)
+            recompute_cost(
+                metadata_for_pricing, table_for_flush,
+                tool_fee_table=tool_fee_table_for_flush,
+                at=frame.enter_time,
+            )
             metadata.cost_usd = metadata_for_pricing.cost_usd
         except PriceCardLookupError as exc:
             # No card for the (normalized) family at this date. Mirror the
@@ -883,6 +1015,7 @@ def track_llm_cost(
         try:
             written_key = _flush_cost_rows_to_s3(
                 frame=frame, table=table_for_flush,
+                tool_fee_table=tool_fee_table_for_flush,
             )
             if written_key:
                 logger.debug(
