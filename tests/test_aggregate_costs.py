@@ -455,3 +455,124 @@ class TestToolRequestTotals:
         assert summary is not None
         assert summary["total_web_search_requests"] == 0
         assert summary["total_web_fetch_requests"] == 0
+
+
+# ── CW metric emission (Phase 4 #2 + #3) ─────────────────────────────────
+
+
+class TestPerAgentCwMetrics:
+    """``aggregate_day`` emits per-agent_id metrics to
+    ``AlphaEngine/Cost`` so alarms + the dashboard can rank by regressor.
+    """
+
+    def test_emits_weekly_cost_per_agent(self, s3):
+        from scripts.aggregate_costs import aggregate_day
+        from unittest.mock import MagicMock
+
+        cw = MagicMock()
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl", [
+            _make_row(agent_id="data:news_event_extraction", sector_team_id=None,
+                      model_name="claude-haiku-4-5",
+                      input_tokens=10_000, output_tokens=2_000, cost_usd=0.020),
+        ])
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/b.jsonl", [
+            _make_row(agent_id="executor:eod_narrative", sector_team_id=None,
+                      model_name="claude-haiku-4-5",
+                      input_tokens=2_000, output_tokens=500, cost_usd=0.0045),
+        ])
+
+        aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
+
+        # Single put_metric_data call (≤20 metrics this run).
+        cw.put_metric_data.assert_called_once()
+        kwargs = cw.put_metric_data.call_args.kwargs
+        assert kwargs["Namespace"] == "AlphaEngine/Cost"
+        metrics = kwargs["MetricData"]
+
+        weekly_costs = {
+            tuple((d["Name"], d["Value"]) for d in m["Dimensions"]): m["Value"]
+            for m in metrics if m["MetricName"] == "WeeklyCostUsd"
+        }
+        assert weekly_costs[(("agent_id", "data:news_event_extraction"),)] == pytest.approx(0.020)
+        assert weekly_costs[(("agent_id", "executor:eod_narrative"),)] == pytest.approx(0.0045)
+
+    def test_cache_hit_ratio_metric_emitted_when_cache_activity(self, s3):
+        from scripts.aggregate_costs import aggregate_day
+        from unittest.mock import MagicMock
+
+        cw = MagicMock()
+        row = _make_row(
+            agent_id="ic_cio", sector_team_id=None,
+            model_name="claude-sonnet-4-6",
+            input_tokens=1_000, output_tokens=200, cost_usd=0.01,
+        )
+        row["cache_read_tokens"] = 3_000  # heavy cache usage
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/c.jsonl", [row])
+
+        aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
+        metrics = cw.put_metric_data.call_args.kwargs["MetricData"]
+        cache_hit = next(m for m in metrics if m["MetricName"] == "CacheHitRatio")
+        # 3000 / (3000 + 1000) = 75%
+        assert cache_hit["Value"] == pytest.approx(75.0)
+        assert cache_hit["Unit"] == "Percent"
+
+    def test_tool_fee_requests_metric_per_tool(self, s3):
+        from scripts.aggregate_costs import aggregate_day
+        from unittest.mock import MagicMock
+
+        cw = MagicMock()
+        row = _make_row(
+            agent_id="qual_tools_agent", sector_team_id="tech",
+            model_name="claude-haiku-4-5",
+            input_tokens=1_000, output_tokens=200, cost_usd=0.502,
+            web_search_requests=50, web_fetch_requests=3,
+        )
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/d.jsonl", [row])
+
+        aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
+        metrics = cw.put_metric_data.call_args.kwargs["MetricData"]
+        tool_metrics = {
+            tuple(sorted((d["Name"], d["Value"]) for d in m["Dimensions"])): m["Value"]
+            for m in metrics if m["MetricName"] == "ToolFeeRequests"
+        }
+        ws_key = tuple(sorted([("agent_id", "qual_tools_agent"), ("tool", "web_search")]))
+        wf_key = tuple(sorted([("agent_id", "qual_tools_agent"), ("tool", "web_fetch")]))
+        assert tool_metrics[ws_key] == 50
+        assert tool_metrics[wf_key] == 3
+
+    def test_cw_failure_does_not_break_parquet_write(self, s3):
+        """Per [[feedback_no_silent_fails]] applied carefully: CW emit
+        is the observability layer ON TOP of the parquet write. CW
+        failure must NOT take down the parquet (which IS the load-
+        bearing artifact)."""
+        from scripts.aggregate_costs import aggregate_day
+        from unittest.mock import MagicMock
+
+        cw = MagicMock()
+        cw.put_metric_data.side_effect = RuntimeError("ThrottlingException")
+
+        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl", [
+            _make_row(agent_id="a", sector_team_id=None,
+                      model_name="claude-haiku-4-5",
+                      input_tokens=10, output_tokens=5, cost_usd=0.001),
+        ])
+
+        # MUST NOT raise — parquet write succeeds, CW failure swallowed.
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
+        assert summary is not None
+        # Parquet was written.
+        obj = s3.get_object(Bucket=_BUCKET, Key=summary["output_key"])
+        df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
+        assert len(df) == 1
+
+    def test_empty_df_skips_cw_emit(self, s3):
+        """Zero-row partition → no metric emit (avoids empty put_metric_data
+        calls that CloudWatch would reject anyway)."""
+        from scripts.aggregate_costs import aggregate_day
+        from unittest.mock import MagicMock
+
+        cw = MagicMock()
+        # No JSONL files → aggregate_day returns None before emit.
+        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
+        assert summary is None
+        cw.put_metric_data.assert_not_called()
