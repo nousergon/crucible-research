@@ -22,13 +22,18 @@ _S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _MARKET_DATA_PREFIX = "market_data/"
 
 # Rerank configuration (L1303 ROADMAP — alpha-engine-lib v0.11.0 primitive).
-# Default empty string ≡ disabled, preserving the hybrid-only path so this
-# PR is safe to merge without a config-side change. Operators flip on by
-# setting ``RAG_RERANK=cross_encoder`` (default, local BAAI model, zero
-# new API surface) or ``RAG_RERANK=llm_judge`` (Anthropic Haiku) in the
-# Lambda environment — no redeploy required for the flip itself, only
-# for the install of the ``[rerank]`` extra (deferred to PR 3 of the
-# L1303 arc, alongside the eval-validated cutover).
+# Default empty string ≡ disabled, preserving the hybrid-only path
+# (operator-validated optimal per 2026-05-12 eval — both rerank variants
+# regressed against hybrid w=0.7 baseline). Operators flip on by setting
+# ``RAG_RERANK=cross_encoder`` (local BAAI bge-reranker-v2-m3, zero API
+# surface) in the Lambda environment — no redeploy required for the
+# flip itself, only for the install of the ``[rerank]`` extra.
+#
+# ``RAG_RERANK=llm_judge`` was removed lib v0.34.0 (2026-05-25) per
+# ``[[preference_llm_calls_confined_to_research_module]]`` + the no-lift
+# finding. CE stays for future domain-finetune retries; if revisiting
+# rerank, EXPERIMENTS.md captures the institutional path (finetune CE
+# on retrieval-log triples, not LLM-judge).
 _RAG_RERANK = os.environ.get("RAG_RERANK", "").strip() or None
 _RAG_RERANK_INPUT_N = int(os.environ.get("RAG_RERANK_INPUT_N", "30"))
 

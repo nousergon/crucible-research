@@ -251,10 +251,14 @@ class TestConditionRerank:
 
     def test_default_conditions_include_rerank_conditions(self) -> None:
         rerank_conds = [c for c in DEFAULT_CONDITIONS if c.rerank is not None]
-        assert len(rerank_conds) == 2
+        # ``llm_judge`` rerank Condition was removed 2026-05-25 when lib
+        # v0.34.0 deleted LLMJudgeReranker — only the CE condition remains.
+        # See evals/rag_retrieval.py::DEFAULT_CONDITIONS comment for the
+        # no-lift finding + institutional rerank-revisit path.
+        assert len(rerank_conds) == 1
         rerank_methods = {c.rerank for c in rerank_conds}
-        assert rerank_methods == {"cross_encoder", "llm_judge"}
-        # Both layer on hybrid w=0.7 (the established baseline from PR 4).
+        assert rerank_methods == {"cross_encoder"}
+        # Layers on hybrid w=0.7 (the established baseline from PR 4).
         for c in rerank_conds:
             assert c.method == "hybrid"
             assert c.vector_weight == 0.7
@@ -500,12 +504,20 @@ class TestFilterConditions:
         baseline_names_out = {c.name for c in out if c.rerank is None}
         assert baseline_names_in == baseline_names_out
 
-    def test_rerank_only_llm_judge_drops_cross_encoder(self) -> None:
+    def test_rerank_only_unknown_method_filters_to_empty_rerank_set(self) -> None:
+        """``llm_judge`` Condition was deleted 2026-05-25 (lib v0.34.0).
+        ``filter_conditions(rerank_only="llm_judge")`` now filters to
+        zero rerank conditions since none match. Baselines preserved.
+        """
         from scripts.run_rag_retrieval_eval import filter_conditions
 
         out = filter_conditions(skip_rerank=False, rerank_only="llm_judge")
-        rerank_kinds = sorted({c.rerank for c in out if c.rerank is not None})
-        assert rerank_kinds == ["llm_judge"]
+        rerank_kinds = {c.rerank for c in out if c.rerank is not None}
+        assert rerank_kinds == set()
+        # Non-rerank baselines all preserved.
+        baseline_names_in = {c.name for c in DEFAULT_CONDITIONS if c.rerank is None}
+        baseline_names_out = {c.name for c in out if c.rerank is None}
+        assert baseline_names_in == baseline_names_out
 
     def test_skip_rerank_and_rerank_only_mutually_exclusive(self) -> None:
         from scripts.run_rag_retrieval_eval import filter_conditions

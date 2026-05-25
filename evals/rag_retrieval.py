@@ -127,11 +127,21 @@ class Condition:
 
 
 # Default sweep — six baseline conditions (vector + keyword + four
-# hybrid weights, established 2026-05-08) plus two rerank conditions
-# layered on the winning hybrid w=0.7 baseline. Rerank conditions
-# require the ``[rerank]`` extras installed on the eval runner; the CLI
-# emits a clear ImportError pointing at the install path if missing
-# (see ``scripts/run_rag_retrieval_eval.py`` docstring).
+# hybrid weights, established 2026-05-08) plus one rerank condition
+# layered on the winning hybrid w=0.7 baseline.
+#
+# **LLM-judge rerank condition removed 2026-05-25** (lib v0.34.0 dropped
+# the ``LLMJudgeReranker`` class). The 2026-05-12 operator eval found
+# both rerank variants regressed against the hybrid w=0.7 baseline
+# (-33.3% CE, -14.2% LLM-judge recall@10 on SEC filings); LLM-judge was
+# deleted outright per ``[[preference_llm_calls_confined_to_research_module]]``,
+# CE stays for future domain-finetune retries. EXPERIMENTS.md captures
+# the institutional rerank-revisit path.
+#
+# Rerank conditions require the ``[rerank]`` extras installed on the
+# eval runner; the CLI emits a clear ImportError pointing at the
+# install path if missing (see ``scripts/run_rag_retrieval_eval.py``
+# docstring).
 DEFAULT_CONDITIONS: tuple[Condition, ...] = (
     Condition("vector", "vector", None),
     Condition("keyword", "keyword", None),
@@ -141,8 +151,6 @@ DEFAULT_CONDITIONS: tuple[Condition, ...] = (
     Condition("hybrid w=0.9", "hybrid", 0.9),
     Condition("hybrid w=0.7 + ce rerank", "hybrid", 0.7,
               rerank="cross_encoder", rerank_input_n=30),
-    Condition("hybrid w=0.7 + llm rerank", "hybrid", 0.7,
-              rerank="llm_judge", rerank_input_n=30),
 )
 
 
