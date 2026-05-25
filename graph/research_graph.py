@@ -598,7 +598,13 @@ def fetch_data(state: ResearchState) -> dict:
                     "price_vs_ma200": fs_row.get("price_vs_ma200"),
                     "momentum_20d": fs_row.get("momentum_20d"),
                     "momentum_5d": fs_row.get("momentum_5d"),
-                    "avg_volume_20d": fs_row.get("avg_volume_20d"),
+                    # Scanner's absolute-liquidity gate compares against
+                    # MIN_AVG_VOLUME (raw shares). The bare avg_volume_20d
+                    # column is the predictor's normalized ratio (~1.0);
+                    # avg_volume_20d_raw is the raw-shares column added in
+                    # alpha-engine-data Phase 1 of the schema audit. See
+                    # alpha-engine-data/features/SCHEMA.md.
+                    "avg_volume_20d": fs_row.get("avg_volume_20d_raw"),
                     "atr_14_pct": fs_row.get("atr_14_pct"),
                     "dist_from_52w_high": fs_row.get("dist_from_52w_high"),
                     "dist_from_52w_low": fs_row.get("dist_from_52w_low"),
