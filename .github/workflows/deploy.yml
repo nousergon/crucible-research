@@ -127,6 +127,19 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh rationale_clustering
 
+      # Daily cost aggregation Lambda — ROADMAP L1146. Same image-share
+      # pattern as eval-judge / rationale-clustering, CMD override sets
+      # the entry to aggregate_costs_handler.handler. SF-wired via the
+      # Saturday alpha-engine-data step_function.json — without this
+      # step the image-share Lambda would stay on whichever version was
+      # current at first manual deploy. Cost-aggregation logic changes
+      # in scripts/aggregate_costs.py propagate cleanly via this step.
+      - name: Deploy aggregate-costs Lambda (alpha-engine-research-aggregate-costs)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh aggregate_costs
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"

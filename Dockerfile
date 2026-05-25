@@ -92,4 +92,12 @@ COPY lambda/eval_rolling_mean_handler.py ${LAMBDA_TASK_ROOT}/eval_rolling_mean_h
 # agent_id, emits agent_rationale_template_concentration CW metric.
 COPY lambda/rationale_clustering_handler.py ${LAMBDA_TASK_ROOT}/rationale_clustering_handler.py
 
+# Daily cost aggregation Lambda — same image, CMD override to
+# ["aggregate_costs_handler.handler"]. Reads decision_artifacts/_cost_raw/
+# JSONL partitions for the target date, writes the daily parquet at
+# decision_artifacts/_cost/{date}/cost.parquet, emits per-agent CW metrics.
+# Per ROADMAP L1146 — closes the manual-trigger surface for the cost
+# aggregator that PR #74 shipped (since 2026-05-01).
+COPY lambda/aggregate_costs_handler.py ${LAMBDA_TASK_ROOT}/aggregate_costs_handler.py
+
 CMD ["handler.handler"]
