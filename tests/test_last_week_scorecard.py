@@ -13,10 +13,12 @@ from pathlib import Path
 import pytest
 
 from evals.last_week_scorecard import (
+    DEFAULT_SCORECARD_PREFIX,
     Scorecard,
     SectorRow,
     TickerOutcome,
     build_scorecard,
+    emit_scorecard_to_s3,
     format_scorecard_text,
 )
 
@@ -305,3 +307,74 @@ class TestSerialization:
         if d["per_sector"]:
             assert "sector" in d["per_sector"][0]
             assert "hit_rate_10d" in d["per_sector"][0]
+
+
+class _StubS3Client:
+    """Captures put_object calls for assertion."""
+
+    def __init__(self, fail_after: int | None = None):
+        self.calls: list[dict] = []
+        self._fail_after = fail_after
+
+    def put_object(self, **kwargs):
+        if self._fail_after is not None and len(self.calls) >= self._fail_after:
+            raise RuntimeError("simulated S3 outage")
+        self.calls.append(kwargs)
+        return {"ETag": '"deadbeef"'}
+
+
+class TestEmitScorecardToS3:
+    def test_writes_dated_and_latest_keys(self, populated_db):
+        import json
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        client = _StubS3Client()
+        result = emit_scorecard_to_s3(sc, s3_client=client, bucket="bkt")
+        # Two put_object calls — dated + latest sidecar.
+        assert len(client.calls) == 2
+        keys = [c["Key"] for c in client.calls]
+        assert any(k.endswith("/latest.json") for k in keys)
+        # Dated key has the YYMMDDHHMM run_id, not "latest".
+        dated = [k for k in keys if not k.endswith("/latest.json")][0]
+        assert dated.startswith(DEFAULT_SCORECARD_PREFIX)
+        # Result dict carries both keys back.
+        assert result["latest_key"].endswith("/latest.json")
+        assert result["dated_key"] == dated
+        # Both payloads identical.
+        bodies = [c["Body"] for c in client.calls]
+        assert bodies[0] == bodies[1]
+        # Round-trip the body back through json.
+        payload = json.loads(bodies[0])
+        assert payload["as_of_date"] == "2026-05-23"
+
+    def test_custom_prefix_honored(self, populated_db):
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        client = _StubS3Client()
+        emit_scorecard_to_s3(
+            sc, s3_client=client, bucket="bkt", prefix="custom/path"
+        )
+        assert all(c["Key"].startswith("custom/path/") for c in client.calls)
+
+    def test_explicit_run_id_used(self, populated_db):
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        client = _StubS3Client()
+        result = emit_scorecard_to_s3(
+            sc, s3_client=client, bucket="bkt", run_id="2605271400"
+        )
+        assert result["run_id"] == "2605271400"
+        assert any("2605271400" in c["Key"] for c in client.calls)
+
+    def test_empty_bucket_raises(self, populated_db):
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        client = _StubS3Client()
+        with pytest.raises(ValueError, match="non-empty bucket"):
+            emit_scorecard_to_s3(sc, s3_client=client, bucket="")
+
+    def test_s3_failure_propagates_per_no_silent_fails(self, populated_db):
+        # Producer-side path: must raise, not swallow. Phase 2 consumers
+        # depend on the artifact existing; silent failure here would
+        # leave the next research cycle without scorecard data and the
+        # operator with no signal that it's missing.
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        client = _StubS3Client(fail_after=0)  # fail on first call
+        with pytest.raises(RuntimeError, match="simulated S3 outage"):
+            emit_scorecard_to_s3(sc, s3_client=client, bucket="bkt")

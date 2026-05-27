@@ -52,9 +52,21 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from alpha_engine_lib.eval_artifacts import (
+    eval_artifact_key,
+    eval_latest_key,
+    new_eval_run_id,
+)
 
 logger = logging.getLogger(__name__)
+
+# Canonical S3 prefix for the scorecard pipeline. Same partition shape
+# as `predictor/variant_gates/triple_barrier` and the eval-judge pipeline
+# — flat `{prefix}/{run_id}.json` + `{prefix}/latest.json` sidecar per
+# the institutional layout codified in `alpha_engine_lib.eval_artifacts`.
+DEFAULT_SCORECARD_PREFIX = "research/last_week_scorecard"
 
 # Top-K surprise / confirmation lists. Bounded so prompt-injection cost
 # is bounded; 3 is the smallest k that still surfaces a pattern (a single
@@ -435,6 +447,68 @@ def format_scorecard_text(sc: Scorecard) -> str:
 
 
 # ---------------------------------------------------------------------------
+# S3 emission
+# ---------------------------------------------------------------------------
+
+
+def emit_scorecard_to_s3(
+    sc: Scorecard,
+    *,
+    s3_client: Any,
+    bucket: str,
+    prefix: str = DEFAULT_SCORECARD_PREFIX,
+    run_id: Optional[str] = None,
+) -> dict:
+    """Write `sc` to S3 under the canonical eval-artifacts partition.
+
+    Two keys land per call:
+      - `{prefix}/{run_id}.json` — forensic, never overwritten (run_id
+        is `YYMMDDHHMM` so concurrent same-minute writes are the only
+        clobber risk and aren't relevant on a weekly cadence).
+      - `{prefix}/latest.json` — operator-UX sidecar pointing to the
+        most recent payload by exact-mirror copy.
+
+    `s3_client` is injected so tests can pass a stub. Caller is
+    responsible for constructing a real boto3 client when wired into
+    the Research Lambda (Phase 1.B.2).
+
+    Returns the `{dated_key, latest_key, run_id}` dict so callers can
+    log + emit observability without re-deriving the keys.
+
+    Per [[feedback_no_silent_fails]] this raises on any S3 failure —
+    the scorecard is a PRODUCER artifact (Phase 2 consumers read it).
+    Best-effort posture would mask Phase-2 prompt-injection on real
+    failures, which is the worst possible outcome.
+    """
+    if not bucket:
+        raise ValueError("emit_scorecard_to_s3 requires a non-empty bucket")
+    run_id = run_id or new_eval_run_id()
+    dated_key = eval_artifact_key(prefix, run_id)
+    latest_key = eval_latest_key(prefix)
+    payload = json.dumps(sc.to_dict(), indent=2).encode("utf-8")
+
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=dated_key,
+        Body=payload,
+        ContentType="application/json",
+    )
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=latest_key,
+        Body=payload,
+        ContentType="application/json",
+    )
+    logger.info(
+        "scorecard emitted bucket=%s dated=%s latest=%s",
+        bucket,
+        dated_key,
+        latest_key,
+    )
+    return {"dated_key": dated_key, "latest_key": latest_key, "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -469,6 +543,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="json",
         help="Output format. 'json' is the machine-consumed shape; 'text' is the prompt-ready rendering.",
     )
+    parser.add_argument(
+        "--s3-bucket",
+        default=None,
+        help=(
+            "Optional S3 bucket. When provided, emits the scorecard "
+            "JSON to `{prefix}/{run_id}.json` + `{prefix}/latest.json` "
+            "alongside the stdout render. Operator-driven invocations "
+            "typically leave this blank; the Saturday SF Research Lambda "
+            "passes the production bucket."
+        ),
+    )
+    parser.add_argument(
+        "--s3-prefix",
+        default=DEFAULT_SCORECARD_PREFIX,
+        help=f"S3 prefix root (default: {DEFAULT_SCORECARD_PREFIX}).",
+    )
     args = parser.parse_args(argv)
 
     db_path = Path(args.db)
@@ -484,6 +574,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(sc.to_dict(), indent=2))
     else:
         print(format_scorecard_text(sc), end="")
+
+    if args.s3_bucket:
+        # Import boto3 lazily — CLI invocations without --s3-bucket
+        # should not require boto3 to be importable.
+        import boto3
+        client = boto3.client("s3")
+        result = emit_scorecard_to_s3(
+            sc,
+            s3_client=client,
+            bucket=args.s3_bucket,
+            prefix=args.s3_prefix,
+        )
+        print(
+            f"emitted s3://{args.s3_bucket}/{result['dated_key']} "
+            f"+ s3://{args.s3_bucket}/{result['latest_key']}",
+            file=sys.stderr,
+        )
     return 0
 
 
