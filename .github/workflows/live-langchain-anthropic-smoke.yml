@@ -1,0 +1,52 @@
+name: Live LangChain Anthropic Smoke
+
+# Catches Anthropic API payload-shape regressions in the LangChain
+# ChatAnthropic path that the mocked unit-test suite cannot see.
+# Modeled on morning-signal's live-api-smoke pattern shipped 2026-05-26
+# for the raw-SDK equivalent of the same class of bug.
+#
+# Triggers ONLY on PRs touching files that affect the LangChain payload
+# shape (agent constructors, callbacks, structured-output schemas).
+# Other PRs skip.
+#
+# Cost: one max_tokens=1 ChatAnthropic.invoke() call per triggered run
+# (~$0.001 on Haiku). Negligible vs the cost of one silent-failed
+# Saturday SF Research stage.
+#
+# Secret gate: requires repo secret ANTHROPIC_API_KEY. Forks without
+# the secret get a clean skip (the script exits 0 when the env var is
+# unset) rather than a failing CI status.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "agents/**/*.py"
+      - "graph/llm_cost_tracker.py"
+      - "evals/judge.py"
+      - "tests/live_smoke/langchain_anthropic_smoke.py"
+      - ".github/workflows/live-langchain-anthropic-smoke.yml"
+      - "requirements.txt"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Dispatch live-LangChain-Anthropic smoke
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python tests/live_smoke/langchain_anthropic_smoke.py
