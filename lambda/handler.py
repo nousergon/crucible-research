@@ -88,6 +88,58 @@ def _ensure_init() -> None:
     _init_done = True
 
 
+def _scorecard_enabled() -> bool:
+    """Read the `RESEARCH_SCORECARD_ENABLED` flag.
+
+    Default-off until Phase 2 (CIO/Macro prompt wiring) lands and the
+    operator flips this on to start the ≥4-cycle shadow soak.
+    """
+    return os.environ.get("RESEARCH_SCORECARD_ENABLED", "").lower() in ("1", "true", "yes")
+
+
+def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
+    """Build + write the prior-cycle scorecard. Shadow-safe.
+
+    Pulled out of the handler body so the wiring + failure posture can
+    be unit-tested with a stub archive + stub S3 client. The handler
+    body sees only the helper call site.
+
+    Skips when the flag is off; logs WARN-and-continues on any failure
+    so the morning briefing isn't blocked by a producer artifact that
+    no consumer is reading yet (the shadow-mode carve-out
+    `[[feedback_no_silent_fails]]` permits).
+    """
+    if not _scorecard_enabled():
+        logger.debug("scorecard disabled (flag off) — skipping emission")
+        return
+    try:
+        import boto3  # local import — only paid when flag is on
+        from evals.last_week_scorecard import build_scorecard, emit_scorecard_to_s3
+        sc = build_scorecard(archive.db_conn, as_of_date=trading_date)
+        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        result = emit_scorecard_to_s3(
+            sc,
+            s3_client=boto3.client("s3"),
+            bucket=bucket,
+        )
+        logger.info(
+            "scorecard emitted run_id=%s dated_key=%s n_resolved_predictions=%d "
+            "n_resolved_signals_10d=%d",
+            result["run_id"],
+            result["dated_key"],
+            sc.n_resolved_predictions,
+            sc.n_resolved_signals_10d,
+        )
+    except Exception as sce:
+        # Shadow-mode WARN-not-fatal. Promote to ERROR + raise in Phase 2
+        # when CIO/Macro prompts depend on the scorecard artifact.
+        logger.warning(
+            "Scorecard emission failed (shadow mode — non-fatal): %s",
+            sce,
+            exc_info=True,
+        )
+
+
 def is_trading_day(date: datetime.date | None = None) -> bool:
     """Return True if date (default: today) is an NYSE trading day."""
     from exchange_calendars import get_calendar
@@ -286,6 +338,20 @@ def handler(event, context):
         # Run performance tracker before agents
         from scoring.performance_tracker import run_performance_checks
         perf_summary = run_performance_checks(archive.db_conn, run_date)
+
+        # Phase 1.B.2 — research-feedback scorecard.
+        # Emits the prior-cycle realized-outcomes scorecard artifact under
+        # `research/last_week_scorecard/{run_id}.json` for Phase 2 prompt
+        # injection. Gated default-OFF behind `RESEARCH_SCORECARD_ENABLED`
+        # until Phase 2 (CIO/Macro prompt wiring) is ready to consume it.
+        # Shadow-mode failure posture: WARN log + continue. Per
+        # [[feedback_no_silent_fails]] secondary-observability carve-out —
+        # (a) swallowing scorecard build/write failures, (b) primary
+        # deliverable (Saturday morning briefing) is independent of the
+        # scorecard during shadow, (c) WARN log is the recording surface
+        # (promotable to ERROR + CloudWatch alarm in Phase 2 when the
+        # consumer depends on the artifact).
+        _maybe_emit_scorecard(archive, trading_date)
 
         # Build and run the LangGraph pipeline
         graph = build_graph()
