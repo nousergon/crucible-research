@@ -20,6 +20,8 @@ from evals.last_week_scorecard import (
     build_scorecard,
     emit_scorecard_to_s3,
     format_scorecard_text,
+    load_latest_scorecard,
+    load_latest_scorecard_text,
 )
 
 
@@ -378,3 +380,114 @@ class TestEmitScorecardToS3:
         client = _StubS3Client(fail_after=0)  # fail on first call
         with pytest.raises(RuntimeError, match="simulated S3 outage"):
             emit_scorecard_to_s3(sc, s3_client=client, bucket="bkt")
+
+
+class _StubS3Reader:
+    """Captures get_object calls; returns a configurable body or raises."""
+
+    def __init__(self, body: bytes | None = None, exc: Exception | None = None):
+        self._body = body
+        self._exc = exc
+        self.calls: list[dict] = []
+
+    def get_object(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._exc:
+            raise self._exc
+
+        class _Body:
+            def __init__(self, b: bytes):
+                self._b = b
+
+            def read(self) -> bytes:
+                return self._b
+
+        return {"Body": _Body(self._body or b"")}
+
+
+class TestLoadLatestScorecard:
+    def test_round_trip_via_to_dict_from_dict(self, populated_db):
+        import json
+        # Build a real scorecard, serialize it, hand it to a stub S3 reader,
+        # then verify the loader hydrates an equivalent Scorecard back.
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        body = json.dumps(sc.to_dict()).encode("utf-8")
+        reader = _StubS3Reader(body=body)
+        loaded = load_latest_scorecard(s3_client=reader, bucket="bkt")
+        assert loaded is not None
+        assert loaded.as_of_date == sc.as_of_date
+        assert loaded.n_resolved_predictions == sc.n_resolved_predictions
+        assert len(loaded.per_sector) == len(sc.per_sector)
+        assert len(loaded.top_surprises) == len(sc.top_surprises)
+        # Per-sector and surprise nested dataclasses survived round-trip.
+        if sc.per_sector:
+            assert loaded.per_sector[0].sector == sc.per_sector[0].sector
+        if sc.top_surprises:
+            assert loaded.top_surprises[0].symbol == sc.top_surprises[0].symbol
+        # Reader was called against `{prefix}/latest.json`.
+        assert reader.calls[0]["Key"].endswith("/latest.json")
+
+    def test_missing_artifact_returns_none(self):
+        reader = _StubS3Reader(exc=Exception("NoSuchKey"))
+        assert load_latest_scorecard(s3_client=reader, bucket="bkt") is None
+
+    def test_corrupt_json_returns_none(self):
+        reader = _StubS3Reader(body=b"{not valid json")
+        assert load_latest_scorecard(s3_client=reader, bucket="bkt") is None
+
+    def test_schema_drift_returns_none(self):
+        # Artifact JSON missing a required field -> from_dict KeyError -> caught.
+        reader = _StubS3Reader(body=b'{"as_of_date": "2026-05-23"}')
+        assert load_latest_scorecard(s3_client=reader, bucket="bkt") is None
+
+    def test_custom_prefix_propagated(self, populated_db):
+        import json
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        reader = _StubS3Reader(body=json.dumps(sc.to_dict()).encode("utf-8"))
+        load_latest_scorecard(s3_client=reader, bucket="bkt", prefix="custom/path")
+        assert reader.calls[0]["Key"] == "custom/path/latest.json"
+
+
+class TestLoadLatestScorecardText:
+    def test_returns_prompt_ready_text_when_present(self, populated_db):
+        import json
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        body = json.dumps(sc.to_dict()).encode("utf-8")
+        reader = _StubS3Reader(body=body)
+        text = load_latest_scorecard_text(s3_client=reader, bucket="bkt")
+        assert "Prior cycle's realized outcomes" in text
+        # Same text the producer-side format_scorecard_text would emit.
+        assert text == format_scorecard_text(sc)
+
+    def test_returns_empty_string_on_miss(self):
+        # The contract that makes this safe to wire as a prompt template
+        # kwarg: missing artifact yields empty string, never None or
+        # an exception. The `{prior_cycle_scorecard}` placeholder
+        # renders as empty when there's no prior cycle to score.
+        reader = _StubS3Reader(exc=Exception("NoSuchKey"))
+        assert load_latest_scorecard_text(s3_client=reader, bucket="bkt") == ""
+
+    def test_returns_empty_string_on_corrupt(self):
+        reader = _StubS3Reader(body=b"{garbage")
+        assert load_latest_scorecard_text(s3_client=reader, bucket="bkt") == ""
+
+
+class TestScorecardFromDict:
+    def test_round_trip_preserves_all_fields(self, populated_db):
+        sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
+        rehydrated = Scorecard.from_dict(sc.to_dict())
+        assert rehydrated.to_dict() == sc.to_dict()
+
+    def test_from_dict_handles_missing_optional_fields(self):
+        # Minimal dict (drop the optional float fields) should still hydrate.
+        minimal = {
+            "as_of_date": "2026-05-23",
+            "lookback_weeks": 4,
+            "n_resolved_predictions": 0,
+            "n_resolved_signals_10d": 0,
+            "n_resolved_signals_30d": 0,
+        }
+        sc = Scorecard.from_dict(minimal)
+        assert sc.overall_predictor_hit_rate is None
+        assert sc.per_sector == []
+        assert sc.top_surprises == []

@@ -136,6 +136,28 @@ class Scorecard:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Scorecard":
+        """Hydrate from a JSON-deserialized dict (round-trips ``to_dict()``).
+
+        Used by the S3 loader to reconstruct a typed Scorecard from the
+        latest.json artifact so `format_scorecard_text` works against it.
+        """
+        return cls(
+            as_of_date=d["as_of_date"],
+            lookback_weeks=d["lookback_weeks"],
+            n_resolved_predictions=d["n_resolved_predictions"],
+            n_resolved_signals_10d=d["n_resolved_signals_10d"],
+            n_resolved_signals_30d=d["n_resolved_signals_30d"],
+            overall_predictor_hit_rate=d.get("overall_predictor_hit_rate"),
+            overall_signal_hit_rate_10d=d.get("overall_signal_hit_rate_10d"),
+            overall_signal_hit_rate_30d=d.get("overall_signal_hit_rate_30d"),
+            market_regime=d.get("market_regime"),
+            per_sector=[SectorRow(**row) for row in (d.get("per_sector") or [])],
+            top_surprises=[TickerOutcome(**row) for row in (d.get("top_surprises") or [])],
+            top_confirmations=[TickerOutcome(**row) for row in (d.get("top_confirmations") or [])],
+        )
+
 
 # ---------------------------------------------------------------------------
 # Build
@@ -506,6 +528,66 @@ def emit_scorecard_to_s3(
         latest_key,
     )
     return {"dated_key": dated_key, "latest_key": latest_key, "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
+# S3 read (consumer-side, Phase 2.A)
+# ---------------------------------------------------------------------------
+
+
+def load_latest_scorecard(
+    *,
+    s3_client: Any,
+    bucket: str,
+    prefix: str = DEFAULT_SCORECARD_PREFIX,
+) -> Optional[Scorecard]:
+    """Fetch `{prefix}/latest.json` and hydrate to a Scorecard.
+
+    Returns None on any failure (404 = Phase 1.B.2 not yet flag-on or
+    first cycle of soak; network / parse / hydrate errors = transient
+    or corrupt artifact). The consumer's job is to render and inject
+    the result; the no-data case is "agents reason without the
+    scorecard," which is their pre-Phase-2 behavior.
+
+    Failure mode posture: graceful — return None, log WARN. Consumers
+    that want hard-fail-on-miss can check `result is None` and decide
+    for themselves. The intended LLM-prompt-injection consumer should
+    treat missing data as "no prior cycle to learn from" rather than
+    fail the whole research cycle on a missing observability artifact.
+    """
+    try:
+        key = eval_latest_key(prefix)
+        obj = s3_client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        data = json.loads(body)
+        return Scorecard.from_dict(data)
+    except Exception as e:
+        logger.warning(
+            "scorecard load failed s3://%s/%s/latest.json: %s — returning None",
+            bucket, prefix.strip("/"), e,
+        )
+        return None
+
+
+def load_latest_scorecard_text(
+    *,
+    s3_client: Any,
+    bucket: str,
+    prefix: str = DEFAULT_SCORECARD_PREFIX,
+) -> str:
+    """Convenience: load latest scorecard, render to prompt-ready text.
+
+    Returns empty string when the artifact is missing or invalid. The
+    intended consumer wires this string into a prompt template's
+    `{prior_cycle_scorecard}` placeholder; empty string means the
+    placeholder renders as nothing and the agents fall back to their
+    pre-Phase-2 behavior. Mirrors the established pattern (see
+    `agents/macro_agent.py::regime_substrate_block`).
+    """
+    sc = load_latest_scorecard(s3_client=s3_client, bucket=bucket, prefix=prefix)
+    if sc is None:
+        return ""
+    return format_scorecard_text(sc)
 
 
 # ---------------------------------------------------------------------------
