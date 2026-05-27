@@ -255,8 +255,19 @@ def _build_cio_prompt(
     exits: list[dict],
     run_date: str,
     prior_decisions: list[dict] | None = None,
+    prior_cycle_scorecard: str | None = None,
 ) -> str:
-    """Build the single batch CIO prompt."""
+    """Build the single batch CIO prompt.
+
+    The ``prior_cycle_scorecard`` kwarg carries the rendered text from
+    ``evals.last_week_scorecard.format_scorecard_text`` for the prior
+    cycle's realized outcomes (per-sector hit rate, surprises,
+    confirmations). When None / "" — the default and the pre-Brian's-
+    gitignored-template-edit state — the kwarg is silently unused by
+    ``str.format`` since the template has no ``{prior_cycle_scorecard}``
+    placeholder yet. Mirrors the established
+    ``agents/macro_agent.py::regime_substrate_block`` pattern.
+    """
 
     # Format candidates
     cand_lines = []
@@ -307,6 +318,7 @@ def _build_cio_prompt(
         exit_text=exit_text,
         prior_decisions_block=_format_prior_decisions(prior_decisions),
         candidates_text=candidates_text,
+        prior_cycle_scorecard=prior_cycle_scorecard or "",
     )
 
 

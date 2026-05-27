@@ -286,6 +286,7 @@ def run_macro_agent(
     macro_data: dict,
     api_key: Optional[str] = None,
     regime_substrate: Optional[dict] = None,
+    prior_cycle_scorecard: Optional[str] = None,
 ) -> dict:
     """
     Run the Macro & Market Environment Agent.
@@ -342,11 +343,20 @@ def run_macro_agent(
     # unused by ``str.format``.
     regime_substrate_block = _format_regime_substrate(regime_substrate)
 
+    # Phase 2.A.2 — prior-cycle realized outcomes scorecard. Mirrors the
+    # ``regime_substrate`` pattern above: kwarg passes through to .format()
+    # always; the ``{prior_cycle_scorecard}`` placeholder is added in an
+    # alpha-engine-config PR alongside this; if it's not present in the
+    # template yet, the kwarg is silently unused by ``str.format``.
+    # Empty string when no prior cycle's scorecard is available (first
+    # cycle of soak, or RESEARCH_SCORECARD_ENABLED still off).
+
     prompt = _PROMPT_TEMPLATE.format(
         sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),
         prior_date=prior_date,
         prior_report=prior_text,
         regime_substrate=regime_substrate_block,
+        prior_cycle_scorecard=prior_cycle_scorecard or "",
         fed_funds=_fmt(macro_data.get("fed_funds_rate")),
         t2yr=_fmt(macro_data.get("treasury_2yr")),
         t10yr=_fmt(macro_data.get("treasury_10yr")),
@@ -641,6 +651,7 @@ def run_macro_agent_with_reflection(
     api_key: Optional[str] = None,
     prior_snapshots: list[dict] | None = None,
     regime_substrate: Optional[dict] = None,
+    prior_cycle_scorecard: Optional[str] = None,
 ) -> dict:
     """
     Run macro agent with self-critique reflection loop.
@@ -677,6 +688,7 @@ def run_macro_agent_with_reflection(
         macro_data=macro_data,
         api_key=api_key,
         regime_substrate=regime_substrate,
+        prior_cycle_scorecard=prior_cycle_scorecard,
     )
     initial_regime = result["market_regime"]
 
@@ -714,6 +726,7 @@ def run_macro_agent_with_reflection(
             macro_data=macro_data,
             api_key=api_key,
             regime_substrate=regime_substrate,
+            prior_cycle_scorecard=prior_cycle_scorecard,
         )
         reflection_log["iterations"] = iteration + 1
 
