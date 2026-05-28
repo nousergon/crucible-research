@@ -211,7 +211,12 @@ class SectorTeamOutput(BaseModel):
 # ── Macro economist output ────────────────────────────────────────────────
 
 
-REGIME_VALUES = ("bull", "neutral", "bear", "caution")
+REGIME_VALUES = ("bull", "neutral", "bear")
+"""3-class Ang-Bekaert macro regime taxonomy (v0.42.0 / 2026-05-28).
+Legacy 4-class "caution" retired per caution-regime-retirement-260528.md.
+Portfolio-protective hysteresis (risk_on/caution/risk_off) is a separate
+axis on the predictor drawdown leg; consumers compose via most-protective
+override at decision time."""
 class MacroEconomistOutput(BaseModel):
     """
     Stored as four separate keys in ``state`` (``macro_report``,

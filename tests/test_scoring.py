@@ -48,7 +48,7 @@ class TestRSIScoring:
 
     def test_score_in_valid_range(self):
         for rsi in [0, 15, 30, 50, 70, 85, 100]:
-            for regime in ["bull", "neutral", "caution", "bear"]:
+            for regime in ["bull", "neutral", "bear"]:
                 score = _score_rsi(rsi, regime)
                 assert 0.0 <= score <= 100.0
 

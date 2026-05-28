@@ -253,9 +253,18 @@ class TestMacroEconomistOutput:
             MacroEconomistOutput(market_regime="euphoric")
 
     def test_regime_all_valid_values(self):
-        for regime in ("bull", "neutral", "bear", "caution"):
+        # 3-class Ang-Bekaert taxonomy (v0.42.0 / 2026-05-28). Legacy
+        # "caution" retired per caution-regime-retirement-260528.md.
+        for regime in ("bull", "neutral", "bear"):
             m = MacroEconomistOutput(market_regime=regime)
             assert m.market_regime == regime
+
+    def test_regime_legacy_caution_rejected(self):
+        # "caution" was retired in v0.42.0. Raw LLM emissions are coerced
+        # to "neutral" by macro_agent._validate_regime upstream of this
+        # schema; the schema itself enforces the 3-class invariant.
+        with pytest.raises(ValueError):
+            MacroEconomistOutput(market_regime="caution")
 
 
 # ── ExitEvent + ExitEvaluatorOutput ───────────────────────────────────────
@@ -469,9 +478,19 @@ class TestMacroCriticOutput:
         c = MacroCriticOutput(
             action="revise",
             critique="too aggressive",
-            suggested_regime="caution",
+            suggested_regime="neutral",
         )
-        assert c.suggested_regime == "caution"
+        assert c.suggested_regime == "neutral"
+
+    def test_revise_legacy_caution_rejected(self):
+        # 3-class invariant (v0.42.0 — caution-regime-retirement-260528.md).
+        from graph.state_schemas import MacroCriticOutput
+        with pytest.raises(ValueError):
+            MacroCriticOutput(
+                action="revise",
+                critique="elevated stress",
+                suggested_regime="caution",
+            )
 
     def test_action_literal_enforced(self):
         from graph.state_schemas import MacroCriticOutput

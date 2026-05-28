@@ -116,7 +116,7 @@ class TestApplyRegimePickGate:
 
     def test_allows_zero_picks_when_no_candidate_clears_bar(self):
         """The signature institutional change — sector teams can now
-        return EMPTY picks when bear/caution conditions raise the bar
+        return EMPTY picks when bear conditions raise the bar
         above every candidate. Previously the team would forcibly
         return 2-3 picks regardless of quality."""
         picks = [

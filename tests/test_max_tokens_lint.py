@@ -48,9 +48,13 @@ _ALLOWLIST: dict[str, set[int]] = {
     # _format_drawdown_leg + the continuous-statement reframe),
     # then 562 → 572 by the Phase 2.A.2 scorecard-kwarg arc (added
     # `prior_cycle_scorecard` to run_macro_agent signature + an inline
-    # comment + kwarg passthrough in the _PROMPT_TEMPLATE.format call).
+    # comment + kwarg passthrough in the _PROMPT_TEMPLATE.format call),
+    # then 572 → 580 by the caution-regime retirement (v0.42.0,
+    # 2026-05-28): added _LEGACY_REGIME_COERCION shim + WARN log +
+    # docstring rework on _validate_regime, dropping the soft-override
+    # → caution branches; net +8 lines above the critic call.
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {572},
+    "agents/macro_agent.py": {580},
 }
 
 

@@ -485,66 +485,74 @@ def run_macro_agent(
 
 
 # ── Regime severity ordering ────────────────────────────────────────────────
-_REGIME_SEVERITY = {"bull": 0, "neutral": 1, "caution": 2, "bear": 3}
+# 3-class Ang-Bekaert taxonomy (v0.42.0 / 2026-05-28). The legacy 4-class
+# "caution" tier retired per caution-regime-retirement-260528.md: VIX,
+# HY OAS, and SPY 30d return are already weighted into the continuous
+# regime_intensity_z META_FEATURE consumed by the predictor L2 Ridge and
+# the executor's Stage D' wires; discretizing them into a 4th regime
+# category was structural double-counting. Portfolio-protective hysteresis
+# (risk_on/caution/risk_off) is a separate axis emitted by the predictor
+# drawdown leg — consumers compose the two via most-protective override.
+_REGIME_SEVERITY = {"bull": 0, "neutral": 1, "bear": 2}
+
+# Migration shim: LLM prompts still reference the 4-class vocabulary
+# (prompt updates ship in Phase 1B follow-on). Raw LLM "caution" coerces
+# to "neutral" — the stress signal that drove the historical "caution"
+# call is preserved end-to-end through regime_intensity_z. Coercion is
+# logged so we can monitor the rate during the OBSERVE window.
+_LEGACY_REGIME_COERCION: dict[str, str] = {"caution": "neutral"}
 
 
 def _validate_regime(llm_regime: str, macro_data: dict) -> str:
     """
     Post-LLM quantitative guardrails for market_regime.
 
-    Hard rules override LLM when quantitative thresholds are breached:
+    Hard rule (only override): extreme stress → bear.
       - VIX > 30 AND SPY 30d < -10% → force 'bear'
-      - VIX > 25 AND SPY 30d < -5% → force at least 'caution'
-      - HY OAS > 500bps → force at least 'caution'
 
-    Only escalates severity — never downgrades (e.g., won't override 'bear' to 'caution').
+    Migration shim (v0.42.0): legacy LLM emissions of "caution" coerce
+    to "neutral" with WARN log; the stress signal is preserved through
+    the continuous regime_intensity_z META_FEATURE. Prompt updates land
+    in a Phase 1B follow-on so the shim retires once the LLM stops
+    emitting the legacy vocabulary.
+
+    Only escalates severity — never downgrades.
     """
 
     cfg = REGIME_GUARDRAILS
+
+    # Migration shim — legacy LLM "caution" → "neutral".
+    coerced = _LEGACY_REGIME_COERCION.get((llm_regime or "").strip().lower())
+    if coerced is not None:
+        logger.warning(
+            "[regime_guardrail] LEGACY COERCION %s → %s "
+            "(stress signal preserved via regime_intensity_z; "
+            "prompt update owed in Phase 1B follow-on)",
+            llm_regime, coerced,
+        )
+        llm_regime = coerced
+
     if not cfg:
         return llm_regime
 
     vix = macro_data.get("vix")
     spy_30d = macro_data.get("sp500_30d_return")
-    hy_oas = macro_data.get("hy_credit_spread_oas")
 
     current_severity = _REGIME_SEVERITY.get(llm_regime, 1)
     forced_regime = llm_regime
 
-    # Hard override: extreme stress → bear
+    # Hard override: extreme stress → bear.
     bear_vix = cfg.get("bear_vix_threshold", 30)
     bear_spy = cfg.get("bear_spy_30d_threshold", -10.0)
     if vix is not None and spy_30d is not None:
         if vix > bear_vix and spy_30d < bear_spy:
-            if _REGIME_SEVERITY.get("bear", 3) > current_severity:
+            if _REGIME_SEVERITY.get("bear", 2) > current_severity:
                 forced_regime = "bear"
                 logger.warning(
                     "[regime_guardrail] OVERRIDE %s → bear: VIX=%.1f>%d AND SPY_30d=%.1f%%<%s%%",
                     llm_regime, vix, bear_vix, spy_30d, bear_spy,
                 )
                 return forced_regime
-
-    # Soft override: elevated stress → at least caution
-    caution_vix = cfg.get("caution_vix_threshold", 25)
-    caution_spy = cfg.get("caution_spy_30d_threshold", -5.0)
-    if vix is not None and spy_30d is not None:
-        if vix > caution_vix and spy_30d < caution_spy:
-            if _REGIME_SEVERITY.get("caution", 2) > current_severity:
-                forced_regime = "caution"
-                logger.warning(
-                    "[regime_guardrail] OVERRIDE %s → caution: VIX=%.1f>%d AND SPY_30d=%.1f%%<%s%%",
-                    llm_regime, vix, caution_vix, spy_30d, caution_spy,
-                )
-
-    # Credit stress override: HY OAS > threshold → at least caution
-    hy_threshold = cfg.get("caution_hy_oas_threshold", 500)
-    if hy_oas is not None and hy_oas > hy_threshold:
-        if _REGIME_SEVERITY.get("caution", 2) > _REGIME_SEVERITY.get(forced_regime, 1):
-            logger.warning(
-                "[regime_guardrail] OVERRIDE %s → caution: HY_OAS=%.0fbps>%dbps",
-                forced_regime, hy_oas, hy_threshold,
-            )
-            forced_regime = "caution"
 
     return forced_regime
 

@@ -99,7 +99,7 @@ def test_dispatch_sectors_and_exit_propagates_market_regime() -> None:
 
     state = {
         "team_id": "",
-        "market_regime": "caution",
+        "market_regime": "bear",
         "sector_modifiers": {"Technology": 0.93},
         "sector_ratings": {"Technology": {"rating": "underweight"}},
     }
@@ -107,7 +107,7 @@ def test_dispatch_sectors_and_exit_propagates_market_regime() -> None:
     sector_sends = [s for s in sends if s.node == "sector_team_node"]
     assert sector_sends, "must have at least one sector-team Send"
     for s in sector_sends:
-        assert s.arg["market_regime"] == "caution"
+        assert s.arg["market_regime"] == "bear"
         assert s.arg["sector_modifiers"]["Technology"] == 0.93
         assert s.arg["sector_ratings"]["Technology"]["rating"] == "underweight"
 

@@ -3729,7 +3729,7 @@ def build_graph() -> StateGraph:
       written to state when Send() captured it. Making macro serial
       upstream means sector teams see the real regime call +
       sector_modifiers + sector_ratings in their ReAct context. The
-      4-class regime taxonomy (bull/neutral/caution/bear) now flows
+      3-class regime taxonomy (bull/neutral/bear) now flows
       into every per-stock pick decision.
 
     Why load_regime_substrate_node is its own step (Stage C):
