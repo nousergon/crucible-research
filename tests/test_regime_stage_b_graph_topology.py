@@ -124,20 +124,31 @@ def test_build_graph_serializes_macro_upstream_of_dispatch() -> None:
     other tests' monkeypatch state. The source is the contract.
     """
     body = _build_graph_source()
-    # Either Stage-B-style (direct edge) or Stage-C-style (via substrate loader)
-    # — both preserve the serial-upstream-of-dispatch property.
+    # Three accepted topologies — all preserve the serial-upstream-of-
+    # dispatch property:
+    #   - Stage B: fetch_data → macro_economist_node (direct edge)
+    #   - Stage C: fetch_data → load_regime_substrate_node → macro
+    #   - Phase 2.A.3: fetch_data → load_regime_substrate_node →
+    #     load_scorecard_node → macro (scorecard arc spliced in)
     has_stage_b_edge = 'graph.add_edge("fetch_data", "macro_economist_node")' in body
     has_stage_c_chain = (
         'graph.add_edge("fetch_data", "load_regime_substrate_node")' in body
         and 'graph.add_edge("load_regime_substrate_node", "macro_economist_node")'
         in body
     )
-    assert has_stage_b_edge or has_stage_c_chain, (
+    has_phase_2a3_chain = (
+        'graph.add_edge("fetch_data", "load_regime_substrate_node")' in body
+        and 'graph.add_edge("load_regime_substrate_node", "load_scorecard_node")'
+        in body
+        and 'graph.add_edge("load_scorecard_node", "macro_economist_node")'
+        in body
+    )
+    assert has_stage_b_edge or has_stage_c_chain or has_phase_2a3_chain, (
         "build_graph must serialize macro_economist_node upstream of the "
-        "sector dispatch — either via a direct fetch_data → macro edge "
-        "(Stage B) or via fetch_data → load_regime_substrate_node → macro "
-        "(Stage C). Without this serialization, sector teams see the "
-        "default 'neutral' regime instead of the macro-computed value."
+        "sector dispatch — Stage B (direct), Stage C (via substrate loader), "
+        "or Phase 2.A.3 (via substrate + scorecard loaders). Without this "
+        "serialization, sector teams see the default 'neutral' regime "
+        "instead of the macro-computed value."
     )
 
 

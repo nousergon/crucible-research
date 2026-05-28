@@ -360,12 +360,19 @@ def test_build_graph_edges_fetch_data_to_load_regime_substrate() -> None:
 
 def test_build_graph_edges_load_regime_substrate_to_macro() -> None:
     body = _build_graph_source()
+    # Phase 2.A.3 (scorecard) splices load_scorecard_node between the
+    # regime substrate loader and the macro economist. The substrate-
+    # before-macro invariant is preserved through the chain
+    # load_regime_substrate_node → load_scorecard_node → macro_economist_node.
     assert (
-        'graph.add_edge("load_regime_substrate_node", "macro_economist_node")'
+        'graph.add_edge("load_regime_substrate_node", "load_scorecard_node")'
+        in body
+        and 'graph.add_edge("load_scorecard_node", "macro_economist_node")'
         in body
     ), (
-        "load_regime_substrate_node must edge to macro_economist_node so "
-        "the substrate is in state before macro reads it."
+        "load_regime_substrate_node must edge through load_scorecard_node "
+        "to macro_economist_node so the substrate (and the prior-cycle "
+        "scorecard text) are both in state before macro reads them."
     )
 
 

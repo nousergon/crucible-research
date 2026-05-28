@@ -68,6 +68,7 @@ def run_cio(
     *,
     max_new_entrants: int = 10,
     min_new_entrants: int = 2,
+    prior_cycle_scorecard: Optional[str] = None,
 ) -> dict:
     """
     Run the CIO evaluation in a single batch Sonnet call.
@@ -133,6 +134,7 @@ def run_cio(
         candidates, macro_context, sector_ratings,
         current_population, cap, exits, run_date,
         prior_decisions=prior_decisions,
+        prior_cycle_scorecard=prior_cycle_scorecard,
     )
 
     # PR 2.3 Step E: flip CIO to with_structured_output. The LLM emits a

@@ -332,6 +332,18 @@ class ResearchState(TypedDict, total=False):
     # back to its prior LLM + post-LLM-guardrail behavior. The macro
     # agent remains the FINAL regime authority either way.
     regime_substrate: Annotated[Optional[dict], take_last]
+
+    # Prior-cycle realized-outcomes scorecard (Phase 2.A.3 of the
+    # research-feedback sidecar arc). Loaded by ``load_scorecard_node``
+    # between regime substrate and macro economist; consumed by
+    # ``macro_economist_node`` AND ``cio_node`` via the
+    # ``prior_cycle_scorecard`` kwarg the agents accept. None / empty
+    # is graceful — agents fall back to pre-Phase-2 behavior. Brian's
+    # gitignored prompt-template edit gates whether the LLM actually
+    # sees the scorecard text; until then the kwarg is silently unused
+    # by ``str.format``. Mirrors the regime_substrate pattern above.
+    prior_cycle_scorecard_text: Annotated[Optional[str], take_last]
+
     episodic_memories: Annotated[dict[str, list], take_last]
     semantic_memories: Annotated[dict[str, list], take_last]
 
@@ -881,6 +893,60 @@ def load_regime_substrate_node(state: ResearchState) -> dict:
     return {"regime_substrate": substrate}
 
 
+def load_scorecard_node(state: ResearchState) -> dict:
+    """Load the prior-cycle realized-outcomes scorecard from S3.
+
+    Phase 2.A.3 of the research-feedback sidecar arc. Reads the
+    canonical eval_artifacts sidecar at
+    ``research/last_week_scorecard/latest.json`` and renders the
+    prompt-ready text via ``format_scorecard_text``. Returns
+    ``{"prior_cycle_scorecard_text": ""}`` gracefully when:
+
+    - The producer (``_maybe_emit_scorecard`` in ``lambda/handler.py``)
+      is flag-OFF (``RESEARCH_SCORECARD_ENABLED`` unset / false) —
+      default state pre-soak.
+    - The producer's flag-on state hasn't yet written any artifact
+      (first Saturday SF after flip).
+    - The S3 read or JSON parse fails transiently.
+
+    Empty string flows through to ``macro_economist_node`` AND
+    ``cio_node`` via the ``prior_cycle_scorecard`` kwarg; ``str.format``
+    silently fills the ``{prior_cycle_scorecard}`` placeholder with
+    "" (or ignores the kwarg entirely until Brian's gitignored
+    template edit lands). Mirrors ``load_regime_substrate_node``'s
+    graceful-degrade posture.
+    """
+    bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+    try:
+        import boto3
+        from evals.last_week_scorecard import load_latest_scorecard_text
+        text = load_latest_scorecard_text(
+            s3_client=boto3.client("s3"),
+            bucket=bucket,
+        )
+        if text:
+            logger.info(
+                "[load_scorecard] loaded prior-cycle scorecard (%d chars)",
+                len(text),
+            )
+        else:
+            logger.info(
+                "[load_scorecard] no scorecard artifact found "
+                "(producer flag off or first cycle) — agents will run "
+                "without prior-cycle outcome data",
+            )
+        return {"prior_cycle_scorecard_text": text}
+    except Exception as e:
+        # Mirror load_regime_substrate_node's graceful posture — never
+        # fail the research cycle on a missing observability artifact.
+        logger.warning(
+            "[load_scorecard] load failed: %s — agents will run without "
+            "prior-cycle outcome data",
+            e,
+        )
+        return {"prior_cycle_scorecard_text": ""}
+
+
 def dispatch_sectors_and_exit(state: ResearchState) -> list:
     """
     Fan-out via Send(): launch 6 sector teams + exit evaluator in parallel.
@@ -1187,6 +1253,12 @@ def macro_economist_node(state: ResearchState) -> dict:
             # agent falls back to its prior LLM + post-LLM-guardrail
             # behavior. Macro agent remains the final regime authority.
             regime_substrate=state.get("regime_substrate"),
+            # Phase 2.A.3: load_scorecard_node populates this state
+            # field with the prior cycle's realized-outcomes scorecard
+            # text. Empty string flows through when the producer's
+            # flag is off or the artifact is missing; the agent's
+            # template renders the placeholder as blank in that case.
+            prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
         )
 
     macro_state_update = {
@@ -2107,6 +2179,11 @@ def cio_node(state: ResearchState) -> dict:
             prior_decisions=prior_ic,
             max_new_entrants=CIO_MAX_NEW_ENTRANTS,
             min_new_entrants=CIO_MIN_NEW_ENTRANTS,
+            # Phase 2.A.3: scorecard text loaded upstream by
+            # load_scorecard_node. Empty string when producer's flag
+            # is off / artifact missing — CIO falls back to pre-Phase-2
+            # behavior (no prior-cycle outcome data in its prompt).
+            prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
         )
 
     # Schema validation on CIO output shapes (strict-by-default).
@@ -3682,6 +3759,11 @@ def build_graph() -> StateGraph:
     # Nodes
     graph.add_node("fetch_data", fetch_data)
     graph.add_node("load_regime_substrate_node", load_regime_substrate_node)
+    # Phase 2.A.3: load_scorecard_node sits between the regime substrate
+    # loader and the macro economist — same shape and graceful-degrade
+    # contract. Produces ``prior_cycle_scorecard_text`` for both
+    # ``macro_economist_node`` AND ``cio_node``.
+    graph.add_node("load_scorecard_node", load_scorecard_node)
     graph.add_node("macro_economist_node", macro_economist_node)
     # Un-orphan arc: produce the institutional factor-profile substrate
     # AFTER fetch_data populated sector_map + run_date (macro does not
@@ -3706,12 +3788,15 @@ def build_graph() -> StateGraph:
     # Entry point
     graph.set_entry_point("fetch_data")
 
-    # Serial: fetch_data → load_regime_substrate_node → macro_economist_node
-    # → compute_focus_list_node. Substrate flows into the macro agent's
-    # ReAct prompt as a strong prior; macro's regime feeds the focus list
-    # blend; focus list lands in state before sector teams dispatch.
+    # Serial: fetch_data → load_regime_substrate_node → load_scorecard_node
+    # → macro_economist_node → compute_focus_list_node. Substrate flows
+    # into the macro agent's ReAct prompt as a strong prior; scorecard
+    # text flows into both macro AND cio prompts as prior-cycle outcome
+    # context; macro's regime feeds the focus list blend; focus list
+    # lands in state before sector teams dispatch.
     graph.add_edge("fetch_data", "load_regime_substrate_node")
-    graph.add_edge("load_regime_substrate_node", "macro_economist_node")
+    graph.add_edge("load_regime_substrate_node", "load_scorecard_node")
+    graph.add_edge("load_scorecard_node", "macro_economist_node")
     # Splice compute_factor_profiles_node between macro and the focus
     # list: it needs sector_map + run_date (set in fetch_data, unchanged
     # by the substrate loader / macro) and must land the factor substrate

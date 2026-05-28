@@ -150,10 +150,11 @@ def test_build_graph_registers_compute_factor_profiles_node():
 
 def test_factor_profiles_node_runs_after_fetch_data_via_macro_chain():
     """The node must sit downstream of fetch_data. The serial chain is
-    fetch_data → load_regime_substrate_node → macro_economist_node →
-    compute_factor_profiles_node, so fetch_data (which populates
-    sector_map + run_date) provably precedes it. Pin the incoming edge
-    from macro (the established serial-upstream node)."""
+    fetch_data → load_regime_substrate_node → load_scorecard_node →
+    macro_economist_node → compute_factor_profiles_node, so fetch_data
+    (which populates sector_map + run_date) provably precedes it. Pin
+    the incoming edge from macro (the established serial-upstream
+    node)."""
     body = _build_graph_source()
     assert (
         'graph.add_edge("macro_economist_node", "compute_factor_profiles_node")'
@@ -161,16 +162,20 @@ def test_factor_profiles_node_runs_after_fetch_data_via_macro_chain():
     ), (
         "compute_factor_profiles_node is not spliced after "
         "macro_economist_node — it needs sector_map + run_date (set in "
-        "fetch_data, unchanged by the substrate loader / macro) before it "
-        "can produce factor profiles."
+        "fetch_data, unchanged by the substrate loader / scorecard loader / "
+        "macro) before it can produce factor profiles."
     )
     # And the serial fetch_data → ... → macro chain that guarantees
-    # fetch_data ran first must still be intact.
+    # fetch_data ran first must still be intact. Phase 2.A.3 (scorecard)
+    # spliced load_scorecard_node between the substrate loader and macro;
+    # the chain is now 4 nodes long but the invariant holds.
     assert (
         'graph.add_edge("fetch_data", "load_regime_substrate_node")' in body
-        and 'graph.add_edge("load_regime_substrate_node", "macro_economist_node")'
+        and 'graph.add_edge("load_regime_substrate_node", "load_scorecard_node")'
         in body
-    ), "the fetch_data → substrate → macro serial chain was broken"
+        and 'graph.add_edge("load_scorecard_node", "macro_economist_node")'
+        in body
+    ), "the fetch_data → substrate → scorecard → macro serial chain was broken"
 
 
 def test_factor_profiles_node_runs_strictly_before_compute_focus_list():
