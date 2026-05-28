@@ -197,6 +197,11 @@ def test_macro_agent_format_passes_canonical_sectors() -> None:
         # so the format() call succeeds; the agent's
         # _format_regime_substrate(None) emits this same message.
         regime_substrate="QUANTITATIVE REGIME SUBSTRATE (Stage C): not available this run.",
+        # Phase-2 prior-cycle scorecard placeholder. The graph wires this in
+        # via ``research_graph::prior_cycle_scorecard_text`` (loaded from
+        # ``evals/last_week_scorecard.py::load_latest_scorecard_text``);
+        # empty string is the canonical missing-artifact fallback.
+        prior_cycle_scorecard="",
         fed_funds="4.50",
         t2yr="3.90",
         t10yr="4.30",

@@ -25,7 +25,13 @@ import logging
 import os
 from typing import Optional
 
-import arcticdb as adb  # Hard dep: matches predictor's Phase 7a pattern.
+import arcticdb as _arcticdb  # noqa: F401  Hard dep: matches predictor's
+                              # Phase 7a pattern. Imported here at module top
+                              # (BEFORE pandas) to prime arcticdb's bundled
+                              # aws-c-common allocator on macOS — the lib
+                              # chokepoint uses lazy import which would
+                              # otherwise let pyarrow's allocator load first
+                              # and segfault on first get_library() call.
                         # If the Lambda image lacks arcticdb, fail loud at
                         # cold start rather than silently degrading.
 import pandas as pd
@@ -50,16 +56,19 @@ class PriceFetchError(RuntimeError):
 
 
 def _connect_arctic() -> object:
-    """Open the ArcticDB ``universe`` library. Hard-fail on unreachable."""
-    region = os.environ.get("AWS_REGION", "us-east-1")
-    uri = f"s3s://s3.{region}.amazonaws.com:{_S3_BUCKET}?path_prefix=arcticdb&aws_auth=true"
+    """Open the ArcticDB ``universe`` library. Hard-fail on unreachable.
+
+    Thin wrapper over ``alpha_engine_lib.arcticdb.open_universe_lib`` —
+    the lib chokepoint (L2771) centralizes S3 URI construction and
+    ``get_library`` error wrapping. Local wrapper retained so
+    ``PriceFetchError`` semantics (a research-specific exception type)
+    are preserved on the failure path.
+    """
+    from alpha_engine_lib.arcticdb import open_universe_lib
     try:
-        arctic = adb.Arctic(uri)
-        return arctic.get_library("universe")
+        return open_universe_lib(_S3_BUCKET)
     except Exception as exc:
-        raise PriceFetchError(
-            f"ArcticDB unreachable at {uri}: {exc}"
-        ) from exc
+        raise PriceFetchError(str(exc)) from exc
 
 
 def _period_to_lookback_days(period: str) -> int:
