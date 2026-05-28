@@ -227,13 +227,20 @@ def test_emit_writes_json_md_and_latest(s3_bucket):
         "decision_artifacts/_calibration/_report/2026-05-28/kappa.json",
         "decision_artifacts/_calibration/_report/2026-05-28/kappa.md",
         "decision_artifacts/_calibration/_report/latest/kappa.json",
+        "decision_artifacts/_calibration/_report/latest/kappa.md",
     ]
-    # latest pointer is readable and matches.
+    # latest json pointer is readable and matches.
     latest = s3_bucket.get_object(
         Bucket="alpha-engine-research",
         Key="decision_artifacts/_calibration/_report/latest/kappa.json",
     )["Body"].read()
     assert json.loads(latest)["status"] == "ok"
+    # latest markdown pointer (what the backtester email embeds) exists.
+    latest_md = s3_bucket.get_object(
+        Bucket="alpha-engine-research",
+        Key="decision_artifacts/_calibration/_report/latest/kappa.md",
+    )["Body"].read().decode("utf-8")
+    assert latest_md.startswith("## Judge calibration (κ)")
 
 
 def test_emit_empty_corpus_still_writes_report(s3_bucket):

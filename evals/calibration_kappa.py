@@ -424,8 +424,12 @@ def emit_calibration_report(
 
     json_key = f"{_REPORT_PREFIX}{report_date}/kappa.json"
     md_key = f"{_REPORT_PREFIX}{report_date}/kappa.md"
-    # Stable "latest" pointer so consumers don't have to date-walk.
-    latest_key = f"{_REPORT_PREFIX}latest/kappa.json"
+    # Stable "latest" pointers so consumers (the backtester evaluator
+    # email) don't have to date-walk. The markdown pointer is what the
+    # email surfaces verbatim — research owns the rendering, the
+    # backtester just embeds it.
+    latest_json_key = f"{_REPORT_PREFIX}latest/kappa.json"
+    latest_md_key = f"{_REPORT_PREFIX}latest/kappa.md"
 
     body = json.dumps(report, indent=2, default=str).encode("utf-8")
     md = render_markdown(report).encode("utf-8")
@@ -436,10 +440,13 @@ def emit_calibration_report(
         Bucket=bkt, Key=md_key, Body=md, ContentType="text/markdown"
     )
     client.put_object(
-        Bucket=bkt, Key=latest_key, Body=body, ContentType="application/json"
+        Bucket=bkt, Key=latest_json_key, Body=body, ContentType="application/json"
+    )
+    client.put_object(
+        Bucket=bkt, Key=latest_md_key, Body=md, ContentType="text/markdown"
     )
 
-    report["report_keys"] = [json_key, md_key, latest_key]
+    report["report_keys"] = [json_key, md_key, latest_json_key, latest_md_key]
     logger.info(
         "[calibration_kappa] status=%s cells=%d sufficient=%d reviews=%d → s3://%s/%s",
         report["status"],
