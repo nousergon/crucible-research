@@ -472,6 +472,14 @@ def build_batch_request(
     ``with_structured_output`` call shape — same structured-output
     semantics, just transported via the Batches API).
 
+    Delegates payload construction to
+    ``alpha_engine_lib.anthropic_payload.build_batches_request_params``
+    (L334 chokepoint — second consumer of the lib's anthropic_payload
+    substrate after morning-signal). The chokepoint enforces the
+    server-tool ⊥ assistant-prefill invariant on the embedded
+    ``params`` dict so future RubricEval extensions that add a server
+    tool (web_search etc.) can't reach Anthropic's HTTP 400.
+
     Raises ``ValueError`` if ``artifact.agent_id`` has no rubric
     mapped — callers must pre-filter via ``resolve_rubric_for_agent``.
 
@@ -479,6 +487,8 @@ def build_batch_request(
     this function is invoked (the skip artifact is persisted
     client-side without spending a batch slot).
     """
+    from alpha_engine_lib.anthropic_payload import build_batches_request_params
+
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
         raise ValueError(
@@ -491,26 +501,18 @@ def build_batch_request(
     rendered = _render_rubric(artifact, loaded_prompt)
     tool_spec = _build_rubric_tool_spec()
 
-    return {
-        "custom_id": custom_id,
-        "params": {
-            "model": judge_model,
-            "max_tokens": max_tokens,
-            "tools": [tool_spec],
-            # Force the model to call the rubric tool — equivalent to
-            # ``with_structured_output(...)``'s ``tool_choice`` posture.
-            # Without this the model can decide to emit prose, which
-            # would fall through every parser in this module.
-            "tool_choice": {"type": "tool", "name": _RUBRIC_TOOL_NAME},
-            "messages": [
-                {"role": "user", "content": rendered},
-            ],
-            # ``metadata.user_id`` is reserved for end-user identification
-            # in Anthropic's contract; we pass the rubric+version pair
-            # via ``metadata`` for batch-side observability without
-            # putting it on a schema-validated field.
-        },
-    }
+    # Force the model to call the rubric tool — equivalent to
+    # ``with_structured_output(...)``'s ``tool_choice`` posture. Without
+    # this the model can decide to emit prose, which would fall through
+    # every parser in this module.
+    return build_batches_request_params(
+        custom_id=custom_id,
+        model=judge_model,
+        max_tokens=max_tokens,
+        user_content=rendered,
+        tools=[tool_spec],
+        tool_choice={"type": "tool", "name": _RUBRIC_TOOL_NAME},
+    )
 
 
 def parse_batch_message(
