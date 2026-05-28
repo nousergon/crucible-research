@@ -48,6 +48,11 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "data/fetchers/insider_fetcher.py": 1,
     "data/fetchers/revision_fetcher.py": 1,
     "data/scanner_orchestrator.py": 1,
+    # κ calibration report (ROADMAP L480): kappa.json + kappa.md + the two
+    # latest/ pointers. Prefix decision_artifacts/_calibration/_report/ is
+    # grandfathered in ARTIFACT_REGISTRY.yaml — operator-gated, consumer
+    # graceful-degrades, so not yet a load-bearing freshness SLA.
+    "evals/calibration_kappa.py": 4,
     "evals/eval_manifest.py": 1,
     "evals/judge.py": 1,
     "evals/last_week_scorecard.py": 2,
