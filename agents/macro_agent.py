@@ -495,13 +495,6 @@ def run_macro_agent(
 # drawdown leg — consumers compose the two via most-protective override.
 _REGIME_SEVERITY = {"bull": 0, "neutral": 1, "bear": 2}
 
-# Migration shim: LLM prompts still reference the 4-class vocabulary
-# (prompt updates ship in Phase 1B follow-on). Raw LLM "caution" coerces
-# to "neutral" — the stress signal that drove the historical "caution"
-# call is preserved end-to-end through regime_intensity_z. Coercion is
-# logged so we can monitor the rate during the OBSERVE window.
-_LEGACY_REGIME_COERCION: dict[str, str] = {"caution": "neutral"}
-
 
 def _validate_regime(llm_regime: str, macro_data: dict) -> str:
     """
@@ -510,27 +503,19 @@ def _validate_regime(llm_regime: str, macro_data: dict) -> str:
     Hard rule (only override): extreme stress → bear.
       - VIX > 30 AND SPY 30d < -10% → force 'bear'
 
-    Migration shim (v0.42.0): legacy LLM emissions of "caution" coerce
-    to "neutral" with WARN log; the stress signal is preserved through
-    the continuous regime_intensity_z META_FEATURE. Prompt updates land
-    in a Phase 1B follow-on so the shim retires once the LLM stops
-    emitting the legacy vocabulary.
+    ``llm_regime`` is already constrained to the 3-class ``RegimeLiteral``
+    ({bull, neutral, bear}) by the ``MacroEconomistRawOutput`` schema at the
+    parse callsite, so no vocabulary coercion happens here. The legacy
+    4-class "caution" migration shim was retired 2026-05-29 once the macro
+    prompts dropped the 4-class vocabulary (caution-regime-retirement
+    Phase 1B). A non-conforming emission fails Pydantic validation upstream
+    and is governed there by STRICT_VALIDATION (raise — the fail-loud
+    default) / lax-mode (neutral default) — never silently coerced here.
 
     Only escalates severity — never downgrades.
     """
 
     cfg = REGIME_GUARDRAILS
-
-    # Migration shim — legacy LLM "caution" → "neutral".
-    coerced = _LEGACY_REGIME_COERCION.get((llm_regime or "").strip().lower())
-    if coerced is not None:
-        logger.warning(
-            "[regime_guardrail] LEGACY COERCION %s → %s "
-            "(stress signal preserved via regime_intensity_z; "
-            "prompt update owed in Phase 1B follow-on)",
-            llm_regime, coerced,
-        )
-        llm_regime = coerced
 
     if not cfg:
         return llm_regime

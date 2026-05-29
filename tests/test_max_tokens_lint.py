@@ -52,9 +52,13 @@ _ALLOWLIST: dict[str, set[int]] = {
     # then 572 → 580 by the caution-regime retirement (v0.42.0,
     # 2026-05-28): added _LEGACY_REGIME_COERCION shim + WARN log +
     # docstring rework on _validate_regime, dropping the soft-override
-    # → caution branches; net +8 lines above the critic call.
+    # → caution branches; net +8 lines above the critic call,
+    # then 580 → 565 by retiring the now-dead _LEGACY_REGIME_COERCION
+    # shim (2026-05-29, Phase 1B follow-on): the macro prompts dropped
+    # the 4-class vocabulary so the coercion was unreachable on the LLM
+    # path; net -15 lines above the critic call.
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {580},
+    "agents/macro_agent.py": {565},
 }
 
 

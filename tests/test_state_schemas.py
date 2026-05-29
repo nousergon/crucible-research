@@ -260,9 +260,10 @@ class TestMacroEconomistOutput:
             assert m.market_regime == regime
 
     def test_regime_legacy_caution_rejected(self):
-        # "caution" was retired in v0.42.0. Raw LLM emissions are coerced
-        # to "neutral" by macro_agent._validate_regime upstream of this
-        # schema; the schema itself enforces the 3-class invariant.
+        # "caution" was retired in v0.42.0. The schema is the single
+        # enforcement point: a "caution" emission fails validation here
+        # (fail-loud), governed downstream by STRICT_VALIDATION. The
+        # legacy _validate_regime coercion shim was retired 2026-05-29.
         with pytest.raises(ValueError):
             MacroEconomistOutput(market_regime="caution")
 

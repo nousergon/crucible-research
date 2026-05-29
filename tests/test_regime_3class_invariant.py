@@ -7,8 +7,10 @@ Pin the 3-class Ang-Bekaert macro regime taxonomy retired the legacy
 Covers:
   - REGIME_VALUES enum is exactly ("bull", "neutral", "bear")
   - macro_agent._REGIME_SEVERITY is 3-key
-  - macro_agent._validate_regime coerces legacy LLM "caution" → "neutral"
-    (migration shim) with WARN log
+  - macro_agent._validate_regime no longer coerces vocabulary — input is
+    schema-constrained to 3-class RegimeLiteral at the parse callsite
+    (the legacy "caution" → "neutral" migration shim was retired
+    2026-05-29 once the macro prompts dropped the 4-class vocabulary)
   - hard-override → bear still fires on extreme stress (VIX > 30 AND
     SPY 30d < -10%)
   - soft-override → caution path is gone (elevated stress no longer
@@ -52,35 +54,29 @@ def test_regime_severity_is_3key():
     assert _REGIME_SEVERITY["neutral"] < _REGIME_SEVERITY["bear"]
 
 
-# ── _validate_regime migration shim ──────────────────────────────────────
+# ── _validate_regime: 3-class passthrough (shim retired) ──────────────────
 
 
-class TestValidateRegimeCoercion:
-    """Migration shim: legacy LLM `caution` coerces to `neutral`.
-    The stress signal that drove the historical `caution` call is
-    preserved end-to-end through regime_intensity_z, so no information
-    is lost — just no longer discretized into a redundant 4th category.
+class TestValidateRegimePassthrough:
+    """The legacy `caution` → `neutral` coercion shim was retired
+    2026-05-29 (Phase 1B follow-on). ``_validate_regime`` now receives
+    inputs already constrained to the 3-class ``RegimeLiteral`` by the
+    ``MacroEconomistRawOutput`` schema, so it never coerces vocabulary —
+    it only applies the catastrophic-stress → bear hard override. A
+    non-conforming emission fails Pydantic upstream (fail-loud under
+    STRICT_VALIDATION), never reaching this function.
     """
 
-    def test_legacy_caution_coerces_to_neutral(self, caplog):
-        from agents.macro_agent import _validate_regime
+    def test_legacy_coercion_shim_stays_retired(self):
+        import agents.macro_agent as macro_agent
 
-        with caplog.at_level(logging.WARNING):
-            out = _validate_regime("caution", {})
+        assert not hasattr(macro_agent, "_LEGACY_REGIME_COERCION"), (
+            "the legacy coercion shim must stay retired — re-introducing "
+            "it silently degrades a model contract violation to 'neutral' "
+            "instead of failing loud (see feedback_no_silent_fails)"
+        )
 
-        assert out == "neutral"
-        assert any(
-            "LEGACY COERCION" in rec.message and "caution" in rec.message
-            for rec in caplog.records
-        ), "expected LEGACY COERCION WARN log"
-
-    def test_case_insensitive_coercion(self):
-        from agents.macro_agent import _validate_regime
-
-        assert _validate_regime("CAUTION", {}) == "neutral"
-        assert _validate_regime("Caution", {}) == "neutral"
-
-    def test_non_legacy_values_passthrough_when_no_threshold_breach(self):
+    def test_3class_values_passthrough_when_no_threshold_breach(self):
         from agents.macro_agent import _validate_regime
 
         # No vix / spy_30d → no hard override → returns input unchanged.
@@ -108,13 +104,6 @@ class TestHardOverrideStillFires:
             "OVERRIDE neutral → bear" in rec.message for rec in caplog.records
         )
 
-    def test_extreme_stress_from_legacy_caution_still_coerces_then_overrides(self):
-        from agents.macro_agent import _validate_regime
-
-        # Legacy LLM caution → coerced to neutral → hard override → bear.
-        macro = {"vix": 40.0, "sp500_30d_return": -15.0}
-        assert _validate_regime("caution", macro) == "bear"
-
     def test_below_bear_threshold_does_not_override(self):
         from agents.macro_agent import _validate_regime
 
@@ -141,7 +130,7 @@ class TestHardOverrideStillFires:
 
 def test_no_guardrails_config_passes_through():
     """When REGIME_GUARDRAILS is unset, _validate_regime returns input
-    (except the legacy coercion shim, which fires unconditionally)."""
+    unchanged — no vocabulary coercion (the shim was retired)."""
     from agents import macro_agent
 
     # Save + clear the guardrails cfg.
@@ -150,7 +139,6 @@ def test_no_guardrails_config_passes_through():
     try:
         assert macro_agent._validate_regime("bull", {"vix": 50, "sp500_30d_return": -20}) == "bull"
         assert macro_agent._validate_regime("bear", {}) == "bear"
-        # Coercion still fires (it's pre-cfg check).
-        assert macro_agent._validate_regime("caution", {}) == "neutral"
+        assert macro_agent._validate_regime("neutral", {}) == "neutral"
     finally:
         macro_agent.REGIME_GUARDRAILS = saved
