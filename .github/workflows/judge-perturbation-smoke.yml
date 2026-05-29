@@ -1,0 +1,73 @@
+name: Judge Perturbation Smoke
+
+# CI gate for LLM-as-judge VALIDATION (ROADMAP L480, 2026-05-29).
+#
+# Runs a small battery of deterministic corruptions through the REAL
+# judge LLM and asserts the judge catches them — the corrupted output's
+# targeted rubric dimension must drop below the known-good reference.
+# This validates the judge on its actual construct (process quality);
+# it does NOT touch stock outcomes (that's a separate, firewalled
+# system diagnostic).
+#
+# Triggers ONLY on PRs touching the judge code, the perturbation harness,
+# or the smoke itself. Rubric PROMPT changes live in alpha-engine-config
+# and reach the judge via that repo's notify-research dispatch.
+#
+# Needs BOTH the ANTHROPIC_API_KEY secret (live judge call) AND the
+# alpha-engine-config checkout (the eval rubric prompts are gitignored
+# here and loaded at runtime). Forks without the API secret get a clean
+# skip (the script exits 0 when the env var is unset).
+#
+# Cost: ~6 Haiku judge calls per run (1 reference per rubric + one per
+# corruption) — cents. Tolerant caught-rate gate absorbs LLM variance;
+# a regressed/insensitive judge still fails it.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "evals/judge.py"
+      - "evals/perturbation.py"
+      - "tests/live_smoke/judge_perturbation_smoke.py"
+      - ".github/workflows/judge-perturbation-smoke.yml"
+      - "requirements.txt"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout research repo
+        uses: actions/checkout@v4
+
+      # Eval rubric prompts are gitignored here; load_prompt() resolves
+      # them from $GITHUB_WORKSPACE/alpha-engine-config/research/prompts/.
+      - name: Checkout alpha-engine-config (branch-aware)
+        env:
+          TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          REPO_URL="https://x-access-token:${TOKEN}@github.com/cipher813/alpha-engine-config.git"
+          if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
+            echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
+          else
+            git clone --depth 1 "$REPO_URL" alpha-engine-config
+            echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
+          fi
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run judge perturbation smoke
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONPATH: .
+        run: python tests/live_smoke/judge_perturbation_smoke.py
