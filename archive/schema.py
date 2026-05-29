@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -465,6 +465,26 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          ALTER TABLE scanner_evaluations ADD COLUMN focus_rank_in_sector INTEGER;
          ALTER TABLE scanner_evaluations ADD COLUMN focus_list_passed INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE scanner_evaluations ADD COLUMN agent_override INTEGER NOT NULL DEFAULT 0;
+         """),
+    # Canonical 21d horizon on score_performance (2026-05-29). Arithmetic
+    # parity columns (price/return/spy/beat/eval_date_21d) plus the
+    # canonical log-domain market-relative alpha (log_alpha_21d =
+    # log_return_21d - log_spy_return_21d) the predictor trains on.
+    # Producer = alpha-engine-data signal_returns._backfill_score_returns,
+    # sourced from universe_returns' 21d columns (alpha-engine-data #197).
+    # Powers the judge outcome-IC validation (ROADMAP L480 re-scope) — the
+    # judge's quality scores correlated against realized canonical alpha.
+    # NULL on rows persisted before this migration / before the 21d
+    # forward window closes; backtester consumers treat NULL as
+    # "outcome not yet realized".
+    18: ("Add canonical 21d returns + log-alpha to score_performance",
+         """
+         ALTER TABLE score_performance ADD COLUMN price_21d REAL;
+         ALTER TABLE score_performance ADD COLUMN return_21d REAL;
+         ALTER TABLE score_performance ADD COLUMN spy_21d_return REAL;
+         ALTER TABLE score_performance ADD COLUMN beat_spy_21d INTEGER;
+         ALTER TABLE score_performance ADD COLUMN eval_date_21d TEXT;
+         ALTER TABLE score_performance ADD COLUMN log_alpha_21d REAL;
          """),
 }
 
