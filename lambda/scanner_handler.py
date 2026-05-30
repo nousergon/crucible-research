@@ -130,11 +130,37 @@ def handler(event, context):
             "error": f"invalid run_date {run_date!r}: expected ISO YYYY-MM-DD",
         }
 
+    # ── Trading-day normalization (DATE_CONVENTIONS) ─────────────────────────
+    # Every trade artifact in the system keys by the TRADING DAY, not the
+    # calendar date: signals.json, sector_team_runs, scanner_evaluations, and
+    # the Research run itself all key off most_recent_trading_day(today). The
+    # Saturday SF passes a CALENDAR run_date (date(Execution.StartTime)) — e.g.
+    # 2026-05-30 (Sat) — while Research keys off Friday 2026-05-29. candidates.json
+    # MUST land on the same trading-day key or the Phase-5 consumer (Research
+    # fetch_data → load_candidates_json) can't find it. The 2026-05-30 L4464
+    # recovery failed exactly here: Scanner wrote candidates/2026-05-30/, Research
+    # read candidates/2026-05-29/. Normalize at the producer to the canonical
+    # trading-day axis (lib chokepoint), preserving on-or-before semantics so an
+    # explicit operator backfill date is normalized too.
+    import datetime as _dt
+    from alpha_engine_lib import trading_calendar as _tc
+    _cal = _dt.date.fromisoformat(run_date[:10])
+    _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
+    _trading_day = _td.isoformat()
+    if _trading_day != run_date[:10]:
+        logger.info(
+            "[scanner_handler] normalized run_date %s (calendar) → %s (trading "
+            "day) per DATE_CONVENTIONS — candidates.json keys by trading day to "
+            "match Research + signals.json",
+            run_date, _trading_day,
+        )
+    run_date = _trading_day
+
     bucket = event.get("bucket", _DEFAULT_BUCKET)
     market_regime = event.get("market_regime", "neutral")
 
     logger.info(
-        "[scanner_handler] start run_date=%s bucket=%s market_regime=%s",
+        "[scanner_handler] start run_date=%s (trading day) bucket=%s market_regime=%s",
         run_date, bucket, market_regime,
     )
 

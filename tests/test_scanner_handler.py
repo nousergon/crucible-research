@@ -68,7 +68,9 @@ class TestHandler:
                 {"run_date": "2026-05-30"}, context=None,
             )
         assert result["status"] == "OK"
-        assert result["date"] == "2026-05-30"
+        # 2026-05-30 (Sat) normalizes to the 2026-05-29 (Fri) trading day —
+        # candidates.json keys by trading day to match Research (DATE_CONVENTIONS).
+        assert result["date"] == "2026-05-29"
         # Summary surfaces the operationally interesting counts.
         assert result["summary"]["scanner_tickers"] == 3
         assert result["summary"]["population_tickers"] == 2
@@ -162,7 +164,8 @@ class TestHandler:
             handler_mod.handler(
                 {"run_date": "2026-05-30"}, context=None,
             )
-        assert captured["run_date"] == "2026-05-30"
+        # Normalized Sat→Fri trading day before reaching the orchestrator.
+        assert captured["run_date"] == "2026-05-29"
 
     def test_bucket_and_market_regime_overrides(self, handler_mod):
         captured = {}
@@ -187,3 +190,32 @@ class TestHandler:
             )
         assert captured["bucket"] == "test-bucket"
         assert captured["market_regime"] == "bull"
+
+    def test_run_date_normalized_to_trading_day(self, handler_mod):
+        """A weekend/holiday calendar run_date is normalized to the most
+        recent trading day so candidates.json lands on the SAME key Research
+        reads (DATE_CONVENTIONS). The 2026-05-30 recovery failed because the
+        Scanner keyed by calendar date (Sat) while Research read trading day
+        (Fri). Saturday 2026-05-30 → Friday 2026-05-29; a trading-day input
+        passes through unchanged."""
+        for given, expected in [("2026-05-30", "2026-05-29"),   # Sat → Fri
+                                ("2026-05-31", "2026-05-29"),   # Sun → Fri
+                                ("2026-05-29", "2026-05-29")]:   # Fri → Fri
+            captured = {}
+
+            def fake_build(**kwargs):
+                captured.update(kwargs)
+                return _ok_artifact()
+
+            with patch.object(handler_mod, "_ensure_init"), \
+                 patch("data.scanner_orchestrator.build_candidates_artifact",
+                       side_effect=fake_build), \
+                 patch("data.scanner_orchestrator.write_candidates_artifact",
+                       return_value=f"candidates/{expected}/candidates.json"), \
+                 patch("boto3.client", return_value=MagicMock()):
+                result = handler_mod.handler({"run_date": given}, context=None)
+            assert captured["run_date"] == expected, (
+                f"run_date {given} must normalize to trading day {expected}, "
+                f"got {captured.get('run_date')}"
+            )
+            assert result["date"] == expected
