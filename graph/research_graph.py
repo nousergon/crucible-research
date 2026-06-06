@@ -2984,6 +2984,63 @@ def _compute_focus_list_audit_lookup(
     return lookup_legacy
 
 
+# ── Secondary-work deadline guard ───────────────────────────────────────────
+# The research Lambda has a HARD 900s ceiling (15 min is the absolute Lambda
+# maximum — it cannot be raised). Normal full-graph runs reach archive_writer
+# in ~5-9 min, but a tail-latency-slow run can run right up to the wall:
+# 2026-06-06 the sector teams alone ate ~13 of the 15 min, signals.json was
+# persisted at ~14.9 min, and the Lambda was SIGKILL'd seconds later while
+# extracting semantic memories (an unbounded LLM call). The Step Function saw
+# a TIMEOUT and failed the whole Research branch — for a run whose primary
+# deliverable (signals.json) had ALREADY landed, and worse, the kill landed
+# BEFORE the "must not miss" scanner_eval grade logging that follows the
+# extraction, leaving a permanent hole in grade history.
+#
+# This guard lets archive_writer skip the lowest-priority best-effort work
+# (semantic-memory extraction) once a wall-clock budget is exhausted, so the
+# remaining higher-priority logging + graph finalize complete inside 900s and
+# the run returns OK with signals delivered instead of being killed mid-flight.
+# Budget is measured from state["run_time"] (set at create_initial_state,
+# ~Lambda start). Set RESEARCH_SECONDARY_DEADLINE_S=0 to disable.
+_SECONDARY_DEADLINE_ENV = "RESEARCH_SECONDARY_DEADLINE_S"
+_SECONDARY_DEADLINE_DEFAULT_S = 780.0  # 13 min — ~2 min headroom under the 900s ceiling
+
+
+def _secondary_deadline_budget_s() -> float:
+    raw = os.environ.get(_SECONDARY_DEADLINE_ENV, "")
+    if not raw:
+        return _SECONDARY_DEADLINE_DEFAULT_S
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[archive_writer] %s=%r is not a number; using default %.0fs",
+            _SECONDARY_DEADLINE_ENV, raw, _SECONDARY_DEADLINE_DEFAULT_S,
+        )
+        return _SECONDARY_DEADLINE_DEFAULT_S
+
+
+def _secondary_work_deadline_exhausted(state: ResearchState) -> tuple[bool, float]:
+    """Return (exhausted, elapsed_s) for the secondary-work wall-clock budget.
+
+    Fails OPEN (returns False) if disabled (budget<=0) or run_time is
+    unparseable — i.e. when in doubt the secondary work still runs, matching
+    the pre-guard behavior. Only a confidently-elapsed budget skips work.
+    """
+    budget = _secondary_deadline_budget_s()
+    if budget <= 0:
+        return (False, 0.0)
+    run_time = state.get("run_time") or ""
+    try:
+        start = datetime.fromisoformat(run_time)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+    except (TypeError, ValueError):
+        return (False, 0.0)
+    return (elapsed >= budget, elapsed)
+
+
 def archive_writer(state: ResearchState) -> dict:
     """Write all data to S3 + SQLite.
 
@@ -3188,21 +3245,36 @@ def archive_writer(state: ResearchState) -> dict:
         except Exception as e:
             logger.error("Failed to save consolidated_report: %s", e)
 
-    # Extract semantic memories from this run (Phase 3)
-    try:
-        from memory.semantic import extract_semantic_memories
-        n_semantic = extract_semantic_memories(
-            db_conn=am.db_conn,
-            sector_team_outputs=state.get("sector_team_outputs", {}),
-            macro_report=state.get("macro_report", ""),
-            market_regime=state.get("market_regime", "neutral"),
-            ic_decisions=state.get("ic_decisions", []),
-            run_date=run_date,
+    # Extract semantic memories from this run (Phase 3) — lowest-priority,
+    # best-effort, and the only UNBOUNDED (LLM-call) work left in the node.
+    # Deadline-gated: signals.json is already persisted above, so on a
+    # tail-latency-slow run we skip this rather than risk a SIGKILL here that
+    # would (a) return TIMEOUT to the SF for a delivered-signals run and
+    # (b) starve the "must not miss" scanner_eval logging that follows.
+    _deadline_hit, _elapsed = _secondary_work_deadline_exhausted(state)
+    if _deadline_hit:
+        logger.warning(
+            "[archive_writer] semantic extraction SKIPPED — secondary-work "
+            "deadline exhausted (%.0fs elapsed >= %.0fs budget). signals.json "
+            "already persisted; preserving the remaining Lambda budget for "
+            "eval logging + finalize so the run returns OK, not TIMEOUT.",
+            _elapsed, _secondary_deadline_budget_s(),
         )
-        if n_semantic:
-            logger.info("[archive_writer] extracted %d semantic memories", n_semantic)
-    except Exception as e:
-        logger.debug("[archive_writer] semantic extraction skipped: %s", e)
+    else:
+        try:
+            from memory.semantic import extract_semantic_memories
+            n_semantic = extract_semantic_memories(
+                db_conn=am.db_conn,
+                sector_team_outputs=state.get("sector_team_outputs", {}),
+                macro_report=state.get("macro_report", ""),
+                market_regime=state.get("market_regime", "neutral"),
+                ic_decisions=state.get("ic_decisions", []),
+                run_date=run_date,
+            )
+            if n_semantic:
+                logger.info("[archive_writer] extracted %d semantic memories", n_semantic)
+        except Exception as e:
+            logger.debug("[archive_writer] semantic extraction skipped: %s", e)
 
     # ── Evaluation logging ──────────────────────────────────────────────────
     # Log all ~900 stocks with tech indicators for population baseline analysis.
