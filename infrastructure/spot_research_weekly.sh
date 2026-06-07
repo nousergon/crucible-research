@@ -282,6 +282,25 @@ command -v python3.12 >/dev/null && PYTHON_BIN=python3.12 || PYTHON_BIN=python3
 export PYTHON_BIN
 ENV_EOF
 
+# Research secrets → env. The Lambda runtime exposes ANTHROPIC_API_KEY (etc.)
+# as Lambda env vars, so ResearchPreflight.check_env_vars() and the agents read
+# them from os.environ. On the spot they live only in SSM, so fetch + export
+# them here (mirrors the RAG secret block in spot_data_weekly.sh). The spot's
+# IAM profile grants ssm:GetParameter on /alpha-engine/*. ANTHROPIC_API_KEY is
+# required (preflight gates on it); FMP/FRED are best-effort (config loads them
+# with required=False). Included in the preflight / smoke / workload blocks.
+read -r -d '' SECRETS_SOURCE <<'SEC_EOF' || true
+for _name in ANTHROPIC_API_KEY FMP_API_KEY FRED_API_KEY; do
+    _val=$(aws ssm get-parameter --name /alpha-engine/$_name --with-decryption --query 'Parameter.Value' --output text --region "${AWS_REGION:-us-east-1}" 2>/dev/null || echo "")
+    if [ -n "$_val" ]; then export $_name="$_val"; fi
+    unset _val
+done
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "ERROR: ANTHROPIC_API_KEY could not be fetched from SSM (/alpha-engine/ANTHROPIC_API_KEY)" >&2
+    exit 1
+fi
+SEC_EOF
+
 # ── Bootstrap: watchdog + python + git + clone + config ──────────────────────
 echo "==> Bootstrapping spot (watchdog, python, clone, config)..."
 run_ssm "bootstrap" 600 <<BOOTSTRAP
@@ -330,6 +349,7 @@ if [ "$RUN_MODE" = "smoke-only" ]; then
     run_ssm "smoke" 900 <<SMOKE
 set -eo pipefail
 ${ENV_SOURCE}
+${SECRETS_SOURCE}
 cd /home/ec2-user/alpha-engine-research
 
 echo "==> Smoke: import main + graph"
@@ -353,6 +373,7 @@ if [ "$PREFLIGHT_ONLY" = "1" ]; then
     run_ssm "preflight" 600 <<PREFLIGHT
 set -eo pipefail
 ${ENV_SOURCE}
+${SECRETS_SOURCE}
 cd /home/ec2-user/alpha-engine-research
 
 echo "==> ResearchPreflight (env/secret resolution + S3 reachability, read-only)"
@@ -379,6 +400,7 @@ echo "════════════════════════�
 run_ssm "workload" "$MAX_RUNTIME_SECONDS" <<WORKLOAD
 set -eo pipefail
 ${ENV_SOURCE}
+${SECRETS_SOURCE}
 cd /home/ec2-user/alpha-engine-research
 
 # ── Spot-side log capture ────────────────────────────────────────────
