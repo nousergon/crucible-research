@@ -2352,19 +2352,27 @@ def population_entry_handler(state: ResearchState) -> dict:
     """Place IC ADVANCE decisions into population."""
     logger.info("[entry_handler] starting")
 
-    final_pop, entry_events = apply_ic_entries(
+    final_pop, events = apply_ic_entries(
         remaining_population=state.get("remaining_population", []),
         ic_decisions=state.get("ic_decisions", []),
         entry_theses=state.get("entry_theses", {}),
         sector_map=state.get("sector_map", {}),
         run_date=state.get("run_date", ""),
+        target_size=POPULATION_CFG.get("target_size", 25),
     )
 
-    all_events = state.get("exits", []) + entry_events
+    # L4534: replacement-aware swaps come back tagged FORCED_ROTATION. Route
+    # them into the exits channel so _build_signals_payload (archive node, runs
+    # after this) emits EXIT/sell signals for the swapped-out names — otherwise
+    # the executor would never sell them (population/executor divergence).
+    swap_exits = [e for e in events if e.get("type") == "FORCED_ROTATION"]
+    entry_events = [e for e in events if e.get("type") != "FORCED_ROTATION"]
+    all_exits = state.get("exits", []) + swap_exits
 
     return {
         "new_population": final_pop,
-        "population_rotation_events": all_events,
+        "population_rotation_events": all_exits + entry_events,
+        "exits": all_exits,
     }
 
 
