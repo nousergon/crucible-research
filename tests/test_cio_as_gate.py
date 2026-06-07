@@ -527,3 +527,28 @@ def test_apply_ic_entries_admits_advance_forced():
     tickers = {p["ticker"] for p in final_pop}
     assert "FORCED" in tickers, "ADVANCE_FORCED must enter the population"
     assert {e["ticker_in"] for e in events} == {"FORCED"}
+
+
+def test_decisions_carry_sector_context_l4533():
+    """Decisions must carry sector + sub-scores joined from the candidate so
+    REJECTED fresh names are attributable downstream (panel + tripwire)."""
+    held = {"HELD1"}
+    candidates = [
+        {"ticker": "HELD1", "sector": "Technology", "quant_score": 80, "qual_score": 78},
+        {"ticker": "CART", "sector": "Consumer Discretionary",
+         "quant_score": 62, "qual_score": 55},
+    ]
+    decisions = [
+        {"ticker": "HELD1", "decision": "ADVANCE", "rank": 1, "conviction": 80,
+         "rationale": "reaffirm", "entry_thesis": None},
+        {"ticker": "CART", "decision": "REJECT", "rank": None, "conviction": 35,
+         "rationale": "underweight sector", "entry_thesis": None},
+    ]
+    result = _post_process_cio_decisions(
+        decisions, candidates, floor=2, cap=10,
+        held_tickers=held, force_fill_conviction_floor=60,
+    )
+    by_ticker = {d["ticker"]: d for d in result["decisions"]}
+    assert by_ticker["CART"]["sector"] == "Consumer Discretionary"
+    assert by_ticker["CART"]["quant_score"] == 62
+    assert by_ticker["HELD1"]["sector"] == "Technology"

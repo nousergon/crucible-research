@@ -433,6 +433,25 @@ def _decision_conviction(d: dict) -> float:
     return float(c) if isinstance(c, (int, float)) else 0.0
 
 
+def _stamp_candidate_context(decisions: list[dict], candidates: list[dict]) -> None:
+    """Join sector + sub-scores from the source candidate onto each decision,
+    in place (L4533). The LLM decision carries only ticker/decision/conviction
+    — sector lives on the upstream team recommendation and was being dropped,
+    leaving downstream consumers (the dashboard new-entrant panel, the
+    underweight-sector tripwire context) unable to attribute a REJECTED fresh
+    name to its sector. ``CIODecision`` is ``extra="allow"`` so these ride
+    through validation. Only fills fields that are absent/None — never clobbers.
+    """
+    by_ticker = {c.get("ticker"): c for c in candidates if c.get("ticker")}
+    for d in decisions:
+        cand = by_ticker.get(d.get("ticker"))
+        if not cand:
+            continue
+        for field in ("sector", "quant_score", "qual_score"):
+            if d.get(field) is None and cand.get(field) is not None:
+                d[field] = cand[field]
+
+
 def _post_process_cio_decisions(
     decisions: list[dict],
     candidates: list[dict],
@@ -535,6 +554,8 @@ def _post_process_cio_decisions(
         floor, cap, force_fill_conviction_floor, len(held),
     )
 
+    _stamp_candidate_context(decisions, candidates)
+
     return {
         "decisions": decisions,
         "advanced_tickers": advanced,
@@ -582,6 +603,8 @@ def _fallback_selection(candidates: list[dict], floor: int) -> dict:
                 "entry_thesis": None,
             })
 
+    _stamp_candidate_context(decisions, candidates)
+
     return {
         "decisions": decisions,
         "advanced_tickers": advanced,
@@ -597,4 +620,9 @@ def _reject_decision(candidate: dict, reason: str) -> dict:
         "conviction": 0,
         "rationale": reason,
         "entry_thesis": None,
+        # L4533: carry sector + sub-scores so rejected names are attributable
+        # downstream (panel sector column, underweight-sector tripwire context).
+        "sector": candidate.get("sector"),
+        "quant_score": candidate.get("quant_score"),
+        "qual_score": candidate.get("qual_score"),
     }
