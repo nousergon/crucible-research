@@ -15,7 +15,10 @@ requiring the full graph state.
 
 from __future__ import annotations
 
-from data.population_selector import compute_exits_and_open_slots
+from data.population_selector import (
+    apply_ic_entries,
+    compute_exits_and_open_slots,
+)
 
 
 DEFAULT_CONFIG = {
@@ -146,3 +149,98 @@ class TestUniverseDropGuardrail:
         )
 
         assert not [e for e in exits if e["type"] == "UNIVERSE_DROP"]
+
+
+# ---------------------------------------------------------------------------
+# L4534 — unconditional min_rotation_floor removed + replacement-aware swap
+# ---------------------------------------------------------------------------
+
+_ROT_CONFIG = {
+    "target_size": 3,
+    "rotation": {
+        "min_long_term_score": 45,
+        "min_tenure_weeks": 2,
+        "thesis_collapse_threshold": 40,
+        "min_rotation_pct": 0.50,  # would have force-rotated under the old floor
+        "max_rotations_per_run": 10,
+    },
+}
+
+
+def test_no_unconditional_forced_rotation_of_healthy_names():
+    """The removed min_rotation_floor must NOT eject healthy incumbents — even
+    with min_rotation_pct high, names >= min_long_term_score stay."""
+    current = [
+        {"ticker": "AAA", "sector": "Tech", "long_term_score": 60, "entry_date": "2026-01-01"},
+        {"ticker": "BBB", "sector": "Tech", "long_term_score": 55, "entry_date": "2026-01-01"},
+        {"ticker": "CCC", "sector": "Tech", "long_term_score": 61, "entry_date": "2026-01-01"},
+    ]
+    theses = {t["ticker"]: {"long_term_score": t["long_term_score"]} for t in current}
+    remaining, exits, _open = compute_exits_and_open_slots(
+        current_population=current,
+        investment_theses=theses,
+        config=_ROT_CONFIG,
+        run_date="2026-06-12",
+    )
+    assert exits == []  # old floor would have force-rotated ~half
+    assert {p["ticker"] for p in remaining} == {"AAA", "BBB", "CCC"}
+
+
+def test_conditional_swap_rotates_out_only_on_upgrade():
+    """Over target after a strong entrant → the weakest incumbent (below the
+    entrant) is swapped out as FORCED_ROTATION."""
+    remaining = [
+        {"ticker": "AAA", "sector": "Tech", "long_term_score": 80},
+        {"ticker": "WEAK", "sector": "Tech", "long_term_score": 50},
+        {"ticker": "BBB", "sector": "Tech", "long_term_score": 75},
+    ]
+    pop, events = apply_ic_entries(
+        remaining_population=remaining,
+        ic_decisions=[{"ticker": "NEW", "decision": "ADVANCE", "rank": 1, "conviction": 70}],
+        entry_theses={},
+        sector_map={"NEW": "Tech"},
+        run_date="2026-06-12",
+        target_size=3,
+    )
+    tickers = {p["ticker"] for p in pop}
+    assert tickers == {"AAA", "BBB", "NEW"}   # WEAK (50 < 70) swapped out, back to target
+    swaps = [e for e in events if e.get("type") == "FORCED_ROTATION"]
+    assert {e["ticker_out"] for e in swaps} == {"WEAK"}
+
+
+def test_no_swap_when_entrant_does_not_upgrade():
+    """Saturation: the entrant is weaker than every incumbent → no rotation,
+    book holds over target (no erosion)."""
+    remaining = [
+        {"ticker": "AAA", "sector": "Tech", "long_term_score": 80},
+        {"ticker": "BBB", "sector": "Tech", "long_term_score": 75},
+        {"ticker": "CCC", "sector": "Tech", "long_term_score": 70},
+    ]
+    pop, events = apply_ic_entries(
+        remaining_population=remaining,
+        ic_decisions=[{"ticker": "WEAKNEW", "decision": "ADVANCE", "rank": 1, "conviction": 40}],
+        entry_theses={},
+        sector_map={"WEAKNEW": "Tech"},
+        run_date="2026-06-12",
+        target_size=3,
+    )
+    assert {p["ticker"] for p in pop} == {"AAA", "BBB", "CCC", "WEAKNEW"}
+    assert [e for e in events if e.get("type") == "FORCED_ROTATION"] == []
+
+
+def test_no_swap_when_no_entrants():
+    """No net-new entrants (the saturated 0-add week) → no rotation at all."""
+    remaining = [
+        {"ticker": "AAA", "sector": "Tech", "long_term_score": 80},
+        {"ticker": "BBB", "sector": "Tech", "long_term_score": 50},
+    ]
+    pop, events = apply_ic_entries(
+        remaining_population=remaining,
+        ic_decisions=[{"ticker": "X", "decision": "REJECT"}],
+        entry_theses={},
+        sector_map={},
+        run_date="2026-06-12",
+        target_size=1,  # over target, but no entrants → still no rotation
+    )
+    assert {p["ticker"] for p in pop} == {"AAA", "BBB"}
+    assert [e for e in events if e.get("type") == "FORCED_ROTATION"] == []

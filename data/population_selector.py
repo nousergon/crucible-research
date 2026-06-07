@@ -570,29 +570,18 @@ def compute_exits_and_open_slots(
         incumbent_copy["long_term_score"] = lt_score
         remaining.append(incumbent_copy)
 
-    # Enforce minimum rotation floor
-    min_rotations = max(1, int(len(current_population) * min_rotation_pct))
-    if rotations_used < min_rotations and remaining:
-        # Force-rotate lowest-scoring tenure-eligible incumbents
-        eligible = sorted(
-            [p for p in remaining if p.get("tenure_weeks", 0) >= min_tenure],
-            key=lambda p: p.get("long_term_score", 0),
-        )
-        for inc in eligible:
-            if rotations_used >= min_rotations:
-                break
-            if rotations_used >= max_rotations:
-                break
-            exits.append({
-                "type": "FORCED_ROTATION",
-                "ticker_out": inc["ticker"],
-                "sector": inc.get("sector", "Unknown"),
-                "reason": f"min_rotation_floor (score={inc.get('long_term_score', 0):.1f})",
-                "score_out": inc.get("long_term_score", 0),
-            })
-            remaining = [p for p in remaining if p["ticker"] != inc["ticker"]]
-            rotations_used += 1
-
+    # NOTE (L4534): the unconditional "minimum rotation floor" that used to
+    # force-rotate the lowest-scoring ~10% out EVERY week was REMOVED here.
+    # It was an asymmetric ratchet that destroyed alpha in a mature book:
+    # it ejected held names scoring 52-61 ("to keep ideas fresh") while the
+    # quality-gated entrant bar (~60) admitted nothing in saturated weeks, so
+    # the population eroded (30 -> 27) and good names (e.g. KLAC@61.5) were
+    # churned out for nothing. "Keep ideas fresh" is now REPLACEMENT-AWARE:
+    # turnover happens only as a quality SWAP in ``apply_ic_entries`` — an
+    # incumbent is rotated out only when a net-new entrant actually upgrades
+    # its slot. Decay-based exits (thesis collapse / score degradation /
+    # universe drop) above are unchanged. ``min_rotation_pct`` / ``max_rotations``
+    # are retained in config but no longer drive unconditional ejection.
     open_slots = max(0, target_size - len(remaining))
 
     logger.info(
@@ -610,9 +599,11 @@ def apply_ic_entries(
     sector_map: dict[str, str],
     run_date: str,
     max_size: int = 30,
+    target_size: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
-    Place IC ADVANCE decisions into the population.
+    Place IC ADVANCE decisions into the population, then apply replacement-aware
+    rotation (L4534).
 
     Args:
         remaining_population: Population after exits.
@@ -621,12 +612,23 @@ def apply_ic_entries(
         sector_map: {ticker: sector} mapping.
         run_date: YYYY-MM-DD.
         max_size: Hard cap on population size (default 30).
+        target_size: Target population size. When the book is over target after
+            entries, the weakest incumbents are rotated out ONLY to the extent a
+            net-new entrant upgrades the slot (incumbent score < the weakest
+            admitted entrant). None disables the swap (size-neutral). This is the
+            replacement-aware successor to the removed unconditional
+            min_rotation_floor — in a saturated week (no entrants) nothing
+            rotates, so the book no longer erodes by ejecting good names.
 
     Returns:
-        (final_population, entry_events)
+        (final_population, events) where ``events`` mixes IC_ADVANCE entry
+        events (``ticker_in``) and FORCED_ROTATION swap exits (``ticker_out``);
+        the caller routes the FORCED_ROTATION events into the exits channel so
+        the executor gets EXIT signals for swapped-out names.
     """
     population = list(remaining_population)
     entry_events = []
+    added_entries: list[dict] = []
 
     # Both ADVANCE and ADVANCE_FORCED admit a ticker — matching only "ADVANCE"
     # here silently dropped floor-forced entrants (the bug that hid 0-new-entrant
@@ -663,6 +665,7 @@ def apply_ic_entries(
             "ic_rationale": decision.get("rationale"),
         }
         population.append(entry)
+        added_entries.append(entry)
         existing_tickers.add(ticker)
 
         entry_events.append({
@@ -674,7 +677,44 @@ def apply_ic_entries(
             "ic_rank": decision.get("rank"),
         })
 
-    logger.info("IC entries: %d advanced into population (total: %d)",
-                len(entry_events), len(population))
+    # ── Replacement-aware rotation (L4534) ────────────────────────────────
+    # When over target after entries, rotate out the weakest incumbents — but
+    # ONLY those a net-new entrant actually upgrades (incumbent score < the
+    # weakest admitted entrant). Never eject a name >= what came in; stop as
+    # soon as the weakest remaining incumbent is no longer beaten. No entrants
+    # (saturated week) → no rotation → book holds (no erosion).
+    rotation_exits: list[dict] = []
+    if target_size is not None and added_entries and len(population) > target_size:
+        weakest_entrant_score = min(
+            (e.get("long_term_score") or 0) for e in added_entries
+        )
+        added_tickers = {e["ticker"] for e in added_entries}
+        incumbents = sorted(
+            (p for p in population if p["ticker"] not in added_tickers),
+            key=lambda p: p.get("long_term_score", 0),
+        )
+        for inc in incumbents:
+            if len(population) <= target_size:
+                break
+            inc_score = inc.get("long_term_score", 0) or 0
+            if inc_score >= weakest_entrant_score:
+                break  # weakest remaining incumbent isn't beaten — no downgrade
+            population = [p for p in population if p["ticker"] != inc["ticker"]]
+            rotation_exits.append({
+                "type": "FORCED_ROTATION",
+                "ticker_out": inc["ticker"],
+                "sector": inc.get("sector", "Unknown"),
+                "reason": (
+                    f"quality_swap: replaced by stronger net-new entrant "
+                    f"(incumbent {inc_score:.1f} < entrant {weakest_entrant_score:.1f})"
+                ),
+                "score_out": inc_score,
+            })
 
-    return population, entry_events
+    logger.info(
+        "IC entries: %d advanced into population, %d quality-swap rotations "
+        "(total: %d, target: %s)",
+        len(entry_events), len(rotation_exits), len(population), target_size,
+    )
+
+    return population, entry_events + rotation_exits
