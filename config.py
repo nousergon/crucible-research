@@ -345,6 +345,19 @@ if CIO_MIN_NEW_ENTRANTS < 0 or CIO_MAX_NEW_ENTRANTS < CIO_MIN_NEW_ENTRANTS:
         f"Invalid cio config: min_new_entrants={CIO_MIN_NEW_ENTRANTS}, "
         f"max_new_entrants={CIO_MAX_NEW_ENTRANTS} (must be 0 <= min <= max)"
     )
+# Entrant bar for the min_new_entrants force-fill: only force a rubric-rejected
+# fresh name in if its CIO conviction clears this (the observed ~60 de-facto
+# bar). Quality gate so a saturated week never injects a sub-bar name — net-new
+# stays below floor and the tripwire fires instead. Set very high (e.g. 101) to
+# disable forcing entirely (pure tripwire).
+CIO_FORCE_FILL_CONVICTION_FLOOR: float = float(
+    _cio_cfg.get("force_fill_conviction_floor", 60)
+)
+# Below this many net-new entrants in a week, emit a loud tripwire (WARN + CW
+# metric) — a saturated/0-add week is defensible but must be visible.
+CIO_NEW_ENTRANT_ALERT_FLOOR: int = int(
+    _cio_cfg.get("new_entrant_alert_floor", CIO_MIN_NEW_ENTRANTS)
+)
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]

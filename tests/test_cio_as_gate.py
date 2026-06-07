@@ -415,3 +415,115 @@ def test_replay_2026_04_24_top3_advanced_caps_below_baseline():
     assert counts["ENTER"] < 27, (
         f"Capped at top-{cap}, ENTER count must be < 27 baseline; got {counts['ENTER']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# L4532 — net-new floor + quality-gated force-fill + ADVANCE_FORCED consumers
+# ---------------------------------------------------------------------------
+
+
+def test_net_new_floor_incumbent_advances_do_not_satisfy_floor():
+    """The 2026-06-05 bug: every ADVANCE is an already-held incumbent, so
+    net-new = 0 even though len(advanced) >= floor. The floor must measure
+    net-new, not total advances."""
+    held = {"HELD1", "HELD2"}
+    decisions = [
+        {"ticker": "HELD1", "decision": "ADVANCE", "rank": 1, "conviction": 80,
+         "rationale": "reaffirm", "entry_thesis": None},
+        {"ticker": "HELD2", "decision": "ADVANCE", "rank": 2, "conviction": 78,
+         "rationale": "reaffirm", "entry_thesis": None},
+        # fresh names all below the bar — must NOT be force-filled
+        {"ticker": "FRESH1", "decision": "REJECT", "rank": None, "conviction": 40,
+         "rationale": "weak", "entry_thesis": None},
+        {"ticker": "FRESH2", "decision": "REJECT", "rank": None, "conviction": 35,
+         "rationale": "weak", "entry_thesis": None},
+    ]
+    candidates = [{"ticker": d["ticker"]} for d in decisions]
+    result = _post_process_cio_decisions(
+        decisions, candidates, floor=2, cap=10,
+        held_tickers=held, force_fill_conviction_floor=60,
+    )
+    # Incumbents are re-affirmed (still in advanced_tickers) but count as 0 net-new.
+    assert result["net_new_entrants"] == 0
+    assert set(result["advanced_tickers"]) == {"HELD1", "HELD2"}
+    # No sub-bar fresh name was force-filled.
+    forced = [d for d in result["decisions"] if d.get("decision") == "ADVANCE_FORCED"]
+    assert forced == []
+
+
+def test_quality_gated_force_fill_admits_only_above_bar():
+    """A fresh name the rubric rejected is force-filled ONLY if its conviction
+    clears the entrant bar."""
+    held = {"HELD1"}
+    decisions = [
+        {"ticker": "HELD1", "decision": "ADVANCE", "rank": 1, "conviction": 80,
+         "rationale": "reaffirm", "entry_thesis": None},
+        {"ticker": "STRONG", "decision": "REJECT", "rank": None, "conviction": 66,
+         "rationale": "soft reject", "entry_thesis": None},
+        {"ticker": "WEAK", "decision": "REJECT", "rank": None, "conviction": 45,
+         "rationale": "weak", "entry_thesis": None},
+    ]
+    candidates = [{"ticker": d["ticker"]} for d in decisions]
+    result = _post_process_cio_decisions(
+        decisions, candidates, floor=2, cap=10,
+        held_tickers=held, force_fill_conviction_floor=60,
+    )
+    # STRONG (66 >= 60) forced in; WEAK (45 < 60) not.
+    assert result["net_new_entrants"] == 1
+    assert "STRONG" in result["advanced_tickers"]
+    assert "WEAK" not in result["advanced_tickers"]
+    forced = [d for d in result["decisions"] if d.get("decision") == "ADVANCE_FORCED"]
+    assert {d["ticker"] for d in forced} == {"STRONG"}
+
+
+def test_incumbent_reaffirmations_not_truncated_by_cap():
+    """Cap governs net-new only — incumbent re-affirmations are unbounded."""
+    held = {f"H{i}" for i in range(8)}
+    decisions = [
+        {"ticker": f"H{i}", "decision": "ADVANCE", "rank": i + 1, "conviction": 80,
+         "rationale": "reaffirm", "entry_thesis": None}
+        for i in range(8)
+    ]
+    # 3 net-new advances with cap=2 → one dropped (lowest conviction)
+    decisions += [
+        {"ticker": "N1", "decision": "ADVANCE", "rank": 9, "conviction": 70,
+         "rationale": "new", "entry_thesis": None},
+        {"ticker": "N2", "decision": "ADVANCE", "rank": 10, "conviction": 65,
+         "rationale": "new", "entry_thesis": None},
+        {"ticker": "N3", "decision": "ADVANCE", "rank": 11, "conviction": 62,
+         "rationale": "new", "entry_thesis": None},
+    ]
+    candidates = [{"ticker": d["ticker"]} for d in decisions]
+    result = _post_process_cio_decisions(
+        decisions, candidates, floor=0, cap=2,
+        held_tickers=held, force_fill_conviction_floor=60,
+    )
+    # All 8 incumbents kept; net-new truncated to cap=2 (drops lowest, N3).
+    assert sum(1 for t in result["advanced_tickers"] if t.startswith("H")) == 8
+    assert result["net_new_entrants"] == 2
+    assert "N1" in result["advanced_tickers"] and "N2" in result["advanced_tickers"]
+    assert "N3" not in result["advanced_tickers"]
+
+
+def test_apply_ic_entries_admits_advance_forced():
+    """The consumer-side half of the bug: apply_ic_entries must admit
+    ADVANCE_FORCED, not only ADVANCE."""
+    from data.population_selector import apply_ic_entries
+
+    remaining = [{"ticker": "HELD1", "sector": "Tech"}]
+    ic_decisions = [
+        {"ticker": "HELD1", "decision": "ADVANCE", "rank": 1, "conviction": 80,
+         "rationale": "reaffirm"},
+        {"ticker": "FORCED", "decision": "ADVANCE_FORCED", "rank": None,
+         "conviction": 65, "rationale": "floor"},
+    ]
+    final_pop, events = apply_ic_entries(
+        remaining_population=remaining,
+        ic_decisions=ic_decisions,
+        entry_theses={},
+        sector_map={"FORCED": "Healthcare"},
+        run_date="2026-06-12",
+    )
+    tickers = {p["ticker"] for p in final_pop}
+    assert "FORCED" in tickers, "ADVANCE_FORCED must enter the population"
+    assert {e["ticker_in"] for e in events} == {"FORCED"}

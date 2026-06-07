@@ -16,6 +16,8 @@ import logging
 import os
 import sqlite3
 
+from graph.state_schemas import ADVANCE_DECISIONS
+
 logger = logging.getLogger(__name__)
 
 MAX_SEMANTIC_EXTRACTIONS = 10  # hard cap per run (~$0.05 max)
@@ -125,7 +127,7 @@ Respond ONLY with JSON: {{"observation": "...", "sector": null}}"""
 
     # 3. Extract cross-sector observation from IC decisions (1 memory)
     if n_created < MAX_SEMANTIC_EXTRACTIONS and ic_decisions:
-        advanced = [d for d in ic_decisions if d.get("decision") == "ADVANCE"]
+        advanced = [d for d in ic_decisions if d.get("decision") in ADVANCE_DECISIONS]
         rejected = [d for d in ic_decisions if d.get("decision") == "REJECT"]
 
         if advanced or rejected:

@@ -221,3 +221,56 @@ def emit_agent_retry(
             "[agent_telemetry] retry emission failed for agent_id=%s: %s",
             agent_id, exc,
         )
+
+
+def emit_new_entrant_tripwire(
+    net_new_entrants: int,
+    alert_floor: int,
+    fresh_slate_max_conviction: float | None,
+    cloudwatch_client: Any = None,
+) -> None:
+    """Emit the weekly net-new-entrant count + a breach flag.
+
+    A 0-add (or below-floor) week is a *defensible* outcome (the CIO correctly
+    rejecting a weak/saturated fresh slate) — but it must be VISIBLE, not
+    silently inferred. Always emits ``NewEntrants`` (the count) so the trend is
+    charted; emits ``NewEntrantsBelowFloor=1`` when ``net_new_entrants <
+    alert_floor`` so an alarm can page on a saturation streak. The caller logs
+    the loud WARN with the human-readable why (fresh-slate max conviction vs
+    the entrant bar). Best-effort per ``feedback_no_silent_fails`` — telemetry
+    is observability, never blocks the run.
+    """
+    if not _is_telemetry_enabled():
+        return
+
+    breach = 1.0 if net_new_entrants < alert_floor else 0.0
+    metric_data = [
+        {"MetricName": "NewEntrants", "Value": float(net_new_entrants), "Unit": "Count"},
+        {"MetricName": "NewEntrantsBelowFloor", "Value": breach, "Unit": "Count"},
+    ]
+    if fresh_slate_max_conviction is not None:
+        metric_data.append({
+            "MetricName": "FreshSlateMaxConviction",
+            "Value": float(fresh_slate_max_conviction),
+            "Unit": "None",
+        })
+
+    cw = cloudwatch_client
+    if cw is None:
+        try:
+            import boto3
+
+            cw = boto3.client("cloudwatch", region_name="us-east-1")
+        except Exception as exc:
+            logger.warning(
+                "[agent_telemetry] could not create boto3 cloudwatch client "
+                "for new-entrant tripwire: %s", exc,
+            )
+            return
+
+    try:
+        cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
+    except Exception as exc:
+        logger.warning(
+            "[agent_telemetry] new-entrant tripwire emission failed: %s", exc,
+        )

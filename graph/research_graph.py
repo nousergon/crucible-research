@@ -58,6 +58,8 @@ from pydantic import ValidationError
 from config import (
     CIO_MAX_NEW_ENTRANTS,
     CIO_MIN_NEW_ENTRANTS,
+    CIO_FORCE_FILL_CONVICTION_FLOOR,
+    CIO_NEW_ENTRANT_ALERT_FLOOR,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
@@ -129,6 +131,7 @@ from graph.decision_capture_helpers import (
 )
 from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 from graph.state_schemas import (
+    ADVANCE_DECISIONS,
     CIODecision,
     ExitEvent,
     InvestmentThesis,
@@ -2251,6 +2254,7 @@ def cio_node(state: ResearchState) -> dict:
             prior_decisions=prior_ic,
             max_new_entrants=CIO_MAX_NEW_ENTRANTS,
             min_new_entrants=CIO_MIN_NEW_ENTRANTS,
+            force_fill_conviction_floor=CIO_FORCE_FILL_CONVICTION_FLOOR,
             # Phase 2.A.3: scorecard text loaded upstream by
             # load_scorecard_node. Empty string when producer's flag
             # is off / artifact missing — CIO falls back to pre-Phase-2
@@ -2269,6 +2273,51 @@ def cio_node(state: ResearchState) -> dict:
         "advanced_tickers": cio_result.get("advanced_tickers", []),
         "entry_theses": cio_result.get("entry_theses", {}),
     }
+
+    # ── New-entrant tripwire (L4532) ──────────────────────────────────────
+    # A 0-add / below-floor week is DEFENSIBLE (the CIO correctly rejecting a
+    # weak or saturated fresh slate) but must be VISIBLE, not silently inferred.
+    # Emit the net-new count + breach flag to CloudWatch and log a loud WARN
+    # with the why (fresh-slate max conviction vs the entrant bar). Best-effort
+    # — observability must never fail the run (per feedback_no_silent_fails).
+    try:
+        from graph.agent_telemetry import emit_new_entrant_tripwire
+
+        _held = {
+            p.get("ticker")
+            for p in (state.get("remaining_population") or [])
+            if p.get("ticker")
+        }
+        _decisions = cio_result.get("decisions", [])
+        _net_new = [t for t in cio_result.get("advanced_tickers", []) if t not in _held]
+        _fresh = [d for d in _decisions if d.get("ticker") not in _held]
+        _fresh_convs = [
+            d.get("conviction") for d in _fresh
+            if isinstance(d.get("conviction"), (int, float))
+        ]
+        _fresh_max = max(_fresh_convs) if _fresh_convs else None
+        emit_new_entrant_tripwire(
+            net_new_entrants=len(_net_new),
+            alert_floor=CIO_NEW_ENTRANT_ALERT_FLOOR,
+            fresh_slate_max_conviction=_fresh_max,
+        )
+        if len(_net_new) < CIO_NEW_ENTRANT_ALERT_FLOOR:
+            logger.warning(
+                "[cio] NEW-ENTRANT TRIPWIRE: %d net-new entrant(s) this week "
+                "(floor=%d). Fresh slate: %d candidate(s), max conviction %s vs "
+                "entrant bar %.0f. Defensible if the slate is genuinely weak "
+                "(saturation) — flagged for review. net-new=%s",
+                len(_net_new), CIO_NEW_ENTRANT_ALERT_FLOOR, len(_fresh),
+                f"{_fresh_max:.0f}" if _fresh_max is not None else "n/a",
+                CIO_FORCE_FILL_CONVICTION_FLOOR, _net_new,
+            )
+        else:
+            logger.info(
+                "[cio] new-entrant check OK: %d net-new entrant(s) (floor=%d)",
+                len(_net_new), CIO_NEW_ENTRANT_ALERT_FLOOR,
+            )
+    except Exception as _e:  # pragma: no cover — telemetry must not fail the run
+        logger.warning("[cio] new-entrant tripwire failed (non-fatal): %s", _e)
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
     snapshot, summary = build_cio_capture_payload(
@@ -2674,9 +2723,9 @@ def _build_notable_developments(state: ResearchState) -> dict[str, list[str]]:
         if reason:
             _add(ticker, f"Exit: {reason[:200]}")
 
-    # CIO advances
+    # CIO advances (ADVANCE + ADVANCE_FORCED — see ADVANCE_DECISIONS)
     for d in state.get("ic_decisions", []):
-        if d.get("decision") == "ADVANCE":
+        if d.get("decision") in ADVANCE_DECISIONS:
             ticker = d.get("ticker", "?")
             rationale = d.get("rationale", "")
             if rationale:

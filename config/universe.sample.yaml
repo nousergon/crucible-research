@@ -64,12 +64,20 @@ scanner:
   deep_value_max_candidates: 10
 
 cio:
-  # Weekly cap on new entrants the CIO may advance. Does NOT count
-  # reaffirmations of held BUY-rated names — those remain unbounded.
-  # The effective cap each week combines the population gap with these bounds:
-  #   effective = min(max_new_entrants, max(min_new_entrants, open_slots))
+  # Weekly cap on NET-NEW entrants the CIO may advance (candidates not already
+  # held). Does NOT count reaffirmations of held BUY-rated names — those remain
+  # unbounded. floor/cap are measured against net-new advances, not total.
   max_new_entrants: 10
   min_new_entrants: 2
+  # Entrant bar for the min_new_entrants force-fill: a rubric-rejected fresh
+  # name is force-admitted only if its CIO conviction clears this (~60 observed
+  # bar). Quality gate — a saturated week (no fresh name ≥ bar) admits 0 and
+  # fires the tripwire rather than injecting a sub-bar name. Set to 101 to
+  # disable forcing entirely (pure-tripwire mode).
+  force_fill_conviction_floor: 60
+  # Below this many net-new entrants/week, emit a loud tripwire (WARN + CW
+  # metric NewEntrantsBelowFloor). Defaults to min_new_entrants.
+  new_entrant_alert_floor: 2
 
 archive:
   retain_history: true

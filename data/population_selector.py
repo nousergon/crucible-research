@@ -26,6 +26,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from alpha_engine_lib.universe import filter_to_universe
+from graph.state_schemas import ADVANCE_DECISIONS
 from scoring.composite import normalize_conviction
 
 logger = logging.getLogger(__name__)
@@ -627,8 +628,11 @@ def apply_ic_entries(
     population = list(remaining_population)
     entry_events = []
 
-    advanced = [d for d in ic_decisions if d.get("decision") == "ADVANCE"]
-    advanced.sort(key=lambda d: d.get("rank", 999))
+    # Both ADVANCE and ADVANCE_FORCED admit a ticker — matching only "ADVANCE"
+    # here silently dropped floor-forced entrants (the bug that hid 0-new-entrant
+    # weeks). See ADVANCE_DECISIONS in graph/state_schemas.py.
+    advanced = [d for d in ic_decisions if d.get("decision") in ADVANCE_DECISIONS]
+    advanced.sort(key=lambda d: d.get("rank") if d.get("rank") is not None else 999)
 
     existing_tickers = {p["ticker"] for p in population}
 

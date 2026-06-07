@@ -68,6 +68,7 @@ def run_cio(
     *,
     max_new_entrants: int = 10,
     min_new_entrants: int = 2,
+    force_fill_conviction_floor: float = 60.0,
     prior_cycle_scorecard: Optional[str] = None,
 ) -> dict:
     """
@@ -98,6 +99,13 @@ def run_cio(
     if not candidates:
         log.info("[cio] no candidates to evaluate")
         return {"decisions": [], "advanced_tickers": [], "entry_theses": {}}
+
+    # Held set — the floor/cap govern NET-NEW entrants (candidates not already
+    # held), and the floor force-fill draws only from net-new names ≥ the
+    # entrant bar. Re-affirmations of incumbents are unbounded.
+    held_tickers = frozenset(
+        p.get("ticker") for p in (current_population or []) if p.get("ticker")
+    )
 
     floor, cap = _compute_advance_bounds(
         len(candidates), max_new_entrants, min_new_entrants,
@@ -224,7 +232,11 @@ def run_cio(
                 raise RuntimeError(msg)
             # Lax mode: fall through to post-process, which tolerates the
             # still-missing tickers by treating them as REJECT.
-        return _post_process_cio_decisions(decisions_dicts, candidates, floor, cap)
+        return _post_process_cio_decisions(
+            decisions_dicts, candidates, floor, cap,
+            held_tickers=held_tickers,
+            force_fill_conviction_floor=force_fill_conviction_floor,
+        )
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
         if is_strict_validation_enabled():
@@ -414,113 +426,120 @@ def _reconcile_cio_decisions(
     }
 
 
+def _decision_conviction(d: dict) -> float:
+    """CIO-assigned conviction on a decision (the ~0-100 score the entrant
+    bar is measured against). Missing → 0."""
+    c = d.get("conviction")
+    return float(c) if isinstance(c, (int, float)) else 0.0
+
+
 def _post_process_cio_decisions(
     decisions: list[dict],
     candidates: list[dict],
     floor: int,
     cap: int,
+    held_tickers: frozenset[str] | set[str] = frozenset(),
+    force_fill_conviction_floor: float = 0.0,
 ) -> dict:
     """Apply cap/floor/force-fill post-processing to a typed CIO decision list.
 
-    PR 2.3 Step E split: regex/JSON parsing was retired (the LLM call now
-    uses ``with_structured_output(CIORawOutput)`` and we receive a typed
-    list directly). This function preserves the existing post-processing
-    logic — bounds enforcement, ADVANCE_FORCED synthesis, audit trail
-    annotation — operating on a ``list[dict]`` decisions input regardless
-    of how the upstream parsing happened.
+    The cap and floor govern **net-new entrants** (candidates NOT already in
+    the held population) — NOT total advances. Re-affirmations of incumbents
+    are unbounded (per the universe.yaml entrant-cap contract) and never
+    truncated. This fixes the bug where a week that re-advanced N incumbents
+    satisfied ``floor`` while admitting **zero** genuinely-new names — the
+    "min_new_entrants" guarantee was silently measuring the wrong thing.
 
-    Bounds enforcement:
-    - Truncate at `cap` if the rubric advanced more than the ceiling.
-    - Force-fill to `floor` from REJECT/DEADLOCK candidates (ranked by
-      combined quant+qual score) when the rubric advanced fewer than the
-      floor. Forced promotions are tagged `decision="ADVANCE_FORCED"` so
-      the audit trail distinguishes them from rubric-driven advances.
+    Bounds enforcement (net-new only):
+    - Truncate NEW advances at ``cap`` (lowest-conviction first) if the rubric
+      advanced more new names than the ceiling. Incumbent re-advances are kept.
+    - Force-fill toward ``floor`` from non-advanced NET-NEW candidates whose
+      CIO conviction ≥ ``force_fill_conviction_floor`` (the entrant bar),
+      ranked by conviction. **Quality-gated by design: never force a sub-bar
+      name in** — when no fresh candidate clears the bar (saturation week),
+      net-new stays below floor and the caller's tripwire fires. Forced
+      promotions are tagged ``decision="ADVANCE_FORCED"`` (see
+      ADVANCE_DECISIONS — every advance-consumer must honor both literals).
     """
-    # Extract advanced tickers + theses from rubric ADVANCE decisions
-    advanced = []
-    entry_theses = {}
+    held = frozenset(held_tickers)
+
+    # Extract rubric ADVANCE decisions + entry theses, partitioned by whether
+    # the ticker is already held (incumbent re-affirmation vs net-new entrant).
+    incumbent_adv: list[str] = []
+    new_adv: list[dict] = []  # keep the decision so we can rank by conviction
+    entry_theses: dict = {}
     for d in decisions:
-        if d.get("decision") == "ADVANCE":
-            ticker = d.get("ticker", "")
-            advanced.append(ticker)
-            if d.get("entry_thesis"):
-                entry_theses[ticker] = d["entry_thesis"]
+        if d.get("decision") != "ADVANCE":
+            continue
+        ticker = d.get("ticker", "")
+        if d.get("entry_thesis"):
+            entry_theses[ticker] = d["entry_thesis"]
+        if ticker in held:
+            incumbent_adv.append(ticker)
+        else:
+            new_adv.append(d)
 
-    rubric_advanced_count = len(advanced)
+    rubric_new_count = len(new_adv)
 
-    # Ceiling: truncate if rubric exceeded cap
-    advanced = advanced[:cap]
-    truncated_count = rubric_advanced_count - len(advanced)
+    # Ceiling on NET-NEW entrants only — drop the lowest-conviction new
+    # advances past the cap (incumbent re-affirmations are unbounded).
+    new_adv.sort(key=_decision_conviction, reverse=True)
+    truncated_new = new_adv[:cap]
+    truncated_count = rubric_new_count - len(truncated_new)
+    new_adv_tickers = [d.get("ticker", "") for d in truncated_new]
 
-    # Floor: force-fill from non-advanced candidates if rubric came up short.
-    # The team-level Quant+Qual+Peer Review already validated all candidates;
-    # the CIO rubric is a secondary editorial gate. When the rubric is too
-    # strict in a given week, fall back to the best of the team-validated
-    # pool ranked by combined quant+qual score.
+    # Floor: quality-gated force-fill of NET-NEW names if the rubric came up
+    # short. Pool = non-advanced, not-held decisions clearing the entrant bar.
     forced_tickers: list[str] = []
-    if len(advanced) < floor:
-        advanced_set = set(advanced)
-        not_advanced = [
-            c for c in candidates if c.get("ticker") not in advanced_set
+    if len(new_adv_tickers) < floor:
+        advanced_set = set(incumbent_adv) | set(new_adv_tickers)
+        pool = [
+            d for d in decisions
+            if d.get("ticker") not in advanced_set
+            and d.get("ticker") not in held
+            and _decision_conviction(d) >= force_fill_conviction_floor
         ]
-        not_advanced.sort(key=_combined_score, reverse=True)
-        shortfall = floor - len(advanced)
-        for c in not_advanced[:shortfall]:
-            ticker = c["ticker"]
-            advanced.append(ticker)
+        pool.sort(key=_decision_conviction, reverse=True)
+        # Don't exceed the cap even when force-filling.
+        shortfall = min(floor - len(new_adv_tickers), cap - len(new_adv_tickers))
+        for d in pool[:max(0, shortfall)]:
+            ticker = d.get("ticker", "")
+            new_adv_tickers.append(ticker)
             forced_tickers.append(ticker)
-        # Mutate matching decision entries so the audit trail reflects the
-        # forced promotion. Add synthetic entries for any forced ticker
-        # missing from the LLM's decisions list.
-        existing_decision_tickers = {d.get("ticker") for d in decisions}
-        for ticker in forced_tickers:
-            matched = False
-            for d in decisions:
-                if d.get("ticker") == ticker:
-                    d["decision"] = "ADVANCE_FORCED"
-                    prior_rationale = d.get("rationale", "") or ""
-                    d["rationale"] = (
-                        f"{prior_rationale} | Floor enforcement: rubric "
-                        f"advanced {rubric_advanced_count} of {len(candidates)}; "
-                        f"promoted to hit min_new_entrants={floor}."
-                    ).strip(" |")
-                    matched = True
-                    break
-            if not matched and ticker not in existing_decision_tickers:
-                cand = next(
-                    (c for c in candidates if c.get("ticker") == ticker), None,
-                )
-                decisions.append({
-                    "ticker": ticker,
-                    "decision": "ADVANCE_FORCED",
-                    "rank": None,
-                    "conviction": int(_combined_score(cand or {})),
-                    "rationale": (
-                        f"Floor enforcement: rubric advanced "
-                        f"{rubric_advanced_count} of {len(candidates)}; "
-                        f"promoted to hit min_new_entrants={floor}."
-                    ),
-                    "entry_thesis": None,
-                })
+            d["decision"] = "ADVANCE_FORCED"
+            prior_rationale = d.get("rationale", "") or ""
+            d["rationale"] = (
+                f"{prior_rationale} | Floor enforcement: rubric advanced "
+                f"{rubric_new_count} net-new of {len(candidates)} candidates; "
+                f"promoted (conviction {_decision_conviction(d):.0f} ≥ bar "
+                f"{force_fill_conviction_floor:.0f}) to hit "
+                f"min_new_entrants={floor}."
+            ).strip(" |")
+
+    advanced = incumbent_adv + new_adv_tickers
+    net_new_count = len(new_adv_tickers)
 
     log.info(
-        "[cio] %d advanced (%d rubric + %d forced), %d truncated, "
-        "%d rejected, %d deadlocked out of %d candidates "
-        "[floor=%d cap=%d]",
+        "[cio] %d advanced (%d incumbent re-affirm + %d net-new [%d rubric + "
+        "%d forced]), %d new truncated, %d rejected, %d deadlocked out of %d "
+        "candidates [floor=%d cap=%d, bar=%.0f, held=%d]",
         len(advanced),
-        rubric_advanced_count - truncated_count,
+        len(incumbent_adv),
+        net_new_count,
+        net_new_count - len(forced_tickers),
         len(forced_tickers),
         truncated_count,
         len([d for d in decisions if d.get("decision") == "REJECT"]),
         len([d for d in decisions if d.get("decision") == "NO_ADVANCE_DEADLOCK"]),
         len(decisions),
-        floor, cap,
+        floor, cap, force_fill_conviction_floor, len(held),
     )
 
     return {
         "decisions": decisions,
         "advanced_tickers": advanced,
         "entry_theses": entry_theses,
+        "net_new_entrants": net_new_count,
     }
 
 

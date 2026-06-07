@@ -109,6 +109,17 @@ __all__ = [
 # cio entry_theses + agent-emitted theses carry the agent int format.
 StoredConvictionLiteral = Literal["rising", "stable", "declining"]
 
+# Canonical "this decision admits the ticker into the population" predicate.
+# The CIO emits BOTH "ADVANCE" (rubric) and "ADVANCE_FORCED" (the
+# min_new_entrants floor force-fill). Any consumer that matches only
+# "ADVANCE" silently drops forced entrants — the bug class that hid the
+# floor for weeks (apply_ic_entries, semantic memory, the report-note
+# builder all filtered only "ADVANCE"). Match this set EVERYWHERE a
+# decision is interpreted as an advance so the literal can never diverge
+# again. Mirrors the dashboard-side ADVANCE_DECISIONS in
+# alpha-engine-dashboard loaders/signal_loader.py.
+ADVANCE_DECISIONS = frozenset({"ADVANCE", "ADVANCE_FORCED"})
+
 
 # ── Atomic agent-output components ────────────────────────────────────────
 
