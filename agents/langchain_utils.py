@@ -402,3 +402,92 @@ def get_final_text(messages: list) -> str:
                 ]
                 return "\n".join(texts)
     return ""
+
+
+# ── Bounded transcript serialization (decision-review / L4567) ────────────────
+#
+# The ReAct agents (quant, qual) discard their full reasoning after the
+# structured-output extraction — only the parsed picks survive. For
+# retrospective "why did/didn't you pick X" review we persist the agent's
+# actual reasoning into the captured decision artifact. This is the
+# ground-truth "why" — strictly better than re-deriving it via a fresh
+# replay, which would generate a NEW rationalization that may not match
+# what actually drove the decision (the explicit rationale for capturing
+# the transcript over LangGraph checkpointing — see ARCHITECTURE).
+#
+# Bounded HARD so it is safe to ride in the captured ``agent_output`` AND
+# in the persisted ``SectorTeamOutput`` graph state without bloat: the
+# agent's reasoning + tool-call args are kept; bulky tool-RESPONSE payloads
+# (price/factor data blobs) are truncated, and the whole transcript is
+# capped. This is observability data, not decision input — it must never
+# dominate the state it rides in.
+
+_TRANSCRIPT_MAX_TOTAL_CHARS = 8_000
+_TRANSCRIPT_MAX_MSG_CHARS = 800
+_TRANSCRIPT_MAX_TOOL_RESPONSE_CHARS = 300
+
+
+def _message_text(msg) -> str:
+    """Best-effort plain-text content of a LangChain message (str or
+    list-of-content-blocks form)."""
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                # tool_use blocks are surfaced via tool_calls, not here
+            else:
+                parts.append(str(b))
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
+def serialize_transcript(
+    messages: list,
+    *,
+    max_total_chars: int = _TRANSCRIPT_MAX_TOTAL_CHARS,
+    max_msg_chars: int = _TRANSCRIPT_MAX_MSG_CHARS,
+    max_tool_response_chars: int = _TRANSCRIPT_MAX_TOOL_RESPONSE_CHARS,
+) -> list[dict]:
+    """Compact, hard-bounded serialization of a ReAct message history.
+
+    Returns a list of ``{role, content, [tool, tool_calls]}`` dicts
+    preserving the agent's reasoning and its tool-call arguments, with
+    bulky tool *responses* truncated and the overall size capped. When the
+    cap is reached the remaining messages are dropped and a final
+    ``{"_truncated": "<n> message(s) omitted (transcript size cap)"}``
+    marker is appended so truncation is never silent."""
+    out: list[dict] = []
+    total = 0
+    for i, msg in enumerate(messages):
+        role = getattr(msg, "type", None) or "unknown"
+        is_tool = role == "tool"
+        cap = max_tool_response_chars if is_tool else max_msg_chars
+        text = _message_text(msg)
+        if len(text) > cap:
+            text = text[:cap] + "…[truncated]"
+        entry: dict = {"role": role, "content": text}
+        if is_tool:
+            name = getattr(msg, "name", None)
+            if name:
+                entry["tool"] = name
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            entry["tool_calls"] = [
+                {"name": tc.get("name", ""), "args": str(tc.get("args", {}))[:200]}
+                for tc in tool_calls
+            ]
+        entry_size = len(text) + sum(len(str(v)) for v in entry.get("tool_calls", []))
+        if total + entry_size > max_total_chars and out:
+            out.append(
+                {"_truncated": f"{len(messages) - i} message(s) omitted "
+                               f"(transcript size cap)"}
+            )
+            break
+        out.append(entry)
+        total += entry_size
+    return out
