@@ -274,6 +274,11 @@ def run_qual_analyst(
             "error": None,
             "partial": False,
             "pillar_assessments": pillar_assessments,
+            # Ground-truth reasoning for retrospective decision review
+            # (L4567) — bounded; captured into the decision artifact +
+            # carried in SectorTeamOutput state without bloat.
+            "final_text": final_text[:_FINAL_TEXT_CAP],
+            "transcript": _serialize_transcript(messages),
         }
 
     except GraphRecursionError as e:
@@ -411,9 +416,15 @@ def _extract_pillar_assessments(
 from agents.langchain_utils import (
     extract_tool_calls as _extract_tool_calls,
     get_final_text as _get_final_text,
+    serialize_transcript as _serialize_transcript,
 )
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     invoke_structured_with_validation_retry,
     invoke_with_rate_limit_retry,
 )
+
+# Cap the analyst's prose answer persisted into the decision artifact for
+# retrospective "why" review (L4567); the transcript is bounded inside
+# ``serialize_transcript``.
+_FINAL_TEXT_CAP = 6_000

@@ -393,6 +393,13 @@ def run_quant_analyst(
             "iterations": len(tool_calls),
             "error": None,
             "partial": False,
+            # Ground-truth reasoning for retrospective decision review
+            # (L4567). Captured into the decision artifact + carried in
+            # SectorTeamOutput state; both bounded so this observability
+            # payload never dominates. final_text is the analyst's prose
+            # answer; transcript is the bounded ReAct message history.
+            "final_text": final_text[:_FINAL_TEXT_CAP],
+            "transcript": _serialize_transcript(messages),
         }
 
     except GraphRecursionError as e:
@@ -601,7 +608,13 @@ def _build_system_prompt(
 
 from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
 from agents.langchain_utils import get_final_text as _get_final_text
+from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     invoke_with_rate_limit_retry,
 )
+
+# Cap the analyst's prose answer persisted into the decision artifact for
+# retrospective "why" review (L4567). The transcript is bounded inside
+# ``serialize_transcript``; this bounds the separate ``final_text`` field.
+_FINAL_TEXT_CAP = 6_000
