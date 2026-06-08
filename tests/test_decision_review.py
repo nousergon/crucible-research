@@ -17,7 +17,11 @@ from archive.schema import ensure_schema
 from scripts.decision_review import (
     _has_decision_tables,
     _parse_rule_tags,
+    answer_question,
+    build_qa_prompt,
     explain_why_not,
+    gather_evidence,
+    has_evidence,
     latest_eval_date,
     review_date,
     review_ticker,
@@ -228,3 +232,63 @@ def test_review_date_funnel_counts(conn):
     assert s["cio_evaluated"] == 1
     assert s["cio_advanced"] == 1
     assert s["advanced"][0]["ticker"] == "AAA"
+
+
+# ── Phase 2: LLM-fallback Q&A (injected llm_fn — no real API calls) ─────────
+
+
+def test_has_evidence(conn):
+    ev_empty = gather_evidence(conn, "NONE")
+    assert has_evidence(ev_empty) is False
+    _scanner(conn, "MSFT", passed=True)
+    assert has_evidence(gather_evidence(conn, "MSFT")) is True
+
+
+def test_build_qa_prompt_grounds_in_evidence(conn):
+    _scanner(conn, "MSFT", passed=True, tech=61.0)
+    _team(conn, "MSFT", team_id="technology", rank=11, quant=47, qual=40, recommended=False)
+    ev = gather_evidence(conn, "MSFT")
+    system, user = build_qa_prompt("MSFT", DATE, "why not a higher rank?", ev)
+    # System message carries the no-fabrication guardrail.
+    assert "ONLY this evidence" in system
+    assert "do NOT speculate" in system
+    # User message embeds the recorded numbers + the question.
+    assert "why not a higher rank?" in user
+    assert "47" in user  # quant_score present in serialized evidence
+    assert "RECORDED EVIDENCE" in user
+
+
+def test_answer_question_skips_llm_when_no_evidence(conn):
+    calls = []
+
+    def fake_llm(system, user):
+        calls.append((system, user))
+        return "should not be called"
+
+    result = answer_question(conn, "GHOST", "why not?", llm_fn=fake_llm)
+    assert result["llm_called"] is False
+    assert result["model"] is None
+    assert calls == []  # no LLM call when nothing is recorded
+    assert "No decision evidence" in result["answer"]
+
+
+def test_answer_question_calls_llm_with_evidence(conn):
+    _scanner(conn, "MSFT", passed=True)
+    _team(conn, "MSFT", team_id="technology", rank=11, quant=47, qual=40, recommended=False)
+    captured = {}
+
+    def fake_llm(system, user):
+        captured["system"] = system
+        captured["user"] = user
+        return "Ranked #11 (quant_score 47); the team recommended higher-scoring names."
+
+    result = answer_question(
+        conn, "msft", "why didn't the team pick it?", model="claude-test",
+        llm_fn=fake_llm,
+    )
+    assert result["llm_called"] is True
+    assert result["model"] == "claude-test"
+    assert result["ticker"] == "MSFT"
+    assert "Ranked #11" in result["answer"]
+    assert "47" in captured["user"]  # evidence was passed to the model
+    assert result["artifacts_used"] == []  # with_artifacts defaulted off
