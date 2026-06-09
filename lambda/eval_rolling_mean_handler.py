@@ -129,4 +129,42 @@ def handler(event, context):
         )
         calibration = {"status": "ERROR", "error": str(exc)}
 
-    return {"status": status, "summary": summary, "calibration": calibration}
+    # Statistical control bands on the judge-score series (L4578(e)).
+    # Reads the rolling-mean series this run just emitted and runs the
+    # Shewhart + CUSUM charts. Secondary observability hung off the
+    # primary rolling-mean deliverable: a failure here MUST NOT sink the
+    # mean (already emitted above), but per [[feedback_no_silent_fails]]
+    # it is recorded — WARN log + a `control_bands` field in the return.
+    control_bands: dict
+    try:
+        from evals.control_bands import compute_and_emit_control_bands
+
+        cb = compute_and_emit_control_bands(end_time=end_time)
+        control_bands = {
+            "status": "OK" if not cb["failed"] else "PARTIAL",
+            "combos_discovered": cb["combos_discovered"],
+            "combos_insufficient_history": cb["combos_insufficient_history"],
+            "breach_count": cb["breach_count"],
+            "breach_emits": cb["breach_emits"],
+        }
+        logger.info(
+            "[eval_rolling_mean_handler] control bands status=%s combos=%d "
+            "insufficient=%d breaches=%d",
+            control_bands["status"],
+            control_bands["combos_discovered"],
+            control_bands["combos_insufficient_history"],
+            control_bands["breach_count"],
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
+        logger.warning(
+            "[eval_rolling_mean_handler] control bands failed (non-fatal): %s",
+            exc,
+        )
+        control_bands = {"status": "ERROR", "error": str(exc)}
+
+    return {
+        "status": status,
+        "summary": summary,
+        "calibration": calibration,
+        "control_bands": control_bands,
+    }
