@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from alpha_engine_lib.logging import setup_logging
+from alpha_engine_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -213,6 +213,7 @@ def _is_scheduled_run_time() -> bool:
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
 
+@monitor_handler
 def handler(event, context):
     """
     AWS Lambda handler for the research pipeline.

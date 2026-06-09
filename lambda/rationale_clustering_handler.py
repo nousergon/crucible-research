@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from graph.langsmith_pandas_patch import install as _install_ls_patch
 _install_ls_patch()
 
-from alpha_engine_lib.logging import setup_logging
+from alpha_engine_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -67,6 +67,7 @@ def _ensure_init() -> None:
     _init_done = True
 
 
+@monitor_handler
 def handler(event, context):
     """Compute + emit per-agent rationale-template concentration."""
     _ensure_init()

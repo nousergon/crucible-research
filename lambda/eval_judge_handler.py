@@ -61,7 +61,7 @@ _install_ls_patch()
 # matching the main research handler. exclude_patterns kept empty —
 # the canonical lib pattern (mirrors lambda/handler.py:58) forces an
 # explicit decision once real ERROR-level noise is observed.
-from alpha_engine_lib.logging import setup_logging
+from alpha_engine_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -94,6 +94,7 @@ def _ensure_init() -> None:
     _init_done = True
 
 
+@monitor_handler
 def handler(event, context):
     """AWS Lambda handler — fans the judge module over captured
     artifacts for ``event["date"]`` and persists the eval results."""

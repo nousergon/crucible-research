@@ -285,6 +285,7 @@ export HOME=/home/ec2-user
 export XDG_CACHE_HOME=/tmp
 export AWS_REGION=us-east-1
 export AWS_DEFAULT_REGION=us-east-1
+export ALPHA_ENGINE_DEPLOYED=1
 command -v python3.12 >/dev/null && PYTHON_BIN=python3.12 || PYTHON_BIN=python3
 export PYTHON_BIN
 ENV_EOF
