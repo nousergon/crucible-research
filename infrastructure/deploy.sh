@@ -458,8 +458,9 @@ deploy_eval_judge() {
 # Rolling-4-week-mean derived metric Lambda (PR 4b). Same image-share
 # pattern as eval_judge — overrides CMD to
 # ``eval_rolling_mean_handler.handler`` at deploy time so the function
-# runs that handler instead of handler.handler. Trigger wiring (weekly
-# EventBridge rule + SNS alarm) lands in PR 4c.
+# runs that handler instead of handler.handler. The SNS alarm on the
+# emitted eval metrics is codified in infrastructure/setup_eval_alarms.sh
+# (L4578e — quality-floor + control-breach alarms, idempotent).
 
 deploy_eval_rolling_mean() {
   echo "=== Deploying $FUNCTION_EVAL_ROLLING_MEAN (image-share with $FUNCTION_MAIN) ==="
