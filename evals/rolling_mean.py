@@ -53,6 +53,26 @@ _REGRESSION_THRESHOLD_ENV_VAR = "ALPHA_ENGINE_EVAL_REGRESSION_THRESHOLD"
 _REGRESSION_THRESHOLD_DEFAULT = 3.0
 """Per ROADMAP §1634: alarm threshold on rolling-4-week-mean < 3.0."""
 
+_FLOOR_MIN_SAMPLES_ENV_VAR = "ALPHA_ENGINE_EVAL_FLOOR_MIN_N"
+_FLOOR_MIN_SAMPLES_DEFAULT = 3
+"""Minimum judged samples a combo needs in the window to participate in the
+ALARMED floor metric (and the regression auto-emit). Root cause of the
+perpetual quality-floor ALARM (investigated 2026-06-11, config#660-era
+L4578e-floor-alarm-firing): the combo matrix is per-TICKER
+(``thesis_update:financials:BRO`` x criterion x judge), so many combos carry a
+SINGLE judged sample per 4-week window — one thesis update scoring the rubric
+minimum on one criterion pinned the floor at 1.0 indefinitely. A pager metric
+cannot run on single-sample means (mirrors the evaluator MetricRecord
+N-honesty discipline). Per-combo derived emission is UNCHANGED — dashboards
+still see every combo; only the alarmed floor + auto-emit gain the N gate."""
+
+_REGRESSION_EMIT_CAP_ENV_VAR = "ALPHA_ENGINE_EVAL_REGRESSION_EMIT_CAP"
+_REGRESSION_EMIT_CAP_DEFAULT = 20
+"""Per-run cap on regression changelog auto-emits (the deployed Lambda had
+never run the auto-emit path live; an uncapped first run over the historical
+low-N tail would spam dozens of entries). Dropped emits are LOGGED with a
+count — never silently truncated."""
+
 
 DERIVED_METRIC_NAME = "agent_quality_score_4w_mean"
 """Per-combo derived metric — one datapoint per (judged_agent_id,
@@ -161,22 +181,25 @@ def _build_metric_data_queries(
     CloudWatch caps queries at 500 per call; ``_get_metric_data_all``
     chunks + paginates so the matrix can grow past 500 combos safely.
     """
-    return [
-        {
-            "Id": f"m{idx}",
-            "MetricStat": {
-                "Metric": {
-                    "Namespace": namespace,
-                    "MetricName": metric_name,
-                    "Dimensions": dims,
-                },
-                "Period": period_seconds,
-                "Stat": "Average",
-            },
-            "ReturnData": True,
+    queries: list[dict[str, Any]] = []
+    for idx, dims in enumerate(combos):
+        metric = {
+            "Namespace": namespace,
+            "MetricName": metric_name,
+            "Dimensions": dims,
         }
-        for idx, dims in enumerate(combos)
-    ]
+        queries.append({
+            "Id": f"m{idx}",
+            "MetricStat": {"Metric": metric, "Period": period_seconds, "Stat": "Average"},
+            "ReturnData": True,
+        })
+        # Paired sample-count query — powers the floor's min-N gate.
+        queries.append({
+            "Id": f"n{idx}",
+            "MetricStat": {"Metric": metric, "Period": period_seconds, "Stat": "SampleCount"},
+            "ReturnData": True,
+        })
+    return queries
 
 
 def compute_and_emit_4w_mean(
@@ -253,6 +276,7 @@ def compute_and_emit_4w_mean(
     metric_data_results = _get_metric_data_all(cw, queries, start, end)
 
     derived_data: list[dict[str, Any]] = []
+    combo_stats: list[dict[str, Any]] = []
     skipped_no_data = 0
     failed: list[dict[str, str]] = []
 
@@ -285,6 +309,15 @@ def compute_and_emit_4w_mean(
         # the most-current rolling mean.
         mean_value = values[0]
 
+        n_result = by_id.get(f"n{idx}", {})
+        n_values = n_result.get("Values", [])
+        # Period == window -> a single SampleCount value; sum() tolerates the
+        # multi-bucket edge the mean path already tolerates. Missing
+        # SampleCount result (e.g. a mock or partial response) -> n=0, which
+        # EXCLUDES the combo from the alarmed floor (fail-safe: never let an
+        # unverifiable mean page the operator).
+        n_samples = int(sum(n_values)) if n_values else 0
+
         derived_data.append({
             "MetricName": derived_metric,
             "Dimensions": dims,
@@ -292,6 +325,7 @@ def compute_and_emit_4w_mean(
             "Unit": "None",
             "Timestamp": end,
         })
+        combo_stats.append({"dims": dims, "value": float(mean_value), "n": n_samples})
 
     if derived_data:
         # Same 1000-entry cap as PutMetricData in metrics.py; chunk
@@ -307,28 +341,62 @@ def compute_and_emit_4w_mean(
     # logs WARN but doesn't block combos N+1..M or the metric-emission
     # below.
     threshold = _resolve_regression_threshold()
+    min_n = _resolve_floor_min_samples()
+    emit_cap = _resolve_regression_emit_cap()
     regression_emits: list[str] = []
+    regression_emits_dropped = 0
     if threshold > 0:
-        for d in derived_data:
-            if d["Value"] < threshold:
-                key = _emit_regression_entry(
-                    dims=d["Dimensions"],
-                    rolling_mean=d["Value"],
-                    threshold=threshold,
-                    window_start=start,
-                    window_end=end,
-                    s3_client=s3,
-                )
-                if key:
-                    regression_emits.append(key)
+        below = [c for c in combo_stats if c["value"] < threshold and c["n"] >= min_n]
+        if len(below) > emit_cap:
+            regression_emits_dropped = len(below) - emit_cap
+            logger.warning(
+                "[rolling_mean] regression auto-emit cap hit: %d combos below "
+                "threshold (n>=%d), emitting worst %d, dropping %d (cap via %s)",
+                len(below), min_n, emit_cap, regression_emits_dropped,
+                _REGRESSION_EMIT_CAP_ENV_VAR,
+            )
+            below = sorted(below, key=lambda c: c["value"])[:emit_cap]
+        for c in below:
+            key = _emit_regression_entry(
+                dims=c["dims"],
+                rolling_mean=c["value"],
+                threshold=threshold,
+                window_start=start,
+                window_end=end,
+                s3_client=s3,
+            )
+            if key:
+                regression_emits.append(key)
 
     # Floor metric: single dimensionless datapoint = MIN across every
     # combo's 4-week mean. The alarm fires against this. Only emitted
     # when at least one combo had data — otherwise there's no floor
     # to compute and emitting None would corrupt the alarm.
-    floor_value = (
-        min(d["Value"] for d in derived_data) if derived_data else None
-    )
+    eligible = [c for c in combo_stats if c["n"] >= min_n]
+    excluded_low_n = len(combo_stats) - len(eligible)
+    floor_combo: Optional[dict[str, Any]] = None
+    if eligible:
+        floor_combo = min(eligible, key=lambda c: c["value"])
+    elif combo_stats:
+        # No combo clears the N gate (tiny corpus week). Fall back to the
+        # ungated min with a WARN rather than silently emitting nothing —
+        # the alarm must never go dark without a trace.
+        floor_combo = min(combo_stats, key=lambda c: c["value"])
+        logger.warning(
+            "[rolling_mean] no combo has n>=%d this window — floor falls "
+            "back to the ungated min (combo n=%d)",
+            min_n, floor_combo["n"],
+        )
+    floor_value = floor_combo["value"] if floor_combo else None
+    if floor_combo is not None:
+        dims_flat = {d["Name"]: d["Value"] for d in floor_combo["dims"]}
+        logger.info(
+            "[rolling_mean] floor combo: agent=%s criterion=%s judge=%s "
+            "mean=%.3f n=%d (min_n=%d, %d low-N combos excluded from floor)",
+            dims_flat.get("judged_agent_id", "?"), dims_flat.get("criterion", "?"),
+            dims_flat.get("judge_model", "?"), floor_combo["value"],
+            floor_combo["n"], min_n, excluded_low_n,
+        )
     if floor_value is not None:
         cw.put_metric_data(
             Namespace=namespace,
@@ -358,7 +426,14 @@ def compute_and_emit_4w_mean(
         "floor_value": floor_value,
         "floor_metric_emitted": floor_value is not None,
         "regression_emits": regression_emits,
+        "regression_emits_dropped": regression_emits_dropped,
         "regression_threshold": threshold,
+        "floor_min_samples": min_n,
+        "floor_combo": (
+            {d["Name"]: d["Value"] for d in floor_combo["dims"]} | {"n": floor_combo["n"]}
+            if floor_combo is not None else None
+        ),
+        "floor_low_n_excluded": excluded_low_n,
     }
 
 
@@ -383,6 +458,32 @@ def _resolve_regression_threshold() -> float:
             _REGRESSION_THRESHOLD_ENV_VAR, raw, _REGRESSION_THRESHOLD_DEFAULT,
         )
         return _REGRESSION_THRESHOLD_DEFAULT
+
+
+def _resolve_floor_min_samples() -> int:
+    """Min samples for floor/auto-emit participation (env-tunable)."""
+    raw = os.environ.get(_FLOOR_MIN_SAMPLES_ENV_VAR)
+    try:
+        return int(raw) if raw is not None else _FLOOR_MIN_SAMPLES_DEFAULT
+    except ValueError:
+        logger.warning(
+            "[rolling_mean] invalid %s=%r — using default %d",
+            _FLOOR_MIN_SAMPLES_ENV_VAR, raw, _FLOOR_MIN_SAMPLES_DEFAULT,
+        )
+        return _FLOOR_MIN_SAMPLES_DEFAULT
+
+
+def _resolve_regression_emit_cap() -> int:
+    """Per-run cap on regression changelog auto-emits (env-tunable)."""
+    raw = os.environ.get(_REGRESSION_EMIT_CAP_ENV_VAR)
+    try:
+        return int(raw) if raw is not None else _REGRESSION_EMIT_CAP_DEFAULT
+    except ValueError:
+        logger.warning(
+            "[rolling_mean] invalid %s=%r — using default %d",
+            _REGRESSION_EMIT_CAP_ENV_VAR, raw, _REGRESSION_EMIT_CAP_DEFAULT,
+        )
+        return _REGRESSION_EMIT_CAP_DEFAULT
 
 
 def _dims_to_dict(dims: list[dict[str, str]]) -> dict[str, str]:

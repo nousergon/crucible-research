@@ -26,9 +26,16 @@ def _dims(agent: str, criterion: str, judge: str = "claude-haiku-4-5") -> list[d
     ]
 
 
-def _make_cw_with_combos(combos: list[list[dict]], values_by_idx: dict[int, list[float]]):
+def _make_cw_with_combos(
+    combos: list[list[dict]],
+    values_by_idx: dict[int, list[float]],
+    samples_by_idx: dict[int, list[float]] | None = None,
+):
     """Build a MagicMock CloudWatch client backed by the given combos +
-    GetMetricData values keyed by query Id index."""
+    GetMetricData values keyed by query Id index. ``samples_by_idx`` feeds
+    the paired ``n{idx}`` SampleCount queries; defaults to n=5 for any combo
+    that has mean values (above the floor min-N gate, so tests that don't
+    care about the gate keep their pre-gate semantics)."""
     cw = MagicMock()
 
     paginator = MagicMock()
@@ -37,12 +44,16 @@ def _make_cw_with_combos(combos: list[list[dict]], values_by_idx: dict[int, list
     ]
     cw.get_paginator.return_value = paginator
 
-    cw.get_metric_data.return_value = {
-        "MetricDataResults": [
-            {"Id": f"m{idx}", "Values": values_by_idx.get(idx, [])}
-            for idx in range(len(combos))
-        ],
-    }
+    results = []
+    for idx in range(len(combos)):
+        values = values_by_idx.get(idx, [])
+        results.append({"Id": f"m{idx}", "Values": values})
+        if samples_by_idx is not None:
+            n_values = samples_by_idx.get(idx, [])
+        else:
+            n_values = [5.0] if values else []
+        results.append({"Id": f"n{idx}", "Values": n_values})
+    cw.get_metric_data.return_value = {"MetricDataResults": results}
     return cw
 
 
@@ -102,11 +113,12 @@ class TestBuildMetricDataQueries:
             metric_name="agent_quality_score",
             period_seconds=2419200,
         )
-        assert [q["Id"] for q in queries] == ["m0", "m1", "m2"]
-        # Stat is Average; Period covers the full window so we get a
-        # single mean datapoint per combo.
+        # Each combo now gets a PAIR: mean (m{idx}) + sample count (n{idx})
+        # — the SampleCount powers the floor's min-N gate.
+        assert [q["Id"] for q in queries] == ["m0", "n0", "m1", "n1", "m2", "n2"]
         for q in queries:
-            assert q["MetricStat"]["Stat"] == "Average"
+            expected_stat = "Average" if q["Id"].startswith("m") else "SampleCount"
+            assert q["MetricStat"]["Stat"] == expected_stat
             assert q["MetricStat"]["Period"] == 2419200
             assert q["ReturnData"] is True
 
@@ -229,8 +241,9 @@ class TestGetMetricDataAll:
 
         result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
 
-        # 1100 combos → 3 GetMetricData calls (500 + 500 + 100), each ≤ 500.
-        assert cw.get_metric_data.call_count == 3
+        # 1100 combos × 2 queries each (mean + SampleCount) = 2200 queries
+        # → 5 GetMetricData calls (500×4 + 200), each ≤ 500.
+        assert cw.get_metric_data.call_count == 5
         for c in cw.get_metric_data.call_args_list:
             assert len(c.kwargs["MetricDataQueries"]) <= 500
         # All combos mapped back + emitted (no "missing result" failures).
@@ -624,3 +637,105 @@ class TestRegressionAutoEmit:
         hash_a = key_a.rsplit("_", 1)[-1].split(".")[0]
         hash_b = key_b.rsplit("_", 1)[-1].split(".")[0]
         assert hash_a == hash_b
+
+
+# ── Floor min-N gate (2026-06-11 — the perpetual quality-floor ALARM fix) ──
+
+
+class TestFloorMinSampleGate:
+    def test_low_n_combo_excluded_from_floor(self):
+        """A single-sample combo scoring 1.0 must NOT set the alarmed floor;
+        the floor comes from the lowest combo with n >= min_n."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("thesis_update:financials:BRO", "citation_grounding"),
+                  _dims("ic_cio", "decision_coherence")]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={0: [1.0], 1: [4.2]},
+            samples_by_idx={0: [1.0], 1: [12.0]},  # n=1 vs n=12
+        )
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=MagicMock())
+
+        assert result["floor_value"] == 4.2
+        assert result["floor_combo"]["judged_agent_id"] == "ic_cio"
+        assert result["floor_combo"]["n"] == 12
+        assert result["floor_low_n_excluded"] == 1
+        # per-combo derived emission is UNCHANGED — both combos still emitted
+        assert result["datapoints_emitted"] == 2
+
+    def test_no_eligible_combo_falls_back_to_ungated_min(self):
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("a", "c1"), _dims("b", "c2")]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={0: [2.0], 1: [3.0]},
+            samples_by_idx={0: [1.0], 1: [2.0]},  # all below min_n=3
+        )
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=MagicMock())
+
+        # fail-safe: alarm never goes dark silently — ungated min emitted
+        assert result["floor_value"] == 2.0
+        assert result["floor_metric_emitted"] is True
+
+    def test_missing_samplecount_result_excludes_combo(self):
+        """n missing (mock/partial response) -> n=0 -> excluded from floor."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("a", "c1"), _dims("b", "c2")]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={0: [1.5], 1: [4.0]},
+            samples_by_idx={0: [], 1: [9.0]},
+        )
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=MagicMock())
+        assert result["floor_value"] == 4.0
+
+    def test_min_n_env_override(self, monkeypatch):
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_FLOOR_MIN_N", "10")
+        combos = [_dims("a", "c1"), _dims("b", "c2")]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={0: [1.0], 1: [4.5]},
+            samples_by_idx={0: [9.0], 1: [10.0]},
+        )
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=MagicMock())
+        assert result["floor_value"] == 4.5
+        assert result["floor_min_samples"] == 10
+
+
+class TestRegressionEmitCapAndGate:
+    def test_low_n_combos_do_not_auto_emit(self):
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("a", "c1"), _dims("b", "c2")]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={0: [1.0], 1: [2.0]},   # both below threshold 3.0
+            samples_by_idx={0: [1.0], 1: [8.0]},  # only b clears min_n
+        )
+        s3 = MagicMock()
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+        # exactly one changelog emit (combo b); the n=1 combo is gated out
+        assert len(result["regression_emits"]) == 1
+        assert s3.put_object.call_count == 1
+
+    def test_emit_cap_drops_excess_and_counts(self, monkeypatch):
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        monkeypatch.setenv("ALPHA_ENGINE_EVAL_REGRESSION_EMIT_CAP", "2")
+        combos = [_dims(f"a{i}", "c") for i in range(5)]
+        cw = _make_cw_with_combos(
+            combos,
+            values_by_idx={i: [1.0 + i * 0.1] for i in range(5)},
+            samples_by_idx={i: [6.0] for i in range(5)},
+        )
+        s3 = MagicMock()
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw, s3_client=s3)
+        assert len(result["regression_emits"]) == 2
+        assert result["regression_emits_dropped"] == 3
+        # worst combos emitted first
+        assert s3.put_object.call_count == 2
