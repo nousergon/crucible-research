@@ -141,11 +141,16 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
 
 
 def is_trading_day(date: datetime.date | None = None) -> bool:
-    """Return True if date (default: today) is an NYSE trading day."""
-    from exchange_calendars import get_calendar
-    nyse = get_calendar("XNYS")
+    """Return True if date (default: today) is an NYSE trading day.
+
+    Delegates to the alpha_engine_lib.trading_calendar chokepoint
+    (L4466/config#886) — the scanner Lambda already resolves through the
+    lib, and two calendar sources in one repo is the drift class that
+    produced the 2026-05-30 calendar-vs-trading-day recovery failure.
+    """
+    from alpha_engine_lib import trading_calendar as _tc
     d = date or datetime.date.today()
-    return nyse.is_session(d)
+    return _tc.is_trading_day(d)
 
 
 def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
@@ -168,13 +173,15 @@ def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
     window. Executor's staleness check uses a 7 calendar-day threshold,
     so Friday-stamped signals read Monday morning (age=3d) stay well
     inside tolerance.
+
+    Delegates to the alpha_engine_lib.trading_calendar chokepoint
+    (L4466/config#886) — formerly a repo-local exchange_calendars
+    resolver, a second calendar source of truth that could silently
+    drift from the lib the scanner resolves through.
     """
-    from exchange_calendars import get_calendar
-    nyse = get_calendar("XNYS")
+    from alpha_engine_lib import trading_calendar as _tc
     d = date or datetime.date.today()
-    while not nyse.is_session(d):
-        d -= datetime.timedelta(days=1)
-    return d
+    return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
 
 
 def is_early_close(date: datetime.date | None = None) -> bool:
@@ -528,12 +535,15 @@ def handler(event, context):
         if final_state.get("email_sent"):
             try:
                 import boto3 as _boto3_agg
-                import datetime as _dt
                 from scripts.aggregate_costs import aggregate_day
                 _agg_summary = aggregate_day(
                     s3_client=_boto3_agg.client("s3"),
                     bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                    target_date=_dt.date.today(),
+                    # L4466/config#886: key the parquet by the TRADING day the
+                    # run's cost rows were written under (llm_cost_tracker keys
+                    # by run_date) — date.today() on a Saturday run pointed the
+                    # aggregator at an empty calendar-date partition.
+                    target_date=trading_date,
                 )
                 if _agg_summary is not None:
                     logger.info(
