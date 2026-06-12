@@ -115,6 +115,12 @@ RATING_SELL_THRESHOLD: float = _cfg["rating_thresholds"]["sell"]
 # Pure structural discipline — don't fight the macro call you just made.
 # Loaded from scoring.yaml `aggregator.macro_sector_coherence_gate`.
 _AGGREGATOR_CFG: dict = _scoring_cfg.get("aggregator", {})
+
+# Factor composite definitions (config#1039): experiment belief — the package's
+# scoring.yaml `factor_composites:` overrides the public baseline in
+# scoring/factor_scoring.py. Shape per composite: list of
+# [raw_factor_column, weight, invert_rank].
+FACTOR_COMPOSITES_CFG: dict = _scoring_cfg.get("factor_composites", {})
 _COHERENCE_GATE_CFG: dict = _AGGREGATOR_CFG.get("macro_sector_coherence_gate", {})
 SECTOR_COHERENCE_GATE_ENABLED: bool = bool(_COHERENCE_GATE_CFG.get("enabled", False))
 SECTOR_COHERENCE_UW_MIN_SCORE: float = float(_COHERENCE_GATE_CFG.get("uw_min_score", 80.0))

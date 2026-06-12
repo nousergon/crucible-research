@@ -77,7 +77,11 @@ logger = logging.getLogger(__name__)
 #
 # `invert=True` means the raw factor is INVERSELY desirable (e.g. higher PE
 # = less desirable, so we invert the percentile rank before combining).
-_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
+# config#1039: composite definitions are experiment beliefs
+# (HARNESS_EXPERIMENT_CLASSIFICATION.md §1) — the experiment package's
+# scoring.yaml `factor_composites:` overrides them; these literals are the
+# public BASELINE the repo runs with when no package entry is present.
+_BASELINE_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
     "quality_score": [
         # (raw_factor_column, weight, invert_rank)
         ("roe", 0.30, False),
@@ -129,6 +133,25 @@ _COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
         ("capex_growth_5y", 0.50, False),  # sustained reinvestment
     ],
 }
+
+
+def _resolve_composite_defs() -> dict[str, list[tuple[str, float, bool]]]:
+    """Package override → baseline fallback for the composite definitions.
+
+    The package expresses each component as [column, weight, invert]; tuples
+    are restored here so downstream consumption is shape-identical.
+    """
+    from config import FACTOR_COMPOSITES_CFG
+
+    if not FACTOR_COMPOSITES_CFG:
+        return _BASELINE_COMPOSITE_DEFS
+    return {
+        composite: [tuple(component) for component in components]
+        for composite, components in FACTOR_COMPOSITES_CFG.items()
+    }
+
+
+_COMPOSITE_DEFS = _resolve_composite_defs()
 
 # Derived raw factor columns — computed by ``_add_derived_factors`` before
 # the percentile-rank step. Each entry is (output_col, fn) where fn takes
