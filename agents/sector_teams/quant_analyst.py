@@ -301,7 +301,7 @@ def run_quant_analyst(
         # Token usage from this ReAct loop's multiple Anthropic calls
         # accumulates into the active ``track_llm_cost`` frame opened
         # by the outer ``sector_team_node`` in research_graph.py.
-        result = invoke_with_rate_limit_retry(
+        result = invoke_react_with_recovery(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config={
@@ -611,6 +611,7 @@ from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    invoke_react_with_recovery,
     invoke_with_rate_limit_retry,
 )
 

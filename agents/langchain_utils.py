@@ -245,6 +245,93 @@ def invoke_with_rate_limit_retry(
     raise last_exc  # pragma: no cover
 
 
+# ── ReAct malformed-tool-history recovery (transient 400) ─────────────────────
+
+
+# Anthropic rejects a message list in which a ``tool_use`` block is not
+# immediately followed by its matching ``tool_result`` block (HTTP 400,
+# ``invalid_request_error``: "messages.N: `tool_use` ids were found
+# without `tool_result` blocks immediately after: toolu_…"). With the
+# prebuilt ``create_react_agent`` loop this is produced sporadically by
+# the MODEL (e.g. a ``max_tokens``-truncated tool_use emission), NOT by
+# our message construction — surfaced 2026-06-13 hard-failing the
+# consumer + healthcare sector teams (2 of 6) on the Saturday SF while the
+# other four teams ran clean off the identical code path.
+#
+# Each ``agent.invoke`` starts a FRESH graph state (the input is just the
+# user message), so re-invoking re-rolls the entire ReAct loop from a
+# clean history and clears the transient malformation. This is the ReAct
+# analogue of ``invoke_structured_with_validation_retry`` (added for the
+# 2026-05-24 'medium_high' Literal single-bad-roll): a single bad roll on
+# the 6-team fan-out must not hard-fail the whole all-agents-strict cycle.
+# After ``max_retries`` fresh re-rolls the 400 propagates unchanged and
+# the caller's hard-fail rule fires (status:ERROR) — a genuinely
+# deterministic malformation still fails loud.
+REACT_MALFORMED_HISTORY_MAX_RETRIES = 2
+
+
+def _is_recoverable_tool_use_400(exc: BaseException) -> bool:
+    """True iff ``exc`` is the recoverable Anthropic 400 about a
+    ``tool_use`` block missing its following ``tool_result`` block.
+
+    Matched narrowly (400 / invalid_request_error AND the specific
+    dangling-tool_use phrasing) so it never swallows an unrelated 400.
+    """
+    status = getattr(exc, "status_code", None)
+    low = str(exc).lower()
+    is_400 = (
+        status == 400
+        or "error code: 400" in low
+        or "invalid_request_error" in low
+    )
+    if not is_400:
+        return False
+    return (
+        "tool_use" in low
+        and "tool_result" in low
+        and "were found without" in low
+    )
+
+
+def invoke_react_with_recovery(
+    invoke_thunk: Callable[[], _T],
+    *,
+    label: str,
+    max_retries: int = REACT_MALFORMED_HISTORY_MAX_RETRIES,
+) -> _T:
+    """Run a fresh ``create_react_agent`` ``.invoke()`` thunk with bounded
+    retry on the recoverable malformed-tool-history 400.
+
+    429 backoff is handled INSIDE each attempt — the thunk is wrapped in
+    ``invoke_with_rate_limit_retry``, so a 429 keeps riding the long
+    deadline as before. This outer layer only re-rolls the rare 400 that
+    ``invoke_with_rate_limit_retry`` re-raises unchanged. Every other
+    exception (incl. ``GraphRecursionError`` and a deadline-exhausted 429)
+    propagates immediately to the caller's existing handlers.
+
+    Args:
+        invoke_thunk: zero-arg thunk wrapping a single ReAct
+            ``agent.invoke({...}, config={...})`` call.
+        label: log/metric label (``f'quant:{team}:react'``).
+        max_retries: extra fresh re-rolls on the recoverable 400 (default
+            2 → up to 3 total ReAct invocations).
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return invoke_with_rate_limit_retry(invoke_thunk, label=label)
+        except BaseException as exc:  # noqa: BLE001 — re-raised below if terminal
+            if attempt > max_retries or not _is_recoverable_tool_use_400(exc):
+                raise
+            log.warning(
+                "[react_recovery:%s] malformed tool_use/tool_result history "
+                "400 (attempt %d/%d) — re-rolling a fresh ReAct invocation "
+                "from clean state: %s",
+                label, attempt, max_retries + 1, exc,
+            )
+
+
 # ── SOTA structured-output retry with validation feedback ─────────────────────
 
 
