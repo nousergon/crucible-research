@@ -140,10 +140,15 @@ def run_qual_analyst(
     # strict-mode parsing-error contract (lax-mode falls back to empty
     # assessments; strict-mode raises).
     from graph.state_schemas import QualAnalystOutput
+    # pre_model_hook (config#1065): drop orphan ``tool_use`` turns from the
+    # LLM-input view before every ReAct turn — the structural pre-send fix
+    # for the intermittent "tool_use without tool_result" 400. See the quant
+    # analyst's matching wiring + agents/langchain_utils.make_tool_use_repair_hook.
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
+        pre_model_hook=make_tool_use_repair_hook(label=f"qual:{team_id}"),
     )
 
     picks_text = "\n".join(
@@ -422,6 +427,7 @@ from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     invoke_react_with_recovery,
     invoke_structured_with_validation_retry,
+    make_tool_use_repair_hook,
 )
 
 # Cap the analyst's prose answer persisted into the decision artifact for

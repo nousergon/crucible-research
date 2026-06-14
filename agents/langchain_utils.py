@@ -332,6 +332,177 @@ def invoke_react_with_recovery(
             )
 
 
+# ── Pre-send tool_use/tool_result pairing repair (structured-tool-use discipline) ──
+#
+# Anthropic's Messages API rejects a message list in which an assistant
+# ``tool_use`` block is not immediately answered by a matching
+# ``tool_result`` block (HTTP 400, ``invalid_request_error``: "messages.N:
+# `tool_use` ids were found without `tool_result` blocks immediately
+# after: toolu_…"). config#1065: on the 2026-06-13 Saturday run two of
+# six sector teams (consumer, healthcare) hard-failed on exactly this 400
+# while four teams ran clean off the identical code path — an INTERMITTENT
+# malformation, surfaced sporadically by the prebuilt ``create_react_agent``
+# loop (e.g. a ``max_tokens``-truncated / aborted tool_use emission that
+# never received its ToolMessage answer before the next turn was assembled).
+#
+# ``invoke_react_with_recovery`` (below) is the OUTER safety net — it
+# re-rolls the whole ReAct loop from a fresh graph state on this 400.
+# This block is the INNER, structural fix per the SOTA structured-tool-use
+# discipline (config#1065 fix-plan 1+2): a ``pre_model_hook`` that runs
+# before EVERY LLM call inside the ReAct loop and REPAIRS the message list
+# in place — dropping any orphan ``tool_use`` (an assistant turn whose
+# tool_call ids are not all answered by a following ToolMessage) — so a
+# malformed history can never be SENT to the API in the first place. The
+# repaired view is fed via ``llm_input_messages`` (the create_react_agent
+# pre_model_hook contract), which does NOT mutate the persisted graph
+# state — it only sanitizes what the model sees on each turn.
+
+
+def _ai_tool_call_ids(msg) -> list[str]:
+    """tool_call ids emitted by an assistant message, in order.
+
+    Handles the langchain ``AIMessage.tool_calls`` shape (list of dicts
+    carrying ``id``). Returns [] for any non-assistant / no-tool-call
+    message. Drops blank/None ids defensively (a tool_call with no id can
+    never be paired and must be treated as an orphan-bearing turn)."""
+    if getattr(msg, "type", None) != "ai":
+        return []
+    tcs = getattr(msg, "tool_calls", None) or []
+    ids: list[str] = []
+    for tc in tcs:
+        # tool_calls dicts; be tolerant of object-shaped entries too.
+        tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+        ids.append(tid if tid else "")
+    return ids
+
+
+def _tool_result_id(msg) -> str | None:
+    """The ``tool_call_id`` a ToolMessage answers, or None if not a tool msg."""
+    if getattr(msg, "type", None) != "tool":
+        return None
+    tid = getattr(msg, "tool_call_id", None)
+    return tid if tid else None
+
+
+def find_orphan_tool_use_ids(messages: list) -> list[str]:
+    """Return the tool_call ids that are emitted by an assistant message
+    but never answered by a following ToolMessage (the malformed-history
+    signature that produces the Anthropic 400).
+
+    A ``tool_use`` id is satisfied iff some message AFTER its assistant
+    turn is a ToolMessage with a matching ``tool_call_id``. Anthropic
+    requires the answer to be in the *immediately following* message, but
+    for repair purposes the looser "answered anywhere later" rule is
+    correct: an id answered later is not an orphan (the create_react_agent
+    loop always appends the ToolMessage right after), and an id answered
+    nowhere is the orphan we must drop. A blank/None id (a tool_call the
+    model emitted without an id) is always an orphan."""
+    answered: set[str] = set()
+    for msg in messages:
+        rid = _tool_result_id(msg)
+        if rid is not None:
+            answered.add(rid)
+    orphans: list[str] = []
+    for msg in messages:
+        for tid in _ai_tool_call_ids(msg):
+            if not tid or tid not in answered:
+                orphans.append(tid or "<missing-id>")
+    return orphans
+
+
+def validate_tool_use_pairing(messages: list) -> None:
+    """Raise ``ValueError`` iff ``messages`` contains an orphan ``tool_use``.
+
+    The pre-send invariant: every assistant ``tool_use`` id has a
+    following ``tool_result`` (ToolMessage). Used by tests and as an
+    optional assertion; the runtime path REPAIRS rather than raises (see
+    ``repair_tool_use_pairing``)."""
+    orphans = find_orphan_tool_use_ids(messages)
+    if orphans:
+        raise ValueError(
+            "malformed message history: tool_use id(s) without a following "
+            f"tool_result block: {orphans}"
+        )
+
+
+def repair_tool_use_pairing(messages: list) -> tuple[list, list[str]]:
+    """Return ``(repaired_messages, dropped_ids)`` with every orphan
+    ``tool_use`` turn removed so the list can never trigger the Anthropic
+    "tool_use ids were found without tool_result blocks" 400.
+
+    Repair rule (drop, never fabricate): an assistant message that emits
+    ANY unanswered tool_call id is dropped WHOLE — we never synthesize a
+    fake ``tool_result``, because a fabricated result would feed the model
+    a hallucinated observation. We also drop any ToolMessage left dangling
+    after its assistant turn is removed (a tool_result with no preceding
+    tool_use is itself a 400). An assistant turn whose tool_calls are ALL
+    answered is kept verbatim. Idempotent: a clean list returns unchanged
+    with an empty ``dropped_ids``."""
+    orphan_ids = set(find_orphan_tool_use_ids(messages))
+    if not orphan_ids:
+        return list(messages), []
+
+    # Pass 1: drop assistant turns that carry an orphan tool_call, and
+    # record which tool_call ids those turns DID legitimately request
+    # (so the matching ToolMessages, now answering a removed turn, also go).
+    dropped_ids: list[str] = []
+    drop_answer_ids: set[str] = set()
+    kept_after_pass1: list = []
+    for msg in messages:
+        ids = _ai_tool_call_ids(msg)
+        if ids and any((not tid) or tid in orphan_ids for tid in ids):
+            # This assistant turn is the orphan-bearing one — drop it whole.
+            for tid in ids:
+                dropped_ids.append(tid or "<missing-id>")
+                if tid:
+                    drop_answer_ids.add(tid)
+            continue
+        kept_after_pass1.append(msg)
+
+    # Pass 2: drop ToolMessages that answered a now-removed assistant turn.
+    repaired: list = []
+    for msg in kept_after_pass1:
+        rid = _tool_result_id(msg)
+        if rid is not None and rid in drop_answer_ids:
+            continue
+        repaired.append(msg)
+
+    return repaired, dropped_ids
+
+
+def make_tool_use_repair_hook(*, label: str):
+    """Build a ``create_react_agent`` ``pre_model_hook`` that drops orphan
+    ``tool_use`` turns from the LLM-input view on every ReAct turn.
+
+    The hook runs immediately before each LLM call. It reads the current
+    ``messages`` from graph state, repairs the tool_use/tool_result pairing,
+    and returns ``{"llm_input_messages": repaired}`` — the
+    ``create_react_agent`` contract for "send THESE messages to the model
+    this turn without rewriting the persisted state". So even if the loop's
+    accumulated history ever holds an orphan ``tool_use`` (truncated /
+    aborted tool emission), the model never SEES it and the 400 never fires.
+
+    On a repair, emits a WARN naming the dropped id(s) so the event is
+    flow-doctor-detectable (mirrors the existing retry WARN pattern) — a
+    silent repair would hide a real upstream malformation. No-op (returns
+    the messages unchanged) on a clean history."""
+
+    def _hook(state: dict) -> dict:
+        messages = state.get("messages", []) or []
+        repaired, dropped = repair_tool_use_pairing(messages)
+        if dropped:
+            log.warning(
+                "[react_repair:%s] dropped %d orphan tool_use turn(s) from the "
+                "LLM-input view before send (ids=%s) — pre-send pairing repair "
+                "prevented an Anthropic 'tool_use without tool_result' 400 "
+                "(config#1065). Persisted graph state is unchanged.",
+                label, len(dropped), dropped,
+            )
+        return {"llm_input_messages": repaired}
+
+    return _hook
+
+
 # ── SOTA structured-output retry with validation feedback ─────────────────────
 
 
