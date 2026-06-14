@@ -115,9 +115,27 @@ class TestThesisUpdateRecompute:
         )
         out = score_aggregator(state)
         assert "MSFT" in out["investment_theses"]
-        # weighted_base = 65 (quant at full weight when qual is None),
-        # macro_shift = (1.1-1.0)/0.30 * 10 = 3.33. final = 68.3.
-        assert out["investment_theses"]["MSFT"]["final_score"] == pytest.approx(68.3, abs=0.1)
+        # weighted_base = 65 (quant at full weight when qual is None). The
+        # macro_shift now comes from the runtime overlay knob (config#1060/
+        # #1061): when ENABLED it is (1.1-1.0)/range * max_shift; when DISABLED
+        # it is 0.0 so final == weighted_base. Assert against the live config
+        # rather than a hardcoded magic number so this test is robust to the
+        # runtime macro_max_shift_points (the production yaml sets 25.0, not
+        # the code default 10.0).
+        import config as research_config
+        if research_config.MACRO_OVERLAY_ENABLED:
+            expected_shift = (
+                (1.1 - 1.0) / research_config.MACRO_MODIFIER_RANGE
+                * research_config.MACRO_MAX_SHIFT_POINTS
+            )
+        else:
+            expected_shift = 0.0
+        assert out["investment_theses"]["MSFT"]["final_score"] == pytest.approx(
+            65.0 + expected_shift, abs=0.1
+        )
+        assert out["investment_theses"]["MSFT"]["macro_shift"] == pytest.approx(
+            expected_shift, abs=0.1
+        )
 
     def test_missing_all_scores_hard_fails(self):
         """If BOTH sub-scores AND final_score are absent, thesis is truly

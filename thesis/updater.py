@@ -27,7 +27,9 @@ def build_thesis_record(
     Args:
         ticker: stock symbol
         run_date: YYYY-MM-DD string
-        aggregated: dict from aggregator.compute_attractiveness_score()
+        aggregated: composite score dict (final_score / weighted_base /
+                    macro_shift / rating) from the score_aggregator path
+                    (scoring.composite.compute_composite_breakdown)
         agent_outputs: dict with keys 'news_json', 'research_json'
                        (the JSON block at end of each agent report)
 
