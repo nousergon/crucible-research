@@ -229,10 +229,17 @@ def run_quant_analyst(
     # and the strict-mode parsing-error contract, which is the established
     # pattern across every other LLM-output site in this codebase.
     from graph.state_schemas import QuantAnalystOutput
+    # pre_model_hook (config#1065): drop orphan ``tool_use`` turns from the
+    # LLM-input view before every ReAct turn so a truncated/aborted tool
+    # emission can never reach the API as an unpaired ``tool_use`` (the
+    # intermittent 400 that hard-failed 2 of 6 teams on 2026-06-13). The
+    # outer ``invoke_react_with_recovery`` re-roll remains the net for a
+    # 400 that somehow still escapes; this is the structural pre-send fix.
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
+        pre_model_hook=make_tool_use_repair_hook(label=f"quant:{team_id}"),
     )
 
     # Build input message
@@ -613,6 +620,7 @@ from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     invoke_react_with_recovery,
     invoke_with_rate_limit_retry,
+    make_tool_use_repair_hook,
 )
 
 # Cap the analyst's prose answer persisted into the decision artifact for
