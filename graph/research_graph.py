@@ -78,6 +78,9 @@ from config import (
     PILLAR_COMPOSITE_WEIGHTS,
     PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
     PILLAR_COMPOSITE_LEGACY_BLEND,
+    MACRO_OVERLAY_ENABLED,
+    MACRO_MAX_SHIFT_POINTS,
+    MACRO_MODIFIER_RANGE,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -1759,6 +1762,9 @@ def score_aggregator(state: ResearchState) -> dict:
                     pillar_weights=PILLAR_COMPOSITE_WEIGHTS,
                     within_pillar_qual_weight=PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
                     legacy_blend_weights=PILLAR_COMPOSITE_LEGACY_BLEND,
+                    macro_overlay_enabled=MACRO_OVERLAY_ENABLED,
+                    macro_max_shift_points=MACRO_MAX_SHIFT_POINTS,
+                    macro_modifier_range=MACRO_MODIFIER_RANGE,
                 )
             except PillarCoverageError as e:
                 pillar_coverage_skip_count += 1
@@ -1875,6 +1881,9 @@ def score_aggregator(state: ResearchState) -> dict:
                         quant_score=quant_score,
                         qual_score=qual_score,
                         sector_modifier=modifier,
+                        macro_overlay_enabled=MACRO_OVERLAY_ENABLED,
+                        macro_max_shift_points=MACRO_MAX_SHIFT_POINTS,
+                        macro_modifier_range=MACRO_MODIFIER_RANGE,
                     )
                     logger.warning(
                         "[score_aggregator] thesis_update for %s missing "

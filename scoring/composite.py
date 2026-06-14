@@ -34,6 +34,27 @@ DEFAULT_W_QUAL = 0.50
 MACRO_MODIFIER_RANGE = 0.30      # distance from 1.0 to min/max (0.70 and 1.30)
 MACRO_MAX_SHIFT_POINTS = 10.0    # max pts added/subtracted by macro shift
 
+# Macro-shift / sector-modifier OVERLAY enable knob (config#1060/#1061).
+#
+# The macro_shift overlay (``(sector_modifier - 1.0) / range × max_shift``)
+# applies a per-sector, sector-CONSTANT point shift to every stock's composite
+# score. The 2026-06-14 ablation (config#1060) found it costs ~+0.054 realized
+# rank-IC and is structurally mis-specified (sector-constant → cannot rank
+# within-sector; tilted toward the worst-realizing sectors; fights the
+# within-sector stock signal). Corroborated by the predictor's
+# ``sector_macro_modifier`` standalone alpha IC ≈ −0.115.
+#
+# PUBLIC-CODE DEFAULT = True → the public reference baseline preserves CURRENT
+# behavior (overlay ON, ±10 pts) per the divergence policy (config#1031,
+# LEGAL_POSTURE §8). The actual DISABLE is applied PRIVATE-FIRST via the
+# runtime config (``aggregator.macro_overlay.enabled: false`` in
+# alpha-engine-config's gitignored ``scoring.yaml``), NOT by changing this
+# default. When the overlay is disabled the per-ticker ``macro_shift`` is
+# forced to 0.0, so the persisted ``final_score`` equals ``combined_score``
+# (weighted_base + boosts). Fully reversible — flip the runtime knob back to
+# ``true`` (or pass ``macro_overlay_enabled=True``) to re-enable.
+MACRO_OVERLAY_ENABLED = True
+
 # ── Pillar composite (Phase 4) defaults ──────────────────────────────────
 #
 # 7-term composite default state: every pillar_weight is 0 → legacy_blend
@@ -101,6 +122,9 @@ def compute_composite_score(
     max_aggregate_boost: float = 10.0,
     factor_subscore: float | None = None,
     factor_weight: float = 0.0,
+    macro_overlay_enabled: bool = MACRO_OVERLAY_ENABLED,
+    macro_max_shift_points: float = MACRO_MAX_SHIFT_POINTS,
+    macro_modifier_range: float = MACRO_MODIFIER_RANGE,
 ) -> dict:
     """
     Compute the composite attractiveness score.
@@ -120,6 +144,13 @@ def compute_composite_score(
             the quant+qual base (e.g. 0.30 → 70% quant_qual + 30% factor).
             Defaults to 0.0 so callers that do not pass a factor profile see
             backward-compatible behavior.
+        macro_overlay_enabled: when False, the macro_shift overlay is forced to
+            0.0 so final_score == combined_score (config#1060/#1061). Default
+            preserves current behavior (overlay ON); the disable is applied via
+            runtime config (private-first per config#1031).
+        macro_max_shift_points / macro_modifier_range: overlay scale params,
+            wired from the runtime config so the operator can tune the dose
+            without a code change (defaults preserve current ±10 behavior).
 
     Returns:
         {
@@ -162,8 +193,14 @@ def compute_composite_score(
         weighted_base = quant_qual_base
         factor_weight_applied = 0.0
 
-    # Macro shift: (modifier - 1.0) / range × max_shift → [-10, +10]
-    macro_shift = (sector_modifier - 1.0) / MACRO_MODIFIER_RANGE * MACRO_MAX_SHIFT_POINTS
+    # Macro shift: (modifier - 1.0) / range × max_shift → [-10, +10].
+    # Forced to 0.0 when the overlay is disabled via the runtime knob
+    # (config#1060/#1061) so final_score == combined_score (weighted_base
+    # + boosts) — the overlay drag is removed without touching the stock signal.
+    if macro_overlay_enabled:
+        macro_shift = (sector_modifier - 1.0) / macro_modifier_range * macro_max_shift_points
+    else:
+        macro_shift = 0.0
 
     # Aggregate boosts with cap
     total_boost = 0.0
@@ -338,6 +375,7 @@ def compute_composite_breakdown(
     max_aggregate_boost: float = 10.0,
     macro_max_shift_points: float = MACRO_MAX_SHIFT_POINTS,
     macro_modifier_range: float = MACRO_MODIFIER_RANGE,
+    macro_overlay_enabled: bool = MACRO_OVERLAY_ENABLED,
 ):
     """Compute the Phase 4 7-term composite breakdown.
 
@@ -556,7 +594,14 @@ def compute_composite_breakdown(
     # ── Weighted base + macro + boosts + catalyst ─────────────────────
     weighted_base = sum(c.contribution for c in pillar_contributions) + legacy_contribution
 
-    macro_shift = (sector_modifier - 1.0) / macro_modifier_range * macro_max_shift_points
+    # Macro-shift overlay — forced to 0.0 when disabled via the runtime knob
+    # (config#1060/#1061). With macro_shift=0 the final_score reduces to
+    # weighted_base + boosts_total + catalyst_modulation (i.e. combined_score),
+    # removing the ~+0.054-IC overlay drag without touching the stock signal.
+    if macro_overlay_enabled:
+        macro_shift = (sector_modifier - 1.0) / macro_modifier_range * macro_max_shift_points
+    else:
+        macro_shift = 0.0
 
     boosts_total = 0.0
     if boosts:

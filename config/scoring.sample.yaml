@@ -88,6 +88,24 @@ aggregator:
   macro_modifier_clamp_min: 0.70
   macro_modifier_clamp_max: 1.30
 
+  # ── Macro-shift overlay enable knob (config#1060/#1061, 2026-06-14) ─────
+  # The macro_shift overlay applies a per-sector, sector-CONSTANT point
+  # shift (macro_modifier → ±macro_max_shift_points) to every stock's
+  # composite score. The 2026-06-14 ablation found it costs ~+0.054
+  # realized rank-IC and is structurally mis-specified (cannot rank within
+  # a sector; tilted toward the worst-realizing sectors; fights the
+  # within-sector stock signal). When `enabled: false` the per-ticker
+  # macro_shift is forced to 0.0 so final_score == combined_score.
+  #
+  # PUBLIC DEFAULT (this sample) = true → preserves current behavior. The
+  # DISABLE is applied private-first in alpha-engine-config's gitignored
+  # scoring.yaml (`enabled: false`), per the divergence policy (config#1031
+  # / LEGAL_POSTURE §8). NOT managed by the backtester optimizer, so a
+  # backtester run cannot silently re-enable it. Reversible — flip back to
+  # true to re-enable.
+  macro_overlay:
+    enabled: true
+
   long_term_weights:
     quant: 0.50
     qual: 0.50

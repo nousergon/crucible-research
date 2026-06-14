@@ -659,3 +659,118 @@ class TestPillarCoverageGuard:
         """Per-ticker callers catching RuntimeError continue to work."""
         assert issubclass(PillarCoverageError, RuntimeError)
         assert score_to_rating(35) == "SELL"
+
+
+class TestMacroOverlayKnob:
+    """Macro-shift overlay enable knob (config#1060/#1061).
+
+    The overlay costs ~+0.054 realized rank-IC and is structurally
+    mis-specified; the disable is applied private-first via runtime config
+    (``aggregator.macro_overlay.enabled: false``). These tests pin BOTH
+    sides of the knob on both composite functions:
+      * default (enabled) preserves CURRENT macro_shift behavior;
+      * disabled forces macro_shift == 0.0 so the persisted final_score
+        equals combined_score (weighted_base + boosts).
+    """
+
+    # ── module + config default preserves behavior ──────────────────────
+    def test_public_default_is_enabled(self):
+        from scoring.composite import MACRO_OVERLAY_ENABLED
+        assert MACRO_OVERLAY_ENABLED is True, (
+            "public-code default MUST preserve current behavior (overlay ON) "
+            "per the divergence policy — the disable lives in runtime config"
+        )
+
+    def test_code_level_defaults_preserve_behavior(self):
+        # The CODE default (composite.py constants) is the public reference
+        # baseline — overlay ON at ±10 pts. The live runtime config may
+        # override the points (the production scoring.yaml sets 25.0) and is
+        # where the DISABLE lands; the code default must stay frozen.
+        from scoring.composite import (
+            MACRO_OVERLAY_ENABLED,
+            MACRO_MAX_SHIFT_POINTS,
+            MACRO_MODIFIER_RANGE,
+        )
+        assert MACRO_OVERLAY_ENABLED is True
+        assert abs(MACRO_MAX_SHIFT_POINTS - 10.0) < 1e-9
+        assert abs(MACRO_MODIFIER_RANGE - 0.30) < 1e-9
+
+    def test_config_reads_runtime_overlay_knob(self):
+        # config.py exposes the runtime knob; default (no macro_overlay block
+        # in yaml) is enabled True. The points/range are read from yaml.
+        import config
+        assert config.MACRO_OVERLAY_ENABLED is True
+        assert isinstance(config.MACRO_MAX_SHIFT_POINTS, float)
+        assert isinstance(config.MACRO_MODIFIER_RANGE, float)
+        assert config.MACRO_MAX_SHIFT_POINTS > 0.0
+        assert config.MACRO_MODIFIER_RANGE > 0.0
+
+    # ── compute_composite_score ─────────────────────────────────────────
+    def test_default_preserves_macro_shift(self):
+        # Tailwind sector → +10 macro_shift at default (enabled).
+        on = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=1.30,
+        )
+        assert abs(on["macro_shift"] - 10.0) < 0.1
+        assert abs(on["final_score"] - 80.0) < 0.2  # 70 base + 10 shift
+
+    def test_disabled_zeroes_macro_shift_score(self):
+        on = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=1.30,
+        )
+        off = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=1.30,
+            macro_overlay_enabled=False,
+        )
+        assert abs(off["macro_shift"]) < 1e-9
+        # final_score collapses to weighted_base (combined_score), no overlay.
+        assert abs(off["final_score"] - off["weighted_base"]) < 1e-9
+        assert off["final_score"] != on["final_score"]
+
+    def test_disabled_zeroes_for_headwind_sector(self):
+        # The drag removal must hold for BOTH signs of the overlay.
+        off = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=0.70,
+            macro_overlay_enabled=False,
+        )
+        assert abs(off["macro_shift"]) < 1e-9
+        assert abs(off["final_score"] - off["weighted_base"]) < 1e-9
+
+    def test_disabled_keeps_boosts(self):
+        # final_score == combined_score == weighted_base + boosts (overlay only is zeroed).
+        off = compute_composite_score(
+            quant_score=60.0, qual_score=60.0, sector_modifier=1.30,
+            boosts={"pead": 5.0}, macro_overlay_enabled=False,
+        )
+        assert abs(off["macro_shift"]) < 1e-9
+        assert abs(off["final_score"] - (off["weighted_base"] + off["total_boost"])) < 1e-9
+        assert abs(off["total_boost"] - 5.0) < 1e-9
+
+    # ── compute_composite_breakdown ─────────────────────────────────────
+    def _legacy_only_breakdown(self, sector_modifier, macro_overlay_enabled=True, boosts=None):
+        return compute_composite_breakdown(
+            quant_score=70.0, qual_score=70.0, factor_subscore=None,
+            pillar_assessment=None, factor_profile=None,
+            sector_modifier=sector_modifier, boosts=boosts,
+            macro_overlay_enabled=macro_overlay_enabled,
+        )
+
+    def test_breakdown_default_preserves_macro_shift(self):
+        on = self._legacy_only_breakdown(1.30)
+        assert abs(on.macro_shift - 10.0) < 0.1
+
+    def test_breakdown_disabled_zeroes_macro_shift(self):
+        on = self._legacy_only_breakdown(1.30)
+        off = self._legacy_only_breakdown(1.30, macro_overlay_enabled=False)
+        assert abs(off.macro_shift) < 1e-9
+        # final_score == weighted_base + boosts_total + catalyst_modulation;
+        # with no boosts / pillars / catalyst → final_score == weighted_base.
+        assert abs(off.final_score - off.weighted_base) < 1e-9
+        assert off.final_score != on.final_score
+
+    def test_breakdown_disabled_combined_score_equals_final(self):
+        # With boosts present, disabled final_score == combined_score
+        # (weighted_base + boosts_total), i.e. the macro overlay term drops out.
+        off = self._legacy_only_breakdown(0.70, macro_overlay_enabled=False, boosts={"pead": 4.0})
+        assert abs(off.macro_shift) < 1e-9
+        assert abs(off.final_score - (off.weighted_base + off.boosts_total)) < 1e-9

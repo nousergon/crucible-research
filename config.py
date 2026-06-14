@@ -116,6 +116,25 @@ RATING_SELL_THRESHOLD: float = _cfg["rating_thresholds"]["sell"]
 # Loaded from scoring.yaml `aggregator.macro_sector_coherence_gate`.
 _AGGREGATOR_CFG: dict = _scoring_cfg.get("aggregator", {})
 
+# ── Macro-shift overlay knob (config#1060/#1061, 2026-06-14) ─────────────────
+# The macro_shift / sector-modifier overlay applies a per-sector, sector-
+# CONSTANT point shift (±10 by default) to every stock's composite score. The
+# 2026-06-14 ablation found it costs ~+0.054 realized rank-IC and is
+# structurally mis-specified (can't rank within-sector; tilted toward the
+# worst-realizing sectors; fights the within-sector stock signal). Loaded from
+# scoring.yaml `aggregator.macro_overlay`. PUBLIC DEFAULT = enabled True →
+# preserves current behavior; the DISABLE (enabled: false) is applied PRIVATE-
+# FIRST via the gitignored config-repo scoring.yaml (divergence policy
+# config#1031 / LEGAL_POSTURE §8). This surface is NOT managed by the
+# backtester (it writes only config/scoring_weights.json + research_params.json
+# to S3, never scoring.yaml), so a backtester run cannot silently re-enable
+# the overlay. macro_max_shift_points / macro_modifier_range were already
+# present in the yaml but unconsumed — wired here so composite.py reads them.
+_MACRO_OVERLAY_CFG: dict = _AGGREGATOR_CFG.get("macro_overlay", {})
+MACRO_OVERLAY_ENABLED: bool = bool(_MACRO_OVERLAY_CFG.get("enabled", True))
+MACRO_MAX_SHIFT_POINTS: float = float(_AGGREGATOR_CFG.get("macro_max_shift_points", 10.0))
+MACRO_MODIFIER_RANGE: float = float(_AGGREGATOR_CFG.get("macro_modifier_range", 0.30))
+
 # Factor composite definitions (config#1039): experiment belief — the package's
 # scoring.yaml `factor_composites:` overrides the public baseline in
 # scoring/factor_scoring.py. Shape per composite: list of
