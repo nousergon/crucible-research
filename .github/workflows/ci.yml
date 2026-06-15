@@ -31,7 +31,7 @@ jobs:
           TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          REPO_URL="https://x-access-token:${TOKEN}@github.com/cipher813/alpha-engine-config.git"
+          REPO_URL="https://x-access-token:${TOKEN}@github.com/nousergon/alpha-engine-config.git"
           if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
             echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
           else

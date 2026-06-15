@@ -28,7 +28,7 @@ RUN microdnf install -y git && microdnf clean all
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "alpha-engine-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/cipher813/alpha-engine-lib@v0.59.3" && \
+RUN pip install --no-cache-dir "alpha-engine-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.59.3" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^alpha-engine-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt

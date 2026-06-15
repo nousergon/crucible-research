@@ -31,7 +31,7 @@ pydantic~=2.7
 #                 graph/research_graph rag.is_available probe)
 # Lib is now public — no PAT required. Lambda Dockerfile installs via the
 # git URL; CI pulls directly.
-alpha-engine-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/cipher813/alpha-engine-lib@v0.59.3
+alpha-engine-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.59.3
 
 # Scheduling / calendar
 exchange-calendars~=4.5
