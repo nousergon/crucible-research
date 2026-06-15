@@ -9,7 +9,7 @@ or wherever ``--out`` points.
 Requires ``RAG_DATABASE_URL`` + ``VOYAGE_API_KEY`` in the environment.
 Rerank conditions (cross_encoder + llm_judge) additionally require:
 
-    pip install 'alpha-engine-lib[rerank] @ git+https://github.com/cipher813/alpha-engine-lib@v0.11.0'
+    pip install 'alpha-engine-lib[rerank] @ git+https://github.com/nousergon/nousergon-lib@v0.11.0'
     # (LLM-judge path also needs ANTHROPIC_API_KEY)
 
 When the ``[rerank]`` extras aren't installed on the eval runner, pass
