@@ -7,11 +7,11 @@
 [![LangGraph](https://img.shields.io/badge/LangGraph-1C3D5A?style=flat-square)](https://langchain-ai.github.io/langgraph/)
 [![Anthropic Claude](https://img.shields.io/badge/Anthropic_Claude-1a73e8?style=flat-square)](https://www.anthropic.com/)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-yellow?style=flat-square)](LICENSE)
-[![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/cipher813/alpha-engine-docs#phase-trajectory)
+[![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/nousergon/nousergon-docs#phase-trajectory)
 
 Multi-agent investment-research pipeline. Six sector teams, a CIO, and a macro economist scan the S&P 500+400 weekly, maintain rolling investment theses, and emit `signals.json` for the rest of the system. Built on LangGraph with Anthropic Claude (Haiku per-team, Sonnet for synthesis).
 
-> System overview, Step Function orchestration, and module relationships live in [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs). Code tour and key files live in [`OVERVIEW.md`](OVERVIEW.md).
+> System overview, Step Function orchestration, and module relationships live in [`nousergon-docs`](https://github.com/nousergon/nousergon-docs). Code tour and key files live in [`OVERVIEW.md`](OVERVIEW.md).
 
 ## What this does
 
@@ -39,19 +39,19 @@ Decision-artifact capture wraps every LLM call site via `LoadedPrompt` (frontmat
 
 ## Configuration
 
-This repo is **public**. Agent prompts, scoring weights, universe configuration, and proprietary scoring formulas are gitignored locally and stored in the private [`alpha-engine-config`](https://github.com/cipher813/alpha-engine-config) repo. Architecture and approach are public; specific values are private.
+This repo is **public**. Agent prompts, scoring weights, universe configuration, and proprietary scoring formulas are gitignored locally and stored in the private [`alpha-engine-config`](https://github.com/nousergon/alpha-engine-config) repo. Architecture and approach are public; specific values are private.
 
 ## Sister repos
 
 | Module | Repo |
 |---|---|
-| Executor | [`alpha-engine`](https://github.com/cipher813/alpha-engine) |
-| Data | [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) |
-| Predictor | [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) |
-| Backtester | [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) |
-| Dashboard | [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) |
-| Library | [`alpha-engine-lib`](https://github.com/cipher813/alpha-engine-lib) |
-| Docs | [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs) |
+| Executor | [`crucible-executor`](https://github.com/nousergon/crucible-executor) |
+| Data | [`nousergon-data`](https://github.com/nousergon/nousergon-data) |
+| Predictor | [`crucible-predictor`](https://github.com/nousergon/crucible-predictor) |
+| Backtester | [`crucible-backtester`](https://github.com/nousergon/crucible-backtester) |
+| Dashboard | [`crucible-dashboard`](https://github.com/nousergon/crucible-dashboard) |
+| Library | [`nousergon-lib`](https://github.com/nousergon/nousergon-lib) |
+| Docs | [`nousergon-docs`](https://github.com/nousergon/nousergon-docs) |
 
 ## License
 

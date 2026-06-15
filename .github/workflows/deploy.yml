@@ -51,13 +51,13 @@ jobs:
           path: alpha-engine-research
 
       # deploy.sh also stages proprietary prompt templates from
-      # cipher813/alpha-engine-config into the build context. That repo is
+      # nousergon/alpha-engine-config into the build context. That repo is
       # private so we need a fine-grained PAT with read-only Contents access.
       # The token is stored as the ALPHA_ENGINE_CONFIG_TOKEN repository secret.
       - name: Checkout alpha-engine-config
         uses: actions/checkout@v4
         with:
-          repository: cipher813/alpha-engine-config
+          repository: nousergon/alpha-engine-config
           path: alpha-engine-config
           token: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
 
@@ -188,7 +188,7 @@ jobs:
 
       - name: Append to system-wide deploy changelog
         if: always()
-        uses: cipher813/alpha-engine-docs/.github/actions/append-changelog@main
+        uses: nousergon/nousergon-docs/.github/actions/append-changelog@main
         with:
           deploy_status: ${{ job.status == 'success' && 'success' || 'failure' }}
           deploy_workflow: deploy.yml
