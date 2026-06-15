@@ -1,5 +1,5 @@
 flow_name: research-lambda
-repo: cipher813/alpha-engine-research
+repo: nousergon/crucible-research
 owner: "@brianmcmahon"
 notify:
   - type: email

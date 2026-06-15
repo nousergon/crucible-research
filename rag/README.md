@@ -2,7 +2,7 @@
 
 Hybrid retrieval (vector + Full-Text Search) over SEC filings, earnings transcripts, and thesis history. Provides the qual analyst agents with deep fundamental context beyond headlines and consensus data.
 
-> **Retrieval-only** in this repo. The shared retrieval/db/embeddings/schema code lives in [`alpha_engine_lib.rag`](https://github.com/cipher813/alpha-engine-lib/tree/main/src/alpha_engine_lib/rag) (since lib v0.3.0; hybrid-retrieval API since v0.6.0). RAG **ingestion** lives in [`alpha-engine-data/rag/pipelines/`](https://github.com/cipher813/alpha-engine-data/tree/main/rag/pipelines) and runs as part of the weekly Step Function via that repo's `infrastructure/spot_data_weekly.sh`.
+> **Retrieval-only** in this repo. The shared retrieval/db/embeddings/schema code lives in [`alpha_engine_lib.rag`](https://github.com/nousergon/nousergon-lib/tree/main/src/alpha_engine_lib/rag) (since lib v0.3.0; hybrid-retrieval API since v0.6.0). RAG **ingestion** lives in [`nousergon-data/rag/pipelines/`](https://github.com/nousergon/nousergon-data/tree/main/rag/pipelines) and runs as part of the weekly Step Function via that repo's `infrastructure/spot_data_weekly.sh`.
 
 ## Architecture
 

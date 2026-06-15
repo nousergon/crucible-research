@@ -109,7 +109,7 @@ build_and_deploy_main() {
       echo "ERROR: research prompts not found — tried:"
       echo "  config/prompts/ (local dev)"
       echo "  $CONFIG_REPO_DIR/research/prompts/ (config repo sibling)"
-      echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+      echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
       echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
       exit 1
     fi
@@ -129,7 +129,7 @@ build_and_deploy_main() {
         echo "ERROR: config/$yaml not found — tried:"
         echo "  config/$yaml (local dev)"
         echo "  $src (config repo sibling)"
-        echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+        echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
         echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
         exit 1
       fi
@@ -152,7 +152,7 @@ build_and_deploy_main() {
       echo "ERROR: config/model_pricing.yaml not found — tried:"
       echo "  config/model_pricing.yaml (local dev)"
       echo "  $src (config repo sibling)"
-      echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+      echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
       echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
       exit 1
     fi

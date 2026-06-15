@@ -157,7 +157,7 @@ def _resolve_prompt_path(name: str) -> Path:
     raise FileNotFoundError(
         f"Prompt '{name}' not found. Searched:\n  "
         + "\n  ".join(str(p) for p in search)
-        + "\nFix: clone cipher813/alpha-engine-config at "
+        + "\nFix: clone nousergon/alpha-engine-config at "
         + "~/alpha-engine-config (local dev) or stage via "
         + "infrastructure/deploy.sh (Lambda build). "
         + "There is no .example fallback by design — see "
