@@ -877,6 +877,28 @@ class ArchiveManager:
                 ),
             )
 
+    def write_team_inputs(self, inputs: list[dict]) -> None:
+        """Record the scanner→team input assignment (v19 team_inputs ledger).
+
+        One row per (ticker, eval_date, team_id) naming WHICH candidate each
+        sector team received and WHY (source = 'scanner' | 'held_population';
+        sector = the routing GICS sector). Idempotent via INSERT OR REPLACE on
+        the UNIQUE key — safe to re-run for the same run_date (SF resume).
+        No-op when the DB connection or the input list is absent.
+        """
+        if not self.db_conn or not inputs:
+            return
+        for r in inputs:
+            self.db_conn.execute(
+                """INSERT OR REPLACE INTO team_inputs
+                   (ticker, eval_date, team_id, source, sector)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    r["ticker"], r["eval_date"], r["team_id"],
+                    r.get("source"), r.get("sector"),
+                ),
+            )
+
     def write_cio_evaluations(self, evaluations: list[dict]) -> None:
         """Log all CIO decisions (ADVANCE/REJECT/DEADLOCK) for evaluation.
 
