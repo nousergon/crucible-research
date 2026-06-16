@@ -667,6 +667,32 @@ def fetch_data(state: ResearchState) -> dict:
         am, run_date, scanner_universe, population_tickers,
     )
 
+    # ── team_inputs ledger (v19): record the scanner→team input assignment ───
+    # The per-team partition is otherwise computed in-memory inside each
+    # sector_team_node and discarded. Persisting it here — once, deterministically,
+    # for ALL teams, before fan-out — lets the decision-review console show the
+    # complete input set per team (not just the names a team ended up ranking),
+    # and survives SF resume (fetch_data always runs). Best-effort: a ledger
+    # write failure must never sink the research run.
+    try:
+        _held = set(population_tickers)
+        _team_inputs: list[dict] = []
+        for _tid in ALL_TEAM_IDS:
+            for _tkr in get_team_tickers(_tid, agent_input_set, sector_map):
+                _team_inputs.append({
+                    "ticker": _tkr,
+                    "eval_date": run_date,
+                    "team_id": _tid,
+                    "source": "held_population" if _tkr in _held else "scanner",
+                    "sector": sector_map.get(_tkr),
+                })
+        am.write_team_inputs(_team_inputs)
+        am.commit()
+        logger.info("[fetch_data] team_inputs ledger: %d assignments across %d teams",
+                    len(_team_inputs), len(ALL_TEAM_IDS))
+    except Exception as e:  # pragma: no cover — observability ledger, never fatal
+        logger.warning("[fetch_data] team_inputs ledger write failed (non-fatal): %s", e)
+
     # ── Feature store first: load pre-computed features for ~900 tickers ─────
     # The predictor's daily inference writes technical + interaction features for
     # the full universe. This eliminates the 3-month yfinance bulk fetch for all

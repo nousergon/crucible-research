@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -304,6 +304,20 @@ CREATE TABLE IF NOT EXISTS team_candidates (
     UNIQUE(ticker, eval_date, team_id)
 );
 
+-- Scanner→team input-assignment ledger (v19). Records WHICH candidate each
+-- sector team received and WHY, so the decision-review console can show the
+-- complete input set per team — not just the names a team ended up ranking.
+-- Without this the scanner→team partition is computed in-memory and discarded.
+CREATE TABLE IF NOT EXISTS team_inputs (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    eval_date       TEXT NOT NULL,
+    team_id         TEXT NOT NULL,
+    source          TEXT,    -- 'scanner' (passed the weekly quant pre-filter) | 'held_population' (tracked stock)
+    sector          TEXT,    -- the GICS sector that routed the ticker to this team
+    UNIQUE(ticker, eval_date, team_id)
+);
+
 CREATE TABLE IF NOT EXISTS cio_evaluations (
     id                  INTEGER PRIMARY KEY,
     ticker              TEXT NOT NULL,
@@ -486,6 +500,8 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          ALTER TABLE score_performance ADD COLUMN eval_date_21d TEXT;
          ALTER TABLE score_performance ADD COLUMN log_alpha_21d REAL;
          """),
+    19: ("Add team_inputs ledger (scanner→team input-assignment audit)",
+         "SELECT 1"),  # Table created via CREATE IF NOT EXISTS above
 }
 
 
