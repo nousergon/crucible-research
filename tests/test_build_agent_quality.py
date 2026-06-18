@@ -1,0 +1,169 @@
+"""
+Unit tests for ``scripts/build_agent_quality.py`` — the report-card
+agent-quality producer (config alpha-engine-config#1149).
+
+Locks down:
+- Each metric block is emitted only from real persisted input, with the exact
+  contract the evaluator consumer (crucible-evaluator#59) reads.
+- Independent degradation: a missing source omits ONLY its block (never a
+  fabricated value), so the consumer N/As just that component.
+- cost_per_signal sums _cost_raw identically to aggregate_costs (implausible
+  rows dropped).
+- judge metrics computed over REAL evals only (skip-markers excluded).
+- Date split: signals key off --date (trading day), cost/eval off --run-date.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import date
+from typing import Iterable
+
+import boto3
+import pytest
+from moto import mock_aws
+
+from scripts.build_agent_quality import build_agent_quality, write_agent_quality
+
+_BUCKET = "alpha-engine-research"
+_DATE = date(2026, 6, 12)        # trading day
+_RUN_DATE = date(2026, 6, 13)    # calendar Saturday the run executed
+
+
+@pytest.fixture
+def s3():
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=_BUCKET)
+        yield client
+
+
+def _put_json(s3, key, obj):
+    s3.put_object(Bucket=_BUCKET, Key=key, Body=json.dumps(obj).encode())
+
+
+def _put_jsonl(s3, key, rows: Iterable[dict]):
+    body = "\n".join(json.dumps(r, default=str) for r in rows).encode()
+    s3.put_object(Bucket=_BUCKET, Key=key, Body=body)
+
+
+def _signals(n):
+    return {"signals": {f"T{i}": {"ticker": f"T{i}", "signal": "ENTER", "score": 70} for i in range(n)}}
+
+
+def _cost_row(cost, run_id="2026-06-13", agent="sector_quant:tech"):
+    return {"schema_version": 2, "timestamp": "2026-06-13T13:30:00+00:00", "run_id": run_id,
+            "agent_id": agent, "model_name": "claude-haiku-4-5", "call_seq": 1,
+            "input_tokens": 1000, "output_tokens": 200, "cost_usd": cost}
+
+
+def _eval(scores, skip=None):
+    return {"schema_version": 2, "run_id": "2026-06-12", "judge_run_id": "jr",
+            "timestamp": "2026-06-13T00:00:00+00:00", "judged_agent_id": "ic_cio",
+            "rubric_id": "r", "rubric_version": "1.0", "judge_model": "claude-haiku-4-5",
+            "dimension_scores": [{"dimension": f"d{i}", "score": s, "reasoning": "r"}
+                                 for i, s in enumerate(scores)],
+            "overall_reasoning": "ok", "judge_skip_reason": skip}
+
+
+def _full_run(s3):
+    _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(30))
+    _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_RUN_DATE.isoformat()}/a/x.jsonl",
+               [_cost_row(0.50), _cost_row(0.25), _cost_row(0.25)])  # total $1.00
+    base = f"decision_artifacts/_eval/{_RUN_DATE.isoformat()}/jr"
+    _put_json(s3, f"{base}/ic_cio.json", _eval([4, 4, 4, 3, 5, 4]))      # pass
+    _put_json(s3, f"{base}/sector_quant.json", _eval([3, 3, 4, 4, 4, 4]))  # pass
+    _put_json(s3, f"{base}/macro.json", _eval([2, 4, 4, 4, 4, 4]))        # fail (a dim < 3)
+    _put_json(s3, f"{base}/skip.json", _eval([], skip="degenerate_input"))  # excluded
+
+
+class TestFullRun:
+    @pytest.fixture(autouse=True)
+    def _seed(self, s3):
+        _full_run(s3)
+
+    def test_all_four_blocks_present(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["status"] == "ok"
+        assert art["date"] == _DATE.isoformat()
+        assert art["run_date"] == _RUN_DATE.isoformat()
+        assert set(art) >= {"signal_volume_adequacy", "cost_per_signal",
+                            "judge_rubric_pass_rate", "judge_rubric_distribution"}
+
+    def test_signal_volume(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["signal_volume_adequacy"] == {"value": 30, "n": 30}
+
+    def test_cost_per_signal(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        c = art["cost_per_signal"]
+        assert c["total_cost_usd"] == 1.0
+        assert c["n"] == 30
+        assert c["value"] == pytest.approx(1.0 / 30, rel=1e-3)
+
+    def test_judge_pass_rate(self, s3):
+        # 2 of 3 real evals pass (macro fails); skip-marker excluded.
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        prr = art["judge_rubric_pass_rate"]
+        assert prr["n"] == 3
+        assert prr["value"] == pytest.approx(2 / 3, rel=1e-3)
+
+    def test_judge_distribution(self, s3):
+        # 18 dim-scores: score 4 appears 13x (4+4+5) → modal concentration 13/18.
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        dist = art["judge_rubric_distribution"]
+        assert dist["n"] == 3
+        assert dist["value"] == pytest.approx(13 / 18, rel=1e-3)
+
+    def test_roundtrip_write(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        key = write_agent_quality(s3, _BUCKET, art)
+        assert key == f"backtest/{_DATE.isoformat()}/agent_quality.json"
+        got = json.loads(s3.get_object(Bucket=_BUCKET, Key=key)["Body"].read())
+        assert got["signal_volume_adequacy"]["value"] == 30
+
+
+class TestIndependentDegradation:
+    def test_empty_run_only_status(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["status"] == "ok"
+        assert not any(isinstance(v, dict) and "value" in v for v in art.values())
+
+    def test_no_signals_drops_cost_and_volume(self, s3):
+        # cost rows present but no signals → no denominator → both blocks absent.
+        _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_RUN_DATE.isoformat()}/a/x.jsonl", [_cost_row(1.0)])
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert "signal_volume_adequacy" not in art
+        assert "cost_per_signal" not in art
+
+    def test_signals_without_cost_keeps_volume(self, s3):
+        _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(12))
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["signal_volume_adequacy"] == {"value": 12, "n": 12}
+        assert "cost_per_signal" not in art
+
+    def test_only_skip_evals_drops_judge(self, s3):
+        base = f"decision_artifacts/_eval/{_RUN_DATE.isoformat()}/jr"
+        _put_json(s3, f"{base}/skip.json", _eval([], skip="degenerate_input"))
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert "judge_rubric_pass_rate" not in art
+        assert "judge_rubric_distribution" not in art
+
+    def test_implausible_cost_rows_dropped(self, s3):
+        _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(10))
+        # one real row + one test-pollution row (bad run_id, huge tokens).
+        _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_RUN_DATE.isoformat()}/a/x.jsonl",
+                   [_cost_row(2.0), {"run_id": "run-x", "cost_usd": 999.0,
+                                     "input_tokens": 9_000_000, "output_tokens": 1}])
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["cost_per_signal"]["total_cost_usd"] == 2.0
+
+
+class TestDateSplit:
+    def test_run_date_defaults_to_date(self, s3):
+        # everything under the SAME date → run_date defaults to date.
+        _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(5))
+        _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_DATE.isoformat()}/a/x.jsonl", [_cost_row(1.0, run_id="2026-06-12")])
+        art = build_agent_quality(s3, _BUCKET, _DATE)  # no run_date
+        assert art["run_date"] == _DATE.isoformat()
+        assert art["cost_per_signal"]["total_cost_usd"] == 1.0
