@@ -3799,6 +3799,10 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "thesis_summary": thesis.get("bull_case", ""),
             "sector": sector_map.get(ticker) or thesis.get("sector") or "Unknown",
             "team_id": thesis.get("team_id"),
+            # Pick provenance (config#859 stance_source_provenance grader):
+            # CIO-advanced new entrant vs reaffirmed held name. Derived from
+            # already-available locals — cannot raise.
+            "stance_source": "cio_entrant" if ticker in advanced_tickers else "reaffirmed_hold",
             "quant_score": thesis.get("quant_score"),
             "qual_score": thesis.get("qual_score"),
             "factor_subscore": thesis.get("factor_subscore"),
@@ -3833,6 +3837,8 @@ def _build_signals_payload(state: ResearchState) -> dict:
                 "thesis_summary": prior.get("thesis_summary", ""),
                 "sector": sector,
                 "team_id": prior.get("team_id"),
+                # Pick provenance: population ticker with no fresh thesis this run.
+                "stance_source": "carryover",
                 "quant_score": prior.get("quant_score"),
                 "qual_score": prior.get("qual_score"),
                 "sub_scores": {
@@ -3852,6 +3858,7 @@ def _build_signals_payload(state: ResearchState) -> dict:
                 "rating": "SELL",
                 "signal": "EXIT",
                 "conviction": "declining",
+                "stance_source": "exit",
                 "thesis_summary": e.get("reason", "Exited from population"),
                 "sector": sector,
                 "team_id": None,
@@ -3876,6 +3883,9 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "sector_rating": sr.get("rating", "market_weight"),
             "sector": sector,
             "thesis_summary": sig["thesis_summary"],
+            # Propagate pick provenance to the v1 universe entries the
+            # evaluator's stance_source_provenance grader reads (config#859).
+            "stance_source": sig.get("stance_source"),
             "factor_quality_score": sig.get("factor_quality_score"),
             "sub_scores": sig.get("sub_scores"),
         })

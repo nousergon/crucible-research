@@ -127,3 +127,21 @@ def test_enter_signal_carries_a_numeric_score():
     assert enters, "synthetic AAA should produce an ENTER"
     for e in enters:
         assert e["score"] is not None, f"ENTER {e['ticker']} must carry a numeric score"
+
+
+def test_universe_entries_carry_stance_source_provenance():
+    # config#859: every universe entry must carry a non-null stance_source so the
+    # evaluator's stance_source_provenance grader can score pick-provenance
+    # coverage (was N/A-MISSING-INPUT because the field did not exist).
+    payload = _build_signals_payload(_synthetic_state())
+    by_ticker = {e["ticker"]: e for e in payload["universe"]}
+    # AAA: BUY + CIO-advanced fresh thesis; BBB: population carryover (no fresh
+    # thesis); CCC: dropped from population.
+    assert by_ticker["AAA"]["stance_source"] == "cio_entrant"
+    assert by_ticker["BBB"]["stance_source"] == "carryover"
+    assert by_ticker["CCC"]["stance_source"] == "exit"
+    for e in payload["universe"]:
+        assert e.get("stance_source"), (
+            f"universe entry {e.get('ticker')!r} has empty stance_source — "
+            "the provenance grader would under-count coverage"
+        )
