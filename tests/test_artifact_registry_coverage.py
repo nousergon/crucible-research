@@ -75,6 +75,12 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "local/sync_db.py": 1,
     "scoring/factor_scoring.py": 2,
     "scripts/aggregate_costs.py": 1,
+    # Report-card agent_quality.json (config#1149). Weekly report-card input;
+    # the evaluator consumer (crucible-evaluator#59) graceful-degrades each
+    # component to a visible N/A-MISSING-INPUT when absent — so absence is NOT
+    # a silent failure and needs no daily freshness-SLA alarm. Per-file PUT pin
+    # only, no ARTIFACT_REGISTRY row (same rationale as the cost/capture streams).
+    "scripts/build_agent_quality.py": 1,
     "scripts/backfill_calibrator_v1_context.py": 2,
     "scripts/backfill_eval_option_b.py": 1,
     "scripts/backfill_orphan_theses.py": 2,
