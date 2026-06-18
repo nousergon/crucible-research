@@ -64,7 +64,13 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "evals/orchestrator.py": 2,
     "evals/rationale_clustering.py": 1,
     "evals/rolling_mean.py": 1,
-    "graph/llm_cost_tracker.py": 1,
+    # Two PUT sites: (1) per-call cost-raw JSONL (_cost_raw/), (2) the
+    # SFT-lossless capture JSONL (_sft_raw/, config#1134). Both are gated on
+    # ALPHA_ENGINE_DECISION_CAPTURE_ENABLED and are accumulation streams
+    # (cost telemetry / Phase-3 distillation training data), NOT load-bearing
+    # freshness-SLA artifacts with a daily consumer — so no ARTIFACT_REGISTRY
+    # row, just this per-file PUT pin.
+    "graph/llm_cost_tracker.py": 2,
     "health_status.py": 2,
     "local/sync_db.py": 1,
     "scoring/factor_scoring.py": 2,
