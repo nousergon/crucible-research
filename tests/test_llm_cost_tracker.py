@@ -102,6 +102,7 @@ def reset_tracker_state(monkeypatch, tmp_path):
     # Wipe completed metadata + frame stack via fresh ContextVar values.
     llm_cost_tracker._frame_stack.set([])
     llm_cost_tracker._completed_metadata.set({})
+    llm_cost_tracker._pending_sft_inputs.set({})
     yield
     llm_cost_tracker._reset_price_table_for_tests()
 
@@ -1357,3 +1358,238 @@ class TestPerCallRowToolFeePricing:
         assert row["web_search_requests"] == 50
         assert row["web_fetch_requests"] == 0
         assert row["cost_usd"] == pytest.approx(0.502, abs=1e-6)
+
+
+# ── SFT-lossless capture (config#1134) ────────────────────────────────────
+
+
+def _make_ai_response(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    text: str = "the answer is 42",
+    model_name: str = "claude-haiku-4-5",
+    tool_calls: list | None = None,
+):
+    """Build a fake LLMResult whose message is a REAL AIMessage.
+
+    The SFT serializer calls ``message_to_dict`` on the output message, which
+    needs a genuine ``BaseMessage`` (not a MagicMock). Token/model extraction
+    reads ``usage_metadata`` / ``response_metadata`` off the same message.
+    """
+    from langchain_core.messages import AIMessage
+
+    ai = AIMessage(
+        content=text,
+        tool_calls=tool_calls or [],
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "input_token_details": {"cache_read": 0, "cache_creation": 0},
+        },
+        response_metadata={"model_name": model_name},
+    )
+    generation = MagicMock()
+    generation.message = ai
+    generation.text = text
+    response = MagicMock()
+    response.generations = [[generation]]
+    response.llm_output = None
+    return response
+
+
+def _make_input_messages(*, system: str, human: str):
+    """Build the langchain batch shape passed to ``on_chat_model_start``."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    return [[SystemMessage(content=system), HumanMessage(content=human)]]
+
+
+def _read_sft_rows(s3, run_id: str = "2026-06-20"):
+    listing = s3.list_objects_v2(
+        Bucket=_TEST_BUCKET, Prefix="decision_artifacts/_sft_raw/",
+    )
+    keys = [obj["Key"] for obj in listing.get("Contents", [])]
+    if not keys:
+        return [], keys
+    return _read_jsonl_object(s3, _TEST_BUCKET, keys[0]), keys
+
+
+class TestSftCapture:
+    def test_pairs_input_and_output_into_sft_row(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_quant:tech",
+            run_id="2026-06-20",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system="You are a quant.", human="Score AAPL."),
+                run_id="call-1",
+                invocation_params={"model": "claude-haiku-4-5", "tools": [{"name": "rsi"}]},
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=100, output_tokens=50, text="AAPL: 78"),
+                run_id="call-1",
+            )
+            assert len(frame.sft_rows) == 1
+            row = frame.sft_rows[0]
+            assert row["call_seq"] == 1
+            # Input: system + human captured, untruncated.
+            types = [m["type"] for m in row["input_messages"]]
+            assert types == ["system", "human"]
+            assert row["input_messages"][0]["data"]["content"] == "You are a quant."
+            # Bound tool schema preserved (essential SFT context).
+            assert row["invocation_params"]["tools"] == [{"name": "rsi"}]
+            # Output completion captured.
+            assert row["output_text"] == "AAPL: 78"
+            assert row["output_message"]["data"]["content"] == "AAPL: 78"
+
+    def test_full_completion_is_untruncated(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        """The SFT sink must NOT apply the 8KB observability transcript cap."""
+        from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
+
+        big_system = "S" * 40_000
+        big_output = "O" * 40_000
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system=big_system, human="hi"),
+                run_id="c",
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=1, output_tokens=1, text=big_output),
+                run_id="c",
+            )
+            row = frame.sft_rows[0]
+            assert len(row["input_messages"][0]["data"]["content"]) == 40_000
+            assert len(row["output_text"]) == 40_000
+
+    def test_secrets_redacted_from_invocation_params(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system="s", human="h"),
+                run_id="c",
+                invocation_params={
+                    "model": "claude-haiku-4-5",
+                    "anthropic_api_key": "sk-ant-SECRET",
+                    "auth_token": "bearer-xyz",
+                },
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=1, output_tokens=1),
+                run_id="c",
+            )
+            params = frame.sft_rows[0]["invocation_params"]
+            assert params["model"] == "claude-haiku-4-5"
+            assert params["anthropic_api_key"] == "<redacted>"
+            assert params["auth_token"] == "<redacted>"
+
+    def test_react_loop_writes_aligned_sft_rows(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_quant:tech",
+            run_id="2026-06-20",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            for i, rid in enumerate(["c1", "c2", "c3"], start=1):
+                cb.on_chat_model_start(
+                    {"kwargs": {}},
+                    _make_input_messages(system="s", human=f"step {i}"),
+                    run_id=rid,
+                )
+                cb.on_llm_end(
+                    _make_ai_response(input_tokens=10 * i, output_tokens=i, text=f"out {i}"),
+                    run_id=rid,
+                )
+
+        rows, keys = _read_sft_rows(mocked_s3)
+        assert "/2026-06-20/sector_quant:tech.jsonl" in keys[0]
+        assert [r["call_seq"] for r in rows] == [1, 2, 3]
+        assert [r["output_text"] for r in rows] == ["out 1", "out 2", "out 3"]
+        # Frame dimensions stamped on every row.
+        assert all(r["agent_id"] == "sector_quant:tech" for r in rows)
+        assert all(r["run_id"] == "2026-06-20" for r in rows)
+
+    def test_flag_off_writes_no_sft_object(
+        self, mocked_s3, capture_disabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}}, _make_input_messages(system="s", human="h"), run_id="c",
+            )
+            cb.on_llm_end(_make_ai_response(input_tokens=1, output_tokens=1), run_id="c")
+
+        # Nothing buffered (start was gated) and nothing written.
+        assert frame.sft_rows == []
+        rows, keys = _read_sft_rows(mocked_s3)
+        assert keys == []
+
+    def test_s3_put_failure_raises_sft_capture_write_error(
+        self, monkeypatch, capture_enabled, patched_pricing_path,
+    ):
+        from graph import llm_cost_tracker
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, SftCaptureWriteError, track_llm_cost,
+        )
+
+        # Neutralize the cost flush (it runs first at frame exit) so we
+        # isolate the SFT-flush failure path; point boto3 at a stub whose
+        # put_object always fails.
+        monkeypatch.setattr(llm_cost_tracker, "_flush_cost_rows_to_s3", lambda **k: None)
+        stub = MagicMock()
+        stub.put_object.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "nope"}}, "PutObject",
+        )
+        monkeypatch.setattr(llm_cost_tracker.boto3, "client", lambda *a, **k: stub)
+
+        cb = CostTelemetryCallback()
+        with pytest.raises(SftCaptureWriteError):
+            with track_llm_cost(
+                agent_id="a", run_id="2026-06-20",
+                model_name_fallback="claude-haiku-4-5",
+            ):
+                cb.on_chat_model_start(
+                    {"kwargs": {}}, _make_input_messages(system="s", human="h"), run_id="c",
+                )
+                cb.on_llm_end(_make_ai_response(input_tokens=1, output_tokens=1), run_id="c")
+
+    def test_sft_key_format(self):
+        from datetime import datetime, timezone
+
+        from graph.llm_cost_tracker import _build_sft_raw_s3_key
+
+        key = _build_sft_raw_s3_key(
+            capture_dt=datetime(2026, 6, 20, tzinfo=timezone.utc),
+            run_id="2026-06-20",
+            agent_id="sector_team:technology",
+        )
+        assert key == "decision_artifacts/_sft_raw/2026-06-20/2026-06-20/sector_team:technology.jsonl"

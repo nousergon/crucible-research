@@ -138,12 +138,59 @@ _PER_CALL_SCHEMA_VERSION = 2
 _DECISION_CAPTURE_ENV_VAR = "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"
 
 
+# ── Per-call SFT-lossless sink (distillation training data) ──────────────
+#
+# The cost-raw JSONL above captures token COUNTS per call; the bounded
+# decision-artifact transcript (agents/langchain_utils.py) captures a
+# size-capped reasoning excerpt for the observability console. NEITHER is
+# usable as distillation SFT training data: SFT needs the FULL, untruncated
+# (input → output) pair per individual LLM call — the exact messages sent on
+# the wire (incl. the rendered system message + bound tool definitions) and
+# the raw model completion (incl. tool_use content blocks).
+#
+# This sink (config#1134, P0) captures exactly that, per ``.invoke()`` call,
+# to ``decision_artifacts/_sft_raw/{YYYY-MM-DD}/{run_id}/{agent_id}.jsonl``.
+# It is gated on the SAME ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED`` flag as
+# the cost stream (already =true in prod) and rides the identical frame /
+# flush / hard-fail machinery. Captured prompts/completions are proprietary
+# IP — the sink is the PRIVATE ``alpha-engine-research`` bucket only; nothing
+# here is ever committed to a public repo.
+#
+# Capturing the wire-level system message is deliberately preferred over
+# plumbing the gitignored prompt-template files through every call site: we
+# record what the model ACTUALLY received, which is both the correct SFT
+# target and robust to prompt-loading refactors.
+#
+# WHY capture now even though the distillation experiment is Phase 3
+# (config#1135): the data is irreversible. Every weekly research run that
+# completes without this capture is a permanently lost training example.
+_SFT_RAW_PREFIX = "decision_artifacts/_sft_raw"
+# Schema v1: per-call (input_messages, invocation_params, output_message,
+# output_text). Bump additively per CLAUDE.md S3 contract safety.
+_SFT_SCHEMA_VERSION = 1
+# Invocation-param keys whose VALUE could carry a secret (api key, auth
+# header). Captured params are sanitized against this denylist before they
+# touch S3 — token counts and tool schemas are fine, credentials are not.
+_SFT_SECRET_PARAM_SUBSTRINGS = ("key", "token", "secret", "auth", "password", "credential")
+
+
 class CostRawWriteError(RuntimeError):
     """Raised when the S3 write of the per-call JSONL sink fails.
 
     Per ``feedback_no_silent_fails``, the cost stream does not swallow
     S3 errors — every captured artifact must land or the run hard-fails.
     Mirror of ``DecisionCaptureWriteError`` for the cost-raw stream.
+    """
+
+
+class SftCaptureWriteError(RuntimeError):
+    """Raised when the S3 write of the SFT-lossless JSONL sink fails.
+
+    Mirror of :exc:`CostRawWriteError` for the distillation-training
+    stream (config#1134). Per ``feedback_no_silent_fails``, a failed
+    write must surface loudly — a silently dropped training example is
+    indistinguishable from a clean run but quietly degrades the Phase-3
+    distillation dataset.
     """
 
 
@@ -258,6 +305,98 @@ def _build_cost_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) 
     """
     date_str = capture_dt.strftime("%Y-%m-%d")
     return f"{_COST_RAW_PREFIX}/{date_str}/{run_id}/{agent_id}.jsonl"
+
+
+def _build_sft_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) -> str:
+    """Compute the JSONL S3 key for a frame's flushed SFT-lossless stream.
+
+    Format: ``decision_artifacts/_sft_raw/{YYYY-MM-DD}/{run_id}/{agent_id}.jsonl``
+
+    Same partition scheme as the cost-raw key so a run's cost rows and
+    SFT rows sit under sibling prefixes and join on
+    ``(run_id, agent_id, call_seq)``.
+    """
+    date_str = capture_dt.strftime("%Y-%m-%d")
+    return f"{_SFT_RAW_PREFIX}/{date_str}/{run_id}/{agent_id}.jsonl"
+
+
+# ── SFT-capture serialization helpers ─────────────────────────────────────
+
+
+def _sanitize_invocation_params(params: Any) -> Optional[dict]:
+    """Return a JSON-safe copy of model invocation params with secrets dropped.
+
+    LangChain hands the chat-model start callback an ``invocation_params``
+    dict (model, temperature, max_tokens, ``tools``, ``stop``, ...). We keep
+    it — the bound ``tools`` schemas are essential SFT context — but drop any
+    key whose name looks credential-bearing (defense in depth; langchain
+    normally redacts secrets, but the sink must never persist one). Values
+    are coerced JSON-safe via ``default=str`` at write time, so nested
+    objects (tool schemas) survive verbatim.
+    """
+    if not isinstance(params, dict):
+        return None
+    cleaned: dict[str, Any] = {}
+    for key, value in params.items():
+        key_l = str(key).lower()
+        if any(sub in key_l for sub in _SFT_SECRET_PARAM_SUBSTRINGS):
+            cleaned[key] = "<redacted>"
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _serialize_input_messages(messages: Any) -> Optional[list]:
+    """Serialize the chat-model input messages to JSON-safe dicts, untruncated.
+
+    ``messages`` is langchain's ``List[List[BaseMessage]]`` (a batch of one
+    conversation). We take the first (only) conversation and dump every
+    message — including the SystemMessage carrying the rendered system prompt
+    — via ``messages_to_dict``, which preserves full ``content`` (text +
+    structured blocks) and ``tool_calls``. No size caps: lossless is the
+    entire point of this sink.
+
+    Returns ``None`` on any shape surprise (logged by the caller) so a
+    callback-shape change degrades to "output captured, input missing"
+    rather than crashing a research run.
+    """
+    try:
+        from langchain_core.messages import messages_to_dict
+
+        if not messages:
+            return None
+        # Batch shape: messages[0] is the conversation for this call.
+        first = messages[0]
+        conversation = first if isinstance(first, (list, tuple)) else messages
+        return messages_to_dict(list(conversation))
+    except Exception:  # noqa: BLE001 — best-effort serialization
+        return None
+
+
+def _serialize_output_message(response: Any) -> tuple[Optional[dict], Optional[str]]:
+    """Serialize the model completion (AIMessage) to a JSON-safe dict + text.
+
+    Returns ``(message_dict, text)``. ``message_dict`` carries the full
+    untruncated completion via ``message_to_dict`` — including Anthropic
+    ``content`` blocks (text + ``tool_use``) and ``tool_calls``. ``text`` is
+    the convenience flat-text rendering (``generation.text``). Either may be
+    ``None`` on a shape surprise; the caller logs and records what it has.
+    """
+    message_dict: Optional[dict] = None
+    text: Optional[str] = None
+    try:
+        from langchain_core.messages import message_to_dict
+
+        generations = response.generations
+        if generations and generations[0]:
+            generation = generations[0][0]
+            text = getattr(generation, "text", None)
+            message = getattr(generation, "message", None)
+            if message is not None:
+                message_dict = message_to_dict(message)
+    except Exception:  # noqa: BLE001 — best-effort serialization
+        pass
+    return message_dict, text
 
 
 # ── Pricing table loader (cached at module level) ────────────────────────
@@ -408,11 +547,25 @@ class _Frame:
     # Per-call rows buffered in memory for the JSONL sink. One dict per
     # Anthropic API call; flushed in JSONL form at scope exit.
     per_call_rows: list[dict] = field(default_factory=list)
+    # Per-call SFT-lossless rows (config#1134): the full untruncated
+    # (input → output) pair per call, buffered here and flushed to the
+    # ``_sft_raw`` sink at scope exit. Only populated when the capture flag
+    # is on (the buffering itself is gated to avoid holding full prompts in
+    # memory on every run). call_seq aligns with ``per_call_rows``.
+    sft_rows: list[dict] = field(default_factory=list)
 
 
 # Stack of frames — supports nested ``track_llm_cost`` (rare, but legal).
 _frame_stack: contextvars.ContextVar[list[_Frame]] = contextvars.ContextVar(
     "alpha_engine_cost_tracker_frames", default=[],
+)
+
+# Pending SFT inputs captured at ``on_chat_model_start``, keyed by langchain
+# call run_id, consumed (popped) at the paired ``on_llm_end``. Lives in a
+# ContextVar so async + threaded fan-out keeps each task's pending inputs
+# separate. Only populated when the capture flag is on.
+_pending_sft_inputs: contextvars.ContextVar[dict[str, dict]] = contextvars.ContextVar(
+    "alpha_engine_cost_tracker_pending_sft", default={},
 )
 
 # Populated metadata, keyed by agent_id — read by ``_capture_if_enabled``
@@ -453,6 +606,42 @@ class CostTelemetryCallback(BaseCallbackHandler):
     Anthropic always returns usage; a missing field signals an SDK shape
     change worth investigating.
     """
+
+    def on_chat_model_start(  # type: ignore[override]
+        self, serialized, messages, **kwargs: Any
+    ) -> None:
+        """Buffer the FULL input messages + invocation params for SFT capture.
+
+        Fires once per ChatAnthropic API call, BEFORE the request goes out —
+        the only callback that carries the input side (incl. the rendered
+        system message + bound tool schemas). We stash it keyed by langchain's
+        per-call ``run_id`` for the paired ``on_llm_end`` to consume.
+
+        Gated on the capture flag: when off, we don't serialize full prompts
+        at all (avoids holding large message bodies in memory on every run).
+        Best-effort — a serialization surprise degrades to a missing-input
+        SFT row, never a raised exception in the research hot path.
+        """
+        if not _is_capture_enabled():
+            return
+        run_id = kwargs.get("run_id")
+        if run_id is None:
+            return
+        input_messages = _serialize_input_messages(messages)
+        if input_messages is None:
+            logger.warning(
+                "[cost_tracker] SFT capture: could not serialize input "
+                "messages for run_id=%s — output will be captured without "
+                "the paired input", run_id,
+            )
+        pending = dict(_pending_sft_inputs.get())
+        pending[str(run_id)] = {
+            "input_messages": input_messages,
+            "invocation_params": _sanitize_invocation_params(
+                kwargs.get("invocation_params")
+            ),
+        }
+        _pending_sft_inputs.set(pending)
 
     def on_llm_end(self, response, **kwargs: Any) -> None:  # type: ignore[override]
         frame = _current_frame()
@@ -501,6 +690,29 @@ class CostTelemetryCallback(BaseCallbackHandler):
             "web_search_requests": usage["web_search_requests"],
             "web_fetch_requests": usage["web_fetch_requests"],
         })
+
+        # SFT-lossless row (config#1134): pair the input buffered at
+        # on_chat_model_start with the full output completion. call_seq
+        # matches the cost row above so the two streams join 1:1. Gated on
+        # the capture flag (the buffering at start was too). Best-effort
+        # serialization — never raise in the research hot path.
+        if _is_capture_enabled():
+            run_id = kwargs.get("run_id")
+            pending = dict(_pending_sft_inputs.get())
+            input_rec = pending.pop(str(run_id), None) if run_id is not None else None
+            if run_id is not None:
+                _pending_sft_inputs.set(pending)
+            output_message, output_text = _serialize_output_message(response)
+            frame.sft_rows.append({
+                "schema_version": _SFT_SCHEMA_VERSION,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "call_seq": frame.call_count,
+                "model_name": call_model or frame.model_name,
+                "input_messages": input_rec["input_messages"] if input_rec else None,
+                "invocation_params": input_rec["invocation_params"] if input_rec else None,
+                "output_message": output_message,
+                "output_text": output_text,
+            })
 
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
@@ -757,6 +969,67 @@ def _flush_cost_rows_to_s3(
     except (BotoCoreError, ClientError) as exc:
         raise CostRawWriteError(
             f"Failed to write cost-raw JSONL to "
+            f"s3://{_COST_RAW_BUCKET}/{s3_key}: {exc}"
+        ) from exc
+    return s3_key
+
+
+def _flush_sft_rows_to_s3(
+    *, frame: _Frame, s3_client: Any | None = None,
+) -> Optional[str]:
+    """Serialize ``frame.sft_rows`` to JSONL + write to the SFT-lossless sink.
+
+    Stamps the constant frame-level dimensions (run_id, agent_id,
+    sector_team_id, node_name, run_type, prompt_*) onto each row so the
+    stream is self-describing, then writes to
+    ``decision_artifacts/_sft_raw/{date}/{run_id}/{agent_id}.jsonl``.
+
+    Returns the S3 key written, or ``None`` when there is nothing to flush
+    (no rows, or no ``run_id`` to build the key). Raises
+    :exc:`SftCaptureWriteError` on any S3 failure per
+    ``feedback_no_silent_fails`` — a dropped training example must be loud,
+    not silent.
+    """
+    if not frame.sft_rows:
+        return None
+    if not frame.run_id:
+        logger.warning(
+            "[cost_tracker] SFT capture: frame for agent_id=%s closed with "
+            "no run_id — SFT JSONL flush skipped. Pass run_id= to "
+            "track_llm_cost to enable.", frame.agent_id,
+        )
+        return None
+
+    enriched_rows = []
+    for row in frame.sft_rows:
+        enriched = dict(row)
+        enriched["run_id"] = frame.run_id
+        enriched["agent_id"] = frame.agent_id
+        enriched["sector_team_id"] = frame.sector_team_id
+        enriched["node_name"] = frame.node_name
+        enriched["run_type"] = frame.run_type
+        enriched["prompt_id"] = frame.prompt.name if frame.prompt else None
+        enriched["prompt_version"] = frame.prompt.version if frame.prompt else None
+        enriched["prompt_version_hash"] = frame.prompt.hash if frame.prompt else None
+        enriched_rows.append(enriched)
+    body = "\n".join(json.dumps(row, default=str) for row in enriched_rows).encode("utf-8")
+
+    s3_key = _build_sft_raw_s3_key(
+        capture_dt=frame.enter_time,
+        run_id=frame.run_id,
+        agent_id=frame.agent_id,
+    )
+    client = s3_client if s3_client is not None else boto3.client("s3")
+    try:
+        client.put_object(
+            Bucket=_COST_RAW_BUCKET,
+            Key=s3_key,
+            Body=body,
+            ContentType="application/x-ndjson",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise SftCaptureWriteError(
+            f"Failed to write SFT-lossless JSONL to "
             f"s3://{_COST_RAW_BUCKET}/{s3_key}: {exc}"
         ) from exc
     return s3_key
@@ -1030,6 +1303,28 @@ def track_llm_cost(
             # fail and investigate (typically IAM or bucket-existence).
             logger.error(
                 "[cost_tracker] cost-raw JSONL write failed for "
+                "agent_id=%s run_id=%s — raising to fail the run loud "
+                "(per feedback_no_silent_fails). Disable via "
+                "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false if S3/IAM is "
+                "broken and you need to recover the run.",
+                agent_id, frame.run_id,
+            )
+            raise
+
+        # SFT-lossless flush (config#1134) — same flag, same hard-fail
+        # posture. Runs after the cost flush so a cost-stream failure
+        # surfaces first; both must land or the run fails loud.
+        try:
+            sft_key = _flush_sft_rows_to_s3(frame=frame)
+            if sft_key:
+                logger.debug(
+                    "[cost_tracker] flushed %d SFT rows for agent_id=%s "
+                    "to s3://%s/%s",
+                    len(frame.sft_rows), agent_id, _COST_RAW_BUCKET, sft_key,
+                )
+        except SftCaptureWriteError:
+            logger.error(
+                "[cost_tracker] SFT-lossless JSONL write failed for "
                 "agent_id=%s run_id=%s — raising to fail the run loud "
                 "(per feedback_no_silent_fails). Disable via "
                 "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false if S3/IAM is "
