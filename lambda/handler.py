@@ -434,32 +434,51 @@ def handler(event, context):
             initial_state["performance_summary"] = perf_summary
 
         if dry_run_llm:
-            # Exclusive stub-only mode — no real LLM calls. Caller asked
-            # for it explicitly (e.g. operator running a stub smoke test).
+            # Preflight-equivalent boot validation — the Saturday SF shell-run
+            # wires this via research_dry=true, and it boots EVERY stage in
+            # preflight-only mode (the spots run --preflight-only), so NO
+            # upstream per-date artifacts are produced. The research graph
+            # hard-depends on upstream data — compute_factor_profiles_node
+            # reads features/{run_date}/*.parquet (written by DataPhase1) and
+            # CORRECTLY hard-fails when it is absent (feedback_no_silent_fails).
+            # Invoking the full graph in a dry rehearsal therefore fails on
+            # upstream data the dry run can never have produced (the 2026-06-18
+            # shell-run failed exactly here). So in dry mode we validate the
+            # bootstrap/import/wiring surface — the keystone's actual purpose,
+            # symmetric with the spots' --preflight-only — and return
+            # ok_dry_run WITHOUT executing the data-dependent graph. The
+            # full-graph integration smoke (orchestration / schema / reducers)
+            # is covered by CI (fixtured) and the real Saturday run (real
+            # upstream data); it never belonged on a data-less dry pass.
             #
-            # CRITICAL: rebuild graph + initial_state AFTER install_dry_run_stubs.
-            # `archive_writer` and `email_sender` are wired into the graph via
-            # graph.add_node(...) which captures the function reference at
-            # build_graph() time. Stubs installed AFTER build_graph have no
-            # effect on those direct-bound nodes — the real S3-write +
-            # email-send code paths would fire. (LLM agent functions are
-            # late-bound through wrapper nodes so they pick up patches
-            # either way; this guard is specifically for the direct-bound
-            # archive_writer/email_sender pair.)
+            # build_graph() under stubs validates node wiring + imports (the
+            # 2026-05-06 RAG-import class of bug); create_initial_state()
+            # validates state construction. Neither needs upstream artifacts.
+            # Stubs are still installed so the direct-bound archive_writer /
+            # email_sender nodes captured at build_graph() time stay inert.
             from dry_run import install_dry_run_stubs
-            logger.info("dry_run_llm=True: stub-only mode (no real LLM calls)")
+            logger.info(
+                "dry_run_llm=True: boot/import/wiring validation only "
+                "(preflight-equivalent; data-dependent graph not executed)"
+            )
             _restore = install_dry_run_stubs(archive)
             try:
-                graph = build_graph()
-                initial_state = create_initial_state(
+                _dry_graph = build_graph()
+                _dry_state = create_initial_state(
                     run_date=run_date,
                     archive_manager=archive,
                     is_early_close=early_close,
                 )
-                initial_state["performance_summary"] = perf_summary
-                final_state = graph.invoke(initial_state)
+                _dry_state["performance_summary"] = perf_summary
             finally:
                 _restore()
+            logger.info("dry_run_llm boot validation OK for %s", run_date)
+            return {
+                "status": "OK",
+                "dry_run_llm": True,
+                "phase": "boot_validation",
+                "date": run_date,
+            }
         else:
             final_state = graph.invoke(initial_state)
 
