@@ -1417,27 +1417,27 @@ def _read_sft_rows(s3, run_id: str = "2026-06-20"):
 
 
 class TestSftCapture:
-    def test_pairs_input_and_output_into_sft_row(self, patched_pricing_path):
+    def test_pairs_input_and_output_into_sft_row(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
         from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
 
-        os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "true"
-        try:
-            cb = CostTelemetryCallback()
-            with track_llm_cost(
-                agent_id="sector_quant:tech",
-                run_id="2026-06-20",
-                model_name_fallback="claude-haiku-4-5",
-            ) as frame:
-                cb.on_chat_model_start(
-                    {"kwargs": {}},
-                    _make_input_messages(system="You are a quant.", human="Score AAPL."),
-                    run_id="call-1",
-                    invocation_params={"model": "claude-haiku-4-5", "tools": [{"name": "rsi"}]},
-                )
-                cb.on_llm_end(
-                    _make_ai_response(input_tokens=100, output_tokens=50, text="AAPL: 78"),
-                    run_id="call-1",
-                )
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_quant:tech",
+            run_id="2026-06-20",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system="You are a quant.", human="Score AAPL."),
+                run_id="call-1",
+                invocation_params={"model": "claude-haiku-4-5", "tools": [{"name": "rsi"}]},
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=100, output_tokens=50, text="AAPL: 78"),
+                run_id="call-1",
+            )
             assert len(frame.sft_rows) == 1
             row = frame.sft_rows[0]
             assert row["call_seq"] == 1
@@ -1450,65 +1450,59 @@ class TestSftCapture:
             # Output completion captured.
             assert row["output_text"] == "AAPL: 78"
             assert row["output_message"]["data"]["content"] == "AAPL: 78"
-        finally:
-            os.environ.pop("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", None)
 
-    def test_full_completion_is_untruncated(self, patched_pricing_path):
+    def test_full_completion_is_untruncated(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
         """The SFT sink must NOT apply the 8KB observability transcript cap."""
         from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
 
         big_system = "S" * 40_000
         big_output = "O" * 40_000
-        os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "true"
-        try:
-            cb = CostTelemetryCallback()
-            with track_llm_cost(
-                agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
-            ) as frame:
-                cb.on_chat_model_start(
-                    {"kwargs": {}},
-                    _make_input_messages(system=big_system, human="hi"),
-                    run_id="c",
-                )
-                cb.on_llm_end(
-                    _make_ai_response(input_tokens=1, output_tokens=1, text=big_output),
-                    run_id="c",
-                )
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system=big_system, human="hi"),
+                run_id="c",
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=1, output_tokens=1, text=big_output),
+                run_id="c",
+            )
             row = frame.sft_rows[0]
             assert len(row["input_messages"][0]["data"]["content"]) == 40_000
             assert len(row["output_text"]) == 40_000
-        finally:
-            os.environ.pop("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", None)
 
-    def test_secrets_redacted_from_invocation_params(self, patched_pricing_path):
+    def test_secrets_redacted_from_invocation_params(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
         from graph.llm_cost_tracker import CostTelemetryCallback, track_llm_cost
 
-        os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "true"
-        try:
-            cb = CostTelemetryCallback()
-            with track_llm_cost(
-                agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
-            ) as frame:
-                cb.on_chat_model_start(
-                    {"kwargs": {}},
-                    _make_input_messages(system="s", human="h"),
-                    run_id="c",
-                    invocation_params={
-                        "model": "claude-haiku-4-5",
-                        "anthropic_api_key": "sk-ant-SECRET",
-                        "auth_token": "bearer-xyz",
-                    },
-                )
-                cb.on_llm_end(
-                    _make_ai_response(input_tokens=1, output_tokens=1),
-                    run_id="c",
-                )
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="2026-06-20", model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_chat_model_start(
+                {"kwargs": {}},
+                _make_input_messages(system="s", human="h"),
+                run_id="c",
+                invocation_params={
+                    "model": "claude-haiku-4-5",
+                    "anthropic_api_key": "sk-ant-SECRET",
+                    "auth_token": "bearer-xyz",
+                },
+            )
+            cb.on_llm_end(
+                _make_ai_response(input_tokens=1, output_tokens=1),
+                run_id="c",
+            )
             params = frame.sft_rows[0]["invocation_params"]
             assert params["model"] == "claude-haiku-4-5"
             assert params["anthropic_api_key"] == "<redacted>"
             assert params["auth_token"] == "<redacted>"
-        finally:
-            os.environ.pop("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", None)
 
     def test_react_loop_writes_aligned_sft_rows(
         self, mocked_s3, capture_enabled, patched_pricing_path,
