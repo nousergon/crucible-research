@@ -81,6 +81,8 @@ from config import (
     MACRO_OVERLAY_ENABLED,
     MACRO_MAX_SHIFT_POINTS,
     MACRO_MODIFIER_RANGE,
+    NEUTRALIZATION_LIVE_ENABLED,
+    NEUTRALIZATION_FACTORS,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -312,6 +314,12 @@ class ResearchState(TypedDict, total=False):
     # ── Data (loaded in fetch_data; single-writer, no parallel update) ───────
     price_data: Annotated[dict[str, Any], take_last]
     technical_scores: Annotated[dict[str, dict], take_last]
+    # Per-name Barra factor loadings (momentum_20d_zscore / return_60d_zscore /
+    # beta_60d_zscore / size_zscore) read from the feature store's
+    # factor_loading group in fetch_data. Consumed by the score-neutralization
+    # OBSERVE shadow in archive_writer (config#1142). Empty when the loadings
+    # group hasn't shipped a snapshot — the shadow is fail-soft on absence.
+    factor_loadings: Annotated[dict[str, dict[str, float]], take_last]
     scanner_universe: Annotated[list[str], take_last]
     # Sector-team screening input (L1995 Phase 5 / L4464): the standalone
     # Scanner SF state's candidate set (candidates.json::scanner_tickers)
@@ -752,6 +760,20 @@ def fetch_data(state: ResearchState) -> dict:
     except Exception as e:
         logger.debug("[fetch_data] daily_closes not available: %s", e)
 
+    # ── Barra factor loadings for the neutralization OBSERVE shadow ──────────
+    # The *_zscore loadings live in the feature store's separate
+    # ``factor_loading.parquet`` group (NOT technical.parquet), so they need
+    # their own read. Consumed only by the config#1142 OBSERVE shadow in
+    # archive_writer — fail-soft, empty dict when the group has no snapshot yet.
+    factor_loadings: dict[str, dict[str, float]] = {}
+    try:
+        from data.fetchers.feature_store_reader import read_latest_factor_loadings
+        factor_loadings = read_latest_factor_loadings() or {}
+        if factor_loadings:
+            logger.info("[fetch_data] factor loadings: %d tickers loaded", len(factor_loadings))
+    except Exception as e:
+        logger.debug("[fetch_data] factor loadings not available: %s", e)
+
     # ── ArcticDB OHLCV read: skip tickers already covered by feature store ───
     # Population tickers always fetched (agents need raw OHLCV for deep analysis).
     # Scanner universe tickers covered by feature store are SKIPPED — their
@@ -937,6 +959,7 @@ def fetch_data(state: ResearchState) -> dict:
         "sector_map": sector_map,
         "price_data": price_data,
         "technical_scores": technical_scores,
+        "factor_loadings": factor_loadings,
         "macro_data": macro_data,
         "current_population": current_population,
         "population_tickers": population_tickers,
@@ -3354,6 +3377,44 @@ def archive_writer(state: ResearchState) -> dict:
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
         logger.error("Failed to write signals.json: %s", e)
+
+    # ── Score-neutralization OBSERVE shadow (config#1142) ────────────────────
+    # UNCONDITIONAL observability hung off the primary path AFTER signals.json is
+    # already persisted: residualize the live composite cross-section against the
+    # Barra factor loadings and write decision_artifacts/_neutralization_shadow/
+    # {run_date}.json. Pure observation — never alters live signals / population /
+    # ENTER selection. Fail-soft (WARN + swallow): a shadow failure cannot fail
+    # the run.
+    #
+    # LIVE cutover gate (NEUTRALIZATION_LIVE_ENABLED, DEFAULT OFF): when flipped
+    # true (private-first, after the shadow validates against momentum_regime_ic
+    # — config#1140) the neutralized scores would become the live composite
+    # ranking. While OFF (the default) this branch is inert and the live
+    # signals.json written above is byte-identical to today — the gate is wired
+    # but does NOT touch the live path.
+    try:
+        from scoring.neutralization_shadow import run_neutralization_shadow
+        _shadow_artifact = run_neutralization_shadow(
+            am,
+            run_date,
+            _candidate_signals_payload,
+            state.get("factor_loadings"),
+            factors=NEUTRALIZATION_FACTORS,
+        )
+        if NEUTRALIZATION_LIVE_ENABLED and _shadow_artifact:
+            # LIVE cutover (gated off by default — see comment above). Apply the
+            # neutralized score as the live composite ranking and re-persist.
+            logger.warning(
+                "[archive_writer] NEUTRALIZATION_LIVE_ENABLED — applying "
+                "neutralized scores to live signals (config#1142 cutover)."
+            )
+            _live_signals = signals_payload.get("signals", {})
+            for _t, _row in _shadow_artifact.get("tickers", {}).items():
+                if _t in _live_signals and _row.get("neutralized_score") is not None:
+                    _live_signals[_t]["score"] = _row["neutralized_score"]
+            am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
+    except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+        logger.warning("[archive_writer] neutralization shadow skipped: %s", e)
 
     # Persist the consolidated morning brief alongside signals.json so
     # the dashboard's Research Briefing Archive page can read it. The

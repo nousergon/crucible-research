@@ -78,6 +78,90 @@ def read_latest_features() -> dict[str, dict] | None:
         return None
 
 
+def read_latest_factor_loadings(
+    columns: tuple[str, ...] = (
+        "momentum_20d_zscore",
+        "return_60d_zscore",
+        "beta_60d_zscore",
+        "size_zscore",
+    ),
+) -> dict[str, dict[str, float]] | None:
+    """Read the most recent Barra factor-loading snapshot from S3.
+
+    The factor loadings (``*_zscore`` columns, group ``factor_loading`` in
+    alpha-engine-data's feature registry) are written to a SEPARATE parquet
+    ``features/{date}/factor_loading.parquet`` — NOT the ``technical.parquet``
+    group that :func:`read_latest_features` reads. They are the per-name
+    exposures the score-neutralization OBSERVE shadow residualizes the
+    composite against (config#1142).
+
+    Returns ``{ticker: {factor_name: exposure}}`` for the requested ``columns``
+    (only finite values included), or ``None`` if unavailable / the group's
+    parquet is missing. Fully fail-soft — research must never break because the
+    loadings group hasn't shipped a snapshot yet.
+    """
+    try:
+        import boto3
+        import pandas as pd
+
+        s3 = boto3.client("s3")
+
+        # Find the latest date directory in features/ (same discovery as
+        # read_latest_features — the two groups share the date partition).
+        response = s3.list_objects_v2(
+            Bucket=_BUCKET, Prefix=_FEATURE_PREFIX, Delimiter="/"
+        )
+        prefixes = response.get("CommonPrefixes", [])
+        dates = []
+        for p in prefixes:
+            part = p["Prefix"].rstrip("/").split("/")[-1]
+            if len(part) == 10 and part[4] == "-" and part[7] == "-":
+                dates.append(part)
+
+        if not dates:
+            logger.debug("No feature store snapshots found in s3://%s/%s", _BUCKET, _FEATURE_PREFIX)
+            return None
+
+        latest_date = sorted(dates)[-1]
+        key = f"{_FEATURE_PREFIX}{latest_date}/factor_loading.parquet"
+        try:
+            obj = s3.get_object(Bucket=_BUCKET, Key=key)
+        except Exception as e:
+            logger.debug("Factor-loading parquet not present at %s: %s", key, e)
+            return None
+
+        buf = io.BytesIO(obj["Body"].read())
+        df = pd.read_parquet(buf, engine="pyarrow")
+
+        if df.empty or "ticker" not in df.columns:
+            return None
+
+        present = [c for c in columns if c in df.columns]
+        if not present:
+            logger.debug(
+                "Factor-loading parquet %s has none of the requested columns %s",
+                key, columns,
+            )
+            return None
+
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            ticker = row["ticker"]
+            ex = {c: float(row[c]) for c in present if pd.notna(row[c])}
+            if ex:
+                result[ticker] = ex
+
+        logger.info(
+            "Factor loadings: loaded %d tickers from %s (%d/%d columns present)",
+            len(result), latest_date, len(present), len(columns),
+        )
+        return result or None
+
+    except Exception as e:
+        logger.debug("Factor-loading read failed (non-blocking): %s", e)
+        return None
+
+
 def read_latest_daily_closes() -> dict[str, float] | None:
     """Read the most recent daily_closes parquet from S3.
 

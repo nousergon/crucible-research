@@ -106,6 +106,27 @@ aggregator:
   macro_overlay:
     enabled: true
 
+  # ── Score neutralization (config#1142, Phase 2 of research-edge recovery) ──
+  # Residualize the composite cross-section against the Barra factor loadings
+  # (momentum 20d + return 60d + beta 60d + size) to remove the unintended
+  # short-momentum factor bet diagnosed in config#1060. The OBSERVE shadow runs
+  # UNCONDITIONALLY (it writes
+  # decision_artifacts/_neutralization_shadow/{date}.json whenever the loadings
+  # are available) — observation is never flag-gated.
+  #
+  # `live_enabled` gates ONLY the LIVE cutover (using the neutralized score as
+  # the live composite ranking). DEFAULT false → live signals are byte-identical
+  # to today; flip to true private-first (config-repo scoring.yaml) ONLY after
+  # the shadow validates against momentum_regime_ic (config#1140). NOT managed
+  # by the backtester optimizer.
+  neutralization:
+    live_enabled: false
+    factors:
+      - momentum_20d_zscore
+      - return_60d_zscore
+      - beta_60d_zscore
+      - size_zscore
+
   long_term_weights:
     quant: 0.50
     qual: 0.50

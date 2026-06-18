@@ -135,6 +135,26 @@ MACRO_OVERLAY_ENABLED: bool = bool(_MACRO_OVERLAY_CFG.get("enabled", True))
 MACRO_MAX_SHIFT_POINTS: float = float(_AGGREGATOR_CFG.get("macro_max_shift_points", 10.0))
 MACRO_MODIFIER_RANGE: float = float(_AGGREGATOR_CFG.get("macro_modifier_range", 0.30))
 
+# ── Score neutralization (config#1142, Phase 2 of research-edge recovery) ────
+# Cross-sectional residualization of the composite against the Barra factor
+# loadings (momentum 20d + return 60d + beta 60d + size) — removes the
+# unintended short-momentum factor bet the config#1060 diagnosis pinned. The
+# OBSERVE shadow runs UNCONDITIONALLY (observation is never flag-gated) and only
+# writes the shadow artifact; it never touches live signals. ``live_enabled``
+# gates the LIVE cutover (use the neutralized score as the live composite
+# ranking) and DEFAULTS OFF — flip only after the shadow validates against
+# momentum_regime_ic (config#1140). Applied private-first via the config-repo
+# scoring.yaml per the divergence policy (config#1031 / LEGAL_POSTURE §8).
+_NEUTRALIZATION_CFG: dict = _AGGREGATOR_CFG.get("neutralization", {})
+NEUTRALIZATION_LIVE_ENABLED: bool = bool(_NEUTRALIZATION_CFG.get("live_enabled", False))
+NEUTRALIZATION_FACTORS: tuple[str, ...] = tuple(
+    _NEUTRALIZATION_CFG.get(
+        "factors",
+        ("momentum_20d_zscore", "return_60d_zscore", "beta_60d_zscore", "size_zscore"),
+    )
+    or ()
+)
+
 # Factor composite definitions (config#1039): experiment belief — the package's
 # scoring.yaml `factor_composites:` overrides the public baseline in
 # scoring/factor_scoring.py. Shape per composite: list of
