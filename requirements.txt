@@ -26,12 +26,14 @@ pydantic~=2.7
 # duplicated in this repo's rag/ folder.
 # Extras:
 #   [arcticdb]    arcticdb (data/fetchers/price_fetcher.py)
-#   [flow_doctor] flow-doctor (lambda/handler.py setup_logging integration)
+#   [flow-doctor] flow-doctor (lambda/handler.py setup_logging integration)
+#                 (HYPHENATED: setuptools normalizes the lib's `flow_doctor`
+#                 extra to `flow-doctor`; old pip drops `[flow_doctor]` — config#1178)
 #   [rag]         psycopg2-binary + pgvector + numpy (qual_tools query_filings,
 #                 graph/research_graph rag.is_available probe)
 # Lib is now public — no PAT required. Lambda Dockerfile installs via the
 # git URL; CI pulls directly.
-alpha-engine-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.59.3
+alpha-engine-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.59.3
 
 # Scheduling / calendar
 exchange-calendars~=4.5
