@@ -696,10 +696,16 @@ class TestMacroOverlayKnob:
         assert abs(MACRO_MODIFIER_RANGE - 0.30) < 1e-9
 
     def test_config_reads_runtime_overlay_knob(self):
-        # config.py exposes the runtime knob; default (no macro_overlay block
-        # in yaml) is enabled True. The points/range are read from yaml.
+        # config.py exposes the runtime knob as a bool read from scoring.yaml.
+        # Its VALUE is environment-dependent and intentionally NOT pinned here:
+        # per this class's docstring the disable lands private-first in the
+        # runtime config (`aggregator.macro_overlay.enabled: false`), so the
+        # reference experiment-package scoring.yaml resolves it False. The
+        # frozen-True PUBLIC baseline is the CODE constant, pinned by
+        # test_public_default_is_enabled / test_code_level_defaults_preserve_behavior
+        # against scoring.composite — not the runtime config read here.
         import config
-        assert config.MACRO_OVERLAY_ENABLED is True
+        assert isinstance(config.MACRO_OVERLAY_ENABLED, bool)
         assert isinstance(config.MACRO_MAX_SHIFT_POINTS, float)
         assert isinstance(config.MACRO_MODIFIER_RANGE, float)
         assert config.MACRO_MAX_SHIFT_POINTS > 0.0
