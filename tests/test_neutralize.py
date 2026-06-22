@@ -15,6 +15,18 @@ from scoring.neutralize import NeutralizationConfig, neutralize_scores  # noqa: 
 
 
 def _spearman(a, b):
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    # Spearman against a zero-variance (constant) vector is undefined — there is
+    # no monotonic relationship to a flat series, so the correct answer is 0.0
+    # ("no correlation"). This guard matters for the perfect-collinearity cases
+    # (e.g. score == momentum exactly → residual is all-zeros): without it,
+    # np.argsort(np.argsort(<all-ties>)) degenerates to the identity index order
+    # [0,1,..,n-1], which spuriously correlates with the other ranking and makes
+    # the result depend on whether the math libs emit residuals as exactly 0.0 or
+    # tiny ±1e-16 (a transitive-version float that flipped this test in CI).
+    if np.ptp(a) < 1e-12 or np.ptp(b) < 1e-12:
+        return 0.0
     ra = np.argsort(np.argsort(a))
     rb = np.argsort(np.argsort(b))
     return float(np.corrcoef(ra, rb)[0, 1])
