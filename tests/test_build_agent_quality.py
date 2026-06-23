@@ -217,3 +217,84 @@ class TestAgentValidationFailureRate:
         art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_BoomCW())
         assert "agent_validation_failure_rate" not in art
         assert art["signal_volume_adequacy"]["value"] == 30  # other components intact
+
+
+class _StubCWFull:
+    """CloudWatch stub: list_metrics paginator (env=prod agent_ids) + per-agent
+    MetricStat get_metric_data, plus the SUM(SEARCH) Expression path for the
+    fleet failure rate. ``per_agent`` is {metric: {agent_id: value}}."""
+
+    def __init__(self, per_agent):
+        self._pa = per_agent
+
+    def get_paginator(self, name):
+        assert name == "list_metrics"
+        pa = self._pa
+
+        class _P:
+            def paginate(self, Namespace, MetricName, Dimensions):  # noqa: N803
+                agents = pa.get(MetricName, {})
+                metrics = [
+                    {"Dimensions": [{"Name": "agent_id", "Value": a},
+                                    {"Name": "env", "Value": "prod"}]}
+                    for a in agents
+                ]
+                return [{"Metrics": metrics}]
+
+        return _P()
+
+    def get_metric_data(self, MetricDataQueries, StartTime, EndTime):  # noqa: N803
+        results = []
+        for q in MetricDataQueries:
+            ms = q.get("MetricStat")
+            if ms:
+                metric = ms["Metric"]["MetricName"]
+                agent = next(d["Value"] for d in ms["Metric"]["Dimensions"]
+                             if d["Name"] == "agent_id")
+                v = self._pa.get(metric, {}).get(agent)
+                results.append({"Id": q["Id"], "Values": [v] if v is not None else []})
+            else:  # Expression (SUM(SEARCH)) — fleet failure rate
+                expr = q["Expression"]
+                metric = ("Failures" if "Failures" in expr
+                          else "Invocations" if "Invocations" in expr else None)
+                total = sum(self._pa.get(metric, {}).values()) if metric else 0
+                results.append({"Id": q["Id"], "Values": [total] if total else []})
+        return {"MetricDataResults": results}
+
+
+class TestRetryStormAndLatency:
+    """config#1149 — retry_storm_count + agent_latency_p95 from per-agent prod telemetry."""
+
+    def _cw(self):
+        return _StubCWFull({
+            "Invocations": {"a": 100, "b": 50},
+            "Failures": {"a": 2, "b": 1},
+            # a: 5 attempts all recovered (5==5, no storm); b: no attempts;
+            # c: 3 attempts, only 1 recovered (3>1) → reached ceiling.
+            "RetryAttempts": {"a": 5, "b": 0, "c": 3},
+            "RetrySuccesses": {"a": 5, "b": 0, "c": 1},
+            "DurationMs": {"a": 8000, "b": 70000, "c": 12000},  # b worst tail
+        })
+
+    def test_retry_storm_counts_unrecovered_agents(self, s3):
+        _full_run(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=self._cw())
+        assert art["retry_storm_count"]["value"] == 1   # only c
+        assert art["retry_storm_count"]["n"] == 3
+
+    def test_latency_p95_is_worst_agent(self, s3):
+        _full_run(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=self._cw())
+        assert art["agent_latency_p95"]["value"] == 70000.0  # b's p95
+        assert art["agent_latency_p95"]["n"] == 3
+
+    def test_failure_rate_via_full_stub(self, s3):
+        _full_run(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=self._cw())
+        assert art["agent_validation_failure_rate"]["value"] == round(3 / 150, 4)
+
+    def test_absent_when_no_prod_agents(self, s3):
+        _full_run(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
+        assert "retry_storm_count" not in art
+        assert "agent_latency_p95" not in art
