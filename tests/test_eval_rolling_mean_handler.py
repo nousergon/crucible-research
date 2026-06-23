@@ -148,3 +148,34 @@ class TestHandler:
 
         # None means rolling_mean will default to now-UTC.
         assert captured.get("end_time") is None
+
+    # ── agent_quality producer wiring (config#1149 Batch A) ─────────────────
+    def test_agent_quality_surfaced_in_result(self, handler_mod):
+        # The previously-unwired build_agent_quality producer now runs here;
+        # its artifact + graded-component list rides in the result.
+        artifact = {"status": "ok", "date": "2026-06-22",
+                    "signal_volume_adequacy": {"value": 25, "n": 25},
+                    "judge_rubric_pass_rate": {"value": 0.8, "n": 30}}
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()), \
+             patch("scripts.build_agent_quality.build_agent_quality", return_value=artifact), \
+             patch("scripts.build_agent_quality.write_agent_quality",
+                   return_value="backtest/2026-06-22/agent_quality.json"):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["agent_quality"]["status"] == "OK"
+        assert result["agent_quality"]["key"] == "backtest/2026-06-22/agent_quality.json"
+        assert set(result["agent_quality"]["graded_components"]) == {
+            "signal_volume_adequacy", "judge_rubric_pass_rate"}
+
+    def test_agent_quality_failure_is_non_fatal(self, handler_mod):
+        # A producer failure MUST NOT change the primary rolling-mean status —
+        # it is recorded in the agent_quality field instead.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()), \
+             patch("scripts.build_agent_quality.build_agent_quality",
+                   side_effect=RuntimeError("S3 list failed")):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["agent_quality"]["status"] == "ERROR"
+        assert "S3 list failed" in result["agent_quality"]["error"]
