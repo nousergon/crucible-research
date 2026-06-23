@@ -162,9 +162,48 @@ def handler(event, context):
         )
         control_bands = {"status": "ERROR", "error": str(exc)}
 
+    # Agent-quality report-card artifact (config#1149 Batch A). THIRD secondary
+    # observability aggregation hung off this weekly eval Lambda — same trigger
+    # point (post-eval-judge convergence) + S3 access as the κ report and control
+    # bands above, and the exact moment both finalized signals AND eval-judge
+    # results exist. The producer (scripts/build_agent_quality) was complete but
+    # wired into NOTHING, so backtest/{date}/agent_quality.json never landed and
+    # its report-card components (signal_volume_adequacy / cost_per_signal /
+    # judge_rubric_pass_rate / judge_rubric_distribution) read N/A. This is the
+    # missing invocation. Dual-date per DATE_CONVENTIONS: target_date = trading
+    # day (signals + output key), run_date = calendar day (cost + eval partitions).
+    # Best-effort: a failure MUST NOT sink the rolling mean (primary deliverable);
+    # recorded as an `agent_quality` field per [[feedback_no_silent_fails]].
+    agent_quality: dict
+    try:
+        import boto3
+
+        from alpha_engine_lib.dates import now_dual
+        from scripts.build_agent_quality import build_agent_quality, write_agent_quality
+
+        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        dual = now_dual()
+        s3c = boto3.client("s3")
+        artifact = build_agent_quality(
+            s3c, bucket, dual.trading_day, run_date=dual.calendar_date,
+        )
+        key = write_agent_quality(s3c, bucket, artifact)
+        graded = sorted(k for k, v in artifact.items() if isinstance(v, dict) and "value" in v)
+        agent_quality = {"status": "OK", "key": key, "graded_components": graded}
+        logger.info(
+            "[eval_rolling_mean_handler] agent_quality wrote %s (%d graded: %s)",
+            key, len(graded), ",".join(graded) or "(none — no signals/evals this run)",
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
+        logger.warning(
+            "[eval_rolling_mean_handler] agent_quality build failed (non-fatal): %s", exc,
+        )
+        agent_quality = {"status": "ERROR", "error": str(exc)}
+
     return {
         "status": status,
         "summary": summary,
         "calibration": calibration,
         "control_bands": control_bands,
+        "agent_quality": agent_quality,
     }
