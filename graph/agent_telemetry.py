@@ -58,6 +58,30 @@ NAMESPACE = "AlphaEngine/Agents"
 _TELEMETRY_ENV_VAR = "ALPHA_ENGINE_AGENT_TELEMETRY_ENABLED"
 
 
+def _env_label() -> str:
+    """``"prod"`` when running in a deployed runtime, else ``"test"``.
+
+    config#1154 fix: the ``AlphaEngine/Agents`` stream was dimensioned only by
+    ``agent_id``, so test/CI runs with real creds (telemetry default-ON) wrote to
+    the SAME metric a prod consumer reads — the namespace is test-polluted and a
+    report-card consumer can't tell prod datapoints from test ones. Stamping an
+    ``env`` dimension lets the consumer query ``{env="prod"}`` and read clean prod
+    data regardless of test pollution. ``ALPHA_ENGINE_DEPLOYED`` is the fleet's
+    deployed-runtime marker (set on the SF/Lambda runtimes); anything else (local
+    dev, CI, smoke) is ``"test"``."""
+    return "prod" if os.environ.get("ALPHA_ENGINE_DEPLOYED", "").strip().lower() in (
+        "1", "true", "yes",
+    ) else "test"
+
+
+def _dims(agent_id: str) -> list[dict]:
+    """Per-agent dimension set: ``agent_id`` + ``env`` (config#1154). Adding
+    ``env`` changes the metric identity vs the legacy agent_id-only stream —
+    intentional: prod consumers query ``{agent_id, env}`` and are immune to the
+    historical test pollution on the agent_id-only series."""
+    return [{"Name": "agent_id", "Value": agent_id}, {"Name": "env", "Value": _env_label()}]
+
+
 def _is_telemetry_enabled() -> bool:
     """Default ON — production emits, tests can disable via env.
 
@@ -109,31 +133,12 @@ def emit_agent_completion(
         0.0, (datetime.now(timezone.utc) - enter_time).total_seconds() * 1000.0,
     )
     failures = 1.0 if exception_raised else 0.0
+    dims = _dims(agent_id)
     metric_data = [
-        {
-            "MetricName": "Invocations",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": 1.0,
-            "Unit": "Count",
-        },
-        {
-            "MetricName": "Failures",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": failures,
-            "Unit": "Count",
-        },
-        {
-            "MetricName": "DurationMs",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": duration_ms,
-            "Unit": "Milliseconds",
-        },
-        {
-            "MetricName": "LLMCallCount",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": float(llm_call_count),
-            "Unit": "Count",
-        },
+        {"MetricName": "Invocations", "Dimensions": dims, "Value": 1.0, "Unit": "Count"},
+        {"MetricName": "Failures", "Dimensions": dims, "Value": failures, "Unit": "Count"},
+        {"MetricName": "DurationMs", "Dimensions": dims, "Value": duration_ms, "Unit": "Milliseconds"},
+        {"MetricName": "LLMCallCount", "Dimensions": dims, "Value": float(llm_call_count), "Unit": "Count"},
     ]
 
     cw = cloudwatch_client
@@ -186,19 +191,12 @@ def emit_agent_retry(
     if not _is_telemetry_enabled():
         return
 
+    dims = _dims(agent_id)
     metric_data = [
-        {
-            "MetricName": "RetryAttempts",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": 1.0 if attempted else 0.0,
-            "Unit": "Count",
-        },
-        {
-            "MetricName": "RetrySuccesses",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": 1.0 if (attempted and succeeded) else 0.0,
-            "Unit": "Count",
-        },
+        {"MetricName": "RetryAttempts", "Dimensions": dims,
+         "Value": 1.0 if attempted else 0.0, "Unit": "Count"},
+        {"MetricName": "RetrySuccesses", "Dimensions": dims,
+         "Value": 1.0 if (attempted and succeeded) else 0.0, "Unit": "Count"},
     ]
 
     cw = cloudwatch_client

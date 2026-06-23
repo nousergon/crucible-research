@@ -62,7 +62,7 @@ def _enter_time(seconds_ago: float) -> datetime:
 
 
 class TestEmitAgentCompletion:
-    def test_emits_four_metrics_with_agent_id_dimension(self, cw: StubCloudWatch) -> None:
+    def test_emits_four_metrics_with_agent_id_and_env_dimension(self, cw: StubCloudWatch) -> None:
         emit_agent_completion(
             agent_id="sector_team:technology",
             enter_time=_enter_time(2.5),
@@ -74,10 +74,22 @@ class TestEmitAgentCompletion:
         assert cw.calls[0]["Namespace"] == NAMESPACE
         names = [m["MetricName"] for m in cw.calls[0]["MetricData"]]
         assert names == ["Invocations", "Failures", "DurationMs", "LLMCallCount"]
+        # config#1154: agent_id + env dimensions (env="test" by default since
+        # ALPHA_ENGINE_DEPLOYED is unset under test).
         for m in cw.calls[0]["MetricData"]:
             assert m["Dimensions"] == [
-                {"Name": "agent_id", "Value": "sector_team:technology"}
+                {"Name": "agent_id", "Value": "sector_team:technology"},
+                {"Name": "env", "Value": "test"},
             ]
+
+    def test_env_dimension_is_prod_when_deployed(self, cw: StubCloudWatch, monkeypatch) -> None:
+        monkeypatch.setenv("ALPHA_ENGINE_DEPLOYED", "1")
+        emit_agent_completion(
+            agent_id="ic_cio", enter_time=_enter_time(1.0),
+            exception_raised=False, llm_call_count=1, cloudwatch_client=cw,
+        )
+        for m in cw.calls[0]["MetricData"]:
+            assert {"Name": "env", "Value": "prod"} in m["Dimensions"]
 
     def test_failures_value_is_one_on_exception(self, cw: StubCloudWatch) -> None:
         emit_agent_completion(
@@ -175,7 +187,8 @@ class TestEmitAgentRetry:
         assert names == ["RetryAttempts", "RetrySuccesses"]
         for m in cw.calls[0]["MetricData"]:
             assert m["Dimensions"] == [
-                {"Name": "agent_id", "Value": "sector_quant:technology"}
+                {"Name": "agent_id", "Value": "sector_quant:technology"},
+                {"Name": "env", "Value": "test"},
             ]
 
     def test_no_retry_emits_zeros_for_density(self, cw: StubCloudWatch) -> None:
@@ -256,9 +269,10 @@ class TestTrackLLMCostFinallyEmission:
         metrics = {m["MetricName"]: m for m in cw.calls[0]["MetricData"]}
         assert metrics["Failures"]["Value"] == 1.0
         assert metrics["Invocations"]["Value"] == 1.0
-        # agent_id dimension correctly threaded.
+        # agent_id + env dimensions correctly threaded (config#1154).
         assert metrics["Failures"]["Dimensions"] == [
-            {"Name": "agent_id", "Value": "sector_team:technology"}
+            {"Name": "agent_id", "Value": "sector_team:technology"},
+            {"Name": "env", "Value": "test"},
         ]
 
     def test_telemetry_failure_does_not_break_tracker(

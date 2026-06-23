@@ -70,6 +70,44 @@ _OUTPUT_PREFIX = "backtest"
 # an eval passes iff every dimension passes.
 _RUBRIC_PASS_THRESHOLD = 3
 
+# Per-agent runtime telemetry namespace (graph/agent_telemetry.py). Dimensioned
+# by {agent_id, env} since config#1154 — we read env="prod" only to skip the
+# test pollution on the legacy agent_id-only series.
+_AGENTS_NAMESPACE = "AlphaEngine/Agents"
+
+
+def _agent_validation_failure_rate(cw: Any, run_date: date_type) -> Optional[dict]:
+    """Fleet agent validation-failure rate over the run day, PROD-only (config#1154).
+
+    ``sum(Failures) / sum(Invocations)`` across every ``agent_id`` with
+    ``env="prod"`` — a CW metric-math SUM(SEARCH(...)) collapses the per-agent
+    series. Returns ``{"value": rate, "n": invocations}`` or ``None`` when there
+    are no prod invocations in the window (no run that day / pre-env-dimension
+    data). Best-effort: the caller swallows CW errors so a missing
+    cloudwatch:GetMetricData grant or throttle never breaks the artifact."""
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(run_date.year, run_date.month, run_date.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+
+    def _sum(metric: str) -> float:
+        expr = (
+            f"SUM(SEARCH('{{{_AGENTS_NAMESPACE},agent_id,env}} "
+            f"MetricName=\"{metric}\" env=\"prod\"', 'Sum', 86400))"
+        )
+        resp = cw.get_metric_data(
+            MetricDataQueries=[{"Id": "q", "Expression": expr, "ReturnData": True}],
+            StartTime=start, EndTime=end,
+        )
+        results = resp.get("MetricDataResults") or [{}]
+        return float(sum(results[0].get("Values") or []))
+
+    invocations = _sum("Invocations")
+    if invocations <= 0:
+        return None
+    failures = _sum("Failures")
+    return {"value": round(failures / invocations, 4), "n": int(invocations)}
+
 
 def _get_json(s3: Any, bucket: str, key: str) -> Optional[dict]:
     """Read one JSON object, or None if absent. Raises on any other S3 error."""
@@ -130,6 +168,7 @@ def build_agent_quality(
     target_date: date_type,
     *,
     run_date: Optional[date_type] = None,
+    cw: Any = None,
 ) -> dict:
     """Compute the agent-quality artifact for one research run.
 
@@ -178,6 +217,18 @@ def build_agent_quality(
                 "value": round(modal_concentration, 4),
                 "n": n_eval,
             }
+
+    # agent_validation_failure_rate — fleet Failures/Invocations from the
+    # AlphaEngine/Agents prod telemetry (config#1154/#1149). Best-effort: a CW
+    # error or absent prod data leaves it off the artifact → grader renders N/A,
+    # never breaks the other components.
+    try:
+        cw_client = cw or boto3.client("cloudwatch", region_name="us-east-1")
+        fr = _agent_validation_failure_rate(cw_client, run_date)
+        if fr is not None:
+            result["agent_validation_failure_rate"] = fr
+    except Exception as exc:  # noqa: BLE001 — best-effort secondary metric
+        logger.warning("[agent_quality] agent_validation_failure_rate read failed: %s", exc)
 
     return result
 
