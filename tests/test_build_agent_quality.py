@@ -167,3 +167,53 @@ class TestDateSplit:
         art = build_agent_quality(s3, _BUCKET, _DATE)  # no run_date
         assert art["run_date"] == _DATE.isoformat()
         assert art["cost_per_signal"]["total_cost_usd"] == 1.0
+
+
+class _StubCW:
+    """Minimal CloudWatch stub: returns Failures/Invocations sums by inspecting
+    the metric-math Expression. Records the expressions seen (for env-filter asserts)."""
+
+    def __init__(self, failures: float, invocations: float) -> None:
+        self._f, self._i = failures, invocations
+        self.exprs: list[str] = []
+
+    def get_metric_data(self, MetricDataQueries, StartTime, EndTime):  # noqa: N803
+        expr = MetricDataQueries[0]["Expression"]
+        self.exprs.append(expr)
+        if "Failures" in expr:
+            v = self._f
+        elif "Invocations" in expr:
+            v = self._i
+        else:
+            v = 0
+        return {"MetricDataResults": [{"Id": "q", "Values": [v] if v else []}]}
+
+
+class TestAgentValidationFailureRate:
+    """config#1154/#1149 — fleet Failures/Invocations from AlphaEngine/Agents prod telemetry."""
+
+    def test_failure_rate_from_prod_telemetry(self, s3):
+        _full_run(s3)
+        cw = _StubCW(failures=3, invocations=120)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=cw)
+        blk = art["agent_validation_failure_rate"]
+        assert blk["value"] == round(3 / 120, 4)
+        assert blk["n"] == 120
+        # Reads PROD only (skips the test-polluted agent_id-only series).
+        assert cw.exprs and all('env="prod"' in e for e in cw.exprs)
+
+    def test_absent_when_no_prod_invocations(self, s3):
+        _full_run(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCW(0, 0))
+        assert "agent_validation_failure_rate" not in art
+
+    def test_cw_error_is_non_fatal(self, s3):
+        _full_run(s3)
+
+        class _BoomCW:
+            def get_metric_data(self, **kwargs):
+                raise RuntimeError("AccessDenied")
+
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_BoomCW())
+        assert "agent_validation_failure_rate" not in art
+        assert art["signal_volume_adequacy"]["value"] == 30  # other components intact
