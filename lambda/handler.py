@@ -480,7 +480,33 @@ def handler(event, context):
                 "date": run_date,
             }
         else:
+            # Snapshot the PRIOR population BEFORE the champion's graph mutates
+            # + commits it (archive_writer node) so the challenger producers
+            # (post-step below) start from the SAME held book — a clean
+            # selection-only comparison (config#1223 B3).
+            _prior_population = archive.load_population()
             final_state = graph.invoke(initial_state)
+
+            # ── Challenger producers (config#1223 research observe substrate) ──
+            # Best-effort shadow: run the no-agent + single-agent producers on
+            # the same scanner candidates + prior population, writing each to
+            # signals_shadow/{producer}/. WHOLLY fail-soft — the champion's
+            # signals.json is already persisted; a challenger failure is recorded
+            # (WARN + the runner's errors map) but never fails the run. Runs only
+            # on a real pass (inside the non-dry branch).
+            try:
+                from producers.runner import run_challengers
+                _shadow = run_challengers(
+                    archive, run_date,
+                    run_time=final_state.get("run_time", "") or run_date,
+                    population=_prior_population,
+                )
+                logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
+            except Exception as _ce:  # noqa: BLE001 — defensive; never fail the champion
+                logger.warning(
+                    "[handler] challenger producers post-step failed "
+                    "(shadow mode, non-fatal): %s", _ce,
+                )
 
         # ── Trajectory validation (Phase 2 eval) ──────────────────
         _trajectory_result = None

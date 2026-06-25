@@ -199,6 +199,10 @@ def assess_candidates(
             config={"metadata": loaded.langsmith_metadata()},
         ),
         label="single_agent_producer",
+        # SHADOW challenger: bound tightly so a rate-limit storm fails this
+        # best-effort call FAST rather than holding the champion's Lambda open
+        # for the global 75-min deadline. A missed shadow week is fine.
+        deadline_seconds=180.0,
     )
     return [a.model_dump() for a in raw.assessments]
 
@@ -210,16 +214,20 @@ def run_single_agent_producer(
     market_regime: str = "neutral",
     run_time: str = "",
     assess_fn: Callable | None = None,
+    population: list[dict] | None = None,
 ) -> dict:
     """Integration entry: load the SAME scanner candidates the champion reads,
     make the single LLM assessment call, build the payload. ``assess_fn`` is
-    injectable for tests (defaults to the live :func:`assess_candidates`)."""
+    injectable for tests; ``population`` may OVERRIDE the SQLite read (the SF
+    post-step passes the snapshotted PRIOR population — clean selection
+    comparison)."""
     from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
     from data.scanner_orchestrator import _build_technical_scores_from_feature_store
 
     cand = archive_manager.load_candidates_json(run_date) or {}
     scanner_tickers = cand.get("scanner_tickers", [])
-    population = archive_manager.load_population()
+    if population is None:
+        population = archive_manager.load_population()
     pop_tickers = [p["ticker"] for p in population]
     prior_theses = archive_manager.load_latest_theses(
         list(dict.fromkeys(scanner_tickers + pop_tickers))
