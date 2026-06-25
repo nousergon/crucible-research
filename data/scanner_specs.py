@@ -1,0 +1,177 @@
+"""Scanner champion/challenger spec registry + shadow-artifact builder
+(config#1221 + config#1186).
+
+The scanner is the first funnel stage (candidate generation, ~900 → ~60). To
+evaluate and refine it INDEPENDENTLY of the research selection layer, we run it
+as a champion/challenger OBSERVE substrate — exactly the pattern the predictor
+model-zoo uses for the M slot, and the standing pattern for every
+refinement-target module (champion serves live, >=1 challenger runs in shadow,
+both scored on realized outcomes, promotion manual + evidence-gated).
+
+- **Champion** (`tech_score_momentum`): the live momentum-only ``tech_score``
+  scanner. Its candidates are emitted by the live path
+  (``candidates/{date}/candidates.json``) — authoritative, untouched here.
+- **Challenger** (`momentum_sleeve`): ranks the SAME liquidity-eligible universe
+  by ``mean(z(momentum_20d), z(return_60d))`` and takes the top-N. This is the
+  candidate-gen the config#1186 reconciliation found beats the live scanner on
+  the scanner's OWN long-only objective with date-clustered significance
+  (lift +0.080, p=0.013) while being flat on the cross-sectional rank-IC #1142
+  neutralizes — i.e. the scanner SHOULD keep momentum even though the composite
+  does not. Emitted to ``candidates_shadow/{spec}/{date}/candidates.json`` and
+  scored forward; never touches the live pool until manually promoted.
+
+A challenger reuses the live scanner's own gate decisions (the per-ticker
+``_last_eval_log`` stashed by ``run_quant_filter``) — so the hard gates
+(liquidity, volatility) are held CONSTANT across specs with zero gate
+duplication, and only the RANKING signal varies. The sleeve inputs
+(``*_zscore``) come already cross-sectionally normalized from
+``factor_loading.parquet`` (same source the #1142 shadow uses).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+
+def _rank_momentum_sleeve(
+    eval_log: list[dict],
+    factor_loadings: dict[str, dict[str, float]] | None,
+    params: dict,
+) -> list[str]:
+    """Rank the liquidity-eligible universe by mean(z(momentum_20d),
+    z(return_60d)) and return the top-N tickers (count-matched to the live
+    scanner's ``momentum_top_n``).
+
+    Eligibility reuses the live scanner's gate decision: any ticker that cleared
+    the liquidity floor (``liquidity_pass == 1``) is eligible — we do NOT re-gate
+    on ``tech_score`` (that IS the champion's ranking signal, held out of the
+    comparison). Names without a factor loading are dropped (can't be scored).
+    """
+    top_n = params.get("momentum_top_n") or 60
+    if not factor_loadings:
+        return []
+    eligible = [r["ticker"] for r in eval_log if r.get("liquidity_pass") == 1]
+    scored: list[tuple[str, float]] = []
+    for ticker in eligible:
+        fl = factor_loadings.get(ticker)
+        if not fl:
+            continue
+        vals = [
+            v for v in (fl.get("momentum_20d_zscore"), fl.get("return_60d_zscore"))
+            if v is not None
+        ]
+        if not vals:
+            continue
+        scored.append((ticker, sum(vals) / len(vals)))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:top_n]]
+
+
+@dataclass(frozen=True)
+class ScannerSpec:
+    """A named candidate-generation build. ``rank`` is ``None`` for the champion
+    (the live path is authoritative); challengers carry a pure ranking function
+    ``(eval_log, factor_loadings, params) -> ordered top-N ticker list``."""
+
+    name: str
+    kind: str  # "champion" | "challenger"
+    version: str
+    description: str
+    rank: Callable[[list[dict], dict | None, dict], list[str]] | None = None
+
+
+# The registry. Add new candidate-gen builds here as challengers; they are
+# scored forever in shadow with no further plumbing (config#1221).
+SCANNER_SPECS: dict[str, ScannerSpec] = {
+    "tech_score_momentum": ScannerSpec(
+        name="tech_score_momentum",
+        kind="champion",
+        version="v1.0",
+        description="live momentum-only tech_score scanner (run_quant_filter)",
+        rank=None,
+    ),
+    "momentum_sleeve": ScannerSpec(
+        name="momentum_sleeve",
+        kind="challenger",
+        version="v1",
+        description="z(momentum_20d)+z(return_60d) over the liquidity-eligible "
+        "universe, count-matched top-N (config#1186)",
+        rank=_rank_momentum_sleeve,
+    ),
+}
+
+
+def challenger_specs() -> list[ScannerSpec]:
+    return [s for s in SCANNER_SPECS.values() if s.kind == "challenger"]
+
+
+def _shadow_artifact(
+    spec: ScannerSpec,
+    scanner_tickers: list[str],
+    live_artifact: dict,
+    n_eligible: int,
+    n_scored: int,
+) -> dict:
+    """Build a shadow candidates artifact for ``spec`` parallel to the live
+    schema, so a downstream leaderboard can read live + every shadow uniformly.
+    population is spec-independent (carried from live); agent_input_set follows
+    the live ``population ∪ spec_picks[:50]`` convention."""
+    population_tickers = list(live_artifact.get("population_tickers", []))
+    agent_input_set = list(
+        dict.fromkeys(population_tickers + scanner_tickers[:50])
+    )
+    return {
+        "run_date": live_artifact["run_date"],
+        "scanner_version": f"{spec.name}-{spec.version}",
+        "spec": {
+            "name": spec.name,
+            "kind": spec.kind,
+            "ranking": spec.description,
+        },
+        "generated_at": live_artifact.get("generated_at"),
+        "population_tickers": population_tickers,
+        "scanner_tickers": scanner_tickers,
+        "agent_input_set": agent_input_set,
+        "filters_applied": live_artifact.get("filters_applied", {}),
+        "stats": {
+            "universe_size": live_artifact.get("stats", {}).get("universe_size"),
+            "post_scanner": len(scanner_tickers),
+            "population_size": len(population_tickers),
+            "agent_input_size": len(agent_input_set),
+            "eligible_universe": n_eligible,
+            "spec_scored": n_scored,
+        },
+    }
+
+
+def build_shadow_artifacts(
+    live_artifact: dict,
+    eval_log: list[dict],
+    factor_loadings: dict[str, dict[str, float]] | None,
+    params: dict,
+) -> dict[str, dict]:
+    """Build shadow candidate artifacts for every CHALLENGER spec.
+
+    Fail-soft PER SPEC: a challenger that raises is logged at WARNING (the
+    failure is recorded, per the no-silent-fails rule) and omitted — the live
+    artifact and the other shadows are unaffected. Returns ``{spec_name:
+    artifact}``.
+    """
+    n_eligible = sum(1 for r in eval_log if r.get("liquidity_pass") == 1)
+    out: dict[str, dict] = {}
+    for spec in challenger_specs():
+        try:
+            tickers = spec.rank(eval_log, factor_loadings, params)
+            out[spec.name] = _shadow_artifact(
+                spec, tickers, live_artifact, n_eligible, len(tickers)
+            )
+        except Exception as exc:  # noqa: BLE001 — shadow is best-effort observability
+            logger.warning(
+                "[scanner_specs] shadow spec %s failed (non-fatal, live "
+                "unaffected): %s", spec.name, exc,
+            )
+    return out
