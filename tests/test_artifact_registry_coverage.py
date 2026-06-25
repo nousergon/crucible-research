@@ -47,7 +47,11 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "data/fetchers/analyst_fetcher.py": 1,
     "data/fetchers/insider_fetcher.py": 1,
     "data/fetchers/revision_fetcher.py": 1,
-    "data/scanner_orchestrator.py": 1,
+    # 2 PUT sites: write_candidates_artifact (live candidates/) +
+    # write_shadow_candidates_artifact (candidates_shadow/{spec}/ — the
+    # config#1221 OBSERVE substrate; registered in ARTIFACT_REGISTRY.yaml as
+    # scanner_candidates_shadow_momentum_sleeve at WATCH severity).
+    "data/scanner_orchestrator.py": 2,
     # κ calibration report (ROADMAP L480): kappa.json + kappa.md + the two
     # latest/ pointers. Prefix decision_artifacts/_calibration/_report/ is
     # grandfathered in ARTIFACT_REGISTRY.yaml — operator-gated, consumer
