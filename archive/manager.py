@@ -347,6 +347,21 @@ class ArchiveManager:
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
+    def write_shadow_signals_json(
+        self, producer_name: str, trading_date: str, generated_at: str, signals: dict
+    ) -> str:
+        """Write a challenger producer's signals.json to the ISOLATED shadow
+        prefix ``signals_shadow/{producer_name}/{trading_date}/signals.json``
+        (config#1221 research observe substrate). NEVER read by live trading —
+        executor/predictor read only ``signals/``. Parallel to
+        :meth:`write_signals_json` so a leaderboard can read champion + every
+        shadow uniformly. Returns the S3 key."""
+        payload = {"date": trading_date, "run_date": generated_at, **signals}
+        body = json.dumps(payload, indent=2, default=str)
+        key = f"signals_shadow/{producer_name}/{trading_date}/signals.json"
+        self._s3_put(key, body)
+        return key
+
     # ── Per-sector-team run persistence (resumability) ────────────────────────
     #
     # The Research Lambda runs the LangGraph stateless (no checkpointer —
