@@ -40,6 +40,16 @@ from agents.sector_teams.qual_analyst import run_qual_analyst
 from agents.sector_teams.peer_review import run_peer_review
 from agents.sector_teams.material_triggers import check_material_triggers
 from thesis.structured import build_structured_thesis, format_structured_thesis_for_prompt
+# Per-sub-agent cost-tracker scopes. Each sub-agent call below opens its
+# own ``track_llm_cost`` frame keyed by the SAME agent_id the paired
+# ``_capture_if_enabled`` call in ``research_graph.sector_team_node`` uses
+# (``sector_quant:{team_id}`` etc.), so the metadata stash + per-call
+# JSONL stream attribute to the canonical split families rather than the
+# legacy combined ``sector_team:{team_id}`` aggregate. PER_STOCK_MODEL is
+# the fallback model name (every sector sub-agent runs on it) so cost
+# recompute resolves even when the callback can't read model_name off the
+# response shape.
+from graph.llm_cost_tracker import track_llm_cost
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +99,15 @@ class SectorTeamContext:
     # archive_writer aggregates per-team override_tickers from team
     # outputs and projects agent_override=1 onto scanner_evaluations.
     override_tickers: list[str] = field(default_factory=list)
+    # Pipeline-invocation id for the cost-tracker per-call JSONL partition
+    # key + per-run budget accumulator. Threaded from ``sector_team_node``
+    # via ``derive_run_id(state)`` so the per-sub-agent ``track_llm_cost``
+    # scopes opened below partition their cost-raw rows under the same
+    # run_id the node uses for the paired decision-artifact captures. None
+    # in unit tests that build a bare context — the scopes then skip the
+    # JSONL flush (the in-process ``pop_metadata_for`` stash still works,
+    # which is what the captures actually read).
+    run_id: str | None = None
 
 
 def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
@@ -127,17 +146,29 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # before falling through to the empty-result path. Recursion
     # exhaustion + exceptions are NOT retried — see
     # _should_retry_on_empty_picks() for the trigger contract.
-    quant_output = run_quant_analyst_with_retry(
-        team_id=team_id,
-        sector_tickers=sector_tickers,
-        market_regime=ctx.market_regime,
-        price_data=ctx.price_data,
-        technical_scores=ctx.technical_scores,
-        run_date=ctx.run_date,
-        api_key=ctx.api_key,
-        focus_list=ctx.focus_list,
-        override_tickers=ctx.override_tickers,
-    )
+    # Scope wraps the quant ReAct loop (multiple Anthropic calls incl. the
+    # decoupled structured-output extraction + any empty-picks retry). The
+    # user-prompt template stamps prompt_id/version onto ModelMetadata.
+    with track_llm_cost(
+        agent_id=f"sector_quant:{team_id}",
+        sector_team_id=team_id,
+        node_name="sector_team_node",
+        run_type="weekly_research",
+        run_id=ctx.run_id,
+        model_name_fallback=PER_STOCK_MODEL,
+        prompt=load_prompt("quant_analyst_user"),
+    ):
+        quant_output = run_quant_analyst_with_retry(
+            team_id=team_id,
+            sector_tickers=sector_tickers,
+            market_regime=ctx.market_regime,
+            price_data=ctx.price_data,
+            technical_scores=ctx.technical_scores,
+            run_date=ctx.run_date,
+            api_key=ctx.api_key,
+            focus_list=ctx.focus_list,
+            override_tickers=ctx.override_tickers,
+        )
 
     quant_picks = quant_output.get("ranked_picks", [])
     # Validate picks have required 'ticker' key — LLM output parsing can drop it
@@ -154,17 +185,26 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # ── Step 3: Qual analyst reviews top 5 ────────────────────────────────────
     top5 = valid_picks[:5]
 
-    qual_output = run_qual_analyst(
-        team_id=team_id,
-        quant_top5=top5,
-        prior_theses=ctx.prior_theses,
-        market_regime=ctx.market_regime,
-        run_date=ctx.run_date,
-        api_key=ctx.api_key,
-        price_data=ctx.price_data,
-        episodic_memories=ctx.episodic_memories,
-        semantic_memories=ctx.semantic_memories,
-    )
+    with track_llm_cost(
+        agent_id=f"sector_qual:{team_id}",
+        sector_team_id=team_id,
+        node_name="sector_team_node",
+        run_type="weekly_research",
+        run_id=ctx.run_id,
+        model_name_fallback=PER_STOCK_MODEL,
+        prompt=load_prompt("qual_analyst_user"),
+    ):
+        qual_output = run_qual_analyst(
+            team_id=team_id,
+            quant_top5=top5,
+            prior_theses=ctx.prior_theses,
+            market_regime=ctx.market_regime,
+            run_date=ctx.run_date,
+            api_key=ctx.api_key,
+            price_data=ctx.price_data,
+            episodic_memories=ctx.episodic_memories,
+            semantic_memories=ctx.semantic_memories,
+        )
 
     # ── Step 4: Peer review → final 0-3 ──────────────────────────────────────
     # Stage D' Wire 1: peer_review applies a regime-conditional pick
@@ -175,16 +215,29 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # docstring named the legacy 3-class projection
     # "bear/caution raise the bar"; the implementation has always read
     # the continuous intensity_z.)
-    peer_output = run_peer_review(
-        team_id=team_id,
-        quant_picks=top5,
-        qual_assessments=qual_output.get("assessments", []),
-        additional_candidate=qual_output.get("additional_candidate"),
-        technical_scores=ctx.technical_scores,
-        market_regime=ctx.market_regime,
-        regime_intensity_z=ctx.regime_intensity_z,
-        api_key=ctx.api_key,
-    )
+    # Scope wraps both peer-review Anthropic passes (quant's review of
+    # qual's addition + the joint finalization). The joint-selection
+    # prompt — the synthesis call that produces the final picks CIO sees
+    # — stamps prompt_id/version onto ModelMetadata.
+    with track_llm_cost(
+        agent_id=f"sector_peer_review:{team_id}",
+        sector_team_id=team_id,
+        node_name="sector_team_node",
+        run_type="weekly_research",
+        run_id=ctx.run_id,
+        model_name_fallback=PER_STOCK_MODEL,
+        prompt=load_prompt("peer_review_joint_selection"),
+    ):
+        peer_output = run_peer_review(
+            team_id=team_id,
+            quant_picks=top5,
+            qual_assessments=qual_output.get("assessments", []),
+            additional_candidate=qual_output.get("additional_candidate"),
+            technical_scores=ctx.technical_scores,
+            market_regime=ctx.market_regime,
+            regime_intensity_z=ctx.regime_intensity_z,
+            api_key=ctx.api_key,
+        )
 
     # ── Step 5: Thesis maintenance for held stocks ────────────────────────────
     team_held = [t for t in ctx.held_tickers if ctx.sector_map.get(t, "") in
@@ -227,13 +280,26 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         )
 
         if triggers:
-            # Material event — update thesis via Haiku
-            updated = _update_thesis_for_held_stock(
-                ticker, triggers, ctx.prior_theses.get(ticker),
-                ctx.news_data_by_ticker.get(ticker),
-                ctx.analyst_data_by_ticker.get(ticker),
-                ctx.run_date, team_id, ctx.api_key,
-            )
+            # Material event — update thesis via the per-stock model. One
+            # cost-tracker scope per ticker, keyed to match the per-ticker
+            # ``thesis_update:{team_id}:{ticker}`` capture in
+            # sector_team_node — the no-trigger preservation branch fires
+            # no LLM call and opens no scope (and is not captured).
+            with track_llm_cost(
+                agent_id=f"thesis_update:{team_id}:{ticker}",
+                sector_team_id=team_id,
+                node_name="sector_team_node",
+                run_type="weekly_research",
+                run_id=ctx.run_id,
+                model_name_fallback=PER_STOCK_MODEL,
+                prompt=load_prompt("sector_team_thesis_update"),
+            ):
+                updated = _update_thesis_for_held_stock(
+                    ticker, triggers, ctx.prior_theses.get(ticker),
+                    ctx.news_data_by_ticker.get(ticker),
+                    ctx.analyst_data_by_ticker.get(ticker),
+                    ctx.run_date, team_id, ctx.api_key,
+                )
             thesis_updates[ticker] = updated
         else:
             # No material event — preserve prior thesis. Normalize the

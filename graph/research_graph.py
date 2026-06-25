@@ -1185,20 +1185,22 @@ def sector_team_node(state: ResearchState) -> dict:
         semantic_memories=state.get("semantic_memories", {}),
         regime_intensity_z=_intensity_z,
         focus_list=state.get("focus_list_by_team", {}).get(team_id, []),
-    )
-    # Cost-telemetry scope spans the whole sector team's LLM activity:
-    # quant ReAct + qual ReAct + peer_review (×2) + thesis updates. The
-    # CostTelemetryCallback attached to each ChatAnthropic instance
-    # accumulates token usage into this single frame; per-call rows are
-    # flushed to a JSONL at scope exit (PR 3 cost-raw stream).
-    with track_llm_cost(
-        agent_id=f"sector_team:{team_id}",
-        sector_team_id=team_id,
-        node_name="sector_team_node",
-        run_type="weekly_research",
+        # Thread the run_id so the per-sub-agent track_llm_cost scopes
+        # opened inside run_sector_team partition their cost-raw JSONL
+        # under the same run_id the captures below use (derive_run_id).
         run_id=derive_run_id(state),
-    ):
-        result = run_sector_team(team_id, ctx)
+    )
+    # Cost telemetry is scoped PER SUB-AGENT inside run_sector_team — one
+    # track_llm_cost frame each for sector_quant / sector_qual /
+    # sector_peer_review / thesis_update:{ticker}, keyed to match the
+    # _capture_if_enabled agent_ids below. The CostTelemetryCallback on
+    # each ChatAnthropic accumulates into whichever inner frame is active
+    # (top of the frame stack), so pop_metadata_for(sector_quant:…) etc.
+    # now returns real token counts + cost instead of the placeholder
+    # fallback. The legacy single sector_team:{team_id} frame here mixed
+    # all four sub-agents' tokens under one agent_id the captures never
+    # read — config#1037's root cause.
+    result = run_sector_team(team_id, ctx)
 
     # Schema validation — strict-by-default (raises RuntimeError on
     # validation failure unless STRICT_VALIDATION=false).
@@ -1206,11 +1208,10 @@ def sector_team_node(state: ResearchState) -> dict:
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
     # Per-sub-agent captures so LLM-as-judge eval can score quant + qual
-    # independently. Cost telemetry stays aggregated under the outer
-    # sector_team:{team_id} track_llm_cost scope above — pop_metadata_for
-    # lookups for sector_quant / sector_qual hit the fallback stub today
-    # (token counts at 0). A future PR can split the cost-tracker scopes
-    # if per-sub-agent cost attribution becomes necessary.
+    # independently. Each agent_id below now matches a per-sub-agent
+    # track_llm_cost scope opened inside run_sector_team (config#1037), so
+    # pop_metadata_for(...) returns real token counts + cost + the stamped
+    # prompt id/version instead of the placeholder fallback.
     team_tickers = get_team_tickers(team_id, ctx.agent_input_set, ctx.sector_map)
     quant_output = result.get("quant_output", {}) or {}
     qual_output = result.get("qual_output", {}) or {}
