@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 SCANNER_VERSION = "v1.0"
 _DEFAULT_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _CANDIDATES_PREFIX = "candidates"
+# Champion/challenger OBSERVE substrate (config#1221): challenger candidate-gen
+# builds are emitted here, parallel to the live candidates/ path, never consumed
+# by live trading until manually promoted.
+_SHADOW_PREFIX = "candidates_shadow"
 _SIGNALS_LATEST_KEY = "signals/latest.json"
 
 
@@ -370,5 +374,67 @@ def write_candidates_artifact(
         len(artifact["agent_input_set"]),
         len(artifact["stats"]["new_vs_prior_cycle"]),
         len(artifact["stats"]["dropped_vs_prior_cycle"]),
+    )
+    return key
+
+
+def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
+    """Build the champion/challenger SHADOW candidate artifacts (config#1221).
+
+    Must be called immediately after :func:`build_candidates_artifact` for the
+    same cycle — it reads the per-ticker gate decisions that
+    ``run_quant_filter`` stashed on ``_last_eval_log`` (so the hard gates are
+    held constant across specs with zero gate duplication) and the
+    cross-sectional ``*_zscore`` factor loadings. Fully fail-soft: any missing
+    input (no eval log, no loadings) yields ``{}`` rather than raising — the
+    shadow substrate must NEVER jeopardize the live candidates.json.
+    """
+    from data.scanner import run_quant_filter
+    from data.fetchers.feature_store_reader import read_latest_factor_loadings
+    from data.scanner_specs import build_shadow_artifacts
+
+    eval_log = getattr(run_quant_filter, "_last_eval_log", None)
+    if not eval_log:
+        logger.warning(
+            "[scanner_orchestrator] no scanner eval log available — skipping "
+            "shadow candidate-gen specs (live artifact unaffected)",
+        )
+        return {}
+    factor_loadings = read_latest_factor_loadings()
+    if not factor_loadings:
+        logger.warning(
+            "[scanner_orchestrator] factor loadings unavailable — skipping "
+            "shadow candidate-gen specs (live artifact unaffected)",
+        )
+        return {}
+    params = _resolved_scanner_params()
+    return build_shadow_artifacts(live_artifact, eval_log, factor_loadings, params)
+
+
+def write_shadow_candidates_artifact(
+    artifact: dict,
+    spec_name: str,
+    *,
+    s3_client: Any | None = None,
+    bucket: str = _DEFAULT_BUCKET,
+) -> str:
+    """Persist a shadow spec artifact to
+    ``s3://{bucket}/candidates_shadow/{spec_name}/{run_date}/candidates.json``
+    and return the S3 key. Parallel to :func:`write_candidates_artifact` but on
+    the isolated shadow prefix — never read by live trading."""
+    s3 = s3_client if s3_client is not None else boto3.client("s3")
+    run_date = artifact["run_date"]
+    key = f"{_SHADOW_PREFIX}/{spec_name}/{run_date}/candidates.json"
+    body = json.dumps(artifact, indent=2, sort_keys=True).encode("utf-8")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=io.BytesIO(body).getvalue(),
+        ContentType="application/json",
+    )
+    logger.info(
+        "[scanner_orchestrator] wrote SHADOW artifact: s3://%s/%s "
+        "(spec=%s scanner_tickers=%d)",
+        bucket, key, spec_name, len(artifact["scanner_tickers"]),
     )
     return key

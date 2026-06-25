@@ -219,3 +219,41 @@ class TestHandler:
                 f"got {captured.get('run_date')}"
             )
             assert result["date"] == expected
+
+    def test_shadow_specs_written_and_summarized(self, handler_mod):
+        # Champion/challenger OBSERVE shadows (config#1221): the handler writes
+        # each challenger artifact to the isolated shadow prefix and records the
+        # keys in summary.shadows — without disturbing the live OK path.
+        shadow_art = {"momentum_sleeve": {"run_date": "2026-05-29", "scanner_tickers": ["A"]}}
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-29/candidates.json"), \
+             patch("data.scanner_orchestrator.build_shadow_candidate_artifacts",
+                   return_value=shadow_art), \
+             patch("data.scanner_orchestrator.write_shadow_candidates_artifact",
+                   return_value="candidates_shadow/momentum_sleeve/2026-05-29/candidates.json"), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["summary"]["shadows"] == {
+            "momentum_sleeve": "candidates_shadow/momentum_sleeve/2026-05-29/candidates.json"
+        }
+        assert "shadow_error" not in result["summary"]
+
+    def test_shadow_failure_does_not_downgrade_live_ok(self, handler_mod):
+        # A shadow build/write failure is WHOLLY fail-soft: live stays OK, the
+        # failure is recorded in summary.shadow_error (no-silent-fails).
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-29/candidates.json"), \
+             patch("data.scanner_orchestrator.build_shadow_candidate_artifacts",
+                   side_effect=RuntimeError("loadings exploded")), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["summary"]["shadows"] == {}
+        assert "loadings exploded" in result["summary"]["shadow_error"]

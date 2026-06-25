@@ -94,6 +94,8 @@ def handler(event, context):
     from data.scanner_orchestrator import (
         build_candidates_artifact,
         write_candidates_artifact,
+        build_shadow_candidate_artifacts,
+        write_shadow_candidates_artifact,
         ScannerOrchestratorError,
     )
 
@@ -192,6 +194,35 @@ def handler(event, context):
         logger.exception("[scanner_handler] S3 write failed hard")
         return {"status": "ERROR", "error": f"S3 write failed: {exc}"}
 
+    # ── Champion/challenger OBSERVE shadows (config#1221) ────────────────────
+    # Best-effort secondary path: emit challenger candidate-gen specs to the
+    # isolated candidates_shadow/ prefix for forward scoring. WHOLLY fail-soft —
+    # the live candidates.json above is the primary deliverable and is already
+    # written; a shadow failure is recorded (WARN + ``shadows`` summary field)
+    # but NEVER downgrades the OK status (no-silent-fails: the recording surface
+    # is the WARN log + the response field).
+    shadows: dict[str, str] = {}
+    shadow_error: str | None = None
+    try:
+        shadow_artifacts = build_shadow_candidate_artifacts(artifact)
+        for spec_name, shadow_artifact in shadow_artifacts.items():
+            try:
+                shadows[spec_name] = write_shadow_candidates_artifact(
+                    shadow_artifact, spec_name, s3_client=s3_client, bucket=bucket,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[scanner_handler] shadow write failed for spec %s "
+                    "(non-fatal, live unaffected): %s", spec_name, exc,
+                )
+                shadow_error = f"{spec_name}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[scanner_handler] shadow candidate-gen build failed "
+            "(non-fatal, live unaffected): %s", exc,
+        )
+        shadow_error = str(exc)
+
     summary = {
         "s3_key": s3_key,
         "scanner_tickers": len(artifact["scanner_tickers"]),
@@ -202,7 +233,10 @@ def handler(event, context):
             artifact["stats"]["dropped_vs_prior_cycle"]
         ),
         "baseline_missing": artifact["stats"]["baseline_missing"],
+        "shadows": shadows,
     }
+    if shadow_error:
+        summary["shadow_error"] = shadow_error
 
     logger.info(
         "[scanner_handler] done run_date=%s scanner_tickers=%d "
