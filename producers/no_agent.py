@@ -151,17 +151,24 @@ def run_no_agent_producer(
     *,
     market_regime: str = "neutral",
     run_time: str = "",
+    population: list[dict] | None = None,
 ) -> dict:
     """Integration entry: load the inputs the no-agent producer needs (the SAME
     scanner candidates the champion reads — scanner held constant) and build the
     signals payload. I/O lives here; the scoring/assembly logic is in the pure
-    :func:`build_no_agent_signals`."""
+    :func:`build_no_agent_signals`.
+
+    ``population`` may OVERRIDE the SQLite read — the SF post-step passes the
+    PRIOR population (snapshotted before the champion mutated it) so every
+    producer's ENTER selections start from the same held book (a clean
+    selection-only comparison)."""
     from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
     from data.scanner_orchestrator import _build_technical_scores_from_feature_store
 
     cand = archive_manager.load_candidates_json(run_date) or {}
     scanner_tickers = cand.get("scanner_tickers", [])
-    population = archive_manager.load_population()
+    if population is None:
+        population = archive_manager.load_population()
     pop_tickers = [p["ticker"] for p in population]
     prior_theses = archive_manager.load_latest_theses(
         list(dict.fromkeys(scanner_tickers + pop_tickers))
