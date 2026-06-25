@@ -3377,7 +3377,21 @@ def archive_writer(state: ResearchState) -> dict:
         )
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
+        # FAIL LOUD — do NOT swallow. signals.json is the PRIMARY producer
+        # artifact of the weekly cycle: Predictor, Executor, the backtester and
+        # the report card all depend on it. Graceful-degrade on a producer/
+        # writer is forbidden (~/.claude/CLAUDE.md "Fail loud and fast").
+        # Swallowing here produced the "ghost success" failure mode — the
+        # research SF task returns status=OK while signals.json is absent, so
+        # the run looks healthy but the whole downstream cycle silently runs on
+        # stale signals. Re-raising propagates to lambda/handler.py's outer
+        # except -> status="ERROR" -> the SF Research branch fails, AND the
+        # artifact-freshness monitor (research_signals) flags the absence.
+        # Both the validation and the write are intentionally inside this try:
+        # an invalid payload is as fatal as a failed write — neither yields a
+        # usable signals.json.
         logger.error("Failed to write signals.json: %s", e)
+        raise
 
     # ── Score-neutralization OBSERVE shadow (config#1142) ────────────────────
     # UNCONDITIONAL observability hung off the primary path AFTER signals.json is
