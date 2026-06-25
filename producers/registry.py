@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from producers.no_agent import run_no_agent_producer
+from producers.single_agent import run_single_agent_producer
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,15 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         description="pure-quant floor: scanner candidates scored by the technical "
         "composite, deterministic top-N ENTER gate, no LLM (config#1221)",
         build=run_no_agent_producer,
+    ),
+    "single_agent_quant": ProducerSpec(
+        name="single_agent_quant",
+        kind="challenger",
+        version="v1",
+        description="single-agent: ONE Sonnet call assesses qual for all scanner "
+        "candidates; deterministic quant + composite; no multi-agent fan-out, no "
+        "macro/CIO (config#1223 / M3 baseline)",
+        build=run_single_agent_producer,
     ),
 }
 

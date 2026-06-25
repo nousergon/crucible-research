@@ -1,0 +1,242 @@
+"""Single-agent research producer (config#1223 / M3 baseline).
+
+ONE LLM call assesses every scanner candidate's qualitative attractiveness; the
+quant score stays deterministic (technical composite) and the two combine via
+the SAME ``compute_composite_score`` the champion uses. This replaces the
+champion's 6-sector-team fan-out + macro economist + CIO with a single agent —
+so a champion-vs-single-agent comparison isolates the value of the MULTI-AGENT
+ORCHESTRATION specifically (vs the value of an LLM at all, which the no-agent
+floor isolates). It is also the natural Phase-3 distillation target (config#1135).
+
+Mirrors the CIO single-Sonnet pattern (agents/investment_committee/ic_cio.py):
+``with_structured_output`` + deadline-bounded 429 retry + cost-telemetry
+callback + gitignored prompt via ``load_prompt``. Assembly reuses the live
+``_build_signals_payload`` (no reimplementation) — contract-identical to the
+champion; only the belief differs.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Callable, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from scoring.composite import compute_composite_score
+
+logger = logging.getLogger(__name__)
+
+_PROMPT_NAME = "ranking_producer"
+DEFAULT_BUY_SCORE_THRESHOLD = 60.0
+DEFAULT_MAX_NEW_ENTRANTS = 15
+
+
+# ── Structured output (mirrors CIORawOutput) ─────────────────────────────────
+class CandidateAssessment(BaseModel):
+    """The single agent's qualitative read on one candidate. The quant score is
+    NOT requested from the LLM — it stays deterministic (technical composite)."""
+
+    model_config = ConfigDict(extra="allow")
+    ticker: str
+    qual_score: float = Field(ge=0, le=100)
+    conviction: Literal["rising", "stable", "declining"] = "stable"
+    brief_thesis: str = ""
+
+
+class RankingProducerOutput(BaseModel):
+    model_config = ConfigDict(extra="allow", validate_default=True)
+    assessments: list[CandidateAssessment] = Field(
+        default_factory=list, min_length=1,
+        description="One qualitative assessment per scanner candidate.",
+    )
+
+
+def build_single_agent_signals(
+    run_date: str,
+    *,
+    scanner_tickers: list[str],
+    assessments: list[dict],
+    technical_scores: dict[str, dict],
+    population: list[dict],
+    prior_theses: dict[str, dict],
+    sector_map: dict[str, str],
+    market_regime: str = "neutral",
+    run_time: str = "",
+    buy_score_threshold: float = DEFAULT_BUY_SCORE_THRESHOLD,
+    max_new_entrants: int = DEFAULT_MAX_NEW_ENTRANTS,
+) -> dict:
+    """Build a conforming signals.json from the single agent's qual assessments
+    + deterministic quant. Pure function (no I/O / no LLM) → unit-testable."""
+    from graph.research_graph import _build_signals_payload
+
+    pop_tickers = {p["ticker"] for p in population}
+    assess_by_ticker = {a["ticker"]: a for a in assessments}
+
+    theses: dict[str, dict] = {}
+    for ticker in scanner_tickers:
+        tech = technical_scores.get(ticker)
+        if not tech:
+            continue
+        quant = tech.get("technical_score")
+        a = assess_by_ticker.get(ticker)
+        qual = a.get("qual_score") if a else None
+        comp = compute_composite_score(
+            quant_score=quant,
+            qual_score=qual,            # the single agent's qualitative read
+            sector_modifier=1.0,        # neutral; no macro agent
+            macro_overlay_enabled=False,
+        )
+        final = comp.get("final_score")
+        if final is None:
+            continue
+        rating = "BUY" if final >= buy_score_threshold else "HOLD"
+        theses[ticker] = {
+            "ticker": ticker,
+            "rating": rating,
+            "score": final,
+            "final_score": final,
+            "quant_score": quant,
+            "qual_score": qual,
+            "conviction": (a.get("conviction") if a else None) or "stable",
+            "sector": sector_map.get(ticker, "Unknown"),
+            "bull_case": (a.get("brief_thesis") if a else "") or "",
+        }
+
+    new_buys = sorted(
+        (t for t, th in theses.items() if th["rating"] == "BUY" and t not in pop_tickers),
+        key=lambda t: theses[t]["final_score"],
+        reverse=True,
+    )
+    advanced_tickers = new_buys[:max_new_entrants]
+
+    new_population = list(population) + [
+        {
+            "ticker": t,
+            "sector": theses[t]["sector"],
+            "long_term_rating": "BUY",
+            "long_term_score": theses[t]["final_score"],
+            "conviction": theses[t]["conviction"],
+            "price_target_upside": None,
+        }
+        for t in advanced_tickers
+    ]
+
+    state: dict = {
+        "investment_theses": theses,
+        "prior_theses": prior_theses,
+        "new_population": new_population,
+        "sector_map": sector_map,
+        "sector_ratings": {},
+        "sector_modifiers": {},
+        "entry_theses": {},
+        "advanced_tickers": advanced_tickers,
+        "exits": [],
+        "run_date": run_date,
+        "run_time": run_time,
+        "market_regime": market_regime,
+    }
+    payload = _build_signals_payload(state)
+    logger.info(
+        "[single_agent] run_date=%s assessed=%d scored=%d buy_candidates=%d "
+        "new_entrants=%d", run_date, len(assessments), len(theses),
+        len(payload.get("buy_candidates", [])), len(advanced_tickers),
+    )
+    return payload
+
+
+def _format_candidate_block(scanner_tickers: list[str], technical_scores: dict, sector_map: dict) -> str:
+    """Per-candidate quant context the single agent reasons over."""
+    lines = []
+    for t in scanner_tickers:
+        tech = technical_scores.get(t) or {}
+        lines.append(
+            f"{t} | sector={sector_map.get(t, 'Unknown')} | "
+            f"tech_score={tech.get('technical_score')} | rsi_14={tech.get('rsi_14')} | "
+            f"momentum_20d={tech.get('momentum_20d')} | price_vs_ma200={tech.get('price_vs_ma200')}"
+        )
+    return "\n".join(lines)
+
+
+def assess_candidates(
+    scanner_tickers: list[str],
+    technical_scores: dict,
+    sector_map: dict,
+    *,
+    api_key: str | None = None,
+) -> list[dict]:
+    """The single LLM call: one Sonnet invocation assesses every candidate.
+
+    Mirrors the CIO call site (structured output + deadline-bounded 429 retry +
+    cost-telemetry callback + gitignored prompt). Returns a list of assessment
+    dicts. Raises on a persistent rate-limit or parse failure (all-agents-strict
+    — a challenger that silently degrades would pollute the leaderboard)."""
+    from langchain_anthropic import ChatAnthropic
+    from langchain_core.messages import HumanMessage
+
+    from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY
+    from agents.prompt_loader import load_prompt
+    from agents.langchain_utils import (
+        SECTOR_TEAM_LLM_MAX_RETRIES,
+        invoke_with_rate_limit_retry,
+    )
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
+    loaded = load_prompt(_PROMPT_NAME)
+    prompt = loaded.text + "\n\n## Candidates\n" + _format_candidate_block(
+        scanner_tickers, technical_scores, sector_map
+    )
+    llm = ChatAnthropic(
+        model=STRATEGIC_MODEL,
+        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+        max_tokens=MAX_TOKENS_STRATEGIC,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        callbacks=[get_cost_telemetry_callback()],
+    )
+    structured_llm = llm.with_structured_output(RankingProducerOutput)
+    raw: RankingProducerOutput = invoke_with_rate_limit_retry(
+        lambda: structured_llm.invoke(
+            [HumanMessage(content=prompt)],
+            config={"metadata": loaded.langsmith_metadata()},
+        ),
+        label="single_agent_producer",
+    )
+    return [a.model_dump() for a in raw.assessments]
+
+
+def run_single_agent_producer(
+    run_date: str,
+    archive_manager,
+    *,
+    market_regime: str = "neutral",
+    run_time: str = "",
+    assess_fn: Callable | None = None,
+) -> dict:
+    """Integration entry: load the SAME scanner candidates the champion reads,
+    make the single LLM assessment call, build the payload. ``assess_fn`` is
+    injectable for tests (defaults to the live :func:`assess_candidates`)."""
+    from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
+    from data.scanner_orchestrator import _build_technical_scores_from_feature_store
+
+    cand = archive_manager.load_candidates_json(run_date) or {}
+    scanner_tickers = cand.get("scanner_tickers", [])
+    population = archive_manager.load_population()
+    pop_tickers = [p["ticker"] for p in population]
+    prior_theses = archive_manager.load_latest_theses(
+        list(dict.fromkeys(scanner_tickers + pop_tickers))
+    )
+    constituents, sector_map = fetch_sp500_sp400_with_sectors()
+    technical_scores, _ = _build_technical_scores_from_feature_store(constituents, sector_map)
+
+    assess = assess_fn or assess_candidates
+    assessments = assess(scanner_tickers, technical_scores, sector_map)
+    return build_single_agent_signals(
+        run_date,
+        scanner_tickers=scanner_tickers,
+        assessments=assessments,
+        technical_scores=technical_scores,
+        population=population,
+        prior_theses=prior_theses,
+        sector_map=sector_map,
+        market_regime=market_regime,
+        run_time=run_time,
+    )
