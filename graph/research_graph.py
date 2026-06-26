@@ -3363,35 +3363,19 @@ def archive_writer(state: ResearchState) -> dict:
         if isinstance(output, dict):
             tool_call_counts_by_team[team_id] = _walk_tool_calls(output)
 
-    try:
-        # Reuse the payload the stub-quarantine guard already scanned at
-        # the top of this node so the promoted bytes are exactly the
-        # bytes the guard verified clean (no TOCTOU between guard +
-        # write). _build_signals_payload is pure so this is identical.
-        signals_payload = _candidate_signals_payload
-        _validate_signals_payload(
-            signals_payload,
-            scanner_universe=universe_symbols,
-            tool_call_counts_by_team=tool_call_counts_by_team,
-            block_on_zero_tool_calls=False,  # soft-fail; flip after soak
-        )
-        am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
-    except Exception as e:
-        # FAIL LOUD — do NOT swallow. signals.json is the PRIMARY producer
-        # artifact of the weekly cycle: Predictor, Executor, the backtester and
-        # the report card all depend on it. Graceful-degrade on a producer/
-        # writer is forbidden (~/.claude/CLAUDE.md "Fail loud and fast").
-        # Swallowing here produced the "ghost success" failure mode — the
-        # research SF task returns status=OK while signals.json is absent, so
-        # the run looks healthy but the whole downstream cycle silently runs on
-        # stale signals. Re-raising propagates to lambda/handler.py's outer
-        # except -> status="ERROR" -> the SF Research branch fails, AND the
-        # artifact-freshness monitor (research_signals) flags the absence.
-        # Both the validation and the write are intentionally inside this try:
-        # an invalid payload is as fatal as a failed write — neither yields a
-        # usable signals.json.
-        logger.error("Failed to write signals.json: %s", e)
-        raise
+    # Reuse the payload the stub-quarantine guard already scanned at
+    # the top of this node so the promoted bytes are exactly the
+    # bytes the guard verified clean (no TOCTOU between guard +
+    # write). _build_signals_payload is pure so this is identical.
+    signals_payload = _candidate_signals_payload
+    _validate_and_write_signals(
+        am,
+        run_date,
+        state.get("run_time", ""),
+        signals_payload,
+        scanner_universe=universe_symbols,
+        tool_call_counts_by_team=tool_call_counts_by_team,
+    )
 
     # ── Score-neutralization OBSERVE shadow (config#1142) ────────────────────
     # UNCONDITIONAL observability hung off the primary path AFTER signals.json is
@@ -3714,6 +3698,48 @@ def _walk_tool_calls(node: object) -> int:
         for item in node:
             count += _walk_tool_calls(item)
     return count
+
+
+def _validate_and_write_signals(
+    am,
+    run_date: str,
+    run_time: str,
+    signals_payload: dict,
+    *,
+    scanner_universe=None,
+    tool_call_counts_by_team: dict[str, int] | None = None,
+) -> None:
+    """Validate the candidate signals payload and persist signals.json.
+
+    The single fail-loud seam for the PRIMARY producer artifact of the
+    weekly cycle (Predictor, Executor, the backtester and the report card
+    all depend on signals.json). Both the validation and the write live
+    inside one try so an invalid payload is as fatal as a failed write —
+    neither yields a usable signals.json.
+
+    FAIL LOUD — do NOT swallow. Graceful-degrade on a producer/writer is
+    forbidden (~/.claude/CLAUDE.md "Fail loud and fast"). Swallowing here
+    produced the "ghost success" failure mode (crucible-research#312): the
+    research SF task returned status=OK while signals.json was absent, so
+    the run looked healthy but the whole downstream cycle silently ran on
+    stale signals. Re-raising propagates to lambda/handler.py's outer
+    except -> status="ERROR" -> the SF Research branch fails, AND the
+    artifact-freshness monitor (research_signals) flags the absence.
+
+    Extracted from ``archive_writer`` to give the contract a clean unit
+    seam (config#1235); behavior is identical to the inline block.
+    """
+    try:
+        _validate_signals_payload(
+            signals_payload,
+            scanner_universe=scanner_universe,
+            tool_call_counts_by_team=tool_call_counts_by_team,
+            block_on_zero_tool_calls=False,  # soft-fail; flip after soak
+        )
+        am.write_signals_json(run_date, run_time, signals_payload)
+    except Exception as e:
+        logger.error("Failed to write signals.json: %s", e)
+        raise
 
 
 def _validate_signals_payload(
