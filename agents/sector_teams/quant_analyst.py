@@ -164,6 +164,7 @@ def run_quant_analyst(
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -618,6 +619,7 @@ from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_react_with_recovery,
     invoke_with_rate_limit_retry,
     make_tool_use_repair_hook,
