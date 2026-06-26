@@ -161,6 +161,7 @@ def _make_modern_response(
 
     generation = MagicMock()
     generation.message = message
+    generation.text = ""  # a real LangChain generation always has a str .text (SFT output_text)
 
     response = MagicMock()
     response.generations = [[generation]]
