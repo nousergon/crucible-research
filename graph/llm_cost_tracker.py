@@ -116,6 +116,8 @@ from alpha_engine_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )
+# New code uses the post-rename name directly (don't extend the deprecated shim).
+from nousergon_lib import sft
 from langchain_core.callbacks import BaseCallbackHandler
 
 from agents.prompt_loader import LoadedPrompt
@@ -165,9 +167,8 @@ _DECISION_CAPTURE_ENV_VAR = "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"
 # (config#1135): the data is irreversible. Every weekly research run that
 # completes without this capture is a permanently lost training example.
 _SFT_RAW_PREFIX = "decision_artifacts/_sft_raw"
-# Schema v1: per-call (input_messages, invocation_params, output_message,
-# output_text). Bump additively per CLAUDE.md S3 contract safety.
-_SFT_SCHEMA_VERSION = 1
+# The record schema + version live in nousergon_lib.sft (canonical v2, shared with
+# the metron_advisor producer — metron-ops#99). Frame dims go in the record's `meta`.
 # Invocation-param keys whose VALUE could carry a secret (api key, auth
 # header). Captured params are sanitized against this denylist before they
 # touch S3 — token counts and tool schemas are fine, credentials are not.
@@ -703,11 +704,12 @@ class CostTelemetryCallback(BaseCallbackHandler):
             if run_id is not None:
                 _pending_sft_inputs.set(pending)
             output_message, output_text = _serialize_output_message(response)
+            # Per-call staging row; the canonical SFT record (frame dims → meta) is
+            # built from these at flush via nousergon_lib.sft.build_record.
             frame.sft_rows.append({
-                "schema_version": _SFT_SCHEMA_VERSION,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
                 "call_seq": frame.call_count,
-                "model_name": call_model or frame.model_name,
+                "model": call_model or frame.model_name,
                 "input_messages": input_rec["input_messages"] if input_rec else None,
                 "invocation_params": input_rec["invocation_params"] if input_rec else None,
                 "output_message": output_message,
@@ -1000,19 +1002,34 @@ def _flush_sft_rows_to_s3(
         )
         return None
 
-    enriched_rows = []
-    for row in frame.sft_rows:
-        enriched = dict(row)
-        enriched["run_id"] = frame.run_id
-        enriched["agent_id"] = frame.agent_id
-        enriched["sector_team_id"] = frame.sector_team_id
-        enriched["node_name"] = frame.node_name
-        enriched["run_type"] = frame.run_type
-        enriched["prompt_id"] = frame.prompt.name if frame.prompt else None
-        enriched["prompt_version"] = frame.prompt.version if frame.prompt else None
-        enriched["prompt_version_hash"] = frame.prompt.hash if frame.prompt else None
-        enriched_rows.append(enriched)
-    body = "\n".join(json.dumps(row, default=str) for row in enriched_rows).encode("utf-8")
+    # Build the canonical SFT record (nousergon_lib.sft, schema v2) from each staged
+    # per-call row, folding the constant frame-level dimensions into `meta` so the
+    # stream stays self-describing. The shared builder is the cross-producer chokepoint
+    # (metron_advisor emits the same schema) — see metron-ops#99.
+    records = [
+        sft.build_record(
+            "crucible_research",
+            captured_at=row["captured_at"],
+            model=row["model"],
+            call_seq=row["call_seq"],
+            input_messages=row["input_messages"],
+            invocation_params=row["invocation_params"],
+            output_message=row["output_message"],
+            output_text=row["output_text"],
+            meta={
+                "run_id": frame.run_id,
+                "agent_id": frame.agent_id,
+                "sector_team_id": frame.sector_team_id,
+                "node_name": frame.node_name,
+                "run_type": frame.run_type,
+                "prompt_id": frame.prompt.name if frame.prompt else None,
+                "prompt_version": frame.prompt.version if frame.prompt else None,
+                "prompt_version_hash": frame.prompt.hash if frame.prompt else None,
+            },
+        )
+        for row in frame.sft_rows
+    ]
+    body = sft.to_jsonl_bytes(records)
 
     s3_key = _build_sft_raw_s3_key(
         capture_dt=frame.enter_time,
