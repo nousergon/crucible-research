@@ -38,29 +38,41 @@ from __future__ import annotations
 import json
 import logging
 import re
-import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
-
-
-def _new_judge_run_id() -> str:
-    """Mint a fresh UUID for a judge batch invocation.
-
-    Production paths generate one of these at the start of a batch and
-    propagate it to every RubricEvalArtifact emitted by that batch.
-    Solo / replay / smoke callers get a fresh UUID per call.
-
-    UUIDv4 chosen over UUIDv7 for readability — the path already
-    encodes the date as the partition prefix, so embedding a timestamp
-    in the UUID itself is redundant.
-    """
-    return str(uuid.uuid4())
 
 import boto3
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from alpha_engine_lib.decision_capture import DecisionArtifact
+from alpha_engine_lib.eval_artifacts import (
+    eval_artifact_key,
+    eval_latest_key,
+    new_eval_run_id,
+)
+
+
+def _new_judge_run_id() -> str:
+    """Mint a fresh judge_run_id for a judge batch invocation.
+
+    Production paths generate one of these at the start of a batch and
+    propagate it to every RubricEvalArtifact emitted by that batch.
+    Solo / replay / smoke callers get a fresh id per call.
+
+    Delegates to ``alpha_engine_lib.eval_artifacts.new_eval_run_id``
+    (config#793 canonical-layout swap) — returns a ``YYMMDDHHMM``
+    structured-timestamp string (sortable, human-readable) rather than
+    the legacy UUIDv4. The timestamp encoding lets operators see when a
+    batch ran straight from the S3 path listing, and lexicographic sort
+    across the flat ``_eval/`` prefix yields chronological order without
+    a date sub-partition.
+
+    Same-minute collisions are by design (production cron cadence makes
+    them effectively impossible); see the lib docstring. Tests inject
+    explicit ``judge_run_id`` strings where determinism is needed.
+    """
+    return new_eval_run_id()
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
 from agents.prompt_loader import LoadedPrompt, load_prompt
@@ -812,7 +824,81 @@ def _capture_date_from_s3_key(judged_artifact_s3_key: str | None) -> str | None:
     return f"{y}-{m}-{d}"
 
 
+def _eval_basename(
+    *, judged_agent_id: str, run_id: str, judge_model: str,
+) -> str:
+    """Per-file basename for one eval artifact inside a judge batch.
+
+    ``{judged_agent_id}.{run_id}.{judge_model}.json`` — the same triple
+    that disambiguated artifacts in the legacy nested layout, now carried
+    as the multi-file basename under the lib's flat ``{run_id}_{basename}``
+    convention. The ``judge_model`` segment lets Haiku-tier and
+    Sonnet-tier evals of the same judged artifact coexist without
+    clobbering each other within one batch.
+    """
+    return f"{judged_agent_id}.{run_id}.{judge_model}.json"
+
+
 def build_eval_s3_key(
+    *,
+    judged_agent_id: str,
+    run_id: str,
+    judge_run_id: str,
+    judge_model: str,
+    timestamp: Optional[datetime] = None,  # noqa: ARG001 — see below
+    prefix: str = DEFAULT_EVAL_PREFIX,
+) -> str:
+    """Build the canonical S3 key for an eval artifact.
+
+    **Canonical ``alpha_engine_lib.eval_artifacts`` layout (config#793
+    swap, supersedes the 2026-05-08 Option B nested partition):**
+
+    Path shape (flat — no ``{date}/`` sub-partition)::
+
+        {prefix}{judge_run_id}_{judged_agent_id}.{run_id}.{judge_model}.json
+
+    Delegates the key format to
+    ``alpha_engine_lib.eval_artifacts.eval_artifact_key`` (single source
+    of truth — we do NOT hand-roll the format). The eval-judge pipeline
+    is a *multi-file-per-run* consumer: one judge batch mints one
+    ``judge_run_id`` (now a ``YYMMDDHHMM`` structured timestamp from
+    ``new_eval_run_id``, formerly a UUID) and emits one artifact per
+    (judged_agent_id, run_id, judge_model). The lib's
+    ``{run_id}_{basename}`` form keeps every file from one batch grouped
+    by the shared ``judge_run_id`` prefix in path listings — the
+    flat-layout equivalent of the legacy nested
+    ``{date}/{judge_run_id}/`` directory.
+
+    Because the ``judge_run_id`` is a UTC timestamp, lexicographic sort
+    across the flat ``_eval/`` prefix yields chronological order with no
+    date partition needed. Operators query one batch's outputs via
+    ``aws s3 ls _eval/ | grep {judge_run_id}`` (or
+    ``--starting-token``); capture-date queries are still served by the
+    manifest layer at ``_eval_by_capture/{capture_date}/manifest.json``.
+
+    ``timestamp`` is accepted for backward-compatible call signatures but
+    is no longer used to build the key — the date now lives inside the
+    timestamp-encoded ``judge_run_id``. Legacy nested keys (produced
+    before this swap) are still readable via :func:`build_legacy_eval_s3_key`
+    and the tolerant manifest scanner.
+
+    ``prefix`` lets ``judge_only`` mode redirect outputs to an isolated
+    path so test runs don't pollute prod observability.
+    """
+    if not judge_run_id:
+        raise ValueError(
+            "build_eval_s3_key requires judge_run_id (canonical eval_artifacts "
+            "layout). Generate one per judge batch invocation via "
+            "_new_judge_run_id() and pass it to every RubricEvalArtifact "
+            "construction in that batch."
+        )
+    basename = _eval_basename(
+        judged_agent_id=judged_agent_id, run_id=run_id, judge_model=judge_model,
+    )
+    return eval_artifact_key(prefix, judge_run_id, basename=basename)
+
+
+def build_legacy_eval_s3_key(
     *,
     judged_agent_id: str,
     run_id: str,
@@ -821,49 +907,20 @@ def build_eval_s3_key(
     timestamp: Optional[datetime] = None,
     prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
-    """Build the canonical S3 key for an eval artifact.
+    """Build the *legacy* nested Option B key (pre-config#793 swap).
 
-    **Institutional production-grade partition (Option B, ROADMAP P1
-    closure 2026-05-08):**
+    Path shape::
 
-    Path shape:
-      ``{prefix}{judge_run_date}/{judge_run_id}/
-        {judged_agent_id}.{judged_run_id}.{judge_model}.json``
+        {prefix}{judge_run_date}/{judge_run_id}/
+          {judged_agent_id}.{run_id}.{judge_model}.json
 
-    The eval artifact is treated as a first-class entity owned by the
-    eval-judge batch invocation that produced it (the canonical pattern
-    in LangSmith / Langfuse / Helicone-class systems). Each batch gets
-    a fresh ``judge_run_id`` (UUID) so all artifacts emitted by one
-    batch cluster under a single directory and are queryable as a group
-    via ``aws s3 ls _eval/{date}/{judge_run_id}/``.
-
-    Capture-date queries ("show me all evals of artifacts captured on
-    day X") are served by a separate manifest layer at
-    ``_eval_by_capture/{capture_date}/manifest.json`` (PR 2 of the
-    Option B arc). The judged artifact's S3 key remains as a
-    foreign-key field on the artifact for direct lookup.
-
-    The date partition is the artifact's emission timestamp (UTC).
-    Within a single batch, all artifacts share the same ``judge_run_id``;
-    if the batch crosses UTC midnight, the directory listing for that
-    judge_run_id will straddle two date prefixes — but
-    ``aws s3 ls --recursive --include "*{judge_run_id}*"`` still
-    returns the full batch as a single logical group because the
-    ``judge_run_id`` is in the path.
-
-    The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
-    of the same judged artifact coexist without clobbering each other.
-
-    ``prefix`` lets ``judge_only`` mode redirect outputs to an isolated
-    path so test runs don't pollute prod observability. Must end in
-    ``/``.
+    Retained for backward-compatibility readers and tests — months of
+    historical eval artifacts already live at this layout and are NOT
+    backfilled (see config#793 migration discipline). New writes use the
+    canonical flat layout via :func:`build_eval_s3_key`.
     """
     if not judge_run_id:
-        raise ValueError(
-            "build_eval_s3_key requires judge_run_id (Option B partition). "
-            "Generate one UUID per judge batch invocation and pass it to "
-            "every RubricEvalArtifact construction in that batch."
-        )
+        raise ValueError("build_legacy_eval_s3_key requires judge_run_id.")
     ts = timestamp or datetime.now(timezone.utc)
     date_partition = ts.strftime("%Y-%m-%d")
     return (
@@ -878,34 +935,35 @@ def persist_eval_artifact(
     s3_client: Any = None,
     bucket: str = S3_BUCKET,
     prefix: str = DEFAULT_EVAL_PREFIX,
+    update_latest: bool = True,
 ) -> str:
-    """Write an eval artifact to S3 and return the S3 key.
+    """Write an eval artifact to S3 and return the (dated) S3 key.
 
-    Uses the canonical ``decision_artifacts/_eval/...`` path by default.
-    Hard-fails on S3 errors (per ``feedback_no_silent_fails``) — callers
-    should handle the exception explicitly if running in best-effort
-    mode.
+    Writes under the canonical flat ``alpha_engine_lib.eval_artifacts``
+    layout (config#793) and, when ``update_latest`` is True, mirrors a
+    ``latest.json`` operator-UX sidecar pointing at the just-written key
+    (``eval_latest_key``). The dated key remains the forensic source of
+    truth; the sidecar is a convenience pointer the lib's
+    ``load_latest_eval_artifact`` reader resolves.
 
-    ``prefix`` lets ``judge_only`` mode persist to an isolated path.
-    Must end in ``/`` and is forwarded to ``build_eval_s3_key``.
+    Hard-fails on the primary artifact write (per
+    ``feedback_no_silent_fails``). The sidecar mirror is best-effort:
+    a sidecar write failure is logged but does NOT fail the artifact
+    write — the dated artifact is the durable record, the sidecar a
+    rebuildable pointer.
+
+    ``prefix`` lets ``judge_only`` mode persist to an isolated path and
+    is forwarded to ``build_eval_s3_key`` / ``eval_latest_key``.
 
     The ``s3_client`` parameter accepts an injected client for tests;
     production passes None and the helper builds the default client.
     """
     s3 = s3_client or boto3.client("s3")
-    # Partition by judge_run_id (Option B institutional pattern,
-    # ROADMAP closure 2026-05-08). The judge_run_id is constant across
-    # all artifacts emitted by one batch invocation — operators query
-    # batch outputs as a single group via
-    # ``aws s3 ls _eval/{date}/{judge_run_id}/``. Capture-date queries
-    # are served by the manifest layer at _eval_by_capture/.
-    artifact_ts = datetime.fromisoformat(artifact.timestamp.replace("Z", "+00:00"))
     key = build_eval_s3_key(
         judged_agent_id=artifact.judged_agent_id,
         run_id=artifact.run_id,
         judge_run_id=artifact.judge_run_id,
         judge_model=artifact.judge_model,
-        timestamp=artifact_ts,
         prefix=prefix,
     )
     body = artifact.model_dump_json(indent=2).encode("utf-8")
@@ -915,4 +973,29 @@ def persist_eval_artifact(
         artifact.judged_agent_id, artifact.rubric_id,
         artifact.judge_model, key,
     )
+    if update_latest:
+        # Operator-UX sidecar mirror. Best-effort: the dated artifact is
+        # the durable record; the sidecar is a rebuildable single-fetch
+        # pointer consumed by alpha_engine_lib.load_latest_eval_artifact.
+        sidecar_key = eval_latest_key(prefix)
+        sidecar_body = json.dumps(
+            {
+                "artifact_key": key,
+                "judge_run_id": artifact.judge_run_id,
+                "judged_agent_id": artifact.judged_agent_id,
+                "run_id": artifact.run_id,
+                "judge_model": artifact.judge_model,
+                "timestamp": artifact.timestamp,
+            },
+            indent=2,
+        ).encode("utf-8")
+        try:
+            s3.put_object(Bucket=bucket, Key=sidecar_key, Body=sidecar_body)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[eval_judge] latest sidecar mirror failed at s3://%s/%s — "
+                "dated artifact %s is the durable record; sidecar is "
+                "rebuildable",
+                bucket, sidecar_key, key, exc_info=True,
+            )
     return key

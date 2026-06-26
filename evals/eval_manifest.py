@@ -1,11 +1,22 @@
 """
 Capture-date manifest aggregator (Option B PR 2).
 
-Eval artifacts under ``decision_artifacts/_eval/{judge_run_date}/
-{judge_run_id}/...`` are partitioned by judge run for batch cohesion
-(institutional pattern — see PR 1 of the Option B arc). The judged
-artifact's capture date lives in ``judged_artifact_s3_key`` as a
-foreign-key field, NOT in the eval path.
+Eval artifacts live under ``decision_artifacts/_eval/`` in one of two
+layouts (config#793 dual-layout tolerance):
+
+* **Canonical flat** (current writes) —
+  ``_eval/{YYMMDDHHMM}_{judged_agent_id}.{run_id}.{judge_model}.json``
+  per the ``alpha_engine_lib.eval_artifacts`` convention. The
+  timestamp-encoded ``judge_run_id`` groups one batch's files by shared
+  prefix; no date sub-partition.
+* **Legacy nested** (pre-config#793, NOT backfilled) —
+  ``_eval/{judge_run_date}/{judge_run_id}/
+  {judged_agent_id}.{run_id}.{judge_model}.json`` from the 2026-05-08
+  Option B partition arc. Months of historical forensic artifacts live
+  here; the scanner reads them too so the swap strands nothing.
+
+In both layouts the judged artifact's capture date lives in
+``judged_artifact_s3_key`` as a foreign-key field, NOT in the eval path.
 
 Operator queries by capture date ("show me all evals for the 5/9
 captures") therefore need an index layer. This module builds that
@@ -46,6 +57,10 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from alpha_engine_lib.eval_artifacts import (
+    EVAL_LATEST_FILENAME as DEFAULT_LATEST_FILENAME,
+)
 
 # Make ``evals``, ``graph`` etc. importable when invoked as
 # `python evals/eval_manifest.py` from the repo root.
@@ -101,25 +116,91 @@ def _capture_date_from_s3_key(judged_artifact_s3_key: str | None) -> str | None:
 # ── Eval scan ───────────────────────────────────────────────────────────
 
 
+_CANONICAL_FLAT_RE = __import__("re").compile(
+    r"^(\d{10})_.+\.json$",
+)
+"""Match the canonical flat eval_artifacts basename (config#793),
+i.e. the key tail AFTER the ``_eval/`` prefix:
+``{YYMMDDHHMM}_{basename}.json``. The 10-digit timestamp run_id is the
+lib's ``new_eval_run_id`` shape; the ``_`` separator is the lib's
+multi-file-per-run grouping prefix. Matched against the prefix-stripped
+relative key (which must contain no further ``/``)."""
+
+
 def _list_eval_keys(
     s3_client: Any, *, bucket: str, prefix: str,
     judge_run_dates: list[str],
 ) -> list[str]:
-    """List every eval-artifact S3 key under the given judge_run_dates.
+    """List every eval-artifact S3 key, tolerant of BOTH layouts.
 
-    We scope the LIST to the dates we want rather than scanning the
-    entire ``_eval/`` prefix — the operator backfill wants a bounded
-    cost regardless of corpus age.
+    config#793 swapped new writes to the canonical flat
+    ``alpha_engine_lib.eval_artifacts`` layout
+    (``{prefix}{YYMMDDHHMM}_{basename}.json``) from the legacy nested
+    Option B layout (``{prefix}{judge_run_date}/{judge_run_id}/
+    {basename}.json``). Months of historical artifacts live at the
+    legacy layout and are NOT backfilled, so the scanner must read both:
+
+    * **Legacy nested** — scoped to the requested ``judge_run_dates``
+      (bounded cost; the date IS the path partition).
+    * **Canonical flat** — a single top-level LIST of ``{prefix}`` for
+      the flat keys. The flat keys carry no date directory, so we can't
+      date-scope the LIST; instead we filter by the timestamp-encoded
+      ``judge_run_id`` (``YYMMDDHHMM``) falling within the requested
+      window. The flat layout accumulates one entry per (agent, run,
+      model) per batch — trivial for S3 LIST even over multi-year
+      history (the lib's flat-layout rationale).
+
+    The ``latest.json`` sidecar is excluded — it's an operator-UX
+    pointer, not an eval artifact.
     """
-    keys: list[str] = []
     paginator = s3_client.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    # ── Legacy nested layout — scoped per judge_run_date ──────────────
     for d in judge_run_dates:
         date_prefix = f"{prefix}{d}/"
         for page in paginator.paginate(Bucket=bucket, Prefix=date_prefix):
             for obj in page.get("Contents", []) or []:
                 key = obj["Key"]
-                if key.endswith(".json"):
+                if key.endswith(".json") and key not in seen:
                     keys.append(key)
+                    seen.add(key)
+
+    # ── Canonical flat layout — single top-level scan, filtered by
+    #    the timestamp-encoded judge_run_id within the date window.
+    # Build the set of YYMMDD prefixes for the requested window so a
+    # flat key is kept iff its run_id's date falls inside it.
+    wanted_yymmdd = {
+        d.replace("-", "")[2:]  # "2026-05-09" -> "260509"
+        for d in judge_run_dates
+        if len(d) == 10
+    }
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []) or []:
+            key = obj["Key"]
+            if key in seen or not key.endswith(".json"):
+                continue
+            if not key.startswith(prefix):
+                continue
+            rel = key[len(prefix):]
+            # Flat keys live directly under the prefix (no further "/").
+            # Anything with a "/" is the nested legacy layout (already
+            # collected date-scoped above) or an unrelated sub-tree.
+            if "/" in rel:
+                continue
+            # latest.json sidecar — pointer, not an artifact.
+            if rel == DEFAULT_LATEST_FILENAME:
+                continue
+            m = _CANONICAL_FLAT_RE.match(rel)
+            if m is None:
+                continue
+            run_id = m.group(1)
+            if wanted_yymmdd and run_id[:6] not in wanted_yymmdd:
+                continue
+            keys.append(key)
+            seen.add(key)
+
     return keys
 
 
