@@ -152,84 +152,99 @@ class TestResolveRubricForAgent:
 
 
 class TestBuildEvalS3Key:
-    """Pins the Option B institutional partition shape (ROADMAP closure
-    2026-05-08): ``_eval/{judge_run_date}/{judge_run_id}/
-    {agent_id}.{run_id}.{judge_model}.json``. Each judge batch
-    invocation gets a fresh judge_run_id so all artifacts emitted by
-    one batch cluster under one directory."""
+    """Pins the canonical ``alpha_engine_lib.eval_artifacts`` flat layout
+    (config#793 swap): ``_eval/{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json``
+    where ``judge_run_id`` is a ``YYMMDDHHMM`` structured timestamp. The
+    multi-file-per-run grouping prefix keeps every artifact from one
+    batch grouped by the shared judge_run_id. No date sub-partition —
+    the timestamp-encoded run_id makes it redundant (lib rationale)."""
 
-    def test_canonical_path_includes_judge_run_id(self):
+    def test_canonical_flat_path_groups_on_judge_run_id(self):
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         key = build_eval_s3_key(
             judged_agent_id="sector_quant:technology",
             run_id="run-abc-123",
-            judge_run_id="batch-uuid-xyz",
+            judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
-            timestamp=ts,
         )
-        # judge_run_date / judge_run_id / agent_id.run_id.judge_model.json
+        # Flat: {prefix}{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json
         assert key == (
-            "decision_artifacts/_eval/2026-05-09/batch-uuid-xyz/"
+            "decision_artifacts/_eval/2605092230_"
             "sector_quant:technology.run-abc-123.claude-haiku-4-5.json"
         )
 
+    def test_uses_lib_helper_as_single_source_of_truth(self):
+        """The key is built by alpha_engine_lib.eval_artifacts.eval_artifact_key
+        — we do NOT hand-roll the format. Pin the equivalence so a drift
+        in either side is caught."""
+        from alpha_engine_lib.eval_artifacts import eval_artifact_key
+        from evals.judge import build_eval_s3_key, DEFAULT_EVAL_PREFIX
+        key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_run_id="2605092230",
+            judge_model="claude-haiku-4-5",
+        )
+        expected = eval_artifact_key(
+            DEFAULT_EVAL_PREFIX, "2605092230",
+            basename="ic_cio.r1.claude-haiku-4-5.json",
+        )
+        assert key == expected
+
     def test_judge_run_id_required(self):
-        """Empty string raises — production paths must mint a UUID per
+        """Empty string raises — production paths must mint a run_id per
         batch and propagate. Solo callers go through evaluate_artifact
-        which defaults a UUID; build_eval_s3_key itself is strict."""
+        which defaults one; build_eval_s3_key itself is strict."""
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         with pytest.raises(ValueError, match="judge_run_id"):
             build_eval_s3_key(
                 judged_agent_id="ic_cio", run_id="r1",
                 judge_run_id="",
-                judge_model="claude-haiku-4-5", timestamp=ts,
+                judge_model="claude-haiku-4-5",
             )
 
-    def test_default_timestamp_is_now(self):
+    def test_no_date_subpartition(self):
         from evals.judge import build_eval_s3_key
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-1",
+            judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
-        # Today's UTC date partition; we just verify shape, not exact match.
-        assert key.startswith("decision_artifacts/_eval/")
-        assert "/batch-1/ic_cio.r1.claude-haiku-4-5.json" in key
+        # Flat — the relative key under the prefix has no further "/".
+        rel = key[len("decision_artifacts/_eval/"):]
+        assert "/" not in rel
+        assert rel.startswith("2605092230_")
 
     def test_judge_model_disambiguates_two_tier(self):
         """Haiku + Sonnet of same (judge_run_id, agent_id, run_id) must
-        coexist — the judge_model segment in the filename is what keeps
+        coexist — the judge_model segment in the basename is what keeps
         the two writes from clobbering each other."""
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         haiku_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
+            judge_run_id="2605092230",
+            judge_model="claude-haiku-4-5",
         )
         sonnet_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-1",
-            judge_model="claude-sonnet-4-6", timestamp=ts,
+            judge_run_id="2605092230",
+            judge_model="claude-sonnet-4-6",
         )
         assert haiku_key != sonnet_key
         assert haiku_key.endswith(".claude-haiku-4-5.json")
         assert sonnet_key.endswith(".claude-sonnet-4-6.json")
 
-    def test_batch_cohesion_same_judge_run_id_same_directory(self):
-        """Institutional invariant: every artifact emitted by ONE batch
-        invocation lands under the SAME judge_run_id directory, even
-        across different judged_agent_ids and judged run_ids. Operator
-        query 'show me batch X's outputs' = `aws s3 ls _eval/{date}/{batch_id}/`."""
+    def test_batch_cohesion_same_judge_run_id_grouped(self):
+        """Institutional invariant carried into the flat layout: every
+        artifact emitted by ONE batch invocation shares the SAME
+        judge_run_id prefix, even across different judged_agent_ids and
+        run_ids. Operator query 'show me batch X's outputs' =
+        `aws s3 ls _eval/ | grep {judge_run_id}`."""
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         keys = [
             build_eval_s3_key(
                 judged_agent_id=aid, run_id=rid,
-                judge_run_id="batch-cohesion-test",
-                judge_model="claude-haiku-4-5", timestamp=ts,
+                judge_run_id="2605092230",
+                judge_model="claude-haiku-4-5",
             )
             for aid, rid in [
                 ("sector_quant:technology", "agent-run-1"),
@@ -237,49 +252,84 @@ class TestBuildEvalS3Key:
                 ("thesis_update:financials:CBOE", "agent-run-3"),
             ]
         ]
-        # All share the same judge_run_id directory prefix.
-        common_prefix = "decision_artifacts/_eval/2026-05-09/batch-cohesion-test/"
+        common_prefix = "decision_artifacts/_eval/2605092230_"
         for k in keys:
             assert k.startswith(common_prefix)
 
-    def test_different_batches_different_directories(self):
-        """Re-judging an artifact in a separate batch lands at a
-        DIFFERENT judge_run_id directory — preserves audit history of
-        re-runs (vs the prior shape that overwrote)."""
+    def test_different_batches_different_run_id_prefix(self):
+        """Re-judging an artifact in a separate batch lands under a
+        DIFFERENT judge_run_id prefix — preserves audit history of
+        re-runs (vs an overwrite-on-rerun shape)."""
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         original = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-original",
-            judge_model="claude-haiku-4-5", timestamp=ts,
+            judge_run_id="2605092230",
+            judge_model="claude-haiku-4-5",
         )
         rerun = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-rerun",
-            judge_model="claude-haiku-4-5", timestamp=ts,
+            judge_run_id="2605100915",
+            judge_model="claude-haiku-4-5",
         )
         assert original != rerun
-        assert "/batch-original/" in original
-        assert "/batch-rerun/" in rerun
+        assert "/2605092230_" in original
+        assert "/2605100915_" in rerun
 
     def test_prefix_override_for_judge_only_mode(self):
         """``judge_only=True`` test runs persist under a non-prod prefix."""
         from evals.judge import build_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
         prod_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
+            judge_run_id="2605092230",
+            judge_model="claude-haiku-4-5",
         )
         test_key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
-            judge_run_id="batch-1",
-            judge_model="claude-haiku-4-5", timestamp=ts,
+            judge_run_id="2605092230",
+            judge_model="claude-haiku-4-5",
             prefix="decision_artifacts/_eval_judge_only/",
         )
         assert prod_key.startswith("decision_artifacts/_eval/")
         assert test_key.startswith("decision_artifacts/_eval_judge_only/")
         assert prod_key != test_key
+
+
+class TestNewJudgeRunId:
+    """``_new_judge_run_id`` delegates to the lib's ``new_eval_run_id``
+    (config#793) — YYMMDDHHMM structured timestamp, not a UUID."""
+
+    def test_returns_yymmddhhmm_shape(self):
+        from evals.judge import _new_judge_run_id
+        rid = _new_judge_run_id()
+        assert rid.isdigit()
+        assert len(rid) == 10
+
+    def test_sortable_chronologically(self):
+        from datetime import datetime, timezone
+        from alpha_engine_lib.eval_artifacts import new_eval_run_id
+        earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc))
+        later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=timezone.utc))
+        assert earlier < later  # lexicographic = chronological
+
+
+class TestBuildLegacyEvalS3Key:
+    """Backward-compat: the legacy nested Option B key builder is retained
+    so readers/tests can reconstruct pre-config#793 historical paths."""
+
+    def test_legacy_nested_shape(self):
+        from evals.judge import build_legacy_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        key = build_legacy_eval_s3_key(
+            judged_agent_id="sector_quant:technology",
+            run_id="run-abc-123",
+            judge_run_id="batch-uuid-xyz",
+            judge_model="claude-haiku-4-5",
+            timestamp=ts,
+        )
+        assert key == (
+            "decision_artifacts/_eval/2026-05-09/batch-uuid-xyz/"
+            "sector_quant:technology.run-abc-123.claude-haiku-4-5.json"
+        )
 
 
 # ── evaluate_artifact end-to-end ──────────────────────────────────────────
@@ -656,16 +706,17 @@ def mocked_s3():
 
 
 class TestPersistEvalArtifact:
-    """Pins persistence under the Option B institutional partition
-    (ROADMAP closure 2026-05-08): judge_run_id is required on every
-    persisted artifact and is the path's batch-grouping key."""
+    """Pins persistence under the canonical flat ``eval_artifacts`` layout
+    (config#793): judge_run_id is required and is the path's
+    batch-grouping prefix; a ``latest.json`` operator-UX sidecar mirrors
+    the most-recently-written key."""
 
-    def test_writes_at_canonical_key(self, mocked_s3):
+    def test_writes_at_canonical_flat_key(self, mocked_s3):
         from evals.judge import persist_eval_artifact
 
         artifact = RubricEvalArtifact(
             run_id="run-1",
-            judge_run_id="batch-uuid-1",
+            judge_run_id="2605092230",
             timestamp="2026-05-09T22:30:00.000Z",
             judged_agent_id="sector_quant:technology",
             rubric_id="eval_rubric_sector_quant",
@@ -678,47 +729,89 @@ class TestPersistEvalArtifact:
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
 
-        # Option B path: {prefix}{judge_run_date}/{judge_run_id}/{agent_id}.{run_id}.{judge_model}.json
+        # Flat: {prefix}{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json
         assert key == (
-            "decision_artifacts/_eval/2026-05-09/batch-uuid-1/"
+            "decision_artifacts/_eval/2605092230_"
             "sector_quant:technology.run-1.claude-haiku-4-5.json"
         )
         obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=key)
         roundtrip = RubricEvalArtifact.model_validate(json.loads(obj["Body"].read()))
         assert roundtrip.judge_model == "claude-haiku-4-5"
-        assert roundtrip.judge_run_id == "batch-uuid-1"
+        assert roundtrip.judge_run_id == "2605092230"
         assert roundtrip.rubric_version == "1.0.0"
         assert len(roundtrip.dimension_scores) == 6
 
-    def test_partition_date_matches_artifact_timestamp(self, mocked_s3):
-        """Date partition is derived from the artifact's stamped
-        timestamp — replays / out-of-band evals land at the same date
-        prefix as their original."""
-        from evals.judge import persist_eval_artifact
+    def test_writes_latest_sidecar_pointing_at_artifact(self, mocked_s3):
+        """The latest.json sidecar mirrors the most-recently-written key
+        and is resolvable by the lib's load_latest_eval_artifact reader."""
+        from alpha_engine_lib.eval_artifacts import (
+            eval_latest_key, load_latest_eval_artifact,
+        )
+        from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
 
         artifact = RubricEvalArtifact(
-            run_id="run-2",
-            judge_run_id="batch-historical",
-            timestamp="2026-04-25T03:14:00.000Z",
+            run_id="run-1",
+            judge_run_id="2605092230",
+            timestamp="2026-05-09T22:30:00.000Z",
             judged_agent_id="ic_cio",
             rubric_id="eval_rubric_ic_cio",
             rubric_version="1.0.0",
-            judge_model="claude-sonnet-4-6",
+            judge_model="claude-haiku-4-5",
             dimension_scores=_make_llm_output().dimension_scores,
             overall_reasoning="x",
         )
         key = persist_eval_artifact(
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
-        assert "/2026-04-25/batch-historical/" in key
+        sidecar_key = eval_latest_key(DEFAULT_EVAL_PREFIX)
+        sidecar = json.loads(
+            mocked_s3.get_object(
+                Bucket="alpha-engine-research", Key=sidecar_key,
+            )["Body"].read()
+        )
+        assert sidecar["artifact_key"] == key
+        assert sidecar["judge_run_id"] == "2605092230"
+        # The lib reader resolves sidecar → artifact body end-to-end.
+        loaded = load_latest_eval_artifact(
+            mocked_s3, bucket="alpha-engine-research",
+            prefix=DEFAULT_EVAL_PREFIX,
+        )
+        assert loaded is not None
+        assert loaded["judged_agent_id"] == "ic_cio"
+
+    def test_update_latest_false_skips_sidecar(self, mocked_s3):
+        from alpha_engine_lib.eval_artifacts import eval_latest_key
+        from botocore.exceptions import ClientError
+        from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
+
+        artifact = RubricEvalArtifact(
+            run_id="run-1",
+            judge_run_id="2605092230",
+            timestamp="2026-05-09T22:30:00.000Z",
+            judged_agent_id="ic_cio",
+            rubric_id="eval_rubric_ic_cio",
+            rubric_version="1.0.0",
+            judge_model="claude-haiku-4-5",
+            dimension_scores=_make_llm_output().dimension_scores,
+            overall_reasoning="x",
+        )
+        persist_eval_artifact(
+            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+            update_latest=False,
+        )
+        with pytest.raises(ClientError):
+            mocked_s3.get_object(
+                Bucket="alpha-engine-research",
+                Key=eval_latest_key(DEFAULT_EVAL_PREFIX),
+            )
 
     def test_batch_cohesion_under_one_judge_run_id(self, mocked_s3):
         """Two artifacts sharing a judge_run_id land under the same
-        directory — the institutional batch-cohesion property
-        (ROADMAP closure 2026-05-08, Option B)."""
+        run_id prefix — the institutional batch-cohesion property
+        carried into the flat layout (config#793)."""
         from evals.judge import persist_eval_artifact
 
-        shared_batch = "batch-cohesion-test"
+        shared_batch = "2605092230"
         artifact_a = RubricEvalArtifact(
             run_id="run-a",
             judge_run_id=shared_batch,
@@ -747,8 +840,8 @@ class TestPersistEvalArtifact:
         key_b = persist_eval_artifact(
             artifact_b, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
-        # Same judge_run_date + judge_run_id directory; different filenames.
-        common_prefix = f"decision_artifacts/_eval/2026-05-09/{shared_batch}/"
+        # Same judge_run_id prefix; different basenames.
+        common_prefix = f"decision_artifacts/_eval/{shared_batch}_"
         assert key_a.startswith(common_prefix)
         assert key_b.startswith(common_prefix)
         assert key_a != key_b

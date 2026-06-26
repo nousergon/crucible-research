@@ -85,6 +85,59 @@ def _write_eval(
     return key
 
 
+def _write_eval_flat(
+    s3, *, judge_run_id: str,
+    judged_agent_id: str, judged_run_id: str,
+    judge_model: str = "claude-haiku-4-5",
+    capture_date: str = "2026-05-09",
+    bucket: str = "alpha-engine-research",
+    rubric_id: str = "eval_rubric_test",
+    rubric_version: str = "1.0.0",
+    judge_skip_reason: str | None = None,
+) -> str:
+    """Write a CANONICAL FLAT (config#793) eval artifact to mocked S3.
+
+    Path: ``_eval/{judge_run_id}_{agent}.{run}.{model}.json`` where
+    judge_run_id is a YYMMDDHHMM timestamp. The timestamp field is
+    derived from the run_id's date so judge_run_date extraction in the
+    manifest entry stays consistent.
+    """
+    # Derive an ISO timestamp from the YYMMDDHHMM run_id for the payload.
+    yy, mm, dd, hh, mi = (
+        judge_run_id[0:2], judge_run_id[2:4], judge_run_id[4:6],
+        judge_run_id[6:8], judge_run_id[8:10],
+    )
+    timestamp = f"20{yy}-{mm}-{dd}T{hh}:{mi}:00.000Z"
+    eval_artifact = {
+        "schema_version": 2,
+        "run_id": judged_run_id,
+        "judge_run_id": judge_run_id,
+        "timestamp": timestamp,
+        "judged_agent_id": judged_agent_id,
+        "judged_artifact_s3_key": (
+            f"decision_artifacts/{capture_date.replace('-', '/')}/"
+            f"{judged_agent_id}/{judged_run_id}.json"
+        ),
+        "rubric_id": rubric_id,
+        "rubric_version": rubric_version,
+        "judge_model": judge_model,
+        "dimension_scores": [
+            {"dimension": "d1", "score": 4, "reasoning": "ok"},
+        ],
+        "overall_reasoning": "ok",
+        "judge_skip_reason": judge_skip_reason,
+    }
+    key = (
+        f"{DEFAULT_EVAL_PREFIX}{judge_run_id}_"
+        f"{judged_agent_id}.{judged_run_id}.{judge_model}.json"
+    )
+    s3.put_object(
+        Bucket=bucket, Key=key,
+        Body=json.dumps(eval_artifact).encode(),
+    )
+    return key
+
+
 # ── Capture-date extraction ─────────────────────────────────────────────
 
 
@@ -299,6 +352,94 @@ class TestBuildManifests:
             e["judged_agent_id"] for e in manifests["2026-05-09"]["evals"]
         ]
         assert agents_in_order == ["aaa_agent", "zzz_agent"]
+
+    # ── Dual-layout tolerance (config#793) ─────────────────────────────
+
+    def test_reads_canonical_flat_layout(self, mocked_s3):
+        """New-layout artifacts (flat ``{run_id}_{basename}``) are scanned
+        and indexed by capture_date."""
+        # judge_run_id 2605091430 = 2026-05-09 14:30 UTC.
+        _write_eval_flat(
+            mocked_s3, judge_run_id="2605091430",
+            judged_agent_id="ic_cio", judged_run_id="r1",
+            capture_date="2026-05-09",
+        )
+        manifests = build_manifests(
+            s3_client=mocked_s3, bucket="alpha-engine-research",
+            judge_run_dates=["2026-05-09"],
+        )
+        assert "2026-05-09" in manifests
+        assert manifests["2026-05-09"]["eval_count"] == 1
+        entry = manifests["2026-05-09"]["evals"][0]
+        assert entry["judge_run_id"] == "2605091430"
+        assert entry["eval_s3_key"].startswith(
+            f"{DEFAULT_EVAL_PREFIX}2605091430_"
+        )
+
+    def test_reads_both_layouts_together(self, mocked_s3):
+        """A corpus mid-migration holds BOTH legacy nested and new flat
+        artifacts under _eval/. The scanner reads every one — the swap
+        strands no historical forensic data."""
+        # Legacy nested for a 5/8 capture.
+        _write_eval(
+            mocked_s3, judge_run_date="2026-05-08",
+            judge_run_id="batch-legacy-uuid", judged_agent_id="ic_cio",
+            judged_run_id="r-old", capture_date="2026-05-08",
+        )
+        # New flat for a 5/9 capture.
+        _write_eval_flat(
+            mocked_s3, judge_run_id="2605091430",
+            judged_agent_id="sector_quant:tech", judged_run_id="r-new",
+            capture_date="2026-05-09",
+        )
+        manifests = build_manifests(
+            s3_client=mocked_s3, bucket="alpha-engine-research",
+            judge_run_dates=["2026-05-08", "2026-05-09"],
+        )
+        assert set(manifests.keys()) == {"2026-05-08", "2026-05-09"}
+        assert manifests["2026-05-08"]["eval_count"] == 1
+        assert manifests["2026-05-09"]["eval_count"] == 1
+        # Legacy entry carries the UUID run_id; flat entry the timestamp.
+        assert manifests["2026-05-08"]["evals"][0]["judge_run_id"] == "batch-legacy-uuid"
+        assert manifests["2026-05-09"]["evals"][0]["judge_run_id"] == "2605091430"
+
+    def test_flat_run_id_outside_window_excluded(self, mocked_s3):
+        """A flat artifact whose timestamp-encoded run_id falls outside
+        the requested judge_run_dates window is not indexed — the scanner
+        date-filters flat keys by their run_id prefix."""
+        # run_id date 2026-05-09, but we only ask for 2026-05-10.
+        _write_eval_flat(
+            mocked_s3, judge_run_id="2605091430",
+            judged_agent_id="ic_cio", judged_run_id="r1",
+            capture_date="2026-05-09",
+        )
+        manifests = build_manifests(
+            s3_client=mocked_s3, bucket="alpha-engine-research",
+            judge_run_dates=["2026-05-10"],
+        )
+        assert manifests == {}
+
+    def test_latest_sidecar_is_not_indexed(self, mocked_s3):
+        """The operator-UX latest.json sidecar is a pointer, not an eval
+        artifact — the scanner must skip it."""
+        from alpha_engine_lib.eval_artifacts import eval_latest_key
+        _write_eval_flat(
+            mocked_s3, judge_run_id="2605091430",
+            judged_agent_id="ic_cio", judged_run_id="r1",
+            capture_date="2026-05-09",
+        )
+        # Write a sidecar alongside.
+        mocked_s3.put_object(
+            Bucket="alpha-engine-research",
+            Key=eval_latest_key(DEFAULT_EVAL_PREFIX),
+            Body=json.dumps({"artifact_key": "whatever"}).encode(),
+        )
+        manifests = build_manifests(
+            s3_client=mocked_s3, bucket="alpha-engine-research",
+            judge_run_dates=["2026-05-09"],
+        )
+        # Only the real eval indexed; sidecar excluded (no crash).
+        assert manifests["2026-05-09"]["eval_count"] == 1
 
     def test_lookback_window_default(self, mocked_s3):
         # Eval at the edge of the lookback window (10 days back) is
