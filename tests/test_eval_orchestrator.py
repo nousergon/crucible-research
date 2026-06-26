@@ -270,8 +270,10 @@ class TestEvaluateCorpus:
         # The Sonnet escalation should be for ic_cio specifically.
         sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
         assert len(sonnet_keys) == 1
-        # Option B path: agent_id is in the FILENAME (ic_cio.{run_id}.{judge_model}.json)
-        assert "/ic_cio." in sonnet_keys[0]
+        # Canonical flat path (config#793): agent_id is in the basename,
+        # preceded by the judge_run_id grouping prefix:
+        # {run_id}_ic_cio.{run_id}.{judge_model}.json
+        assert "_ic_cio." in sonnet_keys[0]
 
     def test_haiku_failure_is_contained(self, mocked_s3_with_captures):
         """LLM raising on one artifact must not halt evaluation of others."""
@@ -758,8 +760,9 @@ class TestEvaluateCorpus:
             )
 
         # Find the two ic_cio keys (Haiku + Sonnet).
-        # Option B path: agent_id is in the FILENAME (ic_cio.{run_id}.{judge_model}.json)
-        ic_cio_keys = [k for k in result["persisted_keys"] if "/ic_cio." in k]
+        # Canonical flat path (config#793): agent_id is in the basename
+        # ({run_id}_ic_cio.{run_id}.{judge_model}.json).
+        ic_cio_keys = [k for k in result["persisted_keys"] if "_ic_cio." in k]
         assert len(ic_cio_keys) == 2
         assert any(".claude-haiku-4-5.json" in k for k in ic_cio_keys)
         assert any(".claude-sonnet-4-6.json" in k for k in ic_cio_keys)

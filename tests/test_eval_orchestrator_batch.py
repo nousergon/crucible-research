@@ -617,15 +617,13 @@ class TestProcessBatchResults:
         assert degenerate_count == 0
         assert len(failed) == 0
         # The skip-marker eval is at decision_artifacts/_eval/{date}/
-        # {agent_id}/{run_id}.{judge_model}.json. Date partition is
-        # taken from the eval artifact's stamped timestamp (now-UTC at
-        # write time), not the eval_date — inherited sync-path behavior.
-        # We pin the agent_id + judge_model segments only.
-        # Option B path: agent_id is in the FILENAME, not a directory segment.
-        # Path: {prefix}{judge_run_date}/{judge_run_id}/{agent_id}.{run_id}.{judge_model}.json
+        # Canonical flat layout (config#793):
+        # {prefix}{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json
+        # where judge_run_id is a YYMMDDHHMM timestamp. We pin the
+        # agent_id + judge_model basename segments only.
         assert any(
             "/_eval/" in k
-            and "/sector_qual:technology." in k
+            and "_sector_qual:technology." in k
             and ".claude-haiku-4-5.json" in k
             for k in persisted
         )
