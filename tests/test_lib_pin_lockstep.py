@@ -1,10 +1,10 @@
 """Pin ``requirements.txt`` + ``Dockerfile`` + ``Dockerfile.alerts`` to the
-same alpha-engine-lib version.
+same nousergon-lib version.
 
-The Dockerfile strips alpha-engine-lib from ``requirements.txt`` before
-``pip install`` (see the ``grep -vE ...alpha-engine-lib`` line in the
+The Dockerfile strips nousergon-lib from ``requirements.txt`` before
+``pip install`` (see the ``grep -vE ...nousergon-lib`` line in the
 Dockerfile RUN block) and instead installs the lib via a hardcoded
-``pip install "alpha-engine-lib@vX.Y.Z"`` line ABOVE that grep. So
+``pip install "nousergon-lib@vX.Y.Z"`` line ABOVE that grep. So
 bumping ``requirements.txt`` alone does NOT propagate to the Lambda
 image — the Dockerfile's hardcoded pin wins.
 
@@ -30,11 +30,11 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _REQUIREMENTS_PIN_RE = re.compile(
-    r"alpha-engine-lib\[[^\]]*\]\s*@\s*git\+https://github\.com/nousergon/nousergon-lib@(v[0-9]+\.[0-9]+\.[0-9]+)"
+    r"nousergon-lib\[[^\]]*\]\s*@\s*git\+https://github\.com/nousergon/nousergon-lib@(v[0-9]+\.[0-9]+\.[0-9]+)"
 )
 # Dockerfile pin lives inside a quoted RUN argument.
 _DOCKERFILE_PIN_RE = re.compile(
-    r'"alpha-engine-lib\[[^\]]*\]\s*@\s*git\+https://github\.com/nousergon/nousergon-lib@(v[0-9]+\.[0-9]+\.[0-9]+)"'
+    r'"nousergon-lib\[[^\]]*\]\s*@\s*git\+https://github\.com/nousergon/nousergon-lib@(v[0-9]+\.[0-9]+\.[0-9]+)"'
 )
 
 
@@ -42,14 +42,14 @@ def _read_pin(filename: str, regex: re.Pattern[str]) -> str:
     text = (_REPO_ROOT / filename).read_text()
     match = regex.search(text)
     assert match is not None, (
-        f"could not find alpha-engine-lib pin in {filename} — pattern "
+        f"could not find nousergon-lib pin in {filename} — pattern "
         f"{regex.pattern!r} matched nothing"
     )
     return match.group(1)
 
 
 def test_requirements_and_dockerfile_pins_match():
-    """All three files must pin alpha-engine-lib to the same tag."""
+    """All three files must pin nousergon-lib to the same tag."""
     req_pin = _read_pin("requirements.txt", _REQUIREMENTS_PIN_RE)
     main_pin = _read_pin("Dockerfile", _DOCKERFILE_PIN_RE)
     alerts_pin = _read_pin("Dockerfile.alerts", _DOCKERFILE_PIN_RE)
@@ -61,7 +61,7 @@ def test_requirements_and_dockerfile_pins_match():
     }
     unique = set(pins.values())
     assert len(unique) == 1, (
-        f"alpha-engine-lib pin drift across deploy artifacts:\n"
+        f"nousergon-lib pin drift across deploy artifacts:\n"
         + "\n".join(f"  {name}: {pin}" for name, pin in pins.items())
         + "\n\nAll three must move in lockstep — bumping requirements.txt "
         f"alone does NOT propagate to the Lambda image because the Dockerfile "

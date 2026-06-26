@@ -1530,9 +1530,10 @@ class TestSftCapture:
         assert "/2026-06-20/sector_quant:tech.jsonl" in keys[0]
         assert [r["call_seq"] for r in rows] == [1, 2, 3]
         assert [r["output_text"] for r in rows] == ["out 1", "out 2", "out 3"]
-        # Frame dimensions stamped on every row.
-        assert all(r["agent_id"] == "sector_quant:tech" for r in rows)
-        assert all(r["run_id"] == "2026-06-20" for r in rows)
+        # Canonical v2: producer set, frame dimensions folded into meta on every row.
+        assert all(r["schema_version"] == 2 and r["producer"] == "crucible_research" for r in rows)
+        assert all(r["meta"]["agent_id"] == "sector_quant:tech" for r in rows)
+        assert all(r["meta"]["run_id"] == "2026-06-20" for r in rows)
 
     def test_flag_off_writes_no_sft_object(
         self, mocked_s3, capture_disabled, patched_pricing_path,
