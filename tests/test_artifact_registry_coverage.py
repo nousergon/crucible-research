@@ -63,7 +63,19 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # ARTIFACT_REGISTRY row, just this per-file PUT pin.
     "evals/control_bands.py": 1,
     "evals/eval_manifest.py": 1,
-    "evals/judge.py": 1,
+    # Two PUT sites (config#793 canonical eval_artifacts swap):
+    #   1. the dated forensic artifact at decision_artifacts/_eval/{judge_run_id}_...json
+    #      (the source of truth — pre-existing pin).
+    #   2. the best-effort latest.json operator-UX sidecar mirror at
+    #      decision_artifacts/_eval/latest.json (eval_latest_key), a rebuildable
+    #      single-fetch pointer the lib's load_latest_eval_artifact reader resolves.
+    # The sidecar write is best-effort (failure is logged, does NOT fail the
+    # artifact write) and rebuildable from the dated key, so it is NOT a
+    # load-bearing freshness-SLA artifact with a daily consumer — per-file PUT
+    # pin only, no new ARTIFACT_REGISTRY freshness row (same rationale as the
+    # cost/capture streams above; the decision_artifacts/_eval/ prefix is
+    # grandfathered in ARTIFACT_REGISTRY.yaml).
+    "evals/judge.py": 2,
     "evals/last_week_scorecard.py": 2,
     "evals/orchestrator.py": 2,
     "evals/rationale_clustering.py": 1,
