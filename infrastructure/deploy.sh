@@ -685,15 +685,15 @@ deploy_scanner() {
 
 case "$TARGET" in
   main)                  build_and_deploy_main ;;
-  alerts)                build_and_deploy_alerts ;;
+  alerts)                build_and_deploy_alerts ;;  # ci-deploy-guard: manual — alerts Lambda deployed on demand, not on every merge
   eval_judge)            deploy_eval_judge ;;
   eval_judge_batch)      deploy_eval_judge_batch ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
-  both)                  build_and_deploy_main; build_and_deploy_alerts ;;
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner ;;
+  both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner ;;  # ci-deploy-guard: manual — aggregate convenience target
   *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|both|all]"; exit 1 ;;
 esac
 
