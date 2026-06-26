@@ -1,0 +1,11 @@
+# CI-only / nightly evals dependencies — NOT part of the Lambda image.
+#
+# requirements.txt is the production Lambda manifest; anything here is for
+# the publishable evals harness only and must never be installed into the
+# deployed image. Install with:  pip install -r requirements-evals.txt
+#
+# Inspect AI — AISI-standard publishable eval harness. Wraps the
+# framework-agnostic golden-trace core (evals/golden_trace.py) as an
+# Inspect Task (evals/golden_trace_inspect.py). Run the deterministic gate
+# with:  inspect eval evals/golden_trace_inspect.py --model mockllm/model
+inspect-ai
