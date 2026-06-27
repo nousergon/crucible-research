@@ -542,6 +542,140 @@ def make_tool_use_repair_hook(*, label: str):
     return _hook
 
 
+# ── Runtime structured-output truncation detection (config#1294) ──────────────
+#
+# Root-cause guard for the truncation-bug class. When an Anthropic tool-call
+# response hits the ``max_tokens`` ceiling MID-emission, the API returns
+# ``stop_reason == "max_tokens"`` and langchain captures the PARTIAL tool
+# parameter block — a half-written JSON object — as a raw string. With
+# ``with_structured_output`` that surfaces downstream as a confusing Pydantic
+# error far from the cause (e.g. ``catalysts: Input should be a valid list …
+# input_type=str``), because the partial argument is handed to the schema as
+# an un-parseable fragment rather than the list it was meant to become.
+#
+# Before config#1294 NOTHING in the repo inspected ``stop_reason`` at runtime;
+# the only guard was a hand-estimated static budget table
+# (``tests/test_schema_max_tokens_audit.py``) which missed a real incident.
+# The SOTA fix is a RUNTIME check at this shared structured-output chokepoint:
+# after EVERY ``with_structured_output(...).invoke()`` we read the response's
+# ``stop_reason`` and, if it is ``max_tokens``, RAISE a clear, explicit error
+# AT THE ROOT CAUSE — naming the call site / schema and the token budget — so
+# the failure is diagnosed as "the model ran out of output tokens" instead of
+# masquerading as a schema-shape bug.
+#
+# Truncation is NOT a transient roll and NOT fixable by re-prompting against
+# the SAME budget, so this raises IMMEDIATELY (before the validation-retry
+# loop burns attempts re-prompting a budget that will truncate again). It is a
+# structural chokepoint guard, not a per-call-site patch: every agent / eval /
+# producer that funnels through ``invoke_structured_with_validation_retry``
+# inherits it. The cure is to raise the offending site's ``max_tokens`` (or
+# shrink the schema), which the descriptive message points the operator to.
+
+
+class StructuredOutputTruncationError(RuntimeError):
+    """A structured-output call was truncated by the ``max_tokens`` ceiling.
+
+    Raised at the shared structured-output chokepoint when an Anthropic
+    response carries ``stop_reason == "max_tokens"`` (config#1294). Carries
+    the call-site label, the schema name, and (when discoverable) the
+    ``max_tokens`` budget so the root cause is unambiguous — distinct from a
+    Pydantic ``ValidationError``, which is what this error PREVENTS the
+    truncation from masquerading as.
+    """
+
+
+# stop_reason / finish_reason values that mean "output hit the token ceiling".
+# Anthropic uses ``max_tokens``; the alias set guards against a langchain/SDK
+# reshuffle that surfaces the OpenAI-style ``length`` finish_reason instead.
+_TRUNCATION_STOP_REASONS = frozenset({"max_tokens", "length"})
+
+
+def _response_metadata_of(raw) -> dict:
+    """Best-effort ``response_metadata`` mapping from a structured-output raw.
+
+    ``with_structured_output(include_raw=True)`` puts the underlying
+    ``AIMessage`` under the ``"raw"`` key. The truncation signal lives in
+    ``AIMessage.response_metadata`` (a provider-controlled dict carrying
+    ``"stop_reason"``). Returns {} for any shape that isn't a dict-bearing
+    AIMessage so a metadata-less response can never crash the guard."""
+    md = getattr(raw, "response_metadata", None)
+    return md if isinstance(md, dict) else {}
+
+
+def _is_truncated_response(raw) -> bool:
+    """True iff the structured-output ``raw`` AIMessage was ``max_tokens``-truncated.
+
+    Reads ``raw.response_metadata['stop_reason']`` (the langchain-anthropic
+    access path confirmed in THIS codebase — see ``evals/judge.py`` and
+    ``graph/llm_cost_tracker.py``) and also tolerates a ``finish_reason``
+    alias. Case/whitespace-insensitive. False for any non-AIMessage or a
+    response with no recognizable truncation stop reason."""
+    md = _response_metadata_of(raw)
+    for key in ("stop_reason", "finish_reason"):
+        val = md.get(key)
+        if isinstance(val, str) and val.strip().lower() in _TRUNCATION_STOP_REASONS:
+            return True
+    return False
+
+
+def _max_tokens_of(raw) -> int | None:
+    """Best-effort ``max_tokens`` budget the truncated call ran under.
+
+    Not always present on the response metadata; returned for the error
+    message when discoverable so the operator knows which budget to raise.
+    Checks the request-echo shapes langchain/Anthropic may surface."""
+    md = _response_metadata_of(raw)
+    for key in ("max_tokens", "max_output_tokens"):
+        val = md.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+    return None
+
+
+def raise_if_truncated(resp: dict, *, label: str, schema_name: str | None = None) -> None:
+    """Raise ``StructuredOutputTruncationError`` iff ``resp`` was ``max_tokens``-truncated.
+
+    The runtime truncation guard (config#1294). ``resp`` is the
+    ``with_structured_output(include_raw=True)`` dict
+    (``{'raw': AIMessage, 'parsed': …, 'parsing_error': …}``). When the raw
+    response's ``stop_reason`` indicates the ``max_tokens`` ceiling was hit,
+    this raises a clear, explicit error naming the call site, schema, and
+    token budget — at the ROOT CAUSE — so the truncation is never allowed to
+    surface downstream as a confusing Pydantic shape error. No-op on a
+    non-truncated response."""
+    raw = resp.get("raw") if isinstance(resp, dict) else None
+    if not _is_truncated_response(raw):
+        return
+    budget = _max_tokens_of(raw)
+    budget_str = f"{budget}" if budget is not None else "unknown (raise the call site's max_tokens)"
+    schema_str = schema_name or "<unknown schema>"
+    raise StructuredOutputTruncationError(
+        f"[{label}] structured-output call was TRUNCATED by the max_tokens "
+        f"ceiling (stop_reason='max_tokens'): the model ran out of output "
+        f"tokens mid-tool-call, so only a PARTIAL parameter block was "
+        f"emitted. schema={schema_str}, max_tokens={budget_str}. This is the "
+        f"ROOT CAUSE — without this guard the partial argument surfaces "
+        f"downstream as a confusing Pydantic shape error (e.g. 'Input should "
+        f"be a valid list … input_type=str'). FIX: raise the max_tokens "
+        f"budget for this call site (or shrink the schema / batch size); "
+        f"re-prompting against the same budget will only truncate again."
+    )
+
+
+def _schema_name_of(structured_llm) -> str | None:
+    """Best-effort schema name bound into a ``with_structured_output`` handle.
+
+    The handle is a ``RunnableSequence``; the bound schema is not part of a
+    stable public contract, so this is purely for a friendlier error message
+    and returns None on any shape it can't introspect (the guard still fires
+    with a ``<unknown schema>`` placeholder)."""
+    for attr in ("name", "__name__"):
+        val = getattr(structured_llm, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
 # ── SOTA structured-output retry with validation feedback ─────────────────────
 
 
@@ -605,6 +739,7 @@ def invoke_structured_with_validation_retry(
     current_messages = list(messages)
     ls_metadata = ls_metadata or {}
     final_resp: dict = {}
+    schema_name = _schema_name_of(structured_llm)
 
     for attempt in range(max_retries + 1):
         attempt_label = f"{label}:attempt={attempt + 1}/{max_retries + 1}"
@@ -615,6 +750,13 @@ def invoke_structured_with_validation_retry(
             ),
             label=attempt_label,
         )
+        # Runtime truncation guard (config#1294): a max_tokens-truncated
+        # response yields a PARTIAL tool-call that would otherwise surface as
+        # a confusing Pydantic shape error below. Detect it FIRST and raise a
+        # clear root-cause error — re-prompting against the same budget would
+        # only truncate again, so this raises immediately instead of burning
+        # a validation-retry attempt.
+        raise_if_truncated(final_resp, label=label, schema_name=schema_name)
         parsing_error = final_resp.get("parsing_error")
         if parsing_error is None:
             if attempt > 0:
