@@ -3400,6 +3400,11 @@ def archive_writer(state: ResearchState) -> dict:
     # ranking. While OFF (the default) this branch is inert and the live
     # signals.json written above is byte-identical to today — the gate is wired
     # but does NOT touch the live path.
+    # Captures the LIVE neutralized score per ticker when the cutover gate is on,
+    # so archive_writer can persist it as the DUAL field on cio_evaluations
+    # (config#1187). Empty when the gate is OFF — the column then stays NULL and
+    # the forward-IC metric reads raw==neutralized (identity).
+    _live_neutralized_scores: dict[str, float] = {}
     try:
         from scoring.neutralization_shadow import run_neutralization_shadow
         _shadow_artifact = run_neutralization_shadow(
@@ -3418,8 +3423,14 @@ def archive_writer(state: ResearchState) -> dict:
             )
             _live_signals = signals_payload.get("signals", {})
             for _t, _row in _shadow_artifact.get("tickers", {}).items():
-                if _t in _live_signals and _row.get("neutralized_score") is not None:
-                    _live_signals[_t]["score"] = _row["neutralized_score"]
+                _neu = _row.get("neutralized_score")
+                if _t in _live_signals and _neu is not None:
+                    _live_signals[_t]["score"] = _neu
+                    # Record the live neutralized score for DUAL persistence to
+                    # research.db (config#1187) — keyed by ticker, joined into
+                    # cio_eval_records below so the backtester can measure the
+                    # LIVE neutralized score's realized forward efficacy.
+                    _live_neutralized_scores[_t] = _neu
             am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
         logger.warning("[archive_writer] neutralization shadow skipped: %s", e)
@@ -3634,6 +3645,13 @@ def archive_writer(state: ResearchState) -> dict:
             "combined_score": thesis.get("weighted_base"),
             "macro_shift": thesis.get("macro_shift"),
             "final_score": thesis.get("final_score"),
+            # DUAL field (config#1187): the LIVE #1142 neutralized composite
+            # score for this ticker, persisted alongside the raw final_score so
+            # the backtester can join the LIVE neutralized ranking to realized
+            # forward 21d alpha. Populated only when NEUTRALIZATION_LIVE_ENABLED
+            # rewrote this ticker's score above; NULL otherwise (gate off / no
+            # exposures / name absent from the neutralized cross-section).
+            "neutralized_final_score": _live_neutralized_scores.get(ticker),
             "cio_decision": decision.get("decision", "UNKNOWN"),
             "cio_conviction": decision.get("conviction"),
             "cio_rank": decision.get("rank"),
