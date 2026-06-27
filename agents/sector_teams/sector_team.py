@@ -32,6 +32,7 @@ from agents.sector_teams.team_config import (
 from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     _is_rate_limit_error,
     invoke_with_rate_limit_retry,
 )
@@ -551,6 +552,7 @@ def _update_thesis_for_held_stock(
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 

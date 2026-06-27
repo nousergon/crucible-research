@@ -56,9 +56,13 @@ _ALLOWLIST: dict[str, set[int]] = {
     # then 580 → 565 by retiring the now-dead _LEGACY_REGIME_COERCION
     # shim (2026-05-29, Phase 1B follow-on): the macro prompts dropped
     # the 4-class vocabulary so the coercion was unreachable on the LLM
-    # path; net -15 lines above the critic call.
+    # path; net -15 lines above the critic call,
+    # then 565 → 567 by the per-call LLM request-timeout guard (config#687,
+    # 2026-06-26): added the SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS import
+    # (+1 line near the top) and a default_request_timeout= kwarg on the
+    # strategic-tier ChatAnthropic above the critic (+1 line); net +2.
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {565},
+    "agents/macro_agent.py": {567},
 }
 
 

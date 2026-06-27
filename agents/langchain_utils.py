@@ -95,6 +95,45 @@ def _resolve_deadline_seconds() -> float:
 # Resolved at import; tests monkeypatch this attribute directly.
 RATE_LIMIT_RETRY_DEADLINE_SECONDS: float = _resolve_deadline_seconds()
 
+
+# ── Per-call request timeout (config#687) ─────────────────────────────────
+# Per-``.invoke()`` HTTP request ceiling on every agent ChatAnthropic
+# instance. langchain-anthropic / the underlying SDK default to NO request
+# timeout, so a single silently-stalled call (a hung connection that never
+# 429s and never streams) can consume the entire sector-team budget — the
+# root cause of the 2026-06-06 sector-team tail-latency blowout (#687).
+#
+# This bounds ONE HTTP request, distinct from the two retry layers above:
+#   - ``max_retries`` (SECTOR_TEAM_LLM_MAX_RETRIES) = SDK-level attempt count
+#   - ``RATE_LIMIT_RETRY_DEADLINE_SECONDS`` = outer 429-aware wall-clock
+# A hung call that is neither retried (not a 429) nor progressing was
+# previously bounded by neither; this is the missing per-request guard.
+#
+# 300 s default — generous vs the 5-9 min full-run norm for a single
+# agent call, tight enough that one stuck call can't eat the ~15-min
+# (now larger) budget. Env override ``SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS``
+# (clamped 30 s .. 20 min so a typo can't disable or unbound it). A timed-out
+# request raises, which ``invoke_with_rate_limit_retry`` treats as a
+# non-429 error and propagates — turning a hang into a fast, visible failure
+# instead of a deadline-consuming stall.
+def _resolve_request_timeout_seconds() -> float:
+    raw = os.environ.get("SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS")
+    if raw is None:
+        return 300.0
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "[llm_request_timeout] SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS=%r "
+            "unparseable — using 300 s default", raw,
+        )
+        return 300.0
+    return max(30.0, min(secs, 20.0 * 60.0))
+
+
+# Resolved at import; tests monkeypatch this attribute directly.
+SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS: float = _resolve_request_timeout_seconds()
+
 # Backoff between 429 attempts. Capped so a single sleep can't blow
 # past the deadline check granularity; the deadline (not an attempt
 # count) is what bounds the loop.
