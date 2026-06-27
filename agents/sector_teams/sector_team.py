@@ -22,7 +22,7 @@ from langchain_core.messages import HumanMessage
 
 from config import (
     ANTHROPIC_API_KEY,
-    MAX_TOKENS_PER_STOCK,
+    MAX_TOKENS_STRATEGIC,
     PER_STOCK_MODEL,
     TEAM_PICKS_PER_RUN,
 )
@@ -523,15 +523,34 @@ def _update_thesis_for_held_stock(
     # research_graph during cost-tracker setup).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-    # Held-stock thesis update is a single-ticker output (bull_case +
-    # bear_case + score updates), fits the per-stock tier. Was hardcoded
-    # at 500 before consolidation 2026-05-03; MAX_TOKENS_PER_STOCK=800
-    # gives 60% more headroom for verbose triggers without altering
-    # other call sites.
+    # Held-stock thesis update is single-ticker BUT narrative-rich: the
+    # HeldThesisUpdateLLMOutput schema emits bull_case + bear_case (prose
+    # paragraphs) + a `catalysts` list[str] + scores — synthesis-class
+    # output, NOT a small accept/reject. It was mis-tiered onto the
+    # per-stock budget (MAX_TOKENS_PER_STOCK=800) it shared with the
+    # genuinely-tiny QuantAcceptanceVerdict call. On the 2026-06-27
+    # Saturday SF run MDT's update overran 800: the structured-output
+    # tool-call truncated mid-`<parameter name="catalysts">`, so
+    # langchain captured a partial string where a list was required
+    # (`catalysts: Input should be a valid list ... input_type=str`).
+    # That is the 2026-05-03 qual_analyst truncation-bug class (PR
+    # #100/#102) recurring at a different, under-budgeted call site, and
+    # because 800 truncates DETERMINISTICALLY all three all-agents-strict
+    # parse re-rolls failed identically and the run hard-failed.
+    #
+    # Root-cause fix: reclassify this site onto MAX_TOKENS_STRATEGIC —
+    # the tier every other narrative-rich structured output already uses
+    # (qual/quant analyst extraction, macro, ic_cio, evals.judge). The
+    # MODEL is unchanged (still PER_STOCK_MODEL / Haiku); only the output
+    # ceiling moves, so nothing about WHAT the thesis says changes — the
+    # model simply finishes emitting the same output instead of being cut
+    # off. Cost-neutral: Anthropic bills emitted tokens, not the cap.
+    # The schema_max_tokens_audit row for this site is corrected in
+    # lockstep so the static guard would now catch a regression to 800.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=MAX_TOKENS_PER_STOCK,
+        max_tokens=MAX_TOKENS_STRATEGIC,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
