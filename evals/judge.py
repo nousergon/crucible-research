@@ -75,6 +75,7 @@ def _new_judge_run_id() -> str:
     return new_eval_run_id()
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
+from agents.langchain_utils import raise_if_truncated
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from evals.judge_models import TAG_BY_LOGICAL, request_model_for
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
@@ -723,6 +724,16 @@ def evaluate_artifact(
             resp = structured_llm.invoke(
                 [HumanMessage(content=rendered)],
                 config={"metadata": loaded_prompt.langsmith_metadata()},
+            )
+            # Runtime truncation guard (config#1294): the judge invokes
+            # with_structured_output directly (not via the shared
+            # invoke_structured_with_validation_retry chokepoint), so it
+            # reuses that chokepoint's exported guard to fail at the root
+            # cause on a max_tokens-truncated response instead of letting the
+            # partial tool-call surface as a confusing Pydantic shape error.
+            raise_if_truncated(
+                resp, label=f"eval_judge:{artifact.agent_id}",
+                schema_name="RubricEvalLLMOutput",
             )
             parsed = resp.get("parsed")
             parsing_error = resp.get("parsing_error")
