@@ -800,6 +800,15 @@ def fetch_data(state: ResearchState) -> dict:
             continue
         if df is not None and len(df) >= 20:
             indicators = compute_technical_indicators(df)
+            # compute_technical_indicators returns None for insufficient
+            # history (df.empty or len(df) < 30). The >= 20 guard above admits
+            # tickers with 20–29 rows, so honour the documented Optional[dict]
+            # sentinel and skip them — same "insufficient data → not technically
+            # scored" outcome as the <20-row tickers and as data/scanner.py /
+            # local/time_scanner.py. Without this, a 20–29-row ticker makes
+            # compute_technical_score(None) crash on indicators.get(...).
+            if indicators is None:
+                continue
             ts = compute_technical_score(indicators, sector=sector_map.get(ticker))
             technical_scores[ticker] = {**indicators, "technical_score": ts}
 
