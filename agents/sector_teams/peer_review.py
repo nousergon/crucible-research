@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
+    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_with_rate_limit_retry,
 )
 
@@ -80,6 +81,7 @@ def run_peer_review(
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_PER_STOCK,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -391,6 +393,7 @@ def _joint_finalization(
         anthropic_api_key=llm.anthropic_api_key,
         max_tokens=MAX_TOKENS_STRATEGIC,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=llm.callbacks,
     )
 
