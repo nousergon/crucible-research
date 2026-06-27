@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -328,6 +328,7 @@ CREATE TABLE IF NOT EXISTS cio_evaluations (
     combined_score      REAL,
     macro_shift         REAL,
     final_score         REAL,
+    neutralized_final_score REAL,  -- live #1142 neutralized composite; see migration 20
     cio_decision        TEXT NOT NULL,
     cio_conviction      INTEGER,
     cio_rank            INTEGER,
@@ -502,6 +503,22 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          """),
     19: ("Add team_inputs ledger (scanner→team input-assignment audit)",
          "SELECT 1"),  # Table created via CREATE IF NOT EXISTS above
+    # Live #1142 neutralization forward-efficacy measurement (config#1187).
+    # The live score-neutralization cutover (2026-06-22, gated by
+    # NEUTRALIZATION_LIVE_ENABLED) rewrites ONLY signals.json's per-ticker
+    # score and was NEVER persisted to research.db — so every graded
+    # forward-IC metric read the RAW composite (final_score) and could not
+    # measure whether the live neutralization actually recovered forward
+    # selection edge. This adds a DUAL field alongside the raw final_score:
+    # cio_evaluations now persists BOTH final_score (raw CIO composite) AND
+    # neutralized_final_score (the live neutralized ranking score). archive_writer
+    # populates it at the exact point neutralization is applied. NULL when the
+    # live gate is OFF, when no neutralized score exists for the ticker, or on
+    # rows persisted before this migration — the backtester's graded
+    # neutralization_live_forward_ic producer treats NULL as "no live
+    # neutralized score recorded" (raw==neutralized, identity).
+    20: ("Add neutralized_final_score to cio_evaluations for live #1142 forward efficacy",
+         "ALTER TABLE cio_evaluations ADD COLUMN neutralized_final_score REAL"),
 }
 
 
