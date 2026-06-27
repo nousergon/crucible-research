@@ -921,6 +921,13 @@ class ArchiveManager:
         JSON-serialized for SQLite storage. Legacy decisions (prompts
         < v1.3.0) come through with rule_tags=None and persist as NULL,
         which downstream analytics interpret as "untagged legacy."
+
+        ``neutralized_final_score`` (config#1187) is the live #1142 neutralized
+        composite ranking score — the DUAL of the raw ``final_score``. It is
+        populated only when the live neutralization gate (NEUTRALIZATION_LIVE_ENABLED)
+        is on AND a neutralized score exists for the ticker; otherwise NULL.
+        Persisting it here (rather than only rewriting signals.json) is what lets
+        the backtester join the LIVE neutralized score to realized forward alpha.
         """
         if not self.db_conn:
             return
@@ -930,14 +937,16 @@ class ArchiveManager:
             self.db_conn.execute(
                 """INSERT OR REPLACE INTO cio_evaluations
                    (ticker, eval_date, team_id, quant_score, qual_score,
-                    combined_score, macro_shift, final_score, cio_decision,
+                    combined_score, macro_shift, final_score,
+                    neutralized_final_score, cio_decision,
                     cio_conviction, cio_rank, rationale, rule_tags)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("team_id"),
                     e.get("quant_score"), e.get("qual_score"),
                     e.get("combined_score"), e.get("macro_shift"),
-                    e.get("final_score"), e["cio_decision"],
+                    e.get("final_score"), e.get("neutralized_final_score"),
+                    e["cio_decision"],
                     e.get("cio_conviction"), e.get("cio_rank"),
                     e.get("rationale"), tags_json,
                 ),
