@@ -103,9 +103,19 @@ _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
         "sector_team._update_thesis_for_held_stock",
         "HeldThesisUpdateLLMOutput",
-        800,  # MAX_TOKENS_PER_STOCK
-        600,  # bull_case + bear_case + catalysts + scores + envelope
-        "Single-ticker held thesis update — narrative-only fields",
+        10752,  # MAX_TOKENS_STRATEGIC — reclassified off per-stock 2026-06-27
+        1600,  # bull_case (~250) + bear_case (~250) + catalysts list[str]
+        # (~8 × ~40 = 320) + conviction/score fields (~50) + tool-call
+        # parameter-tag envelope (~150), all at the verbose end ≈ ~1020;
+        # rounded up to 1600 for headroom.
+        "Single-ticker but narrative-rich: bull_case + bear_case prose + a "
+        "catalysts list + scores. The prior 800 (MAX_TOKENS_PER_STOCK) "
+        "under-counted this at est=600 and truncated MDT's tool-call "
+        "mid-`catalysts` on the 2026-06-27 SF run (string-not-list "
+        "all-agents-strict hard-fail) — same class as the 2026-05-03 "
+        "qual_analyst truncation. Now on MAX_TOKENS_STRATEGIC, the tier the "
+        "other narrative-rich extraction outputs use; estimate raised above "
+        "800 so a regression back to the per-stock tier fails this audit.",
     ),
 ]
 

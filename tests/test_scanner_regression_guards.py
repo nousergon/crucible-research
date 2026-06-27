@@ -334,3 +334,99 @@ def test_scanner_failure_mode_liquidity_gate_regression_caught():
         f"{MIN_AVG_VOLUME:,.0f}) should produce 20 liquidity_pass=0 "
         f"records; got {liq_fail_count}. Gate broken."
     )
+
+
+# ── fetch_data short-history None-guard regression (Saturday SF 2026-06-27) ──
+#
+# The Saturday pipeline FAILED on 2026-06-27 in research_graph.fetch_data with
+# ``AttributeError: 'NoneType' object has no attribute 'get'`` at
+# scoring/technical.py compute_technical_score(indicators=None).
+#
+# Root cause — a threshold mismatch between two contracts:
+#   * compute_technical_indicators(df) returns None when ``df.empty or
+#     len(df) < 30`` (documented "Returns None if insufficient data").
+#   * fetch_data's OHLCV scoring loop admitted any ticker with
+#     ``df is not None and len(df) >= 20`` and passed the result straight
+#     into compute_technical_score WITHOUT checking for the None sentinel.
+# So any ticker whose ArcticDB history has 20–29 rows produced
+# ``indicators=None`` → crash. The two other production callers
+# (data/scanner.py, local/time_scanner.py) already skip on None; fetch_data
+# was the lone unguarded call site.
+
+
+def test_compute_technical_indicators_returns_none_for_20_to_29_rows():
+    """Pin the trigger window: compute_technical_indicators returns None for a
+    df with 20–29 rows (admitted by fetch_data's ``len(df) >= 20`` guard but
+    below the indicator's own ``len(df) < 30`` floor). If this contract ever
+    changes, the fetch_data guard rationale must be revisited."""
+    from data.fetchers.price_fetcher import compute_technical_indicators
+
+    for n in (20, 25, 29):
+        df = _synthetic_ohlcv(n=n)
+        assert len(df) == n
+        assert compute_technical_indicators(df) is None, (
+            f"compute_technical_indicators({n}-row df) must return the "
+            "documented None sentinel (insufficient data)."
+        )
+    # And it must produce a real dict once there are >= 30 rows.
+    assert compute_technical_indicators(_synthetic_ohlcv(n=30)) is not None
+
+
+def test_fetch_data_skips_short_history_tickers_without_crashing():
+    """Reproduce fetch_data's OHLCV scoring loop with the REAL
+    compute_technical_indicators + compute_technical_score over a price_data
+    map that mixes a 25-row (None-yielding) ticker and a 100-row ticker.
+
+    The short-history ticker must be SKIPPED (not technically scored) and the
+    loop must not raise — exactly the production behaviour fixed in
+    graph/research_graph.py. A regression here means the pre-2026-06-27 crash
+    is back."""
+    from data.fetchers.price_fetcher import compute_technical_indicators
+    from scoring.technical import compute_technical_score
+
+    price_data = {
+        "SHORTY": _synthetic_ohlcv(n=25, seed=1),   # < 30 rows → indicators None
+        "GOODY": _synthetic_ohlcv(n=100, seed=2),   # full history → scored
+    }
+    sector_map = {"SHORTY": "Technology", "GOODY": "Technology"}
+    technical_scores: dict = {}
+
+    # Mirror graph/research_graph.py::fetch_data exactly, including the guard.
+    for ticker, df in price_data.items():
+        if ticker in technical_scores:
+            continue
+        if df is not None and len(df) >= 20:
+            indicators = compute_technical_indicators(df)
+            if indicators is None:
+                continue
+            ts = compute_technical_score(indicators, sector=sector_map.get(ticker))
+            technical_scores[ticker] = {**indicators, "technical_score": ts}
+
+    assert "SHORTY" not in technical_scores, (
+        "20–29-row ticker must be skipped, not technically scored."
+    )
+    assert "GOODY" in technical_scores
+    assert isinstance(technical_scores["GOODY"]["technical_score"], float)
+
+
+def test_fetch_data_call_site_guards_none_indicators():
+    """Source anchor: the fetch_data OHLCV scoring loop must guard the None
+    return of compute_technical_indicators before calling
+    compute_technical_score. Pins the literal fix so a future refactor cannot
+    silently reintroduce the 2026-06-27 crash."""
+    import inspect
+
+    import graph.research_graph as rg
+
+    src = inspect.getsource(rg.fetch_data)
+    idx_compute = src.find("compute_technical_indicators(df)")
+    assert idx_compute != -1, "expected compute_technical_indicators(df) call in fetch_data"
+    # Between computing indicators and scoring them, there must be a None guard.
+    tail = src[idx_compute:]
+    idx_guard = tail.find("if indicators is None")
+    idx_score = tail.find("compute_technical_score(indicators")
+    assert idx_guard != -1 and idx_score != -1 and idx_guard < idx_score, (
+        "fetch_data must skip (continue) when compute_technical_indicators "
+        "returns None BEFORE passing indicators to compute_technical_score — "
+        "otherwise a 20–29-row-history ticker crashes the research pipeline."
+    )
