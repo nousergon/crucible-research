@@ -194,6 +194,20 @@ def _capture_if_enabled(
 
     run_id = derive_run_id(state)
 
+    # Provenance stamps for the run=code+data reproducibility contract (1a
+    # schema add → 1b wire-in, #781). Both are best-effort and degrade to a
+    # None/sentinel stamp rather than crashing the capture (feedback_no_
+    # silent_fails — record the gap, don't drop the artifact):
+    #   * data_snapshot_id — the ArcticDB price-data version threaded from
+    #     fetch_data (``fetch_price_data(return_snapshot_id=True)``). Absent
+    #     from state on resume paths that skip fetch_data → "unknown".
+    #   * code_sha — the deployed image's git SHA, stamped at build time into
+    #     ``ALPHA_ENGINE_CODE_SHA`` (GHA ``--build-arg GIT_SHA`` → Dockerfile
+    #     ENV; manual ``deploy.sh`` stamps ``git rev-parse HEAD``). None when
+    #     the env var is unset (local/dev) — the artifact still lands.
+    data_snapshot_id = state.get("data_snapshot_id") or "unknown"
+    code_sha = os.environ.get("ALPHA_ENGINE_CODE_SHA") or None
+
     # Try the populated metadata path first — this is the canonical
     # post-PR-2 source of truth. The tracker handles model-name resolution,
     # token aggregation across multi-call decisions (ReAct + peer review),
@@ -234,6 +248,8 @@ def _capture_if_enabled(
             input_data_snapshot=input_data_snapshot,
             input_data_summary=input_data_summary,
             agent_output=agent_output,
+            code_sha=code_sha,
+            data_snapshot_id=data_snapshot_id,
         )
     except DecisionCaptureWriteError:
         # Hard-fail per design — capture failures must be loud so the
@@ -313,6 +329,14 @@ class ResearchState(TypedDict, total=False):
 
     # ── Data (loaded in fetch_data; single-writer, no parallel update) ───────
     price_data: Annotated[dict[str, Any], take_last]
+    # Run-level ArcticDB price-data snapshot version (``VersionedItem.version``)
+    # surfaced by ``fetch_price_data(return_snapshot_id=True)``. Threaded into
+    # every captured DecisionArtifact's ``data_snapshot_id`` so each research
+    # decision records exactly which immutable price snapshot it was computed
+    # on (reproducibility/provenance — L4567 sub-item 1b / #781). ``"unknown"``
+    # when no versioned read occurred (full feature-store coverage, or a
+    # non-versioned backend). Set once in fetch_data; never mutated downstream.
+    data_snapshot_id: Annotated[str, take_last]
     technical_scores: Annotated[dict[str, dict], take_last]
     # Per-name Barra factor loadings (momentum_20d_zscore / return_60d_zscore /
     # beta_60d_zscore / size_zscore) read from the feature store's
@@ -785,7 +809,19 @@ def fetch_data(state: ResearchState) -> dict:
             "[fetch_data] ArcticDB: reading %d tickers (skipped %d from feature store)",
             len(ohlcv_tickers), len(all_tickers) - len(ohlcv_tickers),
         )
-    price_data = fetch_price_data(ohlcv_tickers, period="3mo") if ohlcv_tickers else {}
+    if ohlcv_tickers:
+        # return_snapshot_id surfaces the ArcticDB ``VersionedItem.version``
+        # the read resolved to → threaded into decision capture as the
+        # run-level ``data_snapshot_id`` provenance stamp (L4567 1b / #781).
+        price_data, data_snapshot_id = fetch_price_data(
+            ohlcv_tickers, period="3mo", return_snapshot_id=True,
+        )
+    else:
+        # No OHLCV read this run (full feature-store coverage) → no ArcticDB
+        # version to stamp. Record the sentinel, never crash on absence.
+        from data.fetchers.price_fetcher import DATA_SNAPSHOT_ID_UNKNOWN
+        price_data, data_snapshot_id = {}, DATA_SNAPSHOT_ID_UNKNOWN
+    logger.info("[fetch_data] data_snapshot_id=%s", data_snapshot_id)
 
     # Fill current_price from ArcticDB for tickers that had feature store data
     # but no daily_closes price
@@ -967,6 +1003,7 @@ def fetch_data(state: ResearchState) -> dict:
         "agent_input_set": agent_input_set,
         "sector_map": sector_map,
         "price_data": price_data,
+        "data_snapshot_id": data_snapshot_id,
         "technical_scores": technical_scores,
         "factor_loadings": factor_loadings,
         "macro_data": macro_data,

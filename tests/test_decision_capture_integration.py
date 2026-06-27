@@ -514,6 +514,83 @@ class TestCaptureHardFailsOnS3Error:
                 )
 
 
+# ── Provenance stamps: data_snapshot_id + code_sha threading (1b / #781) ──
+
+
+class TestProvenanceStampThreading:
+    """``_capture_if_enabled`` must thread the run-level ``data_snapshot_id``
+    (from state, surfaced by the price fetcher) and ``code_sha`` (from the
+    ``ALPHA_ENGINE_CODE_SHA`` deploy env var) into ``capture_decision`` so
+    every captured DecisionArtifact records the immutable data snapshot +
+    code revision it was computed on (L4567 1b)."""
+
+    def _invoke_capturing_kwargs(self, monkeypatch, state, env=None):
+        """Run ``_capture_if_enabled`` with capture enabled and
+        ``capture_decision`` stubbed; return the kwargs it was called with."""
+        from unittest.mock import patch
+
+        monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
+        monkeypatch.delenv("ALPHA_ENGINE_CODE_SHA", raising=False)
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+
+        import graph.research_graph as rg
+
+        captured = {}
+
+        def _fake_capture(**kwargs):
+            captured.update(kwargs)
+            return "s3://fake/key"
+
+        with patch.object(rg, "capture_decision", _fake_capture):
+            rg._capture_if_enabled(
+                state=state,
+                agent_id="sector_quant:technology",
+                model_name_key="sector_team",
+                input_data_snapshot={"x": 1},
+                input_data_summary="test",
+                agent_output={"ranked_picks": []},
+            )
+        return captured
+
+    def test_data_snapshot_id_threaded_from_state(self, monkeypatch):
+        captured = self._invoke_capturing_kwargs(
+            monkeypatch,
+            {"run_date": "2026-04-29", "data_snapshot_id": "7"},
+        )
+        assert captured["data_snapshot_id"] == "7"
+
+    def test_code_sha_threaded_from_env(self, monkeypatch):
+        captured = self._invoke_capturing_kwargs(
+            monkeypatch,
+            {"run_date": "2026-04-29", "data_snapshot_id": "7"},
+            env={"ALPHA_ENGINE_CODE_SHA": "abc123def"},
+        )
+        assert captured["code_sha"] == "abc123def"
+
+    def test_missing_data_snapshot_id_records_unknown(self, monkeypatch):
+        # State without the stamp (e.g. resume path skipping fetch_data) →
+        # "unknown" sentinel, no crash, artifact still written.
+        captured = self._invoke_capturing_kwargs(
+            monkeypatch, {"run_date": "2026-04-29"},
+        )
+        assert captured["data_snapshot_id"] == "unknown"
+
+    def test_missing_code_sha_is_none(self, monkeypatch):
+        # No deploy env var (local/dev) → code_sha None, artifact still lands.
+        captured = self._invoke_capturing_kwargs(
+            monkeypatch, {"run_date": "2026-04-29", "data_snapshot_id": "7"},
+        )
+        assert captured["code_sha"] is None
+
+    def test_unknown_string_in_state_passed_through(self, monkeypatch):
+        captured = self._invoke_capturing_kwargs(
+            monkeypatch,
+            {"run_date": "2026-04-29", "data_snapshot_id": "unknown"},
+        )
+        assert captured["data_snapshot_id"] == "unknown"
+
+
 # ── Run-id derivation ─────────────────────────────────────────────────────
 
 

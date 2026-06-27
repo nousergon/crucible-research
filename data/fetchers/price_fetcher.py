@@ -55,6 +55,50 @@ class PriceFetchError(RuntimeError):
     pass
 
 
+# Sentinel recorded as the run-level ``data_snapshot_id`` when no versioned
+# ArcticDB read produced a usable ``VersionedItem.version`` (e.g. every
+# ticker missing, or the read object doesn't expose ``.version`` because a
+# non-versioned backend / mock returned the frame). Provenance must never
+# crash the run — an absent version records ``"unknown"`` instead (per
+# ``feedback_no_silent_fails``: visible, not silent).
+DATA_SNAPSHOT_ID_UNKNOWN = "unknown"
+
+
+def _extract_arctic_version(res: object) -> Optional[int]:
+    """Best-effort read of ArcticDB ``VersionedItem.version``.
+
+    Returns the integer snapshot version when the read returned a
+    ``VersionedItem`` exposing a numeric ``.version`` (the monotonic
+    per-symbol write generation), else ``None`` — for non-versioned reads,
+    mocks, or any shape that doesn't carry the attribute. Never raises:
+    provenance extraction is strictly best-effort and must not sink a read.
+    """
+    version = getattr(res, "version", None)
+    if isinstance(version, bool):  # bool is an int subclass — reject it
+        return None
+    if isinstance(version, int):
+        return version
+    return None
+
+
+def _summarize_snapshot_id(versions: list[int]) -> str:
+    """Collapse the per-ticker ArcticDB versions seen this read into one
+    run-level ``data_snapshot_id`` string.
+
+    ArcticDB versions are per-symbol monotonic ints, so there is no single
+    global snapshot number across a multi-ticker read. We record the MAX
+    version observed (the newest write generation any read touched) as the
+    run-level provenance stamp — sufficient to pin the as-of data state for
+    the reproducibility contract, and stable for the common case where the
+    universe is written in lockstep by alpha-engine-data's daily append.
+
+    Returns ``DATA_SNAPSHOT_ID_UNKNOWN`` when no versioned read was seen.
+    """
+    if not versions:
+        return DATA_SNAPSHOT_ID_UNKNOWN
+    return str(max(versions))
+
+
 def _connect_arctic() -> object:
     """Open the ArcticDB ``universe`` library. Hard-fail on unreachable.
 
@@ -89,7 +133,12 @@ def _period_to_lookback_days(period: str) -> int:
     return mapping[period]
 
 
-def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+def fetch_price_data(
+    tickers: list[str],
+    period: str = "1y",
+    *,
+    return_snapshot_id: bool = False,
+):
     """
     Read daily OHLCV for a list of tickers from ArcticDB.
 
@@ -97,6 +146,16 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     ``DatetimeIndex``. Individual tickers missing from ArcticDB are dropped
     from the result and logged as warnings; per-ticker error rate above
     ``_MAX_ERR_RATE`` (5%) raises ``PriceFetchError``.
+
+    When ``return_snapshot_id=True`` the return becomes a
+    ``(result, data_snapshot_id)`` tuple, where ``data_snapshot_id`` is the
+    run-level ArcticDB version stamp surfaced from each read's
+    ``VersionedItem.version`` (the immutable price-data snapshot the read
+    resolved to — the provenance anchor for the decision-capture
+    reproducibility contract, L4567 sub-item 1b / issue #781). It is
+    ``"unknown"`` when no read produced a usable version (every ticker
+    missing, or a non-versioned / mocked backend). Default ``False`` keeps
+    the legacy ``dict``-only contract for existing callers.
 
     Failure semantics (Phase 7c):
       * ArcticDB unreachable → ``PriceFetchError`` (hard fail).
@@ -107,7 +166,7 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     fallbacks masked data bugs for days at a time pre-Phase-7a.
     """
     if not tickers:
-        return {}
+        return ({}, DATA_SNAPSHOT_ID_UNKNOWN) if return_snapshot_id else {}
 
     lookback_days = _period_to_lookback_days(period)
     end_ts = pd.Timestamp.utcnow().normalize().tz_localize(None)
@@ -116,6 +175,7 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     universe_lib = _connect_arctic()
 
     result: dict[str, pd.DataFrame] = {}
+    versions: list[int] = []
     n_err = 0
     for ticker in tickers:
         try:
@@ -133,6 +193,12 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
             logger.warning("ArcticDB returned empty frame for %s", ticker)
             n_err += 1
             continue
+        # Surface the immutable snapshot version this read resolved to (1b).
+        # Best-effort: a read that doesn't expose ``.version`` (mock /
+        # non-versioned backend) just doesn't contribute to the stamp.
+        _v = _extract_arctic_version(res)
+        if _v is not None:
+            versions.append(_v)
         # Defensive dedup — matches predictor Phase 7a (removable after 1-2
         # clean Saturday cycles confirm the upstream write path is clean).
         df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -145,10 +211,15 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
             f"{_MAX_ERR_RATE:.0%} threshold ({n_err} failed of {len(tickers)})"
         )
 
+    data_snapshot_id = _summarize_snapshot_id(versions)
     logger.info(
-        "[data_source=arcticdb] Loaded %d/%d ticker prices (%d missing, window %s → %s)",
+        "[data_source=arcticdb] Loaded %d/%d ticker prices (%d missing, "
+        "window %s → %s, data_snapshot_id=%s)",
         len(result), len(tickers), n_err, start_ts.date(), end_ts.date(),
+        data_snapshot_id,
     )
+    if return_snapshot_id:
+        return result, data_snapshot_id
     return result
 
 
