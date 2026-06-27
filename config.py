@@ -14,6 +14,10 @@ from typing import Optional
 import yaml
 
 from alpha_engine_lib.secrets import get_secret
+# Canonical experiment-package config resolver (alpha-engine-config#1157): the
+# lift of the five inline _find_config / load_config / config_loader copies into
+# the shared-lib chokepoint. _find_config below delegates to it.
+from alpha_engine_lib.config import resolve_experiment_config
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
     """Locate real config yaml across local, CI, and Lambda environments.
@@ -30,33 +34,29 @@ def _find_config(filename: str, subdir: str = "research") -> Path:
       3. $GITHUB_WORKSPACE/alpha-engine-config/<subdir>/<file>  (CI checkout)
       4. <repo>/config/<file>                       (Lambda image: deploy.sh
          stages config repo yaml into this directory, subdir-flattened)
+
+    Delegates to the canonical nousergon-lib resolver
+    (resolve_experiment_config, alpha-engine-config#1157). Research's two
+    repo-specific traits are preserved: the ``$GITHUB_WORKSPACE/
+    alpha-engine-config`` CI root (``github_workspace=True``) and the
+    subdir-flattened Lambda repo-local fallback ``<repo>/config/<file>``
+    (``repo_local_fallback``).
     """
-    ws = os.environ.get("GITHUB_WORKSPACE")
-    # Experiment package (HARNESS_EXPERIMENT_CLASSIFICATION.md §3): beliefs load
-    # from experiments/$ALPHA_ENGINE_EXPERIMENT_ID/<subdir>/ ahead of the legacy
-    # top-level <subdir>/ (kept as fallback through the transition).
-    exp = os.environ.get("ALPHA_ENGINE_EXPERIMENT_ID", "reference")
-    roots = [
-        Path.home() / "alpha-engine-config",
-        Path(__file__).parent.parent / "alpha-engine-config",
-    ]
-    if ws:
-        roots.append(Path(ws) / "alpha-engine-config")
-    search = [r / "experiments" / exp / subdir / filename for r in roots]
-    search += [r / subdir / filename for r in roots]
-    # Lambda image: deploy.sh flattens <subdir>/<file> → config/<file>
-    search.append(Path(__file__).parent / "config" / filename)
-    found = next((p for p in search if p.exists()), None)
-    if found is None:
-        raise FileNotFoundError(
+    return resolve_experiment_config(
+        subdir,
+        filename,
+        repo_root=Path(__file__).parent,
+        repo_local_fallback=Path(__file__).parent / "config" / filename,
+        github_workspace=True,
+        resolve=True,
+        error_message=(
             f"Could not locate {subdir}/{filename} in alpha-engine-config. "
-            f"Searched: {[str(p) for p in search]}. "
             "Checkout the config repo at ~/alpha-engine-config (local) or "
             "$GITHUB_WORKSPACE/alpha-engine-config (CI). On Lambda the "
             "config is staged into config/ by deploy.sh; if this is firing "
             "in Lambda the image was built without the staging step."
-        )
-    return found
+        ),
+    )
 
 _CONFIG_PATH = _find_config("universe.yaml")
 _SCORING_CFG_PATH = _find_config("scoring.yaml")
