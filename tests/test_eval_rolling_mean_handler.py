@@ -179,3 +179,29 @@ class TestHandler:
         assert result["status"] == "OK"
         assert result["agent_quality"]["status"] == "ERROR"
         assert "S3 list failed" in result["agent_quality"]["error"]
+
+    # ── producer leaderboard wiring (config#1223 B4 / #1221 shared scorer) ────
+    def test_producer_leaderboard_surfaced_in_result(self, handler_mod):
+        # The producer champion/challenger leaderboard scorer now runs here as a
+        # fail-soft post-step; its status + key + cohort count ride in the result.
+        lb = {"status": "ok", "key": "research/producer_leaderboard/2026-06-22.json",
+              "leaderboard": {"n_dates": 3, "champion": "agentic_sector_teams"}}
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()), \
+             patch("scoring.leaderboard_producers.build_producer_leaderboard", return_value=lb):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["producer_leaderboard"]["status"] == "ok"
+        assert result["producer_leaderboard"]["key"] == "research/producer_leaderboard/2026-06-22.json"
+        assert result["producer_leaderboard"]["n_dates"] == 3
+
+    def test_producer_leaderboard_failure_is_non_fatal(self, handler_mod):
+        # A leaderboard failure MUST NOT change the primary rolling-mean status.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()), \
+             patch("scoring.leaderboard_producers.build_producer_leaderboard",
+                   side_effect=RuntimeError("closes read failed")):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["producer_leaderboard"]["status"] == "ERROR"
+        assert "closes read failed" in result["producer_leaderboard"]["error"]
