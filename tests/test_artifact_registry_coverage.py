@@ -91,6 +91,18 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "local/sync_db.py": 1,
     "scoring/factor_scoring.py": 2,
     "scripts/aggregate_costs.py": 1,
+    # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
+    # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site
+    # (_write_leaderboard) used by both build_scanner_leaderboard →
+    # scanner/leaderboard/{date}.json and build_producer_leaderboard →
+    # research/producer_leaderboard/{date}.json. OBSERVE-ONLY + fail-soft +
+    # cohort-gated — never read by live trading; the consumer (operator review /
+    # the cutover gates in OBSERVATION_REGISTRY) graceful-degrades when the
+    # artifact is absent or ships n_dates=0, so absence is NOT a silent failure
+    # and needs no daily freshness-SLA alarm. Per-file PUT pin only, no
+    # ARTIFACT_REGISTRY row (same rationale as build_agent_quality + the shadow
+    # substrates this scores).
+    "scoring/leaderboard_producers.py": 1,
     # Report-card agent_quality.json (config#1149). Weekly report-card input;
     # the evaluator consumer (crucible-evaluator#59) graceful-degrades each
     # component to a visible N/A-MISSING-INPUT when absent — so absence is NOT
