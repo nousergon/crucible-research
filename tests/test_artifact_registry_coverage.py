@@ -90,6 +90,16 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "health_status.py": 2,
     "local/sync_db.py": 1,
     "scoring/factor_scoring.py": 2,
+    # Full-universe scoreboard (scanner/universe/{date}/universe.json + latest).
+    # SECONDARY observability for the dashboard's filterable ~900-name universe
+    # board — built fail-soft off archive_writer (a write failure WARNs, never
+    # fails the research run; signals.json is the primary deliverable). The
+    # dashboard consumer graceful-degrades when the artifact is absent, so
+    # absence is NOT a silent failure and needs no daily freshness-SLA alarm.
+    # Per-file PUT pin only; ARTIFACT_REGISTRY row deferred until the producer
+    # has run once (register-with-or-after-producer). Single PUT site (loop over
+    # dated + latest keys in write_universe_board_to_s3).
+    "scoring/universe_board.py": 1,
     "scripts/aggregate_costs.py": 1,
     # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
     # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site
