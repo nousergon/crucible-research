@@ -200,10 +200,54 @@ def handler(event, context):
         )
         agent_quality = {"status": "ERROR", "error": str(exc)}
 
+    # Research producer champion/challenger leaderboard (config#1223 B4 / #1221
+    # shared scorer). FOURTH secondary observability aggregation hung off this
+    # weekly eval Lambda — same trigger point + S3 access as agent_quality above,
+    # and the moment realized forward (21d) outcomes for prior cohorts have
+    # matured in alpha-engine-data's daily_closes. The shared scorer
+    # (scoring/leaderboard_producers.build_producer_leaderboard) reads every
+    # signals_shadow/ cohort + the live signals/ champion, joins to realized 21d
+    # returns, scores each producer vs the champion on realized rank-IC +
+    # long-only top-N alpha (date-clustered), and writes
+    # research/producer_leaderboard/{date}.json. OBSERVE-ONLY + fail-soft: the
+    # function never raises (returns a status dict); the extra try/except is
+    # belt-and-suspenders so the rolling mean (primary deliverable) is never sunk.
+    # Recorded as a `producer_leaderboard` field per [[feedback_no_silent_fails]].
+    # Cohort-gated: ships n_dates=0 + null metrics until forward cohorts mature
+    # (full closure of #1221/#1223 = the OBSERVATION_REGISTRY cohort gate).
+    producer_leaderboard: dict
+    try:
+        import boto3
+
+        from alpha_engine_lib.dates import now_dual
+        from scoring.leaderboard_producers import build_producer_leaderboard
+
+        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        dual = now_dual()
+        s3c = boto3.client("s3")
+        lb = build_producer_leaderboard(s3c, bucket, dual.trading_day)
+        producer_leaderboard = {
+            "status": lb.get("status"),
+            "key": lb.get("key"),
+            "n_dates": (lb.get("leaderboard") or {}).get("n_dates"),
+        }
+        logger.info(
+            "[eval_rolling_mean_handler] producer_leaderboard status=%s key=%s n_dates=%s",
+            producer_leaderboard["status"], producer_leaderboard["key"],
+            producer_leaderboard["n_dates"],
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
+        logger.warning(
+            "[eval_rolling_mean_handler] producer_leaderboard build failed (non-fatal): %s",
+            exc,
+        )
+        producer_leaderboard = {"status": "ERROR", "error": str(exc)}
+
     return {
         "status": status,
         "summary": summary,
         "calibration": calibration,
         "control_bands": control_bands,
         "agent_quality": agent_quality,
+        "producer_leaderboard": producer_leaderboard,
     }

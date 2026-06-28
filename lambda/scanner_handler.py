@@ -223,6 +223,32 @@ def handler(event, context):
         )
         shadow_error = str(exc)
 
+    # ── Champion/challenger leaderboard SCORER (config#1221) ─────────────────
+    # Same trigger point + S3 access as the shadow emission above, and the moment
+    # the fresh candidates_shadow/ for this cohort exists. The shared scorer
+    # (scoring/leaderboard_producers.build_scanner_leaderboard) reads ALL cohort
+    # dates' shadow candidates, joins to realized 21d outcomes, scores every spec
+    # vs the champion, and writes scanner/leaderboard/{run_date}.json. OBSERVE-ONLY
+    # + fail-soft: the function itself never raises (returns a status dict); the
+    # extra try/except is belt-and-suspenders so the live candidates.json (primary
+    # deliverable, already written) can never be downgraded. Cohort-gated: on a
+    # fresh date with no matured 21d outcome it ships n_dates=0 with null metrics.
+    leaderboard_status: dict = {}
+    try:
+        from scoring.leaderboard_producers import build_scanner_leaderboard
+
+        leaderboard_status = build_scanner_leaderboard(s3_client, bucket, run_date)
+        logger.info(
+            "[scanner_handler] scanner leaderboard status=%s key=%s",
+            leaderboard_status.get("status"), leaderboard_status.get("key"),
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only, live unaffected
+        logger.warning(
+            "[scanner_handler] scanner leaderboard build failed "
+            "(non-fatal, live unaffected): %s", exc,
+        )
+        leaderboard_status = {"status": "error", "error": str(exc)}
+
     summary = {
         "s3_key": s3_key,
         "scanner_tickers": len(artifact["scanner_tickers"]),
@@ -234,6 +260,10 @@ def handler(event, context):
         ),
         "baseline_missing": artifact["stats"]["baseline_missing"],
         "shadows": shadows,
+        "leaderboard": {
+            "status": leaderboard_status.get("status"),
+            "key": leaderboard_status.get("key"),
+        },
     }
     if shadow_error:
         summary["shadow_error"] = shadow_error
