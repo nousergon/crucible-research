@@ -3607,6 +3607,26 @@ def archive_writer(state: ResearchState) -> dict:
             len(scanner_evals),
         )
 
+    # ── Universe scoreboard (full-universe dashboard artifact) ──────────────
+    # Publish the ~900-name scoreboard (attractiveness + 6 pillar scores + raw
+    # valuation/fundamental/technical metrics + sector + country + gate flags)
+    # for the dashboard's filterable universe board. SECONDARY observability
+    # hung off the research run's primary deliverable (signals.json): per the
+    # no-silent-fails secondary-observability exception, fail SOFT here with a
+    # WARN — a board-write failure must NOT fail the research run. The WARN is
+    # the recording surface (the builder raises on genuinely broken inputs, so
+    # this can't mask a real fault as success).
+    try:
+        from scoring.universe_board import compute_and_write_universe_board
+
+        ub_key = compute_and_write_universe_board(run_date, scanner_evals)
+        logger.info("[archive_writer] universe scoreboard written → %s", ub_key)
+    except Exception as e:
+        logger.warning(
+            "[archive_writer] universe scoreboard write FAILED (non-fatal, "
+            "dashboard visibility only — signals.json unaffected): %s", e,
+        )
+
     # Log quant top-10 per team + final recommendations.
     #
     # Per-sub-signal scores (rsi/macd/ma50/ma200/momentum) are computed
