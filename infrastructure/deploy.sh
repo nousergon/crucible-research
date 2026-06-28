@@ -677,6 +677,12 @@ deploy_aggregate_costs() {
 # (5min) covers feature-store read + ~903-ticker quant filter pass +
 # S3 write — pure compute, no LLM calls. Memory 1024MB matches the
 # main runner's headroom for ArcticDB / pandas working sets.
+#
+# The CloudWatch metric filter + degradation alarm on the scanner's
+# candidate count (config#785) is codified in
+# infrastructure/setup_scanner_alarm.sh (idempotent; run once after the
+# first scanner deploy creates the log group), mirroring the eval alarms
+# in setup_eval_alarms.sh.
 deploy_scanner() {
   _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
 }

@@ -247,4 +247,15 @@ def handler(event, context):
         summary["new_vs_prior_cycle"],
         summary["dropped_vs_prior_cycle"],
     )
+    # Dedicated metric marker line (config#785). The human-readable summary
+    # line above embeds the count inside a ``scanner_tickers=<n>`` token,
+    # which a CloudWatch Logs metric filter cannot split on ``=`` to extract
+    # the integer. This line emits the count as a standalone whitespace-
+    # delimited numeric token so the space-delimited filter pattern in
+    # infrastructure/setup_scanner_alarm.sh can bind it as the metricValue.
+    # Format is locked by tests/test_scanner_metric_marker.py.
+    logger.info(
+        "[scanner_handler] METRIC scanner_tickers_count %d",
+        summary["scanner_tickers"],
+    )
     return {"status": "OK", "summary": summary, "date": run_date}
