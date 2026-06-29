@@ -158,9 +158,20 @@ build_and_deploy_main() {
     fi
   fi
 
+  # Stamp the image with the source commit SHA so the decision-capture
+  # provenance stamp (DecisionArtifact.code_sha, L4567 sub-item 1b / #781)
+  # records the exact deployed code. CI passes $GITHUB_SHA; a manual deploy
+  # falls back to `git rev-parse HEAD`. Empty (not "unknown") when neither
+  # resolves, so graph/research_graph.py's `os.environ.get(...) or None` read
+  # records None rather than a misleading literal. Mirrors the predictor wire-in.
+  GIT_SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo '')}"
+  echo "  Stamping image with GIT_SHA=${GIT_SHA:-<unset>}"
+
   # Build Docker image
   echo "Building Docker image..."
-  docker build --platform linux/amd64 --provenance=false -t "$FUNCTION_MAIN:latest" .
+  docker build --platform linux/amd64 --provenance=false \
+    --build-arg "GIT_SHA=${GIT_SHA}" \
+    -t "$FUNCTION_MAIN:latest" .
 
   # Only remove staged files — never touch a local dev checkout that
   # already had real files present.
