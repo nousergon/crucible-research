@@ -43,6 +43,7 @@ _PRODUCTION_PROMPTS = (
     "peer_review_per_ticker_rationale",
     "sector_team_thesis_update",
     "ic_cio_evaluation",
+    "ic_cio_critic",
 )
 
 # Patterns that indicate the prompt is re-stating its output schema in prose

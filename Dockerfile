@@ -55,6 +55,12 @@ COPY data/ ${LAMBDA_TASK_ROOT}/data/
 COPY emailer/ ${LAMBDA_TASK_ROOT}/emailer/
 COPY graph/ ${LAMBDA_TASK_ROOT}/graph/
 COPY scoring/ ${LAMBDA_TASK_ROOT}/scoring/
+# producers/ holds the challenger research producers (no_agent_quant /
+# single_agent_quant) the handler runs as the observe-mode shadow (config#1223
+# / #1403). Omitting this COPY is exactly why signals_shadow/ was empty: the
+# handler's `from producers.runner import run_challengers` raised
+# ModuleNotFoundError every Saturday, swallowed by the best-effort guard.
+COPY producers/ ${LAMBDA_TASK_ROOT}/producers/
 COPY thesis/ ${LAMBDA_TASK_ROOT}/thesis/
 COPY archive/ ${LAMBDA_TASK_ROOT}/archive/
 COPY evals/ ${LAMBDA_TASK_ROOT}/evals/
