@@ -564,6 +564,42 @@ def build_universe_board(
     }
 
 
+def attractiveness_from_factor_profiles(
+    factor_profiles: dict,
+    *,
+    pillar_weights: dict | None = None,
+    bucket: str | None = None,
+    s3_client: Any = None,
+) -> dict:
+    """``{ticker: {attractiveness_raw, attractiveness_score, ...}}`` computed
+    DIRECTLY from factor profiles via the SSOT ``compute_cross_sectional_attractiveness``.
+
+    The candidate-feed path (config#1400 / ARCHITECTURE §43) needs attractiveness
+    scores PRE-selection, before the full board exists — without the board's
+    classification / feature-parquet reads. This mirrors ``build_universe_board``'s
+    pillar mapping + weight normalization EXACTLY (same chokepoint), so the feed
+    ranks on byte-identical numbers to the console board. Pure/read-only.
+    """
+    from scoring.composite import _PILLAR_TO_FACTOR_KEY
+
+    if pillar_weights is None:
+        pillar_weights = _load_pillar_weights(bucket, s3_client)
+    _wt_total = sum(max(0.0, (_num(w) or 0.0)) for w in pillar_weights.values()) or 1.0
+    pillar_weights = {
+        p: round(max(0.0, (_num(pillar_weights.get(p)) or 0.0)) / _wt_total, 6)
+        for p in _PILLAR_ORDER
+    }
+    pillar_scores_by_ticker = {
+        ticker: {
+            pillar: _num(profile.get(_PILLAR_TO_FACTOR_KEY[pillar]))
+            for pillar in _PILLAR_ORDER
+        }
+        for ticker, profile in (factor_profiles or {}).items()
+        if isinstance(profile, dict)
+    }
+    return compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
+
+
 # ── S3 I/O ──────────────────────────────────────────────────────────────────
 
 def _client(s3_client: Any):
