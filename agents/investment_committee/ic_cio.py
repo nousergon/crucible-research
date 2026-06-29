@@ -11,16 +11,25 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from typing import Literal
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, ConfigDict
 
-from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY
+from config import (
+    STRATEGIC_MODEL,
+    PER_STOCK_MODEL,
+    MAX_TOKENS_STRATEGIC,
+    ANTHROPIC_API_KEY,
+)
 from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_with_rate_limit_retry,
 )
+from strict_mode import is_strict_validation_enabled
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +38,37 @@ log = logging.getLogger(__name__)
 # the legacy prompt) with no shared-template KeyError risk.
 _PROMPT_DEFAULT = "ic_cio_evaluation"
 _PROMPT_DEBLENDED = "ic_cio_evaluation_deblended"
+
+# IC critic (config#927) — a cheap Haiku reviewer that challenges the CIO's
+# advance set before finalization, mirroring the macro-agent reflection loop
+# (agents/macro_agent.run_macro_critic). Default OFF: the reflection wrapper is
+# only invoked when CIO_CRITIC_ENABLED is set, so this is an inert merge.
+_PROMPT_CRITIC = "ic_cio_critic"
+
+# IC-critic max output budget. Small structured call (action + critique +
+# flagged/drops/adds ticker lists); both MAX_TOKENS_* tiers are oversized for
+# this narrow case. A named constant (not an inline literal) so the
+# no-hardcoded-max_tokens lint stays satisfied while keeping the tight ceiling
+# that makes a runaway critic output visible.
+_CRITIC_MAX_TOKENS = 768
+
+
+class CIOCriticOutput(BaseModel):
+    """Reflection-loop critic output for the CIO selection.
+
+    The critic accepts or asks the CIO to revise its advance set before
+    finalization. ``revise`` triggers one more CIO call with the critique as
+    context; ``accept`` ends the loop. ``flagged_tickers`` / ``suggested_drops``
+    / ``suggested_adds`` are advisory — the re-run CIO is free to keep its slate.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    action: Literal["accept", "revise"]
+    critique: str = ""
+    flagged_tickers: list[str] = []
+    suggested_drops: list[str] = []
+    suggested_adds: list[str] = []
 
 
 def _compute_advance_bounds(
@@ -257,6 +297,208 @@ def run_cio(
         # Lax fallback advances only `floor` (not `cap`). When the LLM signal is
         # unusable, be conservative — don't force max-advance on broken data.
         return _fallback_selection(candidates, floor)
+
+
+def _summarize_advanced(cio_result: dict, candidates: list[dict]) -> str:
+    """One line per advanced ticker for the critic prompt (ticker · conviction · thesis)."""
+    by_ticker = {c.get("ticker"): c for c in candidates if c.get("ticker")}
+    theses = cio_result.get("entry_theses", {})
+    lines: list[str] = []
+    for t in cio_result.get("advanced_tickers", []):
+        cand = by_ticker.get(t, {})
+        thesis = theses.get(t, {})
+        conv = cand.get("conviction")
+        summary = (
+            thesis.get("thesis_summary")
+            or thesis.get("rationale")
+            or cand.get("bull_case")
+            or ""
+        )
+        lines.append(
+            f"  {t}: conviction={conv if conv is not None else 'n/a'} | "
+            f"{str(summary)[:160]}"
+        )
+    return "\n".join(lines) if lines else "  (no tickers advanced)"
+
+
+def run_cio_critic(
+    cio_result: dict,
+    candidates: list[dict],
+    macro_context: dict,
+    sector_ratings: dict,
+    api_key: Optional[str] = None,
+) -> dict:
+    """Critique the CIO's advance set with a cheap Haiku reviewer (config#927).
+
+    Mirrors ``agents.macro_agent.run_macro_critic``: structured Haiku call,
+    deadline-bounded 429 retry, strict/lax editorial-accept fallback (accepting
+    the CIO's slate is the conservative behavior when the critic is unavailable).
+
+    Returns: ``{"action": "accept"|"revise", "critique": str,
+    "flagged_tickers": list, "suggested_drops": list, "suggested_adds": list}``.
+    """
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
+    llm = ChatAnthropic(
+        model=PER_STOCK_MODEL,  # Claude Haiku 4.5 — the requested cheap critic
+        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+        max_tokens=_CRITIC_MAX_TOKENS,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+        callbacks=[get_cost_telemetry_callback()],
+    )
+
+    prompt_tmpl = load_prompt(_PROMPT_CRITIC)
+    prompt = prompt_tmpl.format(
+        market_regime=macro_context.get("market_regime", "neutral"),
+        macro_report=str(macro_context.get("macro_report", ""))[:1200],
+        n_candidates=len(candidates),
+        n_advanced=len(cio_result.get("advanced_tickers", [])),
+        advanced_summary=_summarize_advanced(cio_result, candidates),
+        sector_ratings_text="\n".join(
+            f"  {s}: {r.get('rating', 'n/a')}"
+            for s, r in sorted((sector_ratings or {}).items())
+        )
+        or "  (none)",
+    )
+
+    structured_llm = llm.with_structured_output(CIOCriticOutput)
+    try:
+        verdict: CIOCriticOutput = invoke_with_rate_limit_retry(
+            lambda: structured_llm.invoke(
+                [HumanMessage(content=prompt)],
+                config={"metadata": prompt_tmpl.langsmith_metadata()},
+            ),
+            label="cio_critic",
+        )
+        result = {
+            "action": verdict.action,
+            "critique": verdict.critique,
+            "flagged_tickers": list(verdict.flagged_tickers or []),
+            "suggested_drops": list(verdict.suggested_drops or []),
+            "suggested_adds": list(verdict.suggested_adds or []),
+        }
+        log.info(
+            "[cio_critic] action=%s flagged=%s critique=%s",
+            verdict.action, result["flagged_tickers"],
+            (verdict.critique or "")[:80],
+        )
+        return result
+    except Exception as e:
+        if is_strict_validation_enabled():
+            raise
+        log.warning("[cio_critic] LLM call failed: %s — accepting CIO slate", e)
+
+    return {
+        "action": "accept",
+        "critique": "Critic unavailable — accepting CIO selection.",
+        "flagged_tickers": [],
+        "suggested_drops": [],
+        "suggested_adds": [],
+    }
+
+
+def run_cio_with_reflection(
+    candidates: list[dict],
+    macro_context: dict,
+    sector_ratings: dict,
+    current_population: list[dict],
+    open_slots: int,
+    exits: list[dict],
+    run_date: str,
+    api_key: Optional[str] = None,
+    prior_decisions: list[dict] | None = None,
+    *,
+    max_iterations: int = 2,
+    **cio_kwargs,
+) -> tuple[dict, dict]:
+    """Run the CIO, then let a Haiku critic challenge the slate before finalizing.
+
+    1. Initial ``run_cio`` call.
+    2. ``run_cio_critic`` evaluates the advance set.
+    3. If the critic says ``revise`` and iterations remain, re-run ``run_cio``
+       once with the critique threaded into ``prior_decisions`` context.
+
+    Returns ``(cio_result, reflection_log)``. ``reflection_log`` carries
+    ``initial_advanced`` / ``final_advanced`` / ``critic_action`` /
+    ``flagged_tickers`` / ``critique_text`` / ``iterations`` for telemetry. The
+    CIO remains the sole gate — the critic only prompts a reconsideration; it
+    never edits the slate directly.
+    """
+    result = run_cio(
+        candidates=candidates,
+        macro_context=macro_context,
+        sector_ratings=sector_ratings,
+        current_population=current_population,
+        open_slots=open_slots,
+        exits=exits,
+        run_date=run_date,
+        api_key=api_key,
+        prior_decisions=prior_decisions,
+        **cio_kwargs,
+    )
+
+    reflection_log = {
+        "initial_advanced": list(result.get("advanced_tickers", [])),
+        "iterations": 1,
+        "critic_action": "accept",
+        "flagged_tickers": [],
+        "critique_text": "",
+        "final_advanced": list(result.get("advanced_tickers", [])),
+    }
+
+    if not candidates:
+        return result, reflection_log
+
+    for iteration in range(1, max_iterations):
+        critic = run_cio_critic(
+            result, candidates, macro_context, sector_ratings, api_key=api_key
+        )
+        reflection_log["critic_action"] = critic.get("action", "accept")
+        reflection_log["flagged_tickers"] = critic.get("flagged_tickers", [])
+        reflection_log["critique_text"] = critic.get("critique", "")
+
+        if critic.get("action") != "revise":
+            log.info(
+                "[cio_reflection] iteration %d: critic accepted slate (%d advanced)",
+                iteration, len(result.get("advanced_tickers", [])),
+            )
+            break
+
+        log.info(
+            "[cio_reflection] iteration %d: critic requests revision — %s",
+            iteration, critic.get("critique", "")[:80],
+        )
+        critique_note = {
+            "ticker": "__CRITIC__",
+            "thesis_type": "ic_critic_feedback",
+            "rationale": (
+                f"IC CRITIC FEEDBACK: {critic.get('critique', '')} "
+                f"Flagged: {critic.get('flagged_tickers', [])}. "
+                f"Suggested drops: {critic.get('suggested_drops', [])}. "
+                f"Suggested adds: {critic.get('suggested_adds', [])}. "
+                "Reconsider the advance set in light of this; keep names you can "
+                "defend, drop names you cannot."
+            ),
+            "conviction": None,
+            "score": None,
+        }
+        result = run_cio(
+            candidates=candidates,
+            macro_context=macro_context,
+            sector_ratings=sector_ratings,
+            current_population=current_population,
+            open_slots=open_slots,
+            exits=exits,
+            run_date=run_date,
+            api_key=api_key,
+            prior_decisions=list(prior_decisions or []) + [critique_note],
+            **cio_kwargs,
+        )
+        reflection_log["iterations"] = iteration + 1
+
+    reflection_log["final_advanced"] = list(result.get("advanced_tickers", []))
+    return result, reflection_log
 
 
 def _format_prior_decisions(prior_decisions: list[dict] | None) -> str:
