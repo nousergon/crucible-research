@@ -164,6 +164,21 @@ _COHERENCE_GATE_CFG: dict = _AGGREGATOR_CFG.get("macro_sector_coherence_gate", {
 SECTOR_COHERENCE_GATE_ENABLED: bool = bool(_COHERENCE_GATE_CFG.get("enabled", False))
 SECTOR_COHERENCE_UW_MIN_SCORE: float = float(_COHERENCE_GATE_CFG.get("uw_min_score", 80.0))
 
+# ── Attractiveness candidate feed (config#1400 / ARCHITECTURE §43) ───────────
+# Champion/challenger CUT: when enabled, rank the scanned universe by the live
+# 6-pillar attractiveness composite (the SSOT z-blend→percentile) and feed the
+# top-N into the sector teams, REPLACING the momentum-only tech_score gate as
+# the candidate selection. Fixes the 3.9%-recall bottleneck (the binary gate
+# amputates winners — 2026-06-29 e2e_lift). Default OFF — flipping ON is the
+# reversible cut; the tech_score `candidates.json` stays the shadow baseline.
+# Wired in graph.research_graph.rank_candidates_by_attractiveness_node (spliced
+# between compute_factor_profiles_node and dispatch). top_n=60 is count-matched
+# to the current gate (the measured +0.91% sn lift); widen via config to lean
+# into recall once cycle-1 is validated live.
+_ATTRACTIVENESS_FEED_CFG: dict = _scoring_cfg.get("attractiveness_feed", {})
+ATTRACTIVENESS_FEED_ENABLED: bool = bool(_ATTRACTIVENESS_FEED_CFG.get("enabled", False))
+ATTRACTIVENESS_FEED_TOP_N: int = int(_ATTRACTIVENESS_FEED_CFG.get("top_n", 60))
+
 # ── Factor blend (Phase 3 of factor substrate, 260513 plan) ──────────────────
 # Regime-conditional blend of the 4 factor composites (quality / momentum /
 # value / low_vol — produced by scoring.factor_scoring) into the composite
@@ -614,6 +629,105 @@ def get_research_params() -> dict:
         s3_params = _load_research_params_from_s3()
         _research_params_cache = {**_RP_DEFAULTS, **(s3_params or {})}
     return _research_params_cache
+
+
+# ── Factor-blend regime-weights S3 override (config#748) ──────────────────────
+# Same S3 → local-cache → YAML-default chain as research/scanner params. The
+# backtester's factor_blend_optimizer writes per-regime stance-weight
+# reorderings to config/factor_blend_params.json when a trustworthy realized
+# mismatch reproduces; here that override layers on top of the scoring.yaml
+# aggregator.factor_blend regime weights (YAML wins only when the S3 key is
+# absent). Shape of the S3 body:
+#   {"regime_weights": {"bull": {"momentum_score": 0.30, ...}, ...}, ...}
+# A regime absent from the override falls through to its scoring.yaml weights.
+_FACTOR_BLEND_PARAMS_S3_KEY = "config/factor_blend_params.json"
+_FACTOR_BLEND_PARAMS_CACHE_PATH = os.environ.get(
+    "FACTOR_BLEND_PARAMS_CACHE", "/tmp/factor_blend_params_cache.json"
+)
+
+# YAML cold-start default — the regime weights parsed from scoring.yaml above.
+_FB_REGIME_DEFAULTS: dict = {
+    regime: dict(weights) for regime, weights in FACTOR_BLEND_REGIME_WEIGHTS.items()
+}
+
+_factor_blend_regime_cache: Optional[dict] = None
+
+
+def _load_factor_blend_regime_weights_from_s3() -> Optional[dict]:
+    """Read config/factor_blend_params.json from S3, return its regime_weights.
+
+    Fallback chain: S3 → local cache file (with 7-day age cap, mirroring
+    research params) → None (YAML defaults). Returns the ``regime_weights``
+    sub-dict, NOT the whole payload.
+    """
+    try:
+        import boto3
+
+        bucket = os.environ.get("RESEARCH_BUCKET", S3_BUCKET)
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=_FACTOR_BLEND_PARAMS_S3_KEY)
+        data = json.loads(obj["Body"].read())
+        regime_weights = data.get("regime_weights")
+        if isinstance(regime_weights, dict) and regime_weights:
+            _logger.info(
+                "Factor-blend regime weights loaded from S3 (updated %s): %s",
+                data.get("updated_at", "unknown"),
+                list(regime_weights.keys()),
+            )
+            try:
+                with open(_FACTOR_BLEND_PARAMS_CACHE_PATH, "w") as f:
+                    json.dump(regime_weights, f, indent=2)
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("Could not write factor-blend params cache: %s", e)
+            return regime_weights
+    except Exception as e:  # noqa: BLE001
+        if "NoSuchKey" not in str(e):
+            _logger.warning("Could not read factor-blend params from S3: %s", e)
+
+    try:
+        if os.path.exists(_FACTOR_BLEND_PARAMS_CACHE_PATH):
+            import time
+
+            cache_age_hours = (
+                time.time() - os.path.getmtime(_FACTOR_BLEND_PARAMS_CACHE_PATH)
+            ) / 3600
+            if cache_age_hours > 168:  # 7 days
+                _logger.warning(
+                    "Factor-blend params cache is %.0fh old (>7d) — using YAML defaults",
+                    cache_age_hours,
+                )
+                return None
+            with open(_FACTOR_BLEND_PARAMS_CACHE_PATH) as f:
+                regime_weights = json.load(f)
+            if regime_weights:
+                _logger.info(
+                    "Factor-blend regime weights loaded from local cache (age %.0fh)",
+                    cache_age_hours,
+                )
+                return regime_weights
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("Could not read factor-blend params cache: %s", e)
+
+    return None
+
+
+def get_factor_blend_regime_weights() -> dict:
+    """Return the active factor-blend regime weights (S3 override → YAML).
+
+    Cached for the process lifetime (one S3 call per cold-start), mirroring
+    get_research_params(). For each regime the S3 override (when present)
+    REPLACES that regime's weight dict; regimes absent from the override keep
+    their scoring.yaml weights.
+    """
+    global _factor_blend_regime_cache
+    if _factor_blend_regime_cache is None:
+        s3_weights = _load_factor_blend_regime_weights_from_s3() or {}
+        merged = {regime: dict(w) for regime, w in _FB_REGIME_DEFAULTS.items()}
+        for regime, weights in s3_weights.items():
+            if isinstance(weights, dict) and weights:
+                merged[regime] = dict(weights)
+        _factor_blend_regime_cache = merged
+    return _factor_blend_regime_cache
 
 
 # Convenience accessors — these call get_research_params() lazily, so they

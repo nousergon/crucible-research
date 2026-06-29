@@ -72,7 +72,7 @@ def test_skips_when_pillar_weights_zero():
     """Phase-4-cutover-defaults: empty pillar_contributions are by design."""
     theses = {"AAPL": _thesis_without_pillar()}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _ZERO_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_not_called()
 
@@ -83,7 +83,7 @@ def test_skips_dry_run_smoke_at_phase4_defaults():
     """
     theses = {"NVDA": _thesis_without_pillar()}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _ZERO_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_not_called()
 
@@ -96,7 +96,7 @@ def test_fires_when_aqr_weights_live_and_coverage_low():
         "MSFT": _thesis_without_pillar(),
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_called_once()
     call_msg = mock_publish.call_args.kwargs["message"]
@@ -110,7 +110,7 @@ def test_passes_when_aqr_weights_live_and_coverage_high():
         f"TICK{i}": _thesis_with_pillar(seed=i) for i in range(5)
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_not_called()
 
@@ -119,7 +119,7 @@ def test_zero_theses_short_circuits_at_any_weight_state():
     """No theses → nothing to check, regardless of weights."""
     for weights in (_ZERO_WEIGHTS, _AQR_WEIGHTS):
         with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", weights), \
-             patch("alpha_engine_lib.alerts.publish") as mock_publish:
+             patch("krepis.alerts.publish") as mock_publish:
             _check_pillar_distribution_sanity({})
         mock_publish.assert_not_called()
 
@@ -129,7 +129,7 @@ def test_epsilon_boundary_treats_near_zero_weights_as_zero():
     tiny_weights = {p: 1e-9 / 6 for p in _ZERO_WEIGHTS}
     theses = {"AAPL": _thesis_without_pillar()}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", tiny_weights), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_not_called()
 
@@ -141,7 +141,7 @@ def test_half_pillar_ramp_with_low_coverage_still_fires():
     half_weights = {p: 0.5 / 6 for p in _ZERO_WEIGHTS}
     theses = {f"TICK{i}": _thesis_without_pillar() for i in range(5)}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", half_weights), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_called_once()
     assert "low_coverage: 0/5" in mock_publish.call_args.kwargs["message"]
@@ -162,7 +162,7 @@ def test_publish_carries_dedup_key():
         "MSFT": _thesis_without_pillar(),
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
 
     mock_publish.assert_called_once()
@@ -186,7 +186,7 @@ def test_dedup_key_uses_run_date_from_thesis_when_present():
     thesis["run_date"] = "2026-05-30"
     theses = {"AAPL": thesis}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
 
     dedup_key = mock_publish.call_args.kwargs["dedup_key"]
@@ -205,7 +205,7 @@ def test_dedup_key_falls_back_to_utc_today_when_thesis_lacks_run_date():
     from datetime import datetime, timezone
     theses = {"AAPL": _thesis_without_pillar()}  # no run_date
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
 
     dedup_key = mock_publish.call_args.kwargs["dedup_key"]
@@ -230,7 +230,7 @@ def test_dedup_key_varies_by_coverage_bucket():
     }
 
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(low_theses)
         low_key = mock_publish.call_args.kwargs["dedup_key"]
         _check_pillar_distribution_sanity(mixed_theses)
@@ -253,7 +253,7 @@ def test_moat_collapse_fires_when_all_picks_have_no_moat():
         f"TICK{i}": _thesis_with_pillar(seed=i, moat="none") for i in range(6)
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_called_once()
     call_msg = mock_publish.call_args.kwargs["message"]
@@ -269,7 +269,7 @@ def test_moat_collapse_does_not_fire_on_mixed_moat_distribution():
         for i, m in enumerate(moats)
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     mock_publish.assert_not_called()
 
@@ -280,7 +280,7 @@ def test_moat_collapse_requires_min_sample_size():
         f"TICK{i}": _thesis_with_pillar(seed=i, moat="none") for i in range(4)
     }
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
-         patch("alpha_engine_lib.alerts.publish") as mock_publish:
+         patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
     # 4 < 5 sampled moats → check does not run; no alert.
     mock_publish.assert_not_called()

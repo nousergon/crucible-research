@@ -69,7 +69,9 @@ from config import (
     SECTOR_COHERENCE_UW_MIN_SCORE,
     FACTOR_BLEND_ENABLED,
     FACTOR_BLEND_WEIGHT,
-    FACTOR_BLEND_REGIME_WEIGHTS,
+    get_factor_blend_regime_weights,
+    ATTRACTIVENESS_FEED_ENABLED,
+    ATTRACTIVENESS_FEED_TOP_N,
     FACTOR_QUALITY_FLOOR_ENABLED,
     FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
     FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
@@ -123,6 +125,7 @@ from scoring.focus_list import (
     summarize_focus_list,
 )
 from archive.manager import ArchiveManager
+from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
 from alpha_engine_lib.decision_capture import (
     DecisionCaptureWriteError,
@@ -1556,6 +1559,69 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
         raise
 
 
+def rank_candidates_by_attractiveness_node(state: ResearchState) -> dict:
+    """CHAMPION-FEED CUT (config#1400 / ARCHITECTURE §43): re-select the
+    sector-team candidate feed by ranking the scanned universe on the live
+    6-pillar attractiveness composite, REPLACING the momentum-only tech_score
+    gate's ~60 with the top-N attractiveness names.
+
+    WHY: the live tech_score gate has 3.9% 21d recall (2026-06-29 e2e_lift) —
+    a binary gate that amputates ~96% of eventual winners before the agents see
+    them. Ranking the scanned universe by attractiveness (the measured +0.91%
+    sector-neutral lift at matched N) feeds the agents a better-selected pool.
+    Spliced AFTER ``compute_factor_profiles_node`` (which wrote the 6-pillar
+    profiles this run) and BEFORE dispatch, so attractiveness is computable.
+
+    Gated by ``ATTRACTIVENESS_FEED_ENABLED`` (default OFF — flipping ON is the
+    reversible cut). The held population is ALWAYS retained (agents must still
+    evaluate current holdings for HOLD/EXIT). FAIL-SAFE: any error returns ``{}``
+    so the existing tech_score ``agent_input_set`` stands — the cut can never
+    break the research run. The tech_score ``candidates.json`` remains the
+    shadow baseline for the realized-alpha revert signal.
+    """
+    if not ATTRACTIVENESS_FEED_ENABLED:
+        return {}
+    run_date = state.get("run_date")
+    try:
+        from scoring.universe_board import (
+            _read_factor_profiles,
+            attractiveness_from_factor_profiles,
+        )
+
+        profiles = _read_factor_profiles(run_date, None, None) or {}
+        if not profiles:
+            raise RuntimeError(
+                f"attractiveness feed: no factor profiles readable for {run_date}"
+            )
+        scores = attractiveness_from_factor_profiles(profiles)
+        ranked = sorted(
+            (t for t, v in scores.items() if v.get("attractiveness_score") is not None),
+            key=lambda t: scores[t]["attractiveness_score"],
+            reverse=True,
+        )
+        top_n = int(ATTRACTIVENESS_FEED_TOP_N)
+        selected = ranked[:top_n]
+        if not selected:
+            raise RuntimeError("attractiveness feed: no ranked candidates produced")
+        population_tickers = state.get("population_tickers") or []
+        new_set = sorted(set(selected) | set(population_tickers))
+        prior = state.get("agent_input_set") or []
+        logger.info(
+            "[attractiveness_feed] CHAMPION feed ON: %d tickers "
+            "(top-%d attractiveness ∪ held population %d) — replacing tech_score "
+            "feed of %d. Scored %d of %d profiled names.",
+            len(new_set), top_n, len(population_tickers), len(prior),
+            len(ranked), len(profiles),
+        )
+        return {"agent_input_set": new_set}
+    except Exception as e:  # FAIL-SAFE: keep the existing tech_score feed
+        logger.warning(
+            "[attractiveness_feed] FAILED — falling back to existing tech_score "
+            "candidate feed (the cut is inert this run): %s", e,
+        )
+        return {}
+
+
 def compute_focus_list_node(state: ResearchState) -> dict:
     """Build the per-team regime-blended focus list from factor profiles.
 
@@ -1598,7 +1664,7 @@ def compute_focus_list_node(state: ResearchState) -> dict:
 
     market_regime = state.get("market_regime", "neutral")
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+        factor_profiles, market_regime, get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
@@ -1837,7 +1903,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 factor_subscore_val, factor_breakdown = compute_factor_subscore(
                     factor_profile=ticker_factor_profile,
                     market_regime=market_regime,
-                    regime_weights=FACTOR_BLEND_REGIME_WEIGHTS,
+                    regime_weights=get_factor_blend_regime_weights(),
                 )
                 if factor_subscore_val is not None:
                     factor_blend_applied_count += 1
@@ -2059,7 +2125,7 @@ def score_aggregator(state: ResearchState) -> dict:
     # path remain load-bearing.
     if pillar_coverage_skip_count > 0:
         try:
-            from alpha_engine_lib.alerts import publish as alerts_publish
+            from krepis.alerts import publish as alerts_publish
             alerts_publish(
                 message=(
                     f"[score_aggregator] pillar coverage gap — skipped "
@@ -2251,7 +2317,7 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
     )
     try:
-        from alpha_engine_lib.alerts import publish as alerts_publish
+        from krepis.alerts import publish as alerts_publish
         alerts_publish(
             message=msg,
             severity="WARN",
@@ -3148,7 +3214,7 @@ def _compute_focus_list_audit_lookup(
         return {}
 
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+        factor_profiles, market_regime, get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
@@ -3312,18 +3378,29 @@ def archive_writer(state: ResearchState) -> dict:
             except Exception as e:
                 logger.warning("Failed to save stock archive for %s: %s", ticker, e)
 
-        # Save tool usage as analyst resources
+        # Save tool usage as analyst resources. Tool calls are produced at the
+        # *team* (sector) grain — the combined quant+qual ReAct log for the whole
+        # sector team, not scoped to a single ticker (see
+        # agents/sector_teams/sector_team.py:all_tool_calls). The previous guard
+        # `tc.get("ticker")` was always False (extract_tool_calls only emits
+        # {"tool", "input_summary"}), so analyst_resources was never populated.
+        # Record one row per tool call at team grain with a sentinel ticker; the
+        # team→sector mapping lives in `agent="team:{team_id}"`, which is what the
+        # per-sector tool-usage analysis (config#925) aggregates on.
         for tc in output.get("tool_calls", []):
-            if tc.get("tool") and tc.get("ticker"):
-                try:
-                    am.save_analyst_resource(
-                        ticker=tc["ticker"],
-                        run_date=run_date,
-                        agent=f"team:{team_id}",
-                        resource_type=tc["tool"],
-                    )
-                except Exception as e:
-                    logger.debug("[archive_writer] tool log failed: %s", e)
+            tool = tc.get("tool")
+            if not tool:
+                continue
+            try:
+                am.save_analyst_resource(
+                    ticker=tc.get("ticker") or TEAM_RESOURCE_TICKER,
+                    run_date=run_date,
+                    agent=f"team:{team_id}",
+                    resource_type=tool,
+                    resource_detail=str(tc.get("input_summary", ""))[:200],
+                )
+            except Exception as e:
+                logger.debug("[archive_writer] tool log failed: %s", e)
 
     # Save population — pass the canonical post-critic macro fields so
     # population/latest.json carries the same regime / sector_modifiers /
@@ -3648,6 +3725,22 @@ def archive_writer(state: ResearchState) -> dict:
         logger.warning(
             "[archive_writer] universe scoreboard write FAILED (non-fatal, "
             "dashboard visibility only — signals.json unaffected): %s", e,
+        )
+
+    # ── Attractiveness trajectory signal (orthogonalized factor-momentum) ────
+    # Reads the attractiveness history (appended just above by the board write)
+    # + ArcticDB prices → the weekly "rising attractiveness / pre-repricing"
+    # signal + digest email. OBSERVE-MODE, SECONDARY observability: fail SOFT
+    # (a signal failure must not fail the research run); no-ops during warm-up.
+    try:
+        from scoring.attractiveness_trajectory import compute_and_write_trajectory
+
+        tj_key = compute_and_write_trajectory(run_date)
+        logger.info("[archive_writer] attractiveness trajectory written → %s", tj_key or "(warm-up — skipped)")
+    except Exception as e:
+        logger.warning(
+            "[archive_writer] attractiveness trajectory FAILED (non-fatal, "
+            "observe-mode signal — signals.json unaffected): %s", e,
         )
 
     # Log quant top-10 per team + final recommendations.
@@ -4257,6 +4350,10 @@ def build_graph() -> StateGraph:
     # + score_aggregator) do their existing S3 read. Graceful-degrade
     # on any failure — never hard-fails the research run.
     graph.add_node("compute_factor_profiles_node", compute_factor_profiles_node)
+    graph.add_node(
+        "rank_candidates_by_attractiveness_node",
+        rank_candidates_by_attractiveness_node,
+    )
     # PR 4 of scanner-placement arc: compute the per-team regime-blended
     # focus list AFTER macro has written market_regime to state, BEFORE
     # the sector team dispatch reads it.
@@ -4289,7 +4386,17 @@ def build_graph() -> StateGraph:
     # in S3 before compute_focus_list_node AND score_aggregator do their
     # existing read_factor_profiles_from_s3() this same run.
     graph.add_edge("macro_economist_node", "compute_factor_profiles_node")
-    graph.add_edge("compute_factor_profiles_node", "compute_focus_list_node")
+    # Splice the attractiveness champion-feed re-rank (config#1400) between the
+    # factor substrate (just written) and the focus list / dispatch: it reads the
+    # 6-pillar profiles and (when ATTRACTIVENESS_FEED_ENABLED) overwrites
+    # agent_input_set with the top-N attractiveness selection. Default OFF → a
+    # pass-through no-op, so the existing tech_score feed is unchanged.
+    graph.add_edge(
+        "compute_factor_profiles_node", "rank_candidates_by_attractiveness_node"
+    )
+    graph.add_edge(
+        "rank_candidates_by_attractiveness_node", "compute_focus_list_node"
+    )
 
     # Fan-out AFTER focus list: dispatch to 6 sector teams + exit evaluator.
     graph.add_conditional_edges("compute_focus_list_node", dispatch_sectors_and_exit)
