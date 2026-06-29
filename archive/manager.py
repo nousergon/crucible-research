@@ -1234,6 +1234,40 @@ class ArchiveManager:
         )
         self.db_conn.commit()
 
+    def load_analyst_resources(
+        self,
+        since_date: str | None = None,
+        agent_prefix: str | None = None,
+    ) -> list[dict]:
+        """Load analyst_resources rows for per-sector tool-usage analysis.
+
+        Args:
+            since_date: if given, only rows with ``run_date >= since_date``.
+            agent_prefix: if given, only rows whose ``agent`` starts with this
+                prefix (e.g. ``"team:"`` to select sector-team tool usage).
+
+        Returns a list of dicts with keys
+        ``ticker, run_date, agent, resource_type, resource_detail, influence``.
+        Returns ``[]`` when the connection is unset (mirrors other loaders).
+        """
+        if not self.db_conn:
+            return []
+        clauses: list[str] = []
+        params: list[str] = []
+        if since_date:
+            clauses.append("run_date >= ?")
+            params.append(since_date)
+        if agent_prefix:
+            clauses.append("agent LIKE ?")
+            params.append(f"{agent_prefix}%")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.db_conn.execute(
+            "SELECT ticker, run_date, agent, resource_type, resource_detail, "
+            "influence FROM analyst_resources" + where + " ORDER BY run_date",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Memory: Episodic (Phase 2) ───────────────────────────────────────────
 
     def load_episodic_memories(
