@@ -3639,6 +3639,22 @@ def archive_writer(state: ResearchState) -> dict:
             "dashboard visibility only — signals.json unaffected): %s", e,
         )
 
+    # ── Attractiveness trajectory signal (orthogonalized factor-momentum) ────
+    # Reads the attractiveness history (appended just above by the board write)
+    # + ArcticDB prices → the weekly "rising attractiveness / pre-repricing"
+    # signal + digest email. OBSERVE-MODE, SECONDARY observability: fail SOFT
+    # (a signal failure must not fail the research run); no-ops during warm-up.
+    try:
+        from scoring.attractiveness_trajectory import compute_and_write_trajectory
+
+        tj_key = compute_and_write_trajectory(run_date)
+        logger.info("[archive_writer] attractiveness trajectory written → %s", tj_key or "(warm-up — skipped)")
+    except Exception as e:
+        logger.warning(
+            "[archive_writer] attractiveness trajectory FAILED (non-fatal, "
+            "observe-mode signal — signals.json unaffected): %s", e,
+        )
+
     # Log quant top-10 per team + final recommendations.
     #
     # Per-sub-signal scores (rsi/macd/ma50/ma200/momentum) are computed
