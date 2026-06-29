@@ -78,10 +78,22 @@ def _get_base_picks(open_slots: int) -> int:
     return 3
 
 
+# Adaptive slot allocation (config#926): per-team accuracy nudge. A team whose
+# historical recommendations have out-performed earns +1 eligible slot; a team
+# that has under-performed loses 1. The nudge is intentionally small (±1, same
+# scale as the sector-rating adjustment) and gated on a minimum observation
+# count so a team can't be penalized/rewarded on noise. With no accuracy data
+# the function is byte-identical to the static allocation (graceful degrade).
+ADAPTIVE_SLOT_MIN_OBS = 8          # min scored recs before accuracy is trusted
+ADAPTIVE_SLOT_TOP_PERCENTILE = 0.60   # accuracy >= this fraction → +1
+ADAPTIVE_SLOT_BOTTOM_PERCENTILE = 0.40  # accuracy <= this fraction → -1
+
+
 def compute_team_slots(
     open_slots: int,
     sector_ratings: dict[str, dict],
     team_sectors: dict[str, list[str]] | None = None,
+    team_accuracy: dict[str, dict] | None = None,
 ) -> dict[str, int]:
     """
     Compute pick allocation per team based on open slots and macro sector ratings.
@@ -90,6 +102,13 @@ def compute_team_slots(
         open_slots: Number of empty population slots after exits.
         sector_ratings: {sector: {rating: "overweight"|"market_weight"|"underweight", ...}}
         team_sectors: Optional override for TEAM_SECTORS.
+        team_accuracy: Optional adaptive-allocation input (config#926):
+            ``{team_id: {"accuracy": float in [0,1], "n_obs": int}}`` where
+            ``accuracy`` is the team's historical hit rate (e.g. fraction of its
+            recommendations that beat SPY). When provided, each team's slot count
+            is nudged ±1 by ``_accuracy_adjustment``. ``None`` (or a team absent
+            from the map, or below ``ADAPTIVE_SLOT_MIN_OBS``) → no nudge, so the
+            allocation degrades gracefully to the static behavior.
 
     Returns:
         {team_id: allocated_slots} — how many picks from this team are eligible
@@ -103,9 +122,36 @@ def compute_team_slots(
         # Team's sector rating = best rating among its sectors
         team_rating = _get_team_rating(sectors, sector_ratings)
         adj = _rating_adjustment(team_rating)
-        allocation[team_id] = max(0, base + adj)
+        acc_adj = _accuracy_adjustment(
+            (team_accuracy or {}).get(team_id)
+        )
+        allocation[team_id] = max(0, base + adj + acc_adj)
 
     return allocation
+
+
+def _accuracy_adjustment(team_acc: dict | None) -> int:
+    """Slot nudge from a team's historical accuracy (config#926).
+
+    Returns +1 for a top-percentile, well-sampled team, -1 for a
+    bottom-percentile one, and 0 otherwise (including missing/under-sampled
+    data — the graceful-degrade path).
+    """
+    if not team_acc:
+        return 0
+    n_obs = team_acc.get("n_obs", 0) or 0
+    accuracy = team_acc.get("accuracy")
+    if accuracy is None or n_obs < ADAPTIVE_SLOT_MIN_OBS:
+        return 0
+    try:
+        accuracy = float(accuracy)
+    except (TypeError, ValueError):
+        return 0
+    if accuracy >= ADAPTIVE_SLOT_TOP_PERCENTILE:
+        return 1
+    if accuracy <= ADAPTIVE_SLOT_BOTTOM_PERCENTILE:
+        return -1
+    return 0
 
 
 def _get_team_rating(

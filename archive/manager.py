@@ -603,6 +603,29 @@ class ArchiveManager:
         )
         return output
 
+    def load_team_accuracy(self) -> dict | None:
+        """Load the per-team historical-accuracy artifact (config#926).
+
+        Producer: the backtester's team-performance analysis
+        (``optimizer/pipeline_optimizer.analyze_team_performance``), written to
+        ``config/team_accuracy.json`` as
+        ``{team_id: {"accuracy": float, "n_obs": int}}``. Consumed by
+        ``compute_team_slots`` to nudge per-team eligible-pick counts by
+        historical hit rate.
+
+        Returns ``None`` gracefully on any failure (missing artifact, parse
+        error) so adaptive allocation degrades to the static behavior.
+        """
+        raw = self._s3_get("config/team_accuracy.json")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            log.debug("team_accuracy parse failed: %s", e)
+            return None
+
     def load_regime_substrate(self) -> dict | None:
         """Load the most recent regime substrate artifact.
 
