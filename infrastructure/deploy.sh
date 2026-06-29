@@ -314,8 +314,12 @@ else:
     # version) — lib v0.24.0 substrate (L221 retrofit 2026-05-22).
     # Best-effort; ``|| true`` never overrides this script's
     # ``exit 1``. Lib alerts CLI exits 0 if any channel (SNS or
-    # Telegram) succeeded.
-    python3 -m alpha_engine_lib.alerts publish \
+    # Telegram) succeeded. Target is ``krepis.alerts`` (config#1339): the
+    # alerts module relocated to krepis (MIT) at nousergon-lib v0.66.0 and
+    # ``alpha_engine_lib.alerts`` is now a runpy-silent alias shim, so
+    # ``-m alpha_engine_lib.alerts`` would no-op. krepis is pulled
+    # transitively by the nousergon-lib pin (hard dep ``krepis>=0.2.0``).
+    python3 -m krepis.alerts publish \
       --severity error \
       --source "alpha-engine-research/infrastructure/deploy.sh" \
       --dedup-key "canary-fail-${FUNCTION_MAIN}-v${VERSION}" \
