@@ -3,7 +3,7 @@
 Pins the full-universe scoreboard artifact that the dashboard's filterable
 universe board consumes (crucible-dashboard). Locks:
 
-  1. Artifact shape + schema_version (2) + every universe member present.
+  1. Artifact shape + schema_version (3) + every universe member present.
   2. The SOTA attractiveness method: per-pillar cross-sectional z-score
      (winsorized) → coverage-renormalized weighted blend → terminal
      cross-sectional percentile (0-100). Dispersion restored vs the old
@@ -133,12 +133,60 @@ def _by_ticker(board):
 
 def test_artifact_shape_and_membership():
     board = _build()
-    assert board["schema_version"] == UNIVERSE_BOARD_SCHEMA_VERSION == 2
+    assert board["schema_version"] == UNIVERSE_BOARD_SCHEMA_VERSION == 3
     assert board["as_of"] == "2026-06-28"
     assert board["universe_count"] == 3  # ALL members, not just gate-passers
     assert board["attractiveness_method"] == "sector_neutral_zscore_percentile"
     assert {s["ticker"] for s in board["stocks"]} == {"AAPL", "LIN", "XYZ"}
     assert board["pillars"][0] == "quality"
+
+
+# ── Tradeability (INDEPENDENT √-impact cost score — ARCHITECTURE §43) ─────────
+
+def test_tradeability_independent_score_and_coverage():
+    board = _build()
+    assert board["tradeability_method"] == "sqrt_impact_almgren_chriss_round_trip"
+    assert board["tradeability_reference_notional_usd"] == 100_000.0
+    by = _by_ticker(board)
+
+    # AAPL + LIN have price + ADV (avg_volume_20d_raw) + σ → computable.
+    for t in ("AAPL", "LIN"):
+        tr = by[t]["tradeability"]
+        assert tr["expected_cost_bps"] is not None and tr["expected_cost_bps"] > 0
+        assert 0.0 <= tr["tradeability_score"] <= 100.0
+        assert tr["adv_usd"] is not None
+        assert tr["reference_notional_usd"] == 100_000.0
+
+    # AAPL is far more liquid (55M sh @ $195) than LIN (3M sh @ $460) → cheaper
+    # round-trip → strictly higher tradeability percentile.
+    assert by["AAPL"]["tradeability"]["expected_cost_bps"] < by["LIN"]["tradeability"]["expected_cost_bps"]
+    assert by["AAPL"]["tradeability"]["tradeability_score"] > by["LIN"]["tradeability"]["tradeability_score"]
+
+    # XYZ has no technical row → no ADV/σ coverage → honest None (NOT floored to
+    # 'cheapest'), and excluded from the ranked population.
+    xyz = by["XYZ"]["tradeability"]
+    assert xyz["expected_cost_bps"] is None
+    assert xyz["tradeability_score"] is None
+    assert xyz["adv_usd"] is None
+
+
+def test_tradeability_never_blended_into_attractiveness():
+    """§43: tradeability is INDEPENDENT — it must not perturb the attractiveness
+    blend. Dropping ADV/σ for every name leaves attractiveness byte-identical."""
+    import pandas as pd
+
+    full = _build()
+    # Technical frame with ZERO liquidity/vol info (so tradeability is all-None)
+    # but the SAME pillar inputs (attractiveness is driven by factor_profiles, not
+    # the technical frame) — attractiveness must be unchanged.
+    no_liq = pd.DataFrame([{"ticker": "AAPL"}, {"ticker": "LIN"}])
+    stripped = _build(technical_df=no_liq)
+
+    f_by, s_by = _by_ticker(full), _by_ticker(stripped)
+    for t in ("AAPL", "LIN", "XYZ"):
+        assert s_by[t]["attractiveness_score"] == f_by[t]["attractiveness_score"]
+        assert s_by[t]["attractiveness_raw"] == f_by[t]["attractiveness_raw"]
+        assert s_by[t]["tradeability"]["expected_cost_bps"] is None  # stripped → gap
 
 
 # ── 2. SOTA attractiveness ───────────────────────────────────────────────────

@@ -33,7 +33,10 @@ pydantic~=2.7
 #                 graph/research_graph rag.is_available probe)
 # Lib is now public — no PAT required. Lambda Dockerfile installs via the
 # git URL; CI pulls directly.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.70.0
+# DRAFT (config#1399): pinned to the feature branch for the tradeability cost
+# engine (nousergon_lib.quant.transaction_cost). RE-PIN to @v0.75.0 once
+# nousergon-lib#144 merges + is tagged, then un-draft this PR.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@feat/quant-transaction-cost-tradeability
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,

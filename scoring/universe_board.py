@@ -14,7 +14,7 @@ dashboard can show, sort, and FILTER all ~900 names by attractiveness, by each
 pillar, by raw valuation/fundamental/technical metric ranges, by sector, by
 country, and by scanner gate status.
 
-Attractiveness method (schema_version 2 — SOTA / institutional). The 6 pillars
+Attractiveness method (schema_version 3 — SOTA / institutional). The 6 pillars
 are already sector-neutral WITHIN-SECTOR percentile ranks (``factor_scoring.py``);
 the institutional defect was only the FINAL blend — a plain equal-weight mean of
 six bounded percentiles concentrates toward 50 (CLT) and erases cross-sectional
@@ -40,10 +40,12 @@ Output (versioned — consumers pin on ``schema_version``):
 Schema::
 
   {
-    "schema_version": 2,
+    "schema_version": 3,
     "as_of": "YYYY-MM-DD",
     "universe_count": int,
     "attractiveness_method": "sector_neutral_zscore_percentile",
+    "tradeability_method": "sqrt_impact_almgren_chriss_round_trip",  # INDEPENDENT of attractiveness (§43)
+    "tradeability_reference_notional_usd": float,                     # reference single-name trade size
     "pillars": ["quality", "value", "momentum", "growth", "stewardship", "defensiveness"],
     "pillar_weights": {quality: float, ...},   # normalized to sum 1.0 (equal default)
     "gate_config": {                           # the resolved scanner thresholds this cycle (null if unresolvable)
@@ -59,6 +61,12 @@ Schema::
         "industry": "Consumer Electronics",    # null if uncovered
         "attractiveness_score": 0-100 | null,  # cross-sectional percentile of the weighted z-blend
         "attractiveness_raw": float | null,    # the signed z-blend (institutional dispersion preserved)
+        "tradeability": {                      # INDEPENDENT √-impact cost score — NEVER blended into attractiveness (§43)
+          "expected_cost_bps": float | null,   # round-trip cost at the reference notional (half_spread + c·σ·√(Q/ADV) + commission)
+          "tradeability_score": 0-100 | null,  # cross-sectional percentile (higher = cheaper to access)
+          "adv_usd": float | null,             # avg 20d dollar volume (price × shares); null = coverage gap
+          "reference_notional_usd": float
+        },
         "pillars": {quality, value, momentum, growth, stewardship, defensiveness},  # 0-100 | null each
         "pillar_contributions": {quality: float, ...},  # additive w_p·z_p/Σw terms (sum = attractiveness_raw)
         "pillar_coverage": {quality: int, ...},   # # raw factors that contributed per pillar
@@ -99,9 +107,22 @@ import logging
 import os
 from typing import Any, Optional
 
+from nousergon_lib.quant.transaction_cost import (
+    TransactionCostModel,
+    tradeability_percentiles,
+)
+
 logger = logging.getLogger(__name__)
 
-UNIVERSE_BOARD_SCHEMA_VERSION = 2
+UNIVERSE_BOARD_SCHEMA_VERSION = 3
+
+# Reference single-name trade size (USD) for the per-name tradeability estimate —
+# a representative position on the paper book. ``expected_cost_bps`` is the
+# ROUND-TRIP cost to enter+exit this notional; ``tradeability_score`` is its
+# cross-sectional percentile (higher = cheaper to access). Overridable via the
+# optional ``transaction_cost`` config block (which also tunes the cost model).
+_DEFAULT_REFERENCE_NOTIONAL_USD = 100_000.0
+_TRADEABILITY_METHOD = "sqrt_impact_almgren_chriss_round_trip"
 
 # Winsorization clip for the per-pillar cross-sectional z-scores (institutional
 # convention; near-no-op on already-percentile inputs — see module docstring).
@@ -252,6 +273,85 @@ def compute_cross_sectional_attractiveness(
     for ticker in out:
         out[ticker]["attractiveness_score"] = pct.get(ticker)
     return out
+
+
+def _reference_notional(tradeability_config: dict | None) -> float:
+    return float(
+        (tradeability_config or {}).get(
+            "reference_notional_usd", _DEFAULT_REFERENCE_NOTIONAL_USD
+        )
+    )
+
+
+def compute_tradeability(
+    metrics_by_ticker: dict[str, dict],
+    *,
+    tradeability_config: dict | None = None,
+) -> dict[str, dict]:
+    """Per-name TRADEABILITY — an INDEPENDENT artifact, NEVER blended into the
+    attractiveness composite (ARCHITECTURE §43): attractiveness forecasts forward
+    return; tradeability measures the cost to ACCESS it. They are computed,
+    stored and displayed independently and meet only at the decision layer via
+    net-alpha. This lifts the ONE shared √-impact engine
+    (``nousergon_lib.quant.transaction_cost``, §15) so the live score and the
+    backtester's net-alpha read a single cost definition.
+
+    For each name with price + ADV coverage, ``expected_cost_bps`` is the
+    ROUND-TRIP cost — ``half_spread + impact_coef·(σ/ref_σ)·√(Q/ADV) + commission``,
+    doubled for enter+exit — at the reference notional, where ADV$ = ``current_price
+    × avg_volume`` (20d shares) and σ = ``realized_vol_20d``. σ is scaled to the
+    cross-sectional MEDIAN σ so the median-volatility name reproduces the
+    calibrated cost and more/less volatile names cost proportionally more/less
+    (true Almgren-Chriss form, parameter-free reference). ``tradeability_score``
+    is the 0-100 cross-sectional percentile (higher = cheaper).
+
+    A name lacking price/ADV coverage gets ``None`` for both fields — an honest
+    coverage gap, never a fabricated 'cheapest' rank (we do NOT fall the missing
+    name back to the spread+commission floor, which would mis-rank it as maximally
+    tradeable on absent data).
+    """
+    import statistics
+
+    model = TransactionCostModel.from_config(
+        {"transaction_cost": tradeability_config} if tradeability_config else None
+    )
+    ref_notional = _reference_notional(tradeability_config)
+
+    adv_usd: dict[str, float] = {}
+    sigma: dict[str, float] = {}
+    for ticker, metrics in metrics_by_ticker.items():
+        price = metrics.get("current_price")
+        vol_shares = metrics.get("avg_volume")
+        vol_pct = metrics.get("realized_vol_20d")
+        if price is not None and vol_shares is not None and price > 0 and vol_shares > 0:
+            adv_usd[ticker] = price * vol_shares
+        if vol_pct is not None and vol_pct > 0:
+            sigma[ticker] = vol_pct
+    ref_sigma = statistics.median(sigma.values()) if sigma else None
+
+    cost_bps: dict[str, Optional[float]] = {}
+    for ticker in metrics_by_ticker:
+        adv = adv_usd.get(ticker)
+        if adv is None:  # no ADV coverage → no honest cost estimate (gap, not floor)
+            cost_bps[ticker] = None
+            continue
+        cost_bps[ticker] = round(
+            model.round_trip_bps(
+                ref_notional, adv, sigma=sigma.get(ticker), ref_sigma=ref_sigma
+            ),
+            4,
+        )
+
+    scores = tradeability_percentiles(cost_bps)
+    return {
+        ticker: {
+            "expected_cost_bps": cost_bps[ticker],
+            "tradeability_score": scores[ticker],
+            "adv_usd": round(adv_usd[ticker], 2) if ticker in adv_usd else None,
+            "reference_notional_usd": ref_notional,
+        }
+        for ticker in metrics_by_ticker
+    }
 
 
 def _num(v: Any, multiplier: float = 1.0) -> Optional[float]:
@@ -414,6 +514,7 @@ def build_universe_board(
     fundamental_df: "Any" = None,
     pillar_weights: dict | None = None,
     gate_config: dict | None = None,
+    tradeability_config: dict | None = None,
     bucket: str | None = None,
     s3_client: Any = None,
 ) -> dict:
@@ -547,6 +648,15 @@ def build_universe_board(
         stock["attractiveness_score"] = a.get("attractiveness_score")
         stock["pillar_contributions"] = a.get("pillar_contributions", {})
 
+    # ── Tradeability (INDEPENDENT √-impact cost score — computed separately and
+    #    NEVER folded into the attractiveness blend above, ARCHITECTURE §43) ────
+    metrics_by_ticker = {stock["ticker"]: stock["metrics"] for stock, _ in records}
+    tradeability = compute_tradeability(
+        metrics_by_ticker, tradeability_config=tradeability_config
+    )
+    for stock, _ in records:
+        stock["tradeability"] = tradeability.get(stock["ticker"])
+
     stocks = [s for s, _ in records]
     stocks.sort(
         key=lambda s: (s["attractiveness_score"] is None, -(s["attractiveness_score"] or 0))
@@ -557,6 +667,8 @@ def build_universe_board(
         "as_of": run_date,
         "universe_count": len(stocks),
         "attractiveness_method": "sector_neutral_zscore_percentile",
+        "tradeability_method": _TRADEABILITY_METHOD,
+        "tradeability_reference_notional_usd": _reference_notional(tradeability_config),
         "pillars": list(_PILLAR_ORDER),
         "pillar_weights": pillar_weights,
         "gate_config": gate_config,
