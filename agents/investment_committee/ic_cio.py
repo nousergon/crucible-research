@@ -45,6 +45,13 @@ _PROMPT_DEBLENDED = "ic_cio_evaluation_deblended"
 # only invoked when CIO_CRITIC_ENABLED is set, so this is an inert merge.
 _PROMPT_CRITIC = "ic_cio_critic"
 
+# IC-critic max output budget. Small structured call (action + critique +
+# flagged/drops/adds ticker lists); both MAX_TOKENS_* tiers are oversized for
+# this narrow case. A named constant (not an inline literal) so the
+# no-hardcoded-max_tokens lint stays satisfied while keeping the tight ceiling
+# that makes a runaway critic output visible.
+_CRITIC_MAX_TOKENS = 768
+
 
 class CIOCriticOutput(BaseModel):
     """Reflection-loop critic output for the CIO selection.
@@ -335,7 +342,7 @@ def run_cio_critic(
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,  # Claude Haiku 4.5 — the requested cheap critic
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=768,
+        max_tokens=_CRITIC_MAX_TOKENS,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
