@@ -100,6 +100,17 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # has run once (register-with-or-after-producer). Single PUT site (loop over
     # dated + latest keys in write_universe_board_to_s3).
     "scoring/universe_board.py": 1,
+    # Per-stock attractiveness HISTORY parquet
+    # (scanner/universe/history/attractiveness_history.parquet) + the weekly
+    # TRAJECTORY signal (scanner/universe/trajectory/{date}.json + latest).
+    # SECONDARY observability built fail-soft off archive_writer (write failure
+    # WARNs, never fails the run; signals.json is primary). OBSERVE-MODE signal;
+    # the dashboard consumer graceful-degrades when absent → absence is NOT a
+    # silent failure. Per-file PUT pin only; ARTIFACT_REGISTRY rows deferred
+    # until first Saturday production (register-with-or-after-producer —
+    # config#1393). One PUT site each.
+    "scoring/attractiveness_history.py": 1,
+    "scoring/attractiveness_trajectory.py": 1,
     "scripts/aggregate_costs.py": 1,
     # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
     # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site
