@@ -121,6 +121,7 @@ from scoring.focus_list import (
     summarize_focus_list,
 )
 from archive.manager import ArchiveManager
+from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
 from alpha_engine_lib.decision_capture import (
     DecisionCaptureWriteError,
@@ -3289,18 +3290,29 @@ def archive_writer(state: ResearchState) -> dict:
             except Exception as e:
                 logger.warning("Failed to save stock archive for %s: %s", ticker, e)
 
-        # Save tool usage as analyst resources
+        # Save tool usage as analyst resources. Tool calls are produced at the
+        # *team* (sector) grain — the combined quant+qual ReAct log for the whole
+        # sector team, not scoped to a single ticker (see
+        # agents/sector_teams/sector_team.py:all_tool_calls). The previous guard
+        # `tc.get("ticker")` was always False (extract_tool_calls only emits
+        # {"tool", "input_summary"}), so analyst_resources was never populated.
+        # Record one row per tool call at team grain with a sentinel ticker; the
+        # team→sector mapping lives in `agent="team:{team_id}"`, which is what the
+        # per-sector tool-usage analysis (config#925) aggregates on.
         for tc in output.get("tool_calls", []):
-            if tc.get("tool") and tc.get("ticker"):
-                try:
-                    am.save_analyst_resource(
-                        ticker=tc["ticker"],
-                        run_date=run_date,
-                        agent=f"team:{team_id}",
-                        resource_type=tc["tool"],
-                    )
-                except Exception as e:
-                    logger.debug("[archive_writer] tool log failed: %s", e)
+            tool = tc.get("tool")
+            if not tool:
+                continue
+            try:
+                am.save_analyst_resource(
+                    ticker=tc.get("ticker") or TEAM_RESOURCE_TICKER,
+                    run_date=run_date,
+                    agent=f"team:{team_id}",
+                    resource_type=tool,
+                    resource_detail=str(tc.get("input_summary", ""))[:200],
+                )
+            except Exception as e:
+                logger.debug("[archive_writer] tool log failed: %s", e)
 
     # Save population — pass the canonical post-critic macro fields so
     # population/latest.json carries the same regime / sector_modifiers /
