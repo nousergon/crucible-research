@@ -60,3 +60,54 @@ def test_run_challengers_generated_at_falls_back_to_run_date(monkeypatch):
     am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: captured.update(ga=ga) or "k"
     runner.run_challengers(am, "2026-06-19")  # no run_time
     assert captured["ga"] == "2026-06-19"
+
+
+def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
+    """config#1403: a producer that emits nothing must fire a LOUD alert, not a
+    swallowed WARN — the always-on producers are expected to emit every run."""
+    def good_build(run_date, am, *, run_time="", population=None):
+        return {"date": run_date}
+
+    def bad_build(run_date, am, *, run_time="", population=None):
+        raise RuntimeError("boom")
+
+    specs = [
+        ProducerSpec("good", "challenger", "v1", "ok", good_build),
+        ProducerSpec("bad", "challenger", "v1", "raises", bad_build),
+    ]
+    monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    alerts = []
+    monkeypatch.setattr(runner, "publish_observe_alert",
+                        lambda message, **kw: alerts.append((message, kw)) or True)
+
+    am = MagicMock()
+    am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: "k"
+    runner.run_challengers(am, "2026-06-19")
+
+    assert len(alerts) == 1
+    msg, kw = alerts[0]
+    assert "challenger shadow gap" in msg and "bad" in msg
+    assert kw["dedup_key"] == "challenger_shadow_gap:2026-06-19"
+    assert kw["source"] == "research:challenger_producers"
+
+
+def test_run_challengers_silent_when_all_emit(monkeypatch):
+    """No gap → no alert (the alert must fire ONLY on a real always-on gap)."""
+    def good_build(run_date, am, *, run_time="", population=None):
+        return {"date": run_date}
+
+    specs = [
+        ProducerSpec("a", "challenger", "v1", "ok", good_build),
+        ProducerSpec("b", "challenger", "v1", "ok", good_build),
+    ]
+    monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    alerts = []
+    monkeypatch.setattr(runner, "publish_observe_alert",
+                        lambda message, **kw: alerts.append(message) or True)
+
+    am = MagicMock()
+    am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: "k"
+    res = runner.run_challengers(am, "2026-06-19")
+
+    assert res["written"] == {"a": "k", "b": "k"} and not res["errors"]
+    assert alerts == []
