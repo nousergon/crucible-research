@@ -68,7 +68,7 @@ from config import (
     SECTOR_COHERENCE_UW_MIN_SCORE,
     FACTOR_BLEND_ENABLED,
     FACTOR_BLEND_WEIGHT,
-    FACTOR_BLEND_REGIME_WEIGHTS,
+    get_factor_blend_regime_weights,
     FACTOR_QUALITY_FLOOR_ENABLED,
     FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
     FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
@@ -1595,7 +1595,7 @@ def compute_focus_list_node(state: ResearchState) -> dict:
 
     market_regime = state.get("market_regime", "neutral")
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+        factor_profiles, market_regime, get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
@@ -1834,7 +1834,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 factor_subscore_val, factor_breakdown = compute_factor_subscore(
                     factor_profile=ticker_factor_profile,
                     market_regime=market_regime,
-                    regime_weights=FACTOR_BLEND_REGIME_WEIGHTS,
+                    regime_weights=get_factor_blend_regime_weights(),
                 )
                 if factor_subscore_val is not None:
                     factor_blend_applied_count += 1
@@ -3125,7 +3125,7 @@ def _compute_focus_list_audit_lookup(
         return {}
 
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, FACTOR_BLEND_REGIME_WEIGHTS,
+        factor_profiles, market_regime, get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
