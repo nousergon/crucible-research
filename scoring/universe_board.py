@@ -193,6 +193,67 @@ def _zscore(value: float, mean: float, std: float) -> float:
     return max(-_ZSCORE_CLIP, min(_ZSCORE_CLIP, z))
 
 
+def compute_cross_sectional_attractiveness(
+    pillar_scores_by_ticker: dict[str, dict[str, Optional[float]]],
+    pillar_weights: dict[str, float],
+) -> dict[str, dict]:
+    """The SOTA attractiveness composite — the SINGLE SOURCE OF TRUTH.
+
+    Given ``{ticker: {pillar: 0-100 | None}}`` (already sector-neutral
+    within-sector percentile ranks) and NORMALIZED ``pillar_weights``, returns
+    ``{ticker: {"attractiveness_raw", "attractiveness_score",
+    "pillar_contributions"}}`` via: per-pillar cross-sectional winsorized
+    z-score → coverage-renormalized weighted blend → terminal cross-sectional
+    percentile (0-100). ``build_universe_board`` (live board) AND the history
+    backfill (``scoring/attractiveness_history.py``) both call this, so they
+    produce byte-identical numbers for the same inputs.
+
+    ``raw`` is the signed z-blend (dispersion preserved); ``score`` is its
+    cross-sectional percentile; ``pillar_contributions`` are the additive
+    ``w·z/Σw`` terms that sum to ``raw``. A ticker with no usable pillar gets
+    all-None / empty contributions.
+    """
+    # Pass 1 — per-pillar cross-section over names that HAVE each pillar.
+    pillar_values: dict[str, dict[str, float]] = {p: {} for p in _PILLAR_ORDER}
+    for ticker, scores in pillar_scores_by_ticker.items():
+        for p in _PILLAR_ORDER:
+            v = scores.get(p)
+            if v is not None:
+                pillar_values[p][ticker] = v
+    pillar_stats = {p: _mean_std(list(v.values())) for p, v in pillar_values.items() if v}
+
+    # Pass 2 — winsorized z-blend + additive contributions.
+    blends: dict[str, float] = {}
+    out: dict[str, dict] = {}
+    for ticker, scores in pillar_scores_by_ticker.items():
+        contribs: dict[str, tuple[float, float]] = {}
+        num = 0.0
+        wsum = 0.0
+        for p in _PILLAR_ORDER:
+            v = scores.get(p)
+            w = pillar_weights.get(p, 0.0)
+            if v is None or w <= 0 or p not in pillar_stats:
+                continue
+            mean, std = pillar_stats[p]
+            z = _zscore(v, mean, std)
+            num += w * z
+            wsum += w
+            contribs[p] = (w, z)
+        rec = {"attractiveness_raw": None, "attractiveness_score": None, "pillar_contributions": {}}
+        if wsum > 0:
+            blend = num / wsum
+            blends[ticker] = blend
+            rec["attractiveness_raw"] = round(blend, 4)
+            rec["pillar_contributions"] = {p: round(w * z / wsum, 4) for p, (w, z) in contribs.items()}
+        out[ticker] = rec
+
+    # Terminal cross-sectional percentile (restores full 0-100 dispersion).
+    pct = _avg_rank_pct(blends)
+    for ticker in out:
+        out[ticker]["attractiveness_score"] = pct.get(ticker)
+    return out
+
+
 def _num(v: Any, multiplier: float = 1.0) -> Optional[float]:
     """Coerce to a finite float (applying ``multiplier``) or None. NaN / inf /
     non-numeric → None (a coverage gap, never a fabricated value)."""
@@ -418,9 +479,9 @@ def build_universe_board(
     tech_by_ticker = _index_parquet(technical_df)
     fund_by_ticker = _index_parquet(fundamental_df)
 
-    # ── Pass 1: per-stock base records + collect per-pillar cross-section ─────
+    # ── Pass 1: per-stock base records + collect per-pillar scores ───────────
     records: list[tuple[dict, dict]] = []   # (stock, pillar_scores)
-    pillar_values: dict[str, dict[str, float]] = {p: {} for p in _PILLAR_ORDER}
+    pillar_scores_by_ticker: dict[str, dict] = {}
     for row in scanner_evals:
         ticker = row.get("ticker")
         if not ticker:
@@ -434,9 +495,7 @@ def build_universe_board(
             pillar: _num(profile.get(_PILLAR_TO_FACTOR_KEY[pillar]))
             for pillar in _PILLAR_ORDER
         }
-        for p, v in pillar_scores.items():
-            if v is not None:
-                pillar_values[p][ticker] = v
+        pillar_scores_by_ticker[ticker] = pillar_scores
         pillar_coverage = {
             pillar: int(profile[f"{_PILLAR_TO_FACTOR_KEY[pillar][:-6]}_n"])
             for pillar in _PILLAR_ORDER
@@ -480,41 +539,13 @@ def build_universe_board(
             "metrics": metrics,
         }, pillar_scores))
 
-    # ── Cross-sectional pillar stats (mean/std over names that HAVE each pillar) ─
-    pillar_stats = {
-        p: _mean_std(list(vals.values()))
-        for p, vals in pillar_values.items()
-        if vals
-    }
-
-    # ── Pass 2: winsorized z-blend + additive per-pillar contributions ───────
-    blends: dict[str, float] = {}
-    for stock, pillar_scores in records:
-        contribs: dict[str, tuple[float, float]] = {}
-        num = 0.0
-        wsum = 0.0
-        for p in _PILLAR_ORDER:
-            v = pillar_scores[p]
-            w = pillar_weights.get(p, 0.0)
-            if v is None or w <= 0 or p not in pillar_stats:
-                continue
-            mean, std = pillar_stats[p]
-            z = _zscore(v, mean, std)
-            num += w * z
-            wsum += w
-            contribs[p] = (w, z)
-        if wsum > 0:
-            blend = num / wsum
-            blends[stock["ticker"]] = blend
-            stock["attractiveness_raw"] = round(blend, 4)
-            stock["pillar_contributions"] = {
-                p: round(w * z / wsum, 4) for p, (w, z) in contribs.items()
-            }
-
-    # ── Terminal cross-sectional percentile → 0-100 (restores dispersion) ────
-    pct = _avg_rank_pct(blends)
+    # ── Attractiveness (SOTA z-blend → percentile) via the shared chokepoint ──
+    attractiveness = compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
     for stock, _ in records:
-        stock["attractiveness_score"] = pct.get(stock["ticker"])
+        a = attractiveness.get(stock["ticker"], {})
+        stock["attractiveness_raw"] = a.get("attractiveness_raw")
+        stock["attractiveness_score"] = a.get("attractiveness_score")
+        stock["pillar_contributions"] = a.get("pillar_contributions", {})
 
     stocks = [s for s, _ in records]
     stocks.sort(
@@ -623,6 +654,14 @@ def compute_and_write_universe_board(
     s3_client: Any = None,
 ) -> str:
     """archive_writer entry point — build from S3-resident inputs + the in-memory
-    scanner_evals and write the artifact. Returns the dated S3 key."""
+    scanner_evals and write the artifact. Also appends today's attractiveness
+    slice to the per-stock history time-series (fail-soft — a history failure
+    must not mask the board write). Returns the dated S3 key."""
     board = build_universe_board(run_date, scanner_evals, bucket=bucket, s3_client=s3_client)
-    return write_universe_board_to_s3(board, run_date, bucket=bucket, s3_client=s3_client)
+    key = write_universe_board_to_s3(board, run_date, bucket=bucket, s3_client=s3_client)
+    try:
+        from scoring.attractiveness_history import append_history, extract_history_rows_from_board
+        append_history(extract_history_rows_from_board(board), bucket=bucket, s3_client=s3_client)
+    except Exception as e:  # secondary observability — never fail the board write
+        logger.warning("[universe_board] attractiveness history append failed (non-fatal): %s", e)
+    return key
