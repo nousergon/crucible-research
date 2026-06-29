@@ -9,6 +9,20 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # auto-confirms. Image-size impact: ~25MB for git + git-core deps.
 RUN microdnf install -y git && microdnf clean all
 
+# Bake the source commit SHA into the image so the decision-capture provenance
+# stamp (``DecisionArtifact.code_sha``, L4567 sub-item 1b / #781) records the
+# exact deployed code that produced each decision — the SOTA run=code+data
+# reproducibility contract. ``graph/research_graph.py`` reads this at capture
+# time via ``os.environ.get("ALPHA_ENGINE_CODE_SHA")``; without it the stamp is
+# permanently ``None`` in prod. Passed by ``infrastructure/deploy.sh`` via
+# ``--build-arg GIT_SHA=<sha>`` (CI uses ``$GITHUB_SHA``; local dev falls back
+# to ``git rev-parse HEAD``). The build-arg default is left empty so a raw
+# ``docker build`` that forgets to pass it stamps a falsy value (env-var-absent
+# semantics — the capture read treats empty as unset → ``None``) rather than a
+# misleading literal ``"unknown"``. Mirrors the predictor-side GIT_SHA wire-in.
+ARG GIT_SHA=
+ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
+
 # Install dependencies. alpha-engine-lib is installed from public git+https
 # (lib was flipped public 2026-05-03; previous versions vendored a local
 # copy via deploy.sh staging). [arcticdb] pulls arcticdb (used by data/
