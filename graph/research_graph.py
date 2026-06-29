@@ -61,6 +61,7 @@ from config import (
     CIO_FORCE_FILL_CONVICTION_FLOOR,
     CIO_NEW_ENTRANT_ALERT_FLOOR,
     CIO_DEBLENDED_ORCHESTRATION,
+    ADAPTIVE_SLOT_ALLOCATION_ENABLED,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
@@ -1668,7 +1669,23 @@ def merge_results_node(state: ResearchState) -> dict:
     sector_ratings = state.get("sector_ratings", {})
     open_slots = state.get("open_slots", 0)
 
-    team_slot_allocation = compute_team_slots(open_slots, sector_ratings)
+    # Adaptive slot allocation (config#926): when enabled, weight each team's
+    # eligible-pick count by its historical accuracy (loaded from the
+    # backtester's team_accuracy artifact). Default OFF / artifact absent →
+    # team_accuracy is None and compute_team_slots is byte-identical to static.
+    team_accuracy = None
+    if ADAPTIVE_SLOT_ALLOCATION_ENABLED:
+        am = state.get("archive_manager")
+        if am is not None:
+            try:
+                team_accuracy = am.load_team_accuracy()
+            except Exception as e:  # pragma: no cover — loader is best-effort
+                logger.warning("[merge] team_accuracy load failed: %s", e)
+        logger.info("[merge] adaptive slots ON — team_accuracy=%s", team_accuracy)
+
+    team_slot_allocation = compute_team_slots(
+        open_slots, sector_ratings, team_accuracy=team_accuracy
+    )
 
     logger.info("[merge] %d open slots, allocation: %s", open_slots, team_slot_allocation)
 

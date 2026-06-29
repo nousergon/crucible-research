@@ -385,6 +385,19 @@ PREDICTOR_PREDICTIONS_KEY: str = _pred_cfg.get("s3_predictions_key", "predictor/
 # Below this threshold the prediction is treated as low-conviction and ignored.
 MIN_PREDICTION_CONFIDENCE: float = float(_pred_cfg.get("min_confidence", 0.60))
 
+# ── Adaptive slot allocation (config#926) ────────────────────────────────────
+# When enabled, compute_team_slots nudges each team's eligible-pick count ±1 by
+# the team's historical accuracy (loaded from the backtester's team_accuracy S3
+# artifact). Default OFF → static allocation, inert merge. Env override allows a
+# soak flip with no redeploy.
+_slot_cfg: dict = _cfg.get("adaptive_slot_allocation", {})
+_adaptive_slot_env = os.environ.get("ADAPTIVE_SLOT_ALLOCATION_ENABLED")
+ADAPTIVE_SLOT_ALLOCATION_ENABLED: bool = (
+    _adaptive_slot_env.strip().lower() == "true"
+    if _adaptive_slot_env is not None
+    else bool(_slot_cfg.get("enabled", False))
+)
+
 # ── CIO ───────────────────────────────────────────────────────────────────────
 # Weekly entrant cap applied to new investments (does not affect reaffirmations
 # of held BUY-rated names).
