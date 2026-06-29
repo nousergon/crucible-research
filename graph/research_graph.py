@@ -61,6 +61,7 @@ from config import (
     CIO_FORCE_FILL_CONVICTION_FLOOR,
     CIO_NEW_ENTRANT_ALERT_FLOOR,
     CIO_DEBLENDED_ORCHESTRATION,
+    CIO_CRITIC_ENABLED,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
@@ -95,6 +96,7 @@ from agents.sector_teams.sector_team import run_sector_team, SectorTeamContext
 from agents.macro_agent import run_macro_agent_with_reflection
 from agents.investment_committee.ic_cio import (
     run_cio,
+    run_cio_with_reflection,
     build_sector_neutral_quality_map,
     _PROMPT_DEFAULT,
     _PROMPT_DEBLENDED,
@@ -165,6 +167,7 @@ _FALLBACK_AGENT_MODEL_NAMES: dict[str, str] = {
     "sector_team": "claude-haiku-4-5",  # per-stock LLM analysis
     "macro_economist": "claude-sonnet-4-6",  # synthesis / regime call
     "ic_cio": "claude-sonnet-4-6",  # cross-stock ranking
+    "ic_cio_critic": "claude-haiku-4-5",  # cheap IC critic (config#927)
 }
 
 
@@ -2366,7 +2369,36 @@ def cio_node(state: ResearchState) -> dict:
         )
     _cio_prompt_name = _PROMPT_DEBLENDED if _deblended else _PROMPT_DEFAULT
 
-    # Cost-telemetry scope wraps the single CIO Anthropic call.
+    _macro_context = {
+        "market_regime": state.get("market_regime", "neutral"),
+        "macro_report": state.get("macro_report", ""),
+    }
+    _cio_call_kwargs = dict(
+        candidates=candidates,
+        macro_context=_macro_context,
+        sector_ratings=state.get("sector_ratings", {}),
+        current_population=state.get("remaining_population", []),
+        open_slots=state.get("open_slots", 0),
+        exits=state.get("exits", []),
+        run_date=state.get("run_date", ""),
+        prior_decisions=prior_ic,
+        max_new_entrants=CIO_MAX_NEW_ENTRANTS,
+        min_new_entrants=CIO_MIN_NEW_ENTRANTS,
+        force_fill_conviction_floor=CIO_FORCE_FILL_CONVICTION_FLOOR,
+        # Phase 2.A.3: scorecard text loaded upstream by
+        # load_scorecard_node. Empty string when producer's flag
+        # is off / artifact missing — CIO falls back to pre-Phase-2
+        # behavior (no prior-cycle outcome data in its prompt).
+        prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
+        deblended=_deblended,
+        sector_neutral_quality=_sector_neutral_quality,
+    )
+
+    _cio_reflection_log = None
+    # Cost-telemetry scope wraps the CIO Anthropic call(s). When the IC critic
+    # (config#927) is enabled, run_cio_with_reflection may add one Haiku critic
+    # call + one extra CIO call inside the same cost scope. Default OFF →
+    # byte-identical to the prior single run_cio path (inert merge).
     with track_llm_cost(
         agent_id="ic_cio",
         node_name="cio_node",
@@ -2374,29 +2406,20 @@ def cio_node(state: ResearchState) -> dict:
         run_id=derive_run_id(state),
         prompt=load_prompt(_cio_prompt_name),
     ):
-        cio_result = run_cio(
-            candidates=candidates,
-            macro_context={
-                "market_regime": state.get("market_regime", "neutral"),
-                "macro_report": state.get("macro_report", ""),
-            },
-            sector_ratings=state.get("sector_ratings", {}),
-            current_population=state.get("remaining_population", []),
-            open_slots=state.get("open_slots", 0),
-            exits=state.get("exits", []),
-            run_date=state.get("run_date", ""),
-            prior_decisions=prior_ic,
-            max_new_entrants=CIO_MAX_NEW_ENTRANTS,
-            min_new_entrants=CIO_MIN_NEW_ENTRANTS,
-            force_fill_conviction_floor=CIO_FORCE_FILL_CONVICTION_FLOOR,
-            # Phase 2.A.3: scorecard text loaded upstream by
-            # load_scorecard_node. Empty string when producer's flag
-            # is off / artifact missing — CIO falls back to pre-Phase-2
-            # behavior (no prior-cycle outcome data in its prompt).
-            prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
-            deblended=_deblended,
-            sector_neutral_quality=_sector_neutral_quality,
-        )
+        if CIO_CRITIC_ENABLED:
+            cio_result, _cio_reflection_log = run_cio_with_reflection(
+                **_cio_call_kwargs
+            )
+            logger.info(
+                "[cio] IC critic reflection: action=%s flagged=%s "
+                "advanced %d→%d",
+                _cio_reflection_log.get("critic_action"),
+                _cio_reflection_log.get("flagged_tickers"),
+                len(_cio_reflection_log.get("initial_advanced", [])),
+                len(_cio_reflection_log.get("final_advanced", [])),
+            )
+        else:
+            cio_result = run_cio(**_cio_call_kwargs)
 
     # Schema validation on CIO output shapes (strict-by-default).
     for decision in cio_result.get("decisions", []):

@@ -422,6 +422,17 @@ CIO_DEBLENDED_ORCHESTRATION: bool = (
     else bool(_cio_cfg.get("deblended_orchestration", False))
 )
 
+# IC critic (config#927): when enabled, a cheap Haiku reviewer challenges the
+# CIO's advance set before finalization (reflection loop, mirrors the macro
+# agent). Default OFF so the merge is inert; flip for an A/B soak. Env var
+# overrides the YAML so the soak flips with NO redeploy.
+_cio_critic_env = os.environ.get("CIO_CRITIC_ENABLED")
+CIO_CRITIC_ENABLED: bool = (
+    _cio_critic_env.strip().lower() == "true"
+    if _cio_critic_env is not None
+    else bool(_cio_cfg.get("critic_enabled", False))
+)
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]
 PER_STOCK_MODEL: str = LLM_CFG["per_stock_model"]
