@@ -117,6 +117,15 @@ _AUDIT_TABLE: list[tuple[str, str, str | int, int, str]] = [
         "List of CIORawDecision × per-decision rationale + entry_thesis",
     ),
     (
+        "ic_cio (critic)",
+        "CIOCriticOutput",
+        768,  # off-tier via the named _CRITIC_MAX_TOKENS constant in ic_cio.py
+              # (named, so no test_max_tokens_lint allowlist entry is needed)
+        500,  # action + critique (~150tok) + 3 short ticker lists + envelope
+        "Small structured response — action + critique + flagged/drops/adds "
+        "ticker lists (config#927)",
+    ),
+    (
         "evals.judge.evaluate_artifact",
         "RubricEvalLLMOutput",
         "MAX_TOKENS_STRATEGIC",  # DEFAULT_MAX_TOKENS routes through MAX_TOKENS_STRATEGIC
@@ -179,7 +188,13 @@ def _resolve_schema(name: str):
     if hasattr(state_schemas, name):
         return getattr(state_schemas, name)
 
-    # Fallbacks — schemas that live in module-local files.
+    # Fallbacks — schemas that live in module-local files (not the shared
+    # alpha_engine_lib.agent_schemas re-export surface).
+    from agents.investment_committee import ic_cio
+
+    if hasattr(ic_cio, name):
+        return getattr(ic_cio, name)
+
     raise AssertionError(
         f"Schema {name!r} not found in graph.state_schemas. If it lives "
         f"elsewhere, add a fallback to _resolve_schema()."
