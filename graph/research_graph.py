@@ -2122,7 +2122,7 @@ def score_aggregator(state: ResearchState) -> dict:
     # path remain load-bearing.
     if pillar_coverage_skip_count > 0:
         try:
-            from alpha_engine_lib.alerts import publish as alerts_publish
+            from krepis.alerts import publish as alerts_publish
             alerts_publish(
                 message=(
                     f"[score_aggregator] pillar coverage gap — skipped "
@@ -2314,7 +2314,7 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
     )
     try:
-        from alpha_engine_lib.alerts import publish as alerts_publish
+        from krepis.alerts import publish as alerts_publish
         alerts_publish(
             message=msg,
             severity="WARN",
