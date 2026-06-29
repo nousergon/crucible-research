@@ -261,8 +261,8 @@ class TestScannerLeaderboardProducer:
         names = {s["name"]: s for s in got["specs"]}
         assert names["tech_score_momentum"]["realized_rank_ic"] is None
 
-    def test_fail_soft_never_raises(self, s3):
-        from scoring.leaderboard_producers import build_scanner_leaderboard
+    def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):
+        import scoring.leaderboard_producers as lp
 
         # No bucket objects + a deliberately broken client call path: the
         # function must return a status dict, never raise.
@@ -270,8 +270,18 @@ class TestScannerLeaderboardProducer:
             def get_paginator(self, *a, **k):
                 raise RuntimeError("AccessDenied")
 
-        res = build_scanner_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
+        alerts = []
+        monkeypatch.setattr(lp, "publish_observe_alert",
+                            lambda message, **kw: alerts.append((message, kw)) or True)
+
+        res = lp.build_scanner_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
         assert res["status"] == "error"
+        # config#1403: a build failure means the artifact is NOT written → LOUD.
+        assert len(alerts) == 1
+        msg, kw = alerts[0]
+        assert "scanner leaderboard build FAILED" in msg
+        assert kw["dedup_key"] == "scanner_leaderboard_build_error:2026-06-27"
+        assert kw["source"] == "research:scanner_leaderboard"
 
 
 class TestProducerLeaderboardProducer:
@@ -304,12 +314,21 @@ class TestProducerLeaderboardProducer:
         # champion ranks A>B and A outperforms → IC = 1.0.
         assert names["agentic_sector_teams"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
 
-    def test_fail_soft_never_raises(self, s3):
-        from scoring.leaderboard_producers import build_producer_leaderboard
+    def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):
+        import scoring.leaderboard_producers as lp
 
         class _BoomS3:
             def get_paginator(self, *a, **k):
                 raise RuntimeError("AccessDenied")
 
-        res = build_producer_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
+        alerts = []
+        monkeypatch.setattr(lp, "publish_observe_alert",
+                            lambda message, **kw: alerts.append((message, kw)) or True)
+
+        res = lp.build_producer_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
         assert res["status"] == "error"
+        assert len(alerts) == 1
+        msg, kw = alerts[0]
+        assert "producer leaderboard build FAILED" in msg
+        assert kw["dedup_key"] == "producer_leaderboard_build_error:2026-06-27"
+        assert kw["source"] == "research:producer_leaderboard"

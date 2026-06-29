@@ -32,6 +32,7 @@ import json
 import logging
 from typing import Any, Optional
 
+from observe_alerts import publish_observe_alert
 from scoring.leaderboard_scoring import (
     DEFAULT_HORIZON_DAYS,
     SpecDay,
@@ -297,6 +298,19 @@ def build_scanner_leaderboard(
         logger.warning(
             "[leaderboard] scanner leaderboard build failed (non-fatal, observe-only): %s", exc,
         )
+        # Fail-LOUD: scanner/leaderboard/ is OBSERVATION_REGISTRY always-on; a
+        # build failure means the artifact is NOT written to S3 — the silent gap
+        # the 2026-06-27 audit caught (config#1403). Surface it, never swallow.
+        publish_observe_alert(
+            message=(
+                f"[leaderboard] scanner leaderboard build FAILED on {date_str} "
+                f"(observe-only, non-fatal): {exc}. "
+                f"{_SCANNER_OUTPUT.format(date=date_str)} NOT written to S3 — "
+                f"no-silent-fails (config#1403)."
+            ),
+            source="research:scanner_leaderboard",
+            dedup_key=f"scanner_leaderboard_build_error:{date_str}",
+        )
         return {"status": "error", "error": str(exc)}
 
 
@@ -331,5 +345,18 @@ def build_producer_leaderboard(
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
         logger.warning(
             "[leaderboard] producer leaderboard build failed (non-fatal, observe-only): %s", exc,
+        )
+        # Fail-LOUD: research/producer_leaderboard/ is OBSERVATION_REGISTRY
+        # always-on; a build failure means the artifact is NOT written to S3 —
+        # the silent gap the 2026-06-27 audit caught (config#1403).
+        publish_observe_alert(
+            message=(
+                f"[leaderboard] producer leaderboard build FAILED on {date_str} "
+                f"(observe-only, non-fatal): {exc}. "
+                f"{_PRODUCER_OUTPUT.format(date=date_str)} NOT written to S3 — "
+                f"no-silent-fails (config#1403)."
+            ),
+            source="research:producer_leaderboard",
+            dedup_key=f"producer_leaderboard_build_error:{date_str}",
         )
         return {"status": "error", "error": str(exc)}
