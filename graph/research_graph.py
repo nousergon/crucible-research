@@ -3340,6 +3340,90 @@ def _secondary_work_deadline_exhausted(state: ResearchState) -> tuple[bool, floa
     return (elapsed >= budget, elapsed)
 
 
+def _build_scanner_eval_rows(
+    *,
+    scanner_universe: list,
+    extra_override_tickers: list,
+    technical_scores: dict,
+    sector_map: dict,
+    scanner_eval_log: list,
+    focus_lookup: dict,
+    run_date: str,
+) -> list:
+    """Assemble the ``scanner_evaluations`` rows for the cycle (pure, so the
+    join is unit-testable independently of the archive_writer graph node).
+
+    ``scanner_eval_log`` is ``run_quant_filter._last_eval_log`` — the
+    AUTHORITATIVE per-ticker scanner verdict. We join it (not agent team-picks)
+    because ``scanner_evaluations`` records the SCANNER funnel (~900 → ~60):
+
+      * ``quant_filter_pass`` is the scanner's recorded survival flag. The
+        backtester's e2e_lift (``analysis/end_to_end.py``) grades scanner recall
+        / lift off this column, so it MUST mean "survived the quant gate", not
+        "an agent later picked it". Agent selection lives in the focus-list
+        audit (``focus_list_passed`` / ``agent_override``) projected below.
+      * ``filter_fail_reason`` / ``scan_path`` / ``liquidity_pass`` /
+        ``volatility_pass`` are the scanner's recorded gate outcomes — the only
+        place each dropped name's reason exists. Reconstructing rows without
+        them left every failed name with a NULL reason (the dashboard's
+        "(unspecified)" bucket) and uniform pass-flags.
+
+    Names absent from the eval log (agent-override tickers outside the scanned
+    universe; or a cycle where the stash was unavailable) degrade to
+    ``quant_filter_pass=0`` + null reason — honest "not scanner-evaluated", with
+    metrics still carried from ``technical_scores``.
+    """
+    eval_by_ticker = {
+        e.get("ticker"): e for e in (scanner_eval_log or []) if e.get("ticker")
+    }
+
+    def _pref(elog: dict, key: str, *fallbacks):
+        """Scanner eval-log value (authoritative) else the first non-None
+        fallback (the state ``technical_scores`` slice) else None."""
+        v = elog.get(key)
+        if v is not None:
+            return v
+        for fb in fallbacks:
+            if fb is not None:
+                return fb
+        return None
+
+    rows = []
+    for ticker in list(scanner_universe) + list(extra_override_tickers):
+        ts = technical_scores.get(ticker, {}) or {}
+        elog = eval_by_ticker.get(ticker, {})
+        row = {
+            "ticker": ticker,
+            "eval_date": run_date,
+            "sector": sector_map.get(ticker) or elog.get("sector"),
+            "tech_score": _pref(elog, "tech_score", ts.get("technical_score")),
+            "rsi_14": _pref(elog, "rsi_14", ts.get("rsi_14")),
+            "atr_pct": _pref(elog, "atr_pct", ts.get("atr_pct"), ts.get("atr_14_pct")),
+            "price_vs_ma200": _pref(elog, "price_vs_ma200", ts.get("price_vs_ma200")),
+            "current_price": _pref(elog, "current_price", ts.get("current_price")),
+            "avg_volume_20d": _pref(elog, "avg_volume_20d", ts.get("avg_volume_20d")),
+            "scan_path": elog.get("scan_path"),
+            "quant_filter_pass": int(elog.get("quant_filter_pass", 0) or 0),
+            "filter_fail_reason": elog.get("filter_fail_reason"),
+        }
+        # Carry the scanner's recorded gate flags when present (the eval log
+        # only stamps the flag relevant to where a name dropped); absent flags
+        # fall to the schema's NOT NULL DEFAULT 1.
+        if "liquidity_pass" in elog:
+            row["liquidity_pass"] = int(elog.get("liquidity_pass") or 0)
+        if "volatility_pass" in elog:
+            row["volatility_pass"] = int(elog.get("volatility_pass") or 0)
+        # Project focus-list audit fields. focus_lookup is empty when factor
+        # profiles aren't readable — every row gets NULL focus_* fields +
+        # focus_list_passed=0, which the dashboard reads as "shadow logging
+        # didn't run this cycle" rather than "all tickers failed."
+        fl_entry = focus_lookup.get(ticker)
+        if fl_entry is not None:
+            row.update(fl_entry)
+        rows.append(row)
+    return rows
+
+
 def archive_writer(state: ResearchState) -> dict:
     """Write all data to S3 + SQLite.
 
@@ -3642,14 +3726,6 @@ def archive_writer(state: ResearchState) -> dict:
     technical_scores = state.get("technical_scores", {})
     sector_map = state.get("sector_map", {})
     market_regime = state.get("market_regime", "neutral")
-    # Build set of tickers that any team picked (quant top-10 or recommended)
-    team_picked_tickers: set[str] = set()
-    for _tid, _out in team_outputs.items():
-        for _rec in _out.get("recommendations", []):
-            team_picked_tickers.add(_rec.get("ticker", ""))
-        for _pick in _out.get("quant_output", {}).get("ranked_picks", []):
-            if isinstance(_pick, dict):
-                team_picked_tickers.add(_pick.get("ticker", ""))
 
     # ── Focus list audit (PR 4 of scanner-placement arc) ────────────────────
     # Project the focus list computed in compute_focus_list_node + the
@@ -3687,29 +3763,32 @@ def archive_writer(state: ResearchState) -> dict:
         if t not in universe_set and focus_lookup[t].get("agent_override") == 1
     ]
 
-    scanner_evals = []
-    for ticker in list(scanner_universe) + extra_override_tickers:
-        ts = technical_scores.get(ticker, {})
-        row = {
-            "ticker": ticker,
-            "eval_date": run_date,
-            "sector": sector_map.get(ticker),
-            "tech_score": ts.get("technical_score"),
-            "rsi_14": ts.get("rsi_14"),
-            "atr_pct": ts.get("atr_pct") or ts.get("atr_14_pct"),
-            "price_vs_ma200": ts.get("price_vs_ma200"),
-            "current_price": ts.get("current_price"),
-            "avg_volume_20d": ts.get("avg_volume_20d"),
-            "quant_filter_pass": 1 if ticker in team_picked_tickers else 0,
-        }
-        # Project focus-list audit fields. focus_lookup is empty when factor
-        # profiles aren't readable — every row gets NULL focus_* fields +
-        # focus_list_passed=0, which the dashboard reads as "shadow logging
-        # didn't run this cycle" rather than "all tickers failed."
-        fl_entry = focus_lookup.get(ticker)
-        if fl_entry is not None:
-            row.update(fl_entry)
-        scanner_evals.append(row)
+    # The AUTHORITATIVE per-ticker scanner verdict (quant_filter_pass +
+    # filter_fail_reason + scan_path + the liquidity/volatility gate flags) is
+    # computed by run_quant_filter and stashed on its _last_eval_log during the
+    # scanner stage of THIS graph run — the only place the funnel reason for each
+    # of the ~900 names exists. Join it in here rather than reconstructing
+    # placeholder rows (which dropped fail_reason → NULL and mis-set
+    # quant_filter_pass to agent team-picks). Same in-process stash the shadow
+    # candidate-gen specs already rely on (scanner_orchestrator).
+    from data.scanner import run_quant_filter
+
+    scanner_eval_log = getattr(run_quant_filter, "_last_eval_log", None) or []
+    if not scanner_eval_log:
+        logger.warning(
+            "[archive_writer] scanner eval log unavailable — scanner_evaluations "
+            "gate detail (filter_fail_reason / scan_path / true quant_filter_pass) "
+            "degrades to null/0 this cycle"
+        )
+    scanner_evals = _build_scanner_eval_rows(
+        scanner_universe=scanner_universe,
+        extra_override_tickers=extra_override_tickers,
+        technical_scores=technical_scores,
+        sector_map=sector_map,
+        scanner_eval_log=scanner_eval_log,
+        focus_lookup=focus_lookup,
+        run_date=run_date,
+    )
 
     am.write_scanner_evaluations(scanner_evals)
     if focus_lookup:
