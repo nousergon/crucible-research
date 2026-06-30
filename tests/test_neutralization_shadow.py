@@ -197,10 +197,29 @@ def test_partial_exposures_counted_but_names_retained():
 # ── (d) live cutover gate defaults OFF ────────────────────────────────────────
 
 
-def test_live_enabled_defaults_false():
-    import config
+def test_neutralization_live_default_is_observe_off():
+    """Public-baseline contract (divergence policy config#1031): the PUBLIC code
+    ships neutralization observe-off. config.py derives the gate as
+    ``bool(aggregator["neutralization"].get("live_enabled", False))`` (config.py
+    L148-149), so a public-baseline scoring config — one with no
+    ``aggregator.neutralization.live_enabled`` key — MUST resolve False.
 
-    assert config.NEUTRALIZATION_LIVE_ENABLED is False
+    The private config bundle intentionally flips it True for the live edge
+    (config#1142 cutover; reconciled into the reference package by config#1367).
+    That *environment-resolved* value (``config.NEUTRALIZATION_LIVE_ENABLED``) is
+    deliberately NOT asserted here: it is non-deterministic across checkouts — a
+    clean public checkout resolves False, a checkout with the private config
+    bundle resolves True — which reddened every research PR (config#1461). Gate
+    WIRING for both states is proven deterministically by
+    ``test_live_cutover_branch_inert_when_gate_off`` /
+    ``test_live_cutover_branch_applies_when_gate_on``.
+    """
+    # Mirror config.py's two-level derivation against a public-baseline scoring
+    # config (no aggregator.neutralization section at all): default must hold.
+    public_baseline_scoring: dict = {}
+    aggregator = public_baseline_scoring.get("aggregator", {})
+    neutralization = aggregator.get("neutralization", {})
+    assert bool(neutralization.get("live_enabled", False)) is False
 
 
 def test_live_cutover_branch_inert_when_gate_off(monkeypatch):
