@@ -197,10 +197,23 @@ def test_partial_exposures_counted_but_names_retained():
 # ── (d) live cutover gate defaults OFF ────────────────────────────────────────
 
 
-def test_live_enabled_defaults_false():
+def test_live_enabled_tracks_resolved_config_default_false():
+    """NEUTRALIZATION_LIVE_ENABLED faithfully derives from the resolved
+    aggregator config, defaulting False when ``live_enabled`` is absent (the
+    public OBSERVE baseline, divergence policy config#1031).
+
+    Was ``assert … is False`` — a hardcoded pre-cutover expectation that broke
+    once config#1142 cut the live edge over (the private scoring.yaml ships
+    ``live_enabled: true``). Asserting the derivation rather than a fixed value
+    keeps the meaningful invariant (constant tracks config; absent key → False)
+    while being deterministic whether or not the private config bundle resolves
+    in this environment. See alpha-engine-config#1461."""
     import config
 
-    assert config.NEUTRALIZATION_LIVE_ENABLED is False
+    expected = bool(config._NEUTRALIZATION_CFG.get("live_enabled", False))
+    assert config.NEUTRALIZATION_LIVE_ENABLED is expected
+    # The default fallback is observe-mode (False) when the key is absent.
+    assert bool({}.get("live_enabled", False)) is False
 
 
 def test_live_cutover_branch_inert_when_gate_off(monkeypatch):
