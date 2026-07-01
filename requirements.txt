@@ -35,7 +35,14 @@ pydantic~=2.7
 # git URL; CI pulls directly.
 # Tradeability cost engine (config#1399): nousergon_lib.quant.transaction_cost,
 # shipped in nousergon-lib v0.75.0 (#144 merged + tagged 2026-06-30).
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.75.0
+# research_intel contract (config#1500): the research_intel.schema.json +
+# SLOT_SCHEMAS["research_intel"] registration ship in nousergon-lib v0.77.0.
+# NOTE (DRAFT): this pin bump is a HARD DEPENDENCY on tagging lib v0.77.0
+# (see the sibling nousergon-lib PR). Until that tag exists, `pip install`
+# of this line will fail — that is the one repin the reviewer must land
+# after the lib PR merges + is tagged. test_lib_pin_lockstep keeps all three
+# deploy artifacts (this file + Dockerfile + Dockerfile.alerts) in lockstep.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.77.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
