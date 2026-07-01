@@ -80,6 +80,12 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "evals/orchestrator.py": 2,
     "evals/rationale_clustering.py": 1,
     "evals/rolling_mean.py": 1,
+    # Saturday-SF team-accuracy producer (config#1422) — single fixed-key
+    # overwrite (config/team_accuracy.json). Registered in
+    # ARTIFACT_REGISTRY.yaml as config_team_accuracy (warning severity;
+    # consumer load_team_accuracy gracefully falls back to static
+    # allocation when absent).
+    "evals/team_accuracy.py": 1,
     # Two PUT sites: (1) per-call cost-raw JSONL (_cost_raw/), (2) the
     # SFT-lossless capture JSONL (_sft_raw/, config#1134). Both are gated on
     # ALPHA_ENGINE_DECISION_CAPTURE_ENABLED and are accumulation streams
