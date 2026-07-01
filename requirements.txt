@@ -43,7 +43,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # directly (not via a nousergon-lib bump, which would drag the in-flight,
 # 7/3-cutover SF-rename refs in lib 0.74.0 into this repo). Floor guarantees
 # the upgrade even on a non-fresh venv.
-krepis>=0.6.0
+# Bumped 0.6.0 -> 0.7.0 (config#1545): infrastructure/deploy.sh's canary +
+# alert calls use the `krepis.aws invoke-canary` / `krepis.alerts` CLI, which
+# ships starting in krepis 0.7.0 — the 0.6.0 floor didn't actually guarantee
+# the CLI existed (it happened to resolve 0.7.0 anyway since that's the
+# latest release, masking the gap).
+krepis>=0.7.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5
