@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -336,6 +336,35 @@ CREATE TABLE IF NOT EXISTS cio_evaluations (
     rule_tags           TEXT,    -- JSON list[str] of closed-vocab tags; see migration 14
     UNIQUE(ticker, eval_date)
 );
+
+-- Long-format outcome store (EPIC config#1483). The root-cause replacement
+-- for the wide horizon-suffixed score_performance columns
+-- (beat_spy_5d/beat_spy_21d/spy_21d_return/log_alpha_21d/...): one row per
+-- (signal, score_date, horizon_days) so a horizon change is a DATA change, not
+-- a fleet-wide column rename (which silently starved consumers — config#1456).
+-- Field names + semantics mirror nousergon_lib.contracts outcome_record (v1) +
+-- nousergon_lib.quant.horizons.OutcomeColumns. Returns/spy stored as DECIMALS
+-- (matching the universe_returns source + log_alpha), NOT the legacy percent
+-- quirk of the wide columns. Producer = alpha-engine-data
+-- signal_returns._backfill_outcome_records (config#1483 Phase 2, dual-write);
+-- this DDL is byte-identical to that producer's self-creating _ensure so
+-- whichever side creates the table first, both agree. Authoritative-schema
+-- home; consumer reads land in Phase 3 (soak-gated).
+CREATE TABLE IF NOT EXISTS score_performance_outcomes (
+    id             INTEGER PRIMARY KEY,
+    signal_id      TEXT NOT NULL,
+    symbol         TEXT NOT NULL,
+    score_date     TEXT NOT NULL,
+    horizon_days   INTEGER NOT NULL,
+    beat_spy       INTEGER,
+    stock_return   REAL,
+    spy_return     REAL,
+    log_alpha      REAL,
+    is_primary     INTEGER NOT NULL,
+    resolved_at    TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(signal_id, horizon_days)
+);
 """
 
 # ── Versioned Migrations ─────────────────────────────────────────────────────
@@ -519,6 +548,17 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # neutralized score recorded" (raw==neutralized, identity).
     20: ("Add neutralized_final_score to cio_evaluations for live #1142 forward efficacy",
          "ALTER TABLE cio_evaluations ADD COLUMN neutralized_final_score REAL"),
+    # Long-format outcome store indexes (EPIC config#1483 Phase 3a). The
+    # score_performance_outcomes table itself is created by TABLES_SQL above
+    # (CREATE IF NOT EXISTS); this migration adds its query indexes. Mirrors
+    # the producer's _ensure_score_performance_outcomes_schema so a
+    # research-first-created db and a data-first-created db carry identical
+    # indexes. Consumer reads (Phase 3) filter WHERE horizon_days = :h.
+    21: ("Add score_performance_outcomes indexes (config#1483 long-format store)",
+         """
+         CREATE INDEX IF NOT EXISTS idx_spo_horizon ON score_performance_outcomes(horizon_days);
+         CREATE INDEX IF NOT EXISTS idx_spo_score_date ON score_performance_outcomes(score_date);
+         """),
 }
 
 
