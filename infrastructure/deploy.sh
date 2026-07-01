@@ -72,6 +72,56 @@ _lambda_function_exists() {
   exit 1
 }
 
+# ── Throttle-aware Lambda invoke (bounded, jittered retry) ───────────────────
+#
+# Reserved-concurrency=1 singleton guards (the research runner has ONE slot
+# fleet-wide, so two research graphs can't run at once and double LLM spend /
+# S3 writes) can have their lone slot legitimately occupied when the canary
+# fires: an overlapping deploy's canary Lambda (cancelling a GitHub Actions run
+# does NOT stop the Lambda execution it already dispatched — bit
+# crucible-research CI 2026-07-01 when #347 and #348 merged back-to-back), or
+# an in-flight scheduled invocation. AWS then returns TooManyRequestsException /
+# ReservedFunctionConcurrentInvocationLimitExceeded, and the AWS CLI's own retry
+# (max 2, seconds-scale) can't outwait an in-flight execution.
+#
+# This retries ONLY on that throttle/concurrency signal, with exponential
+# backoff + jitter, bounded to ~3 min. A NON-throttle invoke error (bad
+# payload, missing function, AccessDenied) is NOT retried — it returns
+# immediately with the real stderr. Exhausting retries also returns non-zero
+# (fail loud, per the no-silent-fails rule); the caller decides what a
+# never-completed invoke means.
+#
+# Args: <output-file> <aws lambda invoke flags...>   (the output positional is
+#       appended internally — pass only the flags in "$@").
+# Returns: 0 once the invoke API call succeeds (payload in <output-file>);
+#          non-zero on a non-throttle error or exhausted retries.
+_invoke_lambda_with_throttle_retry() {
+  local out_file="$1"; shift
+  local max_attempts=6 attempt=1 rc base sleep_s err_file
+  err_file=$(mktemp)
+  while :; do
+    rc=0
+    aws lambda invoke "$@" "$out_file" >/dev/null 2>"$err_file" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f "$err_file"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && \
+       grep -qE 'TooManyRequestsException|ReservedFunctionConcurrentInvocationLimitExceeded' "$err_file"; then
+      base=$(( 2 ** (attempt - 1) * 5 ))   # 5, 10, 20, 40, 80s
+      sleep_s=$(( base + RANDOM % 5 ))     # + 0-4s jitter
+      echo "  Canary invoke throttled — reserved-concurrency slot busy (attempt ${attempt}/${max_attempts}); retrying in ${sleep_s}s..." >&2
+      sleep "$sleep_s"
+      attempt=$(( attempt + 1 ))
+      continue
+    fi
+    echo "  ERROR: canary invoke failed (exit ${rc}) after ${attempt} attempt(s):" >&2
+    cat "$err_file" >&2
+    rm -f "$err_file"
+    return "$rc"
+  done
+}
+
 # ── Main function: container image deployment ────────────────────────────────
 
 build_and_deploy_main() {
@@ -281,12 +331,29 @@ build_and_deploy_main() {
   # window stays a no-op.
   echo "  Running canary (dry_run_llm=true)..."
   CANARY_OUT=$(mktemp)
-  aws lambda invoke \
-    --function-name "${FUNCTION_MAIN}:live" \
-    --payload '{"dry_run_llm": true}' \
-    --cli-binary-format raw-in-base64-out \
-    --region "$REGION" \
-    "$CANARY_OUT" > /dev/null
+  if ! _invoke_lambda_with_throttle_retry "$CANARY_OUT" \
+      --function-name "${FUNCTION_MAIN}:live" \
+      --payload '{"dry_run_llm": true}' \
+      --cli-binary-format raw-in-base64-out \
+      --region "$REGION"; then
+    # The invoke API never returned a payload — either a non-throttle error, or
+    # the reserved-concurrency slot stayed busy past the bounded retry window.
+    # The deploy itself SUCCEEDED (the live alias already moved to $VERSION); a
+    # never-run smoke test is NOT a canary failure, so do NOT roll back —
+    # reverting a healthy deploy because we couldn't get a test slot would be
+    # the wrong action. Surface loud (fail the job) + alert so an operator
+    # confirms the live version by hand. Distinct dedup-key from the
+    # bad-STATUS rollback path below.
+    rm -f "$CANARY_OUT"
+    echo "  ERROR: canary could not be invoked (slot contention or invoke error) — deploy left LIVE on v${VERSION}, NOT rolled back."
+    python3 -m krepis.alerts publish \
+      --severity error \
+      --source "alpha-engine-research/infrastructure/deploy.sh" \
+      --dedup-key "canary-uninvokable-${FUNCTION_MAIN}-v${VERSION}" \
+      --message "Canary could NOT be invoked for ${FUNCTION_MAIN} v${VERSION} (throttle/concurrency or invoke error, retries exhausted). Live alias LEFT on v${VERSION} — deploy succeeded, NOT rolled back. Verify the live version manually." \
+      || true
+    exit 1
+  fi
 
   # Handler returns {"status": "OK|SKIPPED|ERROR"} or {"statusCode": 500} on env var failure.
   # Accept OK or SKIPPED (wrong_time / already_run / market_holiday are expected).
