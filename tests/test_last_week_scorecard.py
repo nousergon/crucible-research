@@ -45,6 +45,12 @@ def _make_db(path: Path) -> sqlite3.Connection:
             beat_spy_30d INTEGER,
             eval_date_10d TEXT,
             eval_date_30d TEXT,
+            price_21d REAL,
+            return_21d REAL,
+            spy_21d_return REAL,
+            beat_spy_21d INTEGER,
+            eval_date_21d TEXT,
+            log_alpha_21d REAL,
             UNIQUE(symbol, score_date)
         );
         CREATE TABLE predictor_outcomes (
@@ -87,12 +93,12 @@ def _make_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _seed_signal(conn, sym, score_date, beat_10d=None, beat_30d=None,
-                 return_10d=None, spy_10d=None, score=70.0):
+def _seed_signal(conn, sym, score_date, beat_21d=None,
+                 log_alpha_21d=None, score=70.0):
     conn.execute(
-        "INSERT INTO score_performance (symbol, score_date, score, beat_spy_10d, "
-        "beat_spy_30d, return_10d, spy_10d_return) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (sym, score_date, score, beat_10d, beat_30d, return_10d, spy_10d),
+        "INSERT INTO score_performance (symbol, score_date, score, beat_spy_21d, "
+        "log_alpha_21d) VALUES (?, ?, ?, ?, ?)",
+        (sym, score_date, score, beat_21d, log_alpha_21d),
     )
 
 
@@ -135,20 +141,15 @@ def populated_db(tmp_path):
         _seed_population(conn, sym, sector)
 
     # Signals across the lookback window (4 weeks ending 2026-05-22).
-    # Tech: 3 signals, 2 beats at 10d -> 67% hit rate
-    _seed_signal(conn, "AAPL", "2026-05-09", beat_10d=1, beat_30d=1,
-                 return_10d=0.05, spy_10d=0.02)
-    _seed_signal(conn, "MSFT", "2026-05-09", beat_10d=1, beat_30d=0,
-                 return_10d=0.04, spy_10d=0.02)
-    _seed_signal(conn, "GOOG", "2026-05-09", beat_10d=0, beat_30d=1,
-                 return_10d=0.01, spy_10d=0.02)
-    # Healthcare: 3 signals, 1 beat at 10d -> 33% hit rate
-    _seed_signal(conn, "JNJ", "2026-05-09", beat_10d=1, beat_30d=1,
-                 return_10d=0.03, spy_10d=0.02)
-    _seed_signal(conn, "PFE", "2026-05-09", beat_10d=0, beat_30d=0,
-                 return_10d=-0.01, spy_10d=0.02)
-    _seed_signal(conn, "JNJ", "2026-05-16", beat_10d=0, beat_30d=None,
-                 return_10d=0.0, spy_10d=0.01)
+    # Canonical 21d horizon: beat_spy_21d + realized log_alpha_21d.
+    # Tech: 3 signals, 2 beats at 21d -> 67% hit rate
+    _seed_signal(conn, "AAPL", "2026-05-09", beat_21d=1, log_alpha_21d=0.03)
+    _seed_signal(conn, "MSFT", "2026-05-09", beat_21d=1, log_alpha_21d=0.02)
+    _seed_signal(conn, "GOOG", "2026-05-09", beat_21d=0, log_alpha_21d=-0.01)
+    # Healthcare: 3 signals, 1 beat at 21d -> 33% hit rate
+    _seed_signal(conn, "JNJ", "2026-05-09", beat_21d=1, log_alpha_21d=0.01)
+    _seed_signal(conn, "PFE", "2026-05-09", beat_21d=0, log_alpha_21d=-0.03)
+    _seed_signal(conn, "JNJ", "2026-05-16", beat_21d=0, log_alpha_21d=-0.01)
     # Predictions: 5 UP calls with varied realized alpha
     _seed_prediction(conn, "AAPL", "2026-05-09", "UP", 0.82,
                      correct=1, log_alpha=0.06)
@@ -181,9 +182,9 @@ class TestEmptyDB:
         sc = build_scorecard(empty_db, as_of_date=date(2026, 5, 23))
         assert isinstance(sc, Scorecard)
         assert sc.n_resolved_predictions == 0
-        assert sc.n_resolved_signals_10d == 0
+        assert sc.n_resolved_signals_21d == 0
         assert sc.overall_predictor_hit_rate is None
-        assert sc.overall_signal_hit_rate_10d is None
+        assert sc.overall_signal_hit_rate_21d is None
         assert sc.per_sector == []
         assert sc.top_surprises == []
         assert sc.top_confirmations == []
@@ -199,15 +200,12 @@ class TestPopulatedDB:
         assert sc.n_resolved_predictions == 6
         assert sc.overall_predictor_hit_rate == pytest.approx(4 / 6)
 
-    def test_overall_signal_hit_rates(self, populated_db):
+    def test_overall_signal_hit_rate(self, populated_db):
         sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
-        # 6 signals, 5 with beat_spy_10d, 5 with beat_spy_30d
-        # beat_spy_10d sum: 1+1+0+1+0+0 = 3 of 6 -> 50%
-        assert sc.n_resolved_signals_10d == 6
-        assert sc.overall_signal_hit_rate_10d == pytest.approx(3 / 6)
-        # beat_spy_30d sum: 1+0+1+1+0 = 3 of 5 (JNJ 5/16 is None) -> 60%
-        assert sc.n_resolved_signals_30d == 5
-        assert sc.overall_signal_hit_rate_30d == pytest.approx(3 / 5)
+        # 6 signals, all with beat_spy_21d resolved.
+        # beat_spy_21d sum: 1+1+0+1+0+0 = 3 of 6 -> 50%
+        assert sc.n_resolved_signals_21d == 6
+        assert sc.overall_signal_hit_rate_21d == pytest.approx(3 / 6)
 
     def test_per_sector_rows_only_above_min_n(self, populated_db):
         sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
@@ -215,10 +213,10 @@ class TestPopulatedDB:
         # Both sectors have >= 3 signals in the window.
         assert "Tech" in sectors
         assert "Healthcare" in sectors
-        # Tech: 2 of 3 beat at 10d
-        assert sectors["Tech"].hit_rate_10d == pytest.approx(2 / 3)
-        # Healthcare: 1 of 3 beat at 10d (JNJ 5/9 + JNJ 5/16 + PFE 5/9)
-        assert sectors["Healthcare"].hit_rate_10d == pytest.approx(1 / 3)
+        # Tech: 2 of 3 beat at 21d
+        assert sectors["Tech"].hit_rate_21d == pytest.approx(2 / 3)
+        # Healthcare: 1 of 3 beat at 21d (JNJ 5/9 + JNJ 5/16 + PFE 5/9)
+        assert sectors["Healthcare"].hit_rate_21d == pytest.approx(1 / 3)
 
     def test_surprises_predicted_up_realized_worst(self, populated_db):
         sc = build_scorecard(populated_db, as_of_date=date(2026, 5, 23))
@@ -308,7 +306,7 @@ class TestSerialization:
         assert isinstance(d["per_sector"], list)
         if d["per_sector"]:
             assert "sector" in d["per_sector"][0]
-            assert "hit_rate_10d" in d["per_sector"][0]
+            assert "hit_rate_21d" in d["per_sector"][0]
 
 
 class _StubS3Client:
@@ -484,8 +482,7 @@ class TestScorecardFromDict:
             "as_of_date": "2026-05-23",
             "lookback_weeks": 4,
             "n_resolved_predictions": 0,
-            "n_resolved_signals_10d": 0,
-            "n_resolved_signals_30d": 0,
+            "n_resolved_signals_21d": 0,
         }
         sc = Scorecard.from_dict(minimal)
         assert sc.overall_predictor_hit_rate is None
