@@ -109,11 +109,6 @@ def main():
         archive.db_conn.row_factory = sqlite3.Row
         archive._ensure_schema()
 
-    # Performance tracker
-    from scoring.performance_tracker import run_performance_checks
-    perf_summary = run_performance_checks(archive.db_conn, run_date)
-    print(f"Performance summary: {perf_summary}")
-
     # Build and run graph
     from graph.research_graph import build_graph, create_initial_state
 

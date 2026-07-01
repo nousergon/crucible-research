@@ -488,11 +488,6 @@ REGIME_GUARDRAILS: dict = _cfg.get("regime_guardrails", {})
 STALENESS_THRESHOLD_DAYS: int = 5       # flag if score unchanged >= this many trading days
 MATERIAL_SCORE_CHANGE_MIN: float = 3.0  # minimum point change to reset last_material_change_date
 
-# ── Performance tracker (BUY signal accuracy feedback loop) ──────────────────
-_perf_cfg: dict = _cfg.get("performance_tracker", {})
-RECALIBRATION_THRESHOLD: float = float(_perf_cfg.get("recalibration_threshold", 0.55))
-RECALIBRATION_LOOKBACK_DAYS: int = int(_perf_cfg.get("recalibration_lookback_days", 60))
-
 # ── All tracked tickers in a run (universe + up to 3 candidates) ──────────────
 ALL_SECTORS: list[str] = [
     "Technology", "Healthcare", "Financial", "Consumer Discretionary",

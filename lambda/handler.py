@@ -343,10 +343,6 @@ def handler(event, context):
         archive = ArchiveManager()
         archive.download_db()
 
-        # Run performance tracker before agents
-        from scoring.performance_tracker import run_performance_checks
-        perf_summary = run_performance_checks(archive.db_conn, run_date)
-
         # Phase 1.B.2 — research-feedback scorecard.
         # Emits the prior-cycle realized-outcomes scorecard artifact under
         # `research/last_week_scorecard/{run_id}.json` for Phase 2 prompt
@@ -368,7 +364,6 @@ def handler(event, context):
             archive_manager=archive,
             is_early_close=early_close,
         )
-        initial_state["performance_summary"] = perf_summary
 
         # Extract episodic memories from newly completed signal outcomes
         try:
@@ -396,7 +391,6 @@ def handler(event, context):
                     archive_manager=archive,
                     is_early_close=early_close,
                 )
-                _stub_state["performance_summary"] = perf_summary
                 _stub_graph.invoke(_stub_state)
                 logger.info("Stub-LLM dry-run gate: OK (proceeding to real pass)")
             except Exception as _se:
@@ -424,14 +418,12 @@ def handler(event, context):
             archive.close()
             archive = ArchiveManager()
             archive.download_db()
-            perf_summary = run_performance_checks(archive.db_conn, run_date)
             graph = build_graph()
             initial_state = create_initial_state(
                 run_date=run_date,
                 archive_manager=archive,
                 is_early_close=early_close,
             )
-            initial_state["performance_summary"] = perf_summary
 
         if dry_run_llm:
             # Preflight-equivalent boot validation — the Saturday SF shell-run
@@ -469,7 +461,6 @@ def handler(event, context):
                     archive_manager=archive,
                     is_early_close=early_close,
                 )
-                _dry_state["performance_summary"] = perf_summary
             finally:
                 _restore()
             logger.info("dry_run_llm boot validation OK for %s", run_date)
