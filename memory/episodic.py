@@ -1,7 +1,9 @@
 """
 Episodic memory extraction — converts failed BUY signal outcomes into lessons.
 
-Runs after performance_tracker populates score_performance with 10d/30d outcomes.
+Runs after the canonical 21d outcomes land in score_performance
+(beat_spy_21d / return_21d / spy_21d_return / log_alpha_21d — the retired
+10d/30d columns were replaced in the canonical-alpha cutover, config#1456).
 Uses Haiku to extract a 1-2 sentence lesson from each failed signal.
 
 Cost-capped: MAX_EPISODIC_EXTRACTIONS per run to prevent runaway costs.
@@ -23,14 +25,16 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
     """
     Extract episodic memories from recently completed score_performance outcomes.
 
-    Finds BUY signals where beat_spy_10d = 0 (underperformed) that don't yet
-    have a memory_episodes entry. Uses Haiku to generate a lesson for each.
+    Finds BUY signals where beat_spy_21d = 0 (underperformed at the canonical
+    21d horizon) that don't yet have a memory_episodes entry. Uses Haiku to
+    generate a lesson for each.
 
     Returns number of new memories created.
     """
     # Find failed signals without existing memories
     rows = db_conn.execute("""
-        SELECT sp.symbol, sp.score_date, sp.score, sp.return_10d, sp.spy_10d_return,
+        SELECT sp.symbol, sp.score_date, sp.score, sp.return_21d, sp.spy_21d_return,
+               sp.log_alpha_21d,
                it.conviction, it.thesis_summary, it.signal,
                ms.market_regime, ms.vix
         FROM score_performance sp
@@ -40,7 +44,7 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
             ON sp.score_date = ms.date
         LEFT JOIN memory_episodes me
             ON sp.symbol = me.ticker AND sp.score_date = me.signal_date
-        WHERE sp.beat_spy_10d = 0
+        WHERE sp.beat_spy_21d = 0
             AND me.id IS NULL
         ORDER BY sp.score_date DESC
         LIMIT ?
@@ -70,17 +74,24 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
             logger.warning("[memory_extractor] hit cap of %d extractions", MAX_EPISODIC_EXTRACTIONS)
             break
 
-        symbol, score_date, score, return_10d, spy_return = r[0], r[1], r[2], r[3], r[4]
-        conviction, thesis_summary, signal = r[5], r[6], r[7]
-        regime, vix = r[8], r[9]
+        symbol, score_date, score = r[0], r[1], r[2]
+        return_21d, spy_return, log_alpha_21d = r[3], r[4], r[5]
+        conviction, thesis_summary, signal = r[6], r[7], r[8]
+        regime, vix = r[9], r[10]
 
-        outcome_vs_spy = (return_10d or 0) - (spy_return or 0)
+        # Canonical market-relative alpha: prefer the log-domain 21d alpha
+        # column when available (config#1456), fall back to arithmetic excess.
+        outcome_vs_spy = (
+            log_alpha_21d
+            if log_alpha_21d is not None
+            else (return_21d or 0) - (spy_return or 0)
+        )
 
-        prompt = f"""A BUY signal for {symbol} on {score_date} (score: {score}, conviction: {conviction}) underperformed SPY by {outcome_vs_spy:.1%} over 10 days.
+        prompt = f"""A BUY signal for {symbol} on {score_date} (score: {score}, conviction: {conviction}) underperformed SPY by {outcome_vs_spy:.1%} over 21 days.
 
 Thesis: {(thesis_summary or 'N/A')[:300]}
 Market regime: {regime or 'unknown'}, VIX: {vix or '?'}
-Stock return: {return_10d:.1%}, SPY return: {spy_return:.1%}
+Stock return: {return_21d:.1%}, SPY return: {spy_return:.1%}
 
 In 1-2 sentences, what lesson should be remembered for future analysis of {symbol} or similar stocks? Also provide 2-3 pattern tags (e.g., "earnings", "margin_compression", "momentum_reversal").
 
@@ -106,13 +117,17 @@ Respond ONLY with JSON: {{"lesson": "...", "pattern_tags": ["...", "..."]}}"""
             ).fetchone()
             sector = sector_row[0] if sector_row else None
 
+            # `outcome_10d` is the memory_episodes column NAME (unchanged here
+            # — renaming it touches archive/manager.py + qual_tools.py readers,
+            # out of this migration's scope). It now stores the canonical 21d
+            # realized return. Flagged for a follow-up column rename.
             db_conn.execute(
                 "INSERT OR IGNORE INTO memory_episodes "
                 "(ticker, signal_date, score, rating, conviction, thesis_summary, "
                 "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags, created_date) "
                 "VALUES (?, ?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (symbol, score_date, score, conviction, (thesis_summary or "")[:500],
-                 return_10d, outcome_vs_spy, lesson, sector, tags, score_date),
+                 return_21d, outcome_vs_spy, lesson, sector, tags, score_date),
             )
             db_conn.commit()
             n_created += 1

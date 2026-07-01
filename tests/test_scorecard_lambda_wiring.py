@@ -51,7 +51,9 @@ def stub_archive(tmp_path):
             score REAL, beat_spy_10d INTEGER, beat_spy_30d INTEGER,
             return_10d REAL, spy_10d_return REAL, return_30d REAL,
             spy_30d_return REAL, price_on_date REAL, price_10d REAL,
-            price_30d REAL, eval_date_10d TEXT, eval_date_30d TEXT
+            price_30d REAL, eval_date_10d TEXT, eval_date_30d TEXT,
+            price_21d REAL, return_21d REAL, spy_21d_return REAL,
+            beat_spy_21d INTEGER, eval_date_21d TEXT, log_alpha_21d REAL
         );
         CREATE TABLE predictor_outcomes (
             id INTEGER PRIMARY KEY, symbol TEXT, prediction_date TEXT,

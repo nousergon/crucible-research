@@ -124,11 +124,11 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
         )
         logger.info(
             "scorecard emitted run_id=%s dated_key=%s n_resolved_predictions=%d "
-            "n_resolved_signals_10d=%d",
+            "n_resolved_signals_21d=%d",
             result["run_id"],
             result["dated_key"],
             sc.n_resolved_predictions,
-            sc.n_resolved_signals_10d,
+            sc.n_resolved_signals_21d,
         )
     except Exception as sce:
         # Shadow-mode WARN-not-fatal. Promote to ERROR + raise in Phase 2

@@ -7,15 +7,17 @@ research signal-boost configs weekly. The agents writing the BUY/HOLD/
 EXIT theses have no idea whether their prior calls worked.
 
 This module joins the substrate that DOES carry realized outcomes
-(score_performance for BUY-signal hit rates at 10d/30d, predictor_outcomes
-for 21d log-alpha at the per-ticker level) into a compact snapshot —
-the "last week's scorecard" — that downstream phases will inject into
-the CIO + Macro Economist prompts under a labeled section.
+(score_performance for BUY-signal hit rates at the canonical 21d horizon,
+predictor_outcomes for 21d log-alpha at the per-ticker level) into a
+compact snapshot — the "last week's scorecard" — that downstream phases
+will inject into the CIO + Macro Economist prompts under a labeled section.
 
 Substrate joins:
-  - score_performance — per-BUY-signal beat-SPY at 10d / 30d (sector taken
-    from a JOIN against `population` since score_performance is not
-    self-describing on sector).
+  - score_performance — per-BUY-signal beat-SPY at the canonical 21d
+    horizon + realized 21d log-alpha (sector taken from a JOIN against
+    `population` since score_performance is not self-describing on sector).
+    The retired 10d/30d outcome columns were replaced by the canonical
+    21d columns in the canonical-alpha cutover (config#1456).
   - predictor_outcomes — per-prediction realized 21d log-alpha + correctness
     (canonical `correct` / `actual_log_alpha` with legacy `correct_5d` /
     `actual_5d_return` fallback for pre-2026-05-09 rows).
@@ -92,9 +94,8 @@ class SectorRow:
 
     sector: str
     n_signals: int
-    hit_rate_10d: Optional[float]
-    hit_rate_30d: Optional[float]
-    mean_excess_10d: Optional[float]
+    hit_rate_21d: Optional[float]
+    mean_log_alpha_21d: Optional[float]
 
 
 @dataclass
@@ -123,11 +124,9 @@ class Scorecard:
     as_of_date: str
     lookback_weeks: int
     n_resolved_predictions: int
-    n_resolved_signals_10d: int
-    n_resolved_signals_30d: int
+    n_resolved_signals_21d: int
     overall_predictor_hit_rate: Optional[float]
-    overall_signal_hit_rate_10d: Optional[float]
-    overall_signal_hit_rate_30d: Optional[float]
+    overall_signal_hit_rate_21d: Optional[float]
     market_regime: Optional[str]
     per_sector: list[SectorRow] = field(default_factory=list)
     top_surprises: list[TickerOutcome] = field(default_factory=list)
@@ -147,11 +146,9 @@ class Scorecard:
             as_of_date=d["as_of_date"],
             lookback_weeks=d["lookback_weeks"],
             n_resolved_predictions=d["n_resolved_predictions"],
-            n_resolved_signals_10d=d["n_resolved_signals_10d"],
-            n_resolved_signals_30d=d["n_resolved_signals_30d"],
+            n_resolved_signals_21d=d["n_resolved_signals_21d"],
             overall_predictor_hit_rate=d.get("overall_predictor_hit_rate"),
-            overall_signal_hit_rate_10d=d.get("overall_signal_hit_rate_10d"),
-            overall_signal_hit_rate_30d=d.get("overall_signal_hit_rate_30d"),
+            overall_signal_hit_rate_21d=d.get("overall_signal_hit_rate_21d"),
             market_regime=d.get("market_regime"),
             per_sector=[SectorRow(**row) for row in (d.get("per_sector") or [])],
             top_surprises=[TickerOutcome(**row) for row in (d.get("top_surprises") or [])],
@@ -190,10 +187,8 @@ def build_scorecard(
         else None
     )
 
-    sig_10d = [r for r in signal_rows if r["beat_spy_10d"] is not None]
-    sig_30d = [r for r in signal_rows if r["beat_spy_30d"] is not None]
-    overall_sig_10d = sum(r["beat_spy_10d"] for r in sig_10d) / len(sig_10d) if sig_10d else None
-    overall_sig_30d = sum(r["beat_spy_30d"] for r in sig_30d) / len(sig_30d) if sig_30d else None
+    sig_21d = [r for r in signal_rows if r["beat_spy_21d"] is not None]
+    overall_sig_21d = sum(r["beat_spy_21d"] for r in sig_21d) / len(sig_21d) if sig_21d else None
 
     per_sector = _build_sector_rows(signal_rows)
     surprises, confirmations = _build_surprise_lists(predictor_rows)
@@ -203,11 +198,9 @@ def build_scorecard(
         as_of_date=as_of_date.isoformat(),
         lookback_weeks=lookback_weeks,
         n_resolved_predictions=n_predictor_resolved,
-        n_resolved_signals_10d=len(sig_10d),
-        n_resolved_signals_30d=len(sig_30d),
+        n_resolved_signals_21d=len(sig_21d),
         overall_predictor_hit_rate=overall_pred_hit,
-        overall_signal_hit_rate_10d=overall_sig_10d,
-        overall_signal_hit_rate_30d=overall_sig_30d,
+        overall_signal_hit_rate_21d=overall_sig_21d,
         market_regime=regime,
         per_sector=per_sector,
         top_surprises=surprises,
@@ -273,10 +266,8 @@ def _fetch_signal_outcomes(
             sp.symbol,
             sp.score_date,
             sp.score,
-            sp.beat_spy_10d,
-            sp.beat_spy_30d,
-            sp.return_10d,
-            sp.spy_10d_return,
+            sp.beat_spy_21d,
+            sp.log_alpha_21d,
             COALESCE(p.sector, '(unknown)') AS sector
         FROM score_performance sp
         LEFT JOIN population p ON p.symbol = sp.symbol
@@ -288,11 +279,9 @@ def _fetch_signal_outcomes(
             "symbol": r[0],
             "score_date": r[1],
             "score": r[2],
-            "beat_spy_10d": r[3],
-            "beat_spy_30d": r[4],
-            "return_10d": r[5],
-            "spy_10d_return": r[6],
-            "sector": r[7],
+            "beat_spy_21d": r[3],
+            "log_alpha_21d": r[4],
+            "sector": r[5],
         }
         for r in rows
     ]
@@ -317,7 +306,7 @@ def _fetch_market_regime(conn: sqlite3.Connection, on_or_before: str) -> Optiona
 
 
 def _build_sector_rows(signal_rows: list[dict]) -> list[SectorRow]:
-    """Per-sector hit rate + mean excess return at 10d horizon."""
+    """Per-sector hit rate + mean realized log-alpha at the canonical 21d horizon."""
     by_sector: dict[str, list[dict]] = {}
     for r in signal_rows:
         by_sector.setdefault(r["sector"], []).append(r)
@@ -326,20 +315,18 @@ def _build_sector_rows(signal_rows: list[dict]) -> list[SectorRow]:
     for sector, rows in sorted(by_sector.items()):
         if len(rows) < _MIN_SECTOR_N:
             continue
-        h10 = [r["beat_spy_10d"] for r in rows if r["beat_spy_10d"] is not None]
-        h30 = [r["beat_spy_30d"] for r in rows if r["beat_spy_30d"] is not None]
-        excess_10d = [
-            r["return_10d"] - r["spy_10d_return"]
-            for r in rows
-            if r["return_10d"] is not None and r["spy_10d_return"] is not None
+        h21 = [r["beat_spy_21d"] for r in rows if r["beat_spy_21d"] is not None]
+        log_alpha_21d = [
+            r["log_alpha_21d"] for r in rows if r["log_alpha_21d"] is not None
         ]
         out.append(
             SectorRow(
                 sector=sector,
                 n_signals=len(rows),
-                hit_rate_10d=sum(h10) / len(h10) if h10 else None,
-                hit_rate_30d=sum(h30) / len(h30) if h30 else None,
-                mean_excess_10d=sum(excess_10d) / len(excess_10d) if excess_10d else None,
+                hit_rate_21d=sum(h21) / len(h21) if h21 else None,
+                mean_log_alpha_21d=(
+                    sum(log_alpha_21d) / len(log_alpha_21d) if log_alpha_21d else None
+                ),
             )
         )
     return out
@@ -428,12 +415,8 @@ def format_scorecard_text(sc: Scorecard) -> str:
         f"({sc.n_resolved_predictions} resolved)"
     )
     lines.append(
-        f"- Research signal hit rate (10d vs SPY): {_fmt_pct(sc.overall_signal_hit_rate_10d)} "
-        f"({sc.n_resolved_signals_10d} resolved)"
-    )
-    lines.append(
-        f"- Research signal hit rate (30d vs SPY): {_fmt_pct(sc.overall_signal_hit_rate_30d)} "
-        f"({sc.n_resolved_signals_30d} resolved)"
+        f"- Research signal hit rate (21d vs SPY): {_fmt_pct(sc.overall_signal_hit_rate_21d)} "
+        f"({sc.n_resolved_signals_21d} resolved)"
     )
 
     if sc.per_sector:
@@ -441,8 +424,8 @@ def format_scorecard_text(sc: Scorecard) -> str:
         lines.append("### Per-sector hit rate (≥3 resolved signals)")
         for s in sc.per_sector:
             lines.append(
-                f"- {s.sector}: 10d {_fmt_pct(s.hit_rate_10d)} / 30d {_fmt_pct(s.hit_rate_30d)} "
-                f"(n={s.n_signals}, mean 10d excess vs SPY {_fmt_signed(s.mean_excess_10d, 3)})"
+                f"- {s.sector}: 21d {_fmt_pct(s.hit_rate_21d)} "
+                f"(n={s.n_signals}, mean 21d log-α vs SPY {_fmt_signed(s.mean_log_alpha_21d, 3)})"
             )
 
     if sc.top_surprises:
