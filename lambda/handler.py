@@ -97,6 +97,63 @@ def _scorecard_enabled() -> bool:
     return os.environ.get("RESEARCH_SCORECARD_ENABLED", "").lower() in ("1", "true", "yes")
 
 
+def _team_accuracy_enabled() -> bool:
+    """Read the `TEAM_ACCURACY_PRODUCER_ENABLED` flag.
+
+    Default-ON (unlike the scorecard flag): config#1422 exists specifically
+    to start live history accruing NOW, ahead of `ADAPTIVE_SLOT_ALLOCATION_ENABLED`
+    being flipped — the consumer (`compute_team_slots` in
+    `agents/sector_teams/team_config.py`) already gates its own read behind
+    that separate flag and degrades gracefully when the artifact is absent,
+    so there's no risk in writing it early. Kept as an env-overridable flag
+    (not hardcoded True) purely for operator kill-switch safety, mirroring
+    every other producer's pattern in this handler.
+    """
+    return os.environ.get("TEAM_ACCURACY_PRODUCER_ENABLED", "true").lower() in ("1", "true", "yes")
+
+
+def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
+    """Build + write the per-team historical-accuracy artifact. Shadow-safe.
+
+    Producer half of config#926's adaptive slot allocation (config#1422):
+    the consumer (`archive/manager.py::load_team_accuracy` +
+    `ADAPTIVE_SLOT_ALLOCATION_ENABLED` + `compute_team_slots`'s
+    `team_accuracy` nudge) shipped in config#926 but nothing wrote
+    `config/team_accuracy.json`, so flipping that flag was a no-op.
+
+    WARN-and-continue on any failure — same shadow-mode posture as
+    `_maybe_emit_scorecard` — so the morning briefing is never blocked by
+    this secondary-observability producer, and the adaptive-slot consumer
+    already treats a missing/stale artifact as "degrade to static
+    allocation" by design.
+    """
+    if not _team_accuracy_enabled():
+        logger.debug("team_accuracy producer disabled (flag off) — skipping emission")
+        return
+    try:
+        import boto3  # local import — only paid when flag is on
+        from evals.team_accuracy import analyze_team_performance, save_team_accuracy
+        team_accuracy = analyze_team_performance(archive.db_conn, as_of_date=trading_date)
+        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        save_team_accuracy(
+            team_accuracy,
+            s3_client=boto3.client("s3"),
+            bucket=bucket,
+        )
+        logger.info(
+            "team_accuracy emitted: %d teams with resolved observations (%s)",
+            len(team_accuracy),
+            {tid: v["n_obs"] for tid, v in team_accuracy.items()},
+        )
+    except Exception as tae:
+        # Shadow-mode WARN-not-fatal — see docstring.
+        logger.warning(
+            "team_accuracy emission failed (shadow mode — non-fatal): %s",
+            tae,
+            exc_info=True,
+        )
+
+
 def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
     """Build + write the prior-cycle scorecard. Shadow-safe.
 
@@ -356,6 +413,14 @@ def handler(event, context):
         # (promotable to ERROR + CloudWatch alarm in Phase 2 when the
         # consumer depends on the artifact).
         _maybe_emit_scorecard(archive, trading_date)
+
+        # config#1422 — per-team historical-accuracy producer for adaptive
+        # slot allocation (config#926). Writes `config/team_accuracy.json`
+        # from CIO-ADVANCED picks' realized 21d beat-SPY outcomes, joined by
+        # team_id. Default-ON (unlike the scorecard) so live history starts
+        # accruing now, ahead of `ADAPTIVE_SLOT_ALLOCATION_ENABLED` being
+        # flipped for the soak. Same shadow-mode WARN-and-continue posture.
+        _maybe_emit_team_accuracy(archive, trading_date)
 
         # Build and run the LangGraph pipeline
         graph = build_graph()
