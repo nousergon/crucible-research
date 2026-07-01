@@ -665,6 +665,38 @@ def handler(event, context):
                     _agg_exc,
                 )
 
+        # ── Distillation SFT-corpus stats ─────────────────────────────
+        # Read the cumulative _sft_raw corpus and (re)write the compact
+        # ``distillation/corpus_stats/latest.json`` artifact the console
+        # Distillation-Corpus panel + the config#1542 kill-gate trigger
+        # consume (deduped, teacher-segregated, per-task counts + growth).
+        # Reads the WHOLE corpus each run, so weekly cadence keeps the
+        # cumulative number correct. Non-fatal — pure observability hung
+        # off a primary path that already succeeded; a recurring failure
+        # surfaces via WARN without blocking trading.
+        if final_state.get("email_sent"):
+            try:
+                import boto3 as _boto3_cs
+                from scripts.corpus_stats import compute_corpus_stats
+                _cs = compute_corpus_stats(
+                    s3_client=_boto3_cs.client("s3"),
+                    bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+                    target_date=trading_date,
+                )
+                logger.info(
+                    "[corpus_stats] deduped=%d quant_calibrator=%d/%d → %s",
+                    _cs["totals"]["deduped_pairs"],
+                    _cs["trigger"]["deduped_single_teacher"],
+                    _cs["trigger"]["target_pairs"],
+                    _cs.get("output_key", "<unknown>"),
+                )
+            except Exception as _cs_exc:
+                logger.warning(
+                    "[corpus_stats] stats refresh failed (non-fatal — "
+                    "console panel renders last artifact): %s",
+                    _cs_exc,
+                )
+
         logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
         return {
             "status": "OK",

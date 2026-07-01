@@ -44,8 +44,8 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # 7/3-cutover SF-rename refs in lib 0.74.0 into this repo). Floor guarantees
 # the upgrade even on a non-fresh venv.
 #
-# Bumped to >=0.7.0 (config#1494): deploy.sh's canary now CALLS the
-# ``krepis.aws invoke-canary`` CLI (0.7.0 ships it) instead of an inline Bash
+# Bumped to >=0.7.0 (config#1494 + config#1545): deploy.sh's canary now CALLS
+# the `krepis.aws invoke-canary` CLI (0.7.0 ships it) instead of an inline Bash
 # throttle-retry helper. The invoke is now LOAD-BEARING (not best-effort like
 # the alerts call), so krepis must be importable in the deploy environment —
 # this floor makes it a hard runtime/deploy dependency.
