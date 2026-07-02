@@ -49,6 +49,52 @@ class CompanyThesisLLM(BaseModel):
     stance: Literal["attractive", "neutral", "avoid"]
     conviction: int = Field(ge=0, le=100)
     summary: str = Field(description="3-5 sentence executive summary of the thesis.")
+    # Independent 0-100 rating (Brian, 2026-07-02): the analyst's OWN
+    # attractiveness call from its evidence review (filings, news/sentiment,
+    # weekly research, macro/sector themes, raw metrics). Deliberately
+    # independent of the scanner composite — the prompt WITHHOLDS the
+    # attractiveness score / pillars so the model cannot anchor on them
+    # (analyst._facts_board_row). Optional-with-default HERE so theses
+    # stored before this field existed still parse (S3 add-only contract);
+    # new generations are forced to emit it via CompanyThesisRatedLLM.
+    rating: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Your independent attractiveness rating for this name, 0-100 "
+            "(100 = most attractive), derived solely from your own review "
+            "of the evidence provided. You are deliberately not shown the "
+            "house quant composite — do not try to guess or match it."
+        ),
+    )
+    rating_rationale: str = Field(
+        default="",
+        description=(
+            "2-4 sentences: why this specific number — the evidence that "
+            "drives it and what would move it up or down."
+        ),
+    )
+
+
+class CompanyThesisRatedLLM(CompanyThesisLLM):
+    """Response contract for NEW thesis generations — rating is REQUIRED.
+
+    Storage keeps ``rating`` optional on :class:`CompanyThesisLLM` so
+    pre-rating artifacts on S3 still parse; this subclass tightens the two
+    fields to required for the LLM call, so an omitted rating fails
+    validation and gets the client's bounded corrective retry instead of
+    silently persisting ``None``.
+    """
+
+    rating: int = Field(
+        ge=0,
+        le=100,
+        description=CompanyThesisLLM.model_fields["rating"].description,
+    )
+    rating_rationale: str = Field(
+        description=CompanyThesisLLM.model_fields["rating_rationale"].description,
+    )
 
 
 class CompanyThesis(_Artifact):
@@ -58,7 +104,9 @@ class CompanyThesis(_Artifact):
     version: int = Field(ge=1)
     trading_day: str
     calendar_date: str
-    update_reason: Literal["initial", "event", "staleness_refresh", "reconcile"]
+    update_reason: Literal[
+        "initial", "event", "staleness_refresh", "reconcile", "operator_refresh"
+    ]
     thesis: CompanyThesisLLM
     sector: str | None = None
     attractiveness_score: float | None = None
@@ -71,6 +119,41 @@ class CompanyThesis(_Artifact):
     tier: str = ""
     prompt_version: str = ""
     cost_usd: float = 0.0
+
+
+# ── Ratings board (console/eval rollup) ──────────────────────────────────────
+
+
+class RatingRow(BaseModel):
+    """One covered name's current think-tank view, denormalized for consumers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    sector: str | None = None
+    rating: int | None = None  # None = thesis predates the rating field
+    rating_rationale: str = ""
+    stance: str = ""
+    conviction: int | None = None
+    summary: str = ""
+    thesis_version: int = 0
+    thesis_trading_day: str = ""
+    update_reason: str = ""
+    # Scanner composite AT THE TIME the thesis was written — metadata for
+    # divergence display only; never shown to the model (see CompanyThesisLLM).
+    attractiveness_score: float | None = None
+    attractiveness_rank: int | None = None
+    rating_minus_attractiveness: float | None = None
+
+
+class RatingsBoard(_Artifact):
+    """``thinktank/ratings/{trading_day}.json`` + ``latest.json`` — upserted
+    every run from the theses written; the console/eval join surface (one
+    read instead of N per-ticker thesis fetches)."""
+
+    trading_day: str = ""
+    updated_at: str = ""
+    rows: dict[str, RatingRow] = Field(default_factory=dict)
 
 
 # ── Theme theses (macro + sector) ────────────────────────────────────────────
@@ -195,7 +278,7 @@ class RunManifest(_Artifact):
     """``thinktank/runs/{trading_day}/manifest_{run_id}.json`` — one per run."""
 
     run_id: str
-    mode: Literal["daily", "reconcile", "dry_run"]
+    mode: Literal["daily", "reconcile", "dry_run", "operator_refresh"]
     trading_day: str
     calendar_date: str
     started_at: str
@@ -209,6 +292,7 @@ class RunManifest(_Artifact):
     themes_reconciled: bool = False
     theme_updates_written: int = 0
     context_sources_present: dict[str, bool] = Field(default_factory=dict)
+    ratings_rows: int = 0
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
     total_cost_usd: float = 0.0
     budget_month_spent_usd: float = 0.0

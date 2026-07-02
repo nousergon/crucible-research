@@ -40,7 +40,8 @@ from thinktank.ledger import (
     save_ledger,
     select_intake,
 )
-from thinktank.schemas import EventRecord, RunManifest
+from thinktank.ratings import update_ratings_board
+from thinktank.schemas import CompanyThesis, EventRecord, RunManifest
 from thinktank.settings import ThinktankSettings, load_settings
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
@@ -52,6 +53,7 @@ def run_daily(
     settings: ThinktankSettings | None = None,
     *,
     dry_run: bool = False,
+    refresh_tickers: list[str] | None = None,
     store: ThinktankStore | None = None,
     client: ThinktankClient | None = None,
     ssm_client=None,
@@ -64,7 +66,7 @@ def run_daily(
 
     manifest = RunManifest(
         run_id=run_id,
-        mode="dry_run" if dry_run else "daily",
+        mode="dry_run" if dry_run else ("operator_refresh" if refresh_tickers else "daily"),
         trading_day=trading_day,
         calendar_date=calendar_date,
         started_at=datetime.now(timezone.utc).isoformat(),
@@ -84,15 +86,27 @@ def run_daily(
         )
 
     ledger = load_ledger(store)
-    new_rows, refresh = select_intake(
-        ledger,
-        ctx.board,
-        daily_new_names=settings.daily_new_names,
-        rank_ceiling=settings.rank_ceiling,
-    )
+    if refresh_tickers is not None:
+        # Operator-refresh mode ({"refresh_tickers": [...]} event / backfill):
+        # re-underwrite ONLY the named covered tickers — no intake, no sweep,
+        # no theme work. An uncovered name is a caller error: fail loud.
+        uncovered = sorted(set(refresh_tickers) - ledger.covered())
+        if uncovered:
+            raise ValueError(
+                f"refresh_tickers not in coverage ledger: {uncovered} — "
+                "operator refresh only re-underwrites covered names."
+            )
+        new_rows, refresh = [], sorted(set(refresh_tickers))
+    else:
+        new_rows, refresh = select_intake(
+            ledger,
+            ctx.board,
+            daily_new_names=settings.daily_new_names,
+            rank_ceiling=settings.rank_ceiling,
+        )
     manifest.names_added = [r["ticker"] for r in new_rows]
     manifest.names_refreshed = refresh
-    covered_before = sorted(ledger.covered())
+    covered_before = [] if refresh_tickers is not None else sorted(ledger.covered())
 
     if dry_run:
         manifest.finished_at = datetime.now(timezone.utc).isoformat()
@@ -111,8 +125,10 @@ def run_daily(
     themes = ThemeKeeper(
         store, client, ctx, trading_day=trading_day, calendar_date=calendar_date
     )
-    themes.ensure_current()
+    if refresh_tickers is None:
+        themes.ensure_current()
 
+    theses_written: list[CompanyThesis] = []
     board_by_ticker = {r["ticker"]: r for r in new_rows}
     for ticker in manifest.names_added:
         thesis = build_thesis(
@@ -131,9 +147,11 @@ def run_daily(
             sector=thesis.sector,
             attractiveness_rank=thesis.attractiveness_rank,
         )
+        theses_written.append(thesis)
         manifest.theses_written += 1
 
     ranked_rows = {s.get("ticker"): s for s in (ctx.board or {}).get("stocks", [])}
+    refresh_reason = "operator_refresh" if refresh_tickers is not None else "staleness_refresh"
     for ticker in refresh:
         thesis = build_thesis(
             store, client, ctx, themes,
@@ -141,11 +159,12 @@ def run_daily(
             board_row=ranked_rows.get(ticker),
             trading_day=trading_day,
             calendar_date=calendar_date,
-            update_reason="staleness_refresh",
+            update_reason=refresh_reason,
         )
         record_thesis_write(
             ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version
         )
+        theses_written.append(thesis)
         manifest.theses_written += 1
 
     # ── events sweep over everything covered before today's additions ────────
@@ -177,6 +196,7 @@ def run_daily(
                 )
                 manifest.event_updates_written += 1
                 manifest.theses_written += 1
+                theses_written.append(thesis)
                 written_version = thesis.version
             event_rows.append(
                 EventRecord(
@@ -196,6 +216,10 @@ def run_daily(
 
     # ── persist ──────────────────────────────────────────────────────────────
     save_ledger(store, ledger)
+    board = update_ratings_board(
+        store, ledger, theses_written, trading_day=trading_day
+    )
+    manifest.ratings_rows = len(board.rows)
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
@@ -234,11 +258,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Research think tank runner")
     parser.add_argument("--daily", action="store_true", help="run the daily cycle")
     parser.add_argument("--dry-run", action="store_true", help="plan only, no LLM/writes")
+    parser.add_argument(
+        "--refresh",
+        nargs="+",
+        metavar="TICKER",
+        help="operator refresh: re-underwrite ONLY these covered tickers "
+        "(no intake/sweep/themes) — e.g. a rating backfill",
+    )
     args = parser.parse_args(argv)
-    if not args.daily:
-        parser.error("--daily is required (the only mode in P0)")
+    if not args.daily and not args.refresh:
+        parser.error("one of --daily / --refresh TICKER... is required")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    run_daily(dry_run=args.dry_run)
+    run_daily(dry_run=args.dry_run, refresh_tickers=args.refresh)
     return 0
 
 
