@@ -22,6 +22,7 @@ import logging
 from agents.prompt_loader import load_prompt
 
 from thinktank import THEME_KEY_TMPL, THEME_LATEST_TMPL
+from thinktank.capture import emit_theme_capture
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle
 from thinktank.schemas import ThemeThesis, ThemeThesisLLM
@@ -147,6 +148,7 @@ class ThemeKeeper:
         self._store_new(
             kind="macro", key="macro", prior=None, llm=result, reason="seed",
             weekly_anchor=weekly_date,
+            system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
 
         sector_prompt = load_prompt("thinktank_theme_sector")
@@ -172,6 +174,7 @@ class ThemeKeeper:
             self._store_new(
                 kind="sector", key=sector, prior=None, llm=result, reason="seed",
                 weekly_anchor=weekly_date,
+                system=_SECTOR_SYSTEM, user=rendered, prompt_hash=sector_prompt.hash,
             )
 
     # ── reconcile (weekly is the authoritative anchor) ───────────────────────
@@ -205,6 +208,7 @@ class ThemeKeeper:
             kind="macro", key="macro", prior=macro, llm=result, reason="reconcile",
             weekly_anchor=weekly_date,
             divergence=result.parsed.change_summary or None,
+            system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
 
         sector_prompt = load_prompt("thinktank_theme_sector")
@@ -232,6 +236,7 @@ class ThemeKeeper:
                 kind="sector", key=sector, prior=prior, llm=result, reason="reconcile",
                 weekly_anchor=weekly_date,
                 divergence=result.parsed.change_summary or None,
+                system=_SECTOR_SYSTEM, user=rendered, prompt_hash=sector_prompt.hash,
             )
 
     # ── daily churn-gated update ─────────────────────────────────────────────
@@ -260,6 +265,7 @@ class ThemeKeeper:
         self._store_new(
             kind="macro", key="macro", prior=prior, llm=result, reason="event",
             weekly_anchor=prior.weekly_anchor_date,
+            system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
 
     # ── shared writer ────────────────────────────────────────────────────────
@@ -274,6 +280,9 @@ class ThemeKeeper:
         reason: str,
         weekly_anchor: str | None,
         divergence: str | None = None,
+        system: str = "",
+        user: str = "",
+        prompt_hash: str | None = None,
     ) -> None:
         theme = ThemeThesis(
             kind=kind,  # type: ignore[arg-type]
@@ -290,4 +299,25 @@ class ThemeKeeper:
             cost_usd=llm.cost_usd,
         )
         _write_theme(self._store, theme)
+        emit_theme_capture(
+            base_run_id=self._client.run_id,
+            kind=kind,
+            key_slug=_slug(key),
+            version=theme.version,
+            result=llm,
+            system=system,
+            user=user,
+            prompt_version_hash=prompt_hash,
+            input_data_snapshot={
+                "kind": kind,
+                "key": key,
+                "update_reason": reason,
+                "market_regime": self._ctx.market_regime(),
+                "weekly_anchor_date": weekly_anchor,
+                "prior_theme": prior.theme.model_dump() if prior else None,
+            },
+            agent_output=theme.model_dump(),
+            bucket=self._store.bucket,
+            s3_client=self._store.s3,
+        )
         self.updates_written += 1
