@@ -1,0 +1,22 @@
+name: Config counterpart guard
+
+# Blocks merging this repo's PRs while a same-named alpha-engine-config
+# branch exists — i.e., while the PR is half of an unmerged LOCKSTEP PAIR
+# (config#1592). This repo's CI clones alpha-engine-config branch-aware
+# (ci.yml "Checkout alpha-engine-config (branch-aware)"), so PR CI green
+# does NOT imply main CI green until the config counterpart merges: two
+# main-red incidents on 2026-07-02 (runs 28608910812, 28613003459) came
+# from exactly this race. When this check is RED: merge the config PR
+# first, then re-run this check (Re-run jobs) to unblock.
+#
+# Required status check on main branch protection (context:
+# "config-counterpart-merged / config-counterpart-merged"). Logic lives in
+# the fleet chokepoint: nousergon-lib config-counterpart-guard.yml.
+
+on:
+  pull_request:
+
+jobs:
+  config-counterpart-merged:
+    uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@main
+    secrets: inherit
