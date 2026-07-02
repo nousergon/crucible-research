@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS memory_episodes (
     rating          TEXT,
     conviction      TEXT,
     thesis_summary  TEXT,
-    outcome_10d     REAL,
+    outcome_21d     REAL,
     outcome_vs_spy  REAL,
     lesson          TEXT,
     sector          TEXT,
@@ -559,6 +559,19 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          CREATE INDEX IF NOT EXISTS idx_spo_horizon ON score_performance_outcomes(horizon_days);
          CREATE INDEX IF NOT EXISTS idx_spo_score_date ON score_performance_outcomes(score_date);
          """),
+    # Rename memory_episodes.outcome_10d -> outcome_21d (config#1480, folded
+    # into config#1530). The column NAME was stale — memory/episodic.py has
+    # stored the canonical 21d realized return in it since the config#1456
+    # canonical-alpha cutover; only the name lagged. Data is unchanged by this
+    # migration (a pure rename), so no backfill/copy step is needed. Readers
+    # (archive/manager.py::load_episodic_memories,
+    # agents/sector_teams/qual_tools.py::get_lessons) + the writer
+    # (memory/episodic.py::extract_memories) + tests/test_memory.py move to
+    # the new name in the same PR. RENAME COLUMN requires SQLite >= 3.25;
+    # this fleet's Lambda runtime (Python 3.12, bundled SQLite) and every dev
+    # environment are well past that floor.
+    22: ("Rename memory_episodes.outcome_10d to outcome_21d (config#1480)",
+         "ALTER TABLE memory_episodes RENAME COLUMN outcome_10d TO outcome_21d"),
 }
 
 
@@ -605,11 +618,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             else:
                 conn.execute(sql)
         except sqlite3.OperationalError as e:
-            # Column may already exist from pre-versioning era — safe to skip
-            if "duplicate column" not in str(e).lower():
+            msg = str(e).lower()
+            # Column may already exist from pre-versioning era — safe to skip.
+            # "no such column" covers a RENAME COLUMN migration (e.g. v22)
+            # running against a DB whose TABLES_SQL already created the
+            # column under its post-rename name (every fresh DB / test
+            # fixture, since TABLES_SQL is the current — not historical —
+            # shape): the source column never existed there, so the rename
+            # is correctly a no-op rather than an error.
+            if "duplicate column" not in msg and "no such column" not in msg:
                 log.error("Schema migration v%d failed: %s — %s", version, desc, e)
                 raise
-            log.debug("Migration v%d skipped (column already exists): %s", version, desc)
+            log.debug("Migration v%d skipped (already in target shape): %s", version, desc)
 
         # Record migration as applied
         conn.execute(

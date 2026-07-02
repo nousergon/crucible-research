@@ -4,6 +4,12 @@ producer).
 Synthetic SQLite fixture mirrors the research.db `cio_evaluations` +
 `score_performance` schema. Each test focuses on one invariant of the
 team-accuracy build path.
+
+`_seed_signal` seeds BOTH the wide `score_performance.beat_spy_21d` column
+(schema realism) AND the long-format `score_performance_outcomes` store
+(config#1483/config#1530 — the ACTUAL source
+`evals.outcome_store.load_primary_outcomes` reads) so existing test call
+sites exercise the real post-cutover read path unchanged.
 """
 
 from __future__ import annotations
@@ -53,10 +59,29 @@ def _make_db(path: Path) -> sqlite3.Connection:
             log_alpha_21d REAL,
             UNIQUE(symbol, score_date)
         );
+        CREATE TABLE score_performance_outcomes (
+            id INTEGER PRIMARY KEY,
+            signal_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            score_date TEXT NOT NULL,
+            horizon_days INTEGER NOT NULL,
+            beat_spy INTEGER,
+            stock_return REAL,
+            spy_return REAL,
+            log_alpha REAL,
+            is_primary INTEGER NOT NULL,
+            resolved_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(signal_id, horizon_days)
+        );
         """
     )
     conn.commit()
     return conn
+
+
+# The canonical primary horizon (nousergon_lib.quant.horizons.DEFAULT_POLICY).
+_PRIMARY_HORIZON = 21
 
 
 def _seed_cio(conn, ticker, eval_date, team_id, decision="ADVANCE"):
@@ -73,6 +98,17 @@ def _seed_signal(conn, symbol, score_date, beat_21d):
         "VALUES (?, ?, ?, ?)",
         (symbol, score_date, 70.0, beat_21d),
     )
+    if beat_21d is not None:
+        conn.execute(
+            "INSERT INTO score_performance_outcomes "
+            "(signal_id, symbol, score_date, horizon_days, beat_spy, "
+            " stock_return, spy_return, log_alpha, is_primary, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 1, ?)",
+            (
+                f"{symbol}:{score_date}", symbol, score_date, _PRIMARY_HORIZON,
+                beat_21d, f"{score_date}T00:00:00+00:00",
+            ),
+        )
 
 
 @pytest.fixture

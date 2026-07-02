@@ -12,11 +12,15 @@ it to the fixed S3 key the consumer reads.
 
 Substrate join (mirrors ``evals/last_week_scorecard.py``'s established
 pattern): ``cio_evaluations`` carries ``team_id`` per ``(ticker, eval_date)``
-but no realized outcome; ``score_performance`` carries the realized
-``beat_spy_21d`` per ``(symbol, score_date)`` but no team attribution. A
-CIO-ADVANCED ticker is scored into ``score_performance`` on the same cycle
-(same date) it's ADVANCEd, so joining on ``(ticker=symbol, eval_date=score_date)``
-attributes each realized outcome back to the team that recommended it.
+but no realized outcome; the canonical-primary-horizon (21d) beat-SPY outcome
+per ``(symbol, score_date)`` now comes from the long-format
+``score_performance_outcomes`` store via ``evals.outcome_store``
+(config#1483/config#1530 cutover — replaces the retired wide horizon-
+suffixed score_performance column read), joined here by team_id having no
+direct representation in that store. A CIO-ADVANCED ticker is scored on the
+same cycle (same date) it's ADVANCEd, so joining on
+``(ticker=symbol, eval_date=score_date)`` attributes each realized outcome
+back to the team that recommended it.
 
 Only ``cio_decision = 'ADVANCE'`` rows count: those are the picks that
 actually entered the live population (per ``agents/investment_committee/ic_cio.py``'s
@@ -47,6 +51,8 @@ import logging
 import sqlite3
 from datetime import date, timedelta
 from typing import Any, Optional
+
+from evals import outcome_store
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +97,7 @@ def analyze_team_performance(
 
     by_team: dict[str, list[int]] = {}
     for r in rows:
-        by_team.setdefault(r["team_id"], []).append(r["beat_spy_21d"])
+        by_team.setdefault(r["team_id"], []).append(r["beat_spy"])
 
     result: dict[str, dict[str, Any]] = {}
     for team_id, outcomes in sorted(by_team.items()):
@@ -107,27 +113,36 @@ def _fetch_team_outcomes(
     """Pull per-pick realized 21d beat-SPY outcomes, attributed to team_id.
 
     Joins CIO-ADVANCED picks (``cio_evaluations``, has ``team_id``, no
-    outcome) against realized signal outcomes (``score_performance``, has
-    ``beat_spy_21d``, no team attribution) on ``(ticker, eval_date)`` —
-    both are written from the same research cycle for the same date, so
-    the pair keys align. Only resolved rows (``beat_spy_21d IS NOT NULL``)
-    and only ``team_id IS NOT NULL`` rows (defensive — CIO evaluations for
-    exit-only / non-team-sourced candidates may carry a null team) count.
+    outcome) against realized canonical-primary-horizon (21d) outcomes from
+    the long-format ``score_performance_outcomes`` store (via
+    ``evals.outcome_store`` — config#1483/config#1530 cutover, replaces the
+    retired wide horizon-suffixed score_performance column read) on
+    ``(ticker=symbol, eval_date=score_date)`` — both are written from the
+    same research cycle for the same date, so the pair keys align. Only
+    resolved rows and only ``team_id IS NOT NULL`` rows (defensive — CIO
+    evaluations for exit-only / non-team-sourced candidates may carry a null
+    team) count. Returns dicts keyed ``team_id``/``beat_spy`` (the long
+    store's field name, NOT the retired wide column name).
     """
     sql = """
         SELECT
             c.team_id,
-            sp.beat_spy_21d
+            c.ticker,
+            c.eval_date
         FROM cio_evaluations c
-        JOIN score_performance sp
-            ON sp.symbol = c.ticker AND sp.score_date = c.eval_date
         WHERE c.eval_date BETWEEN ? AND ?
           AND c.cio_decision = 'ADVANCE'
           AND c.team_id IS NOT NULL
-          AND sp.beat_spy_21d IS NOT NULL
     """
     rows = conn.execute(sql, (start, end)).fetchall()
-    return [{"team_id": r[0], "beat_spy_21d": r[1]} for r in rows]
+    outcomes = outcome_store.load_primary_outcomes(conn, start, end)
+    result = []
+    for team_id, ticker, eval_date in rows:
+        outcome = outcomes.get((ticker, eval_date))
+        if outcome is None or outcome.beat_spy is None:
+            continue
+        result.append({"team_id": team_id, "beat_spy": outcome.beat_spy})
+    return result
 
 
 def save_team_accuracy(
