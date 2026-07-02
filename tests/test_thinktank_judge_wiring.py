@@ -173,3 +173,15 @@ def test_build_batch_plan_default_shape_unchanged():
         _put_capture(s3, date="2026-07-01", agent_id="ic_cio", run_id="r0")
         plan = build_batch_plan(date="2026-07-02", bucket=BUCKET, s3_client=s3)
         assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
+
+
+def test_expand_lookback_dates():
+    from evals.orchestrator import expand_lookback_dates
+
+    assert expand_lookback_dates("2026-07-04", 6) == [
+        "2026-07-03", "2026-07-02", "2026-07-01",
+        "2026-06-30", "2026-06-29", "2026-06-28",
+    ]
+    assert expand_lookback_dates("2026-07-04", 0) == []
+    # month boundary
+    assert expand_lookback_dates("2026-07-01", 1) == ["2026-06-30"]

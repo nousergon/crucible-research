@@ -94,6 +94,7 @@ def build_thesis(
     if signals_entry:
         sources.append("weekly_signals")
 
+    next_version = (prior.version + 1) if prior else 1
     prompt = load_prompt("thinktank_thesis")
     rendered = prompt.format(
         ticker=ticker,
@@ -116,12 +117,19 @@ def build_thesis(
         response_model=CompanyThesisLLM,
         prompt_id=prompt.name,
         prompt_version=prompt.version,
+        sft_meta={
+            "ticker": ticker,
+            "thesis_version": next_version,
+            "update_reason": update_reason,
+            "trading_day": trading_day,
+            "capture_run_id": f"{client.run_id}-{ticker}-v{next_version}",
+        },
     )
 
     macro_v, sector_vs = themes.theme_versions()
     thesis = CompanyThesis(
         ticker=ticker,
-        version=(prior.version + 1) if prior else 1,
+        version=next_version,
         trading_day=trading_day,
         calendar_date=calendar_date,
         update_reason=update_reason,  # type: ignore[arg-type]
@@ -219,6 +227,7 @@ def sweep(
             response_model=SweepBatchLLM,
             prompt_id=prompt.name,
             prompt_version=prompt.version,
+            sft_meta={"tickers": chunk},
         )
         batch: SweepBatchLLM = result.parsed  # type: ignore[assignment]
         known = set(chunk)

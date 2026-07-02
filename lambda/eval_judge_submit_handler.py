@@ -20,6 +20,8 @@ Event shape (all fields optional):
                                      # producers, e.g. thinktank)
       "agent_id_prefixes": ["thinktank_"],  # optional: only judge agent_ids
                                      # with these prefixes (family selection)
+      "capture_lookback_days": 6     # optional: expand extra_dates to the N
+                                     # days before date (weekly SF passes 6)
     }
 
 Returns:
@@ -122,6 +124,16 @@ def handler(event, context):
     # producers (thinktank) whose artifacts land in weekday partitions.
     extra_dates = event.get("extra_dates") or None
     agent_id_prefixes = event.get("agent_id_prefixes") or None
+    # capture_lookback_days=N expands to extra_dates covering the N days
+    # before `date` — the Saturday SF passes 6 so the week's thinktank
+    # captures ride the SAME weekly batch (unmapped agent_ids in those
+    # partitions are skipped cleanly; no prior Saturday falls in range).
+    lookback = int(event.get("capture_lookback_days") or 0)
+    if lookback > 0:
+        from evals.orchestrator import expand_lookback_dates
+
+        computed = expand_lookback_dates(date, lookback)
+        extra_dates = sorted(set(computed) | set(extra_dates or []), reverse=True)
 
     logger.info(
         "[eval_judge_submit_handler] start date=%s force_sonnet=%s "

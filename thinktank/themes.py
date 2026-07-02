@@ -144,6 +144,8 @@ class ThemeKeeper:
             response_model=ThemeThesisLLM,
             prompt_id=prompt.name,
             prompt_version=prompt.version,
+            sft_meta={"kind": "macro", "key": "macro", "update_reason": "seed",
+                      "theme_version": 1, "trading_day": self._trading_day},
         )
         self._store_new(
             kind="macro", key="macro", prior=None, llm=result, reason="seed",
@@ -170,6 +172,8 @@ class ThemeKeeper:
                 response_model=ThemeThesisLLM,
                 prompt_id=sector_prompt.name,
                 prompt_version=sector_prompt.version,
+                sft_meta={"kind": "sector", "key": sector, "update_reason": "seed",
+                          "theme_version": 1, "trading_day": self._trading_day},
             )
             self._store_new(
                 kind="sector", key=sector, prior=None, llm=result, reason="seed",
@@ -203,6 +207,9 @@ class ThemeKeeper:
             response_model=ThemeThesisLLM,
             prompt_id=prompt.name,
             prompt_version=prompt.version,
+            sft_meta={"kind": "macro", "key": "macro", "update_reason": "reconcile",
+                      "theme_version": macro.version + 1,
+                      "trading_day": self._trading_day},
         )
         self._store_new(
             kind="macro", key="macro", prior=macro, llm=result, reason="reconcile",
@@ -231,6 +238,10 @@ class ThemeKeeper:
                 response_model=ThemeThesisLLM,
                 prompt_id=sector_prompt.name,
                 prompt_version=sector_prompt.version,
+                sft_meta={"kind": "sector", "key": sector,
+                          "update_reason": "reconcile",
+                          "theme_version": (prior.version + 1) if prior else 1,
+                          "trading_day": self._trading_day},
             )
             self._store_new(
                 kind="sector", key=sector, prior=prior, llm=result, reason="reconcile",
@@ -258,6 +269,9 @@ class ThemeKeeper:
             response_model=ThemeThesisLLM,
             prompt_id=prompt.name,
             prompt_version=prompt.version,
+            sft_meta={"kind": "macro", "key": "macro", "update_reason": "event",
+                      "theme_version": prior.version + 1,
+                      "trading_day": self._trading_day},
         )
         if not result.parsed.material_change:
             logger.info("macro theme: no material change today — no version written")
