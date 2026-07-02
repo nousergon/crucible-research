@@ -2,10 +2,11 @@
 Score performance feedback loop (§5.6) — BUY-signal recording.
 
 Records BUY-rated stocks (score >= 70) into score_performance at scoring
-time so the canonical 21d outcome (beat_spy_21d / return_21d /
-spy_21d_return / log_alpha_21d) can be attached later by the
-alpha-engine-data producer (signal_returns._backfill_score_returns,
-alpha-engine-data#197).
+time so the canonical-primary-horizon (21d) outcome can be attached later
+by the alpha-engine-data producer (signal_returns._backfill_score_returns,
+alpha-engine-data#197) — resolved outcomes now live in the long-format
+score_performance_outcomes store (EPIC config#1483), not wide horizon-
+suffixed columns on this table.
 
 The legacy 10d/30d evaluation loop (run_performance_checks,
 get_trading_day_offset, _get_spy_price_on_date, _compute_accuracy_stats)

@@ -35,7 +35,14 @@ pydantic~=2.7
 # git URL; CI pulls directly.
 # Tradeability cost engine (config#1399): nousergon_lib.quant.transaction_cost,
 # shipped in nousergon-lib v0.75.0 (#144 merged + tagged 2026-06-30).
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.75.0
+# Bumped 0.75.0 -> 0.78.0 (config#1483/config#1530): the research/episodic
+# consumer cutover onto the long-format score_performance_outcomes store
+# needs nousergon_lib.quant.horizons (HorizonPolicy/OutcomeColumns, lib#147,
+# v0.77.0) + nousergon_lib.quant.horizon_guard (the shared burn-down-guard
+# testing primitive lifted on the second adoption, lib#149, v0.78.0) —
+# this repo adopts the shared guard directly rather than hand-rolling its
+# own copy (see tests/test_wide_horizon_column_burndown_guard.py).
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.78.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,

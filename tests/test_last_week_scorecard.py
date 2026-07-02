@@ -2,6 +2,14 @@
 
 Synthetic SQLite fixture mirrors the research.db schema. Each test
 focuses on one invariant of the scorecard build path.
+
+The signal-outcome fixture seeds BOTH the wide `score_performance` columns
+(kept for schema realism / other consumers' fixtures elsewhere) AND the
+long-format `score_performance_outcomes` store (config#1483/config#1530 —
+the ACTUAL source `evals.outcome_store.load_primary_outcomes` reads).
+`_seed_signal`'s `beat_21d`/`log_alpha_21d` args are consumed to build both
+representations from one call site so existing test call sites don't need
+per-test changes.
 """
 
 from __future__ import annotations
@@ -87,19 +95,53 @@ def _make_db(path: Path) -> sqlite3.Connection:
             date TEXT NOT NULL,
             regime TEXT
         );
+        CREATE TABLE score_performance_outcomes (
+            id INTEGER PRIMARY KEY,
+            signal_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            score_date TEXT NOT NULL,
+            horizon_days INTEGER NOT NULL,
+            beat_spy INTEGER,
+            stock_return REAL,
+            spy_return REAL,
+            log_alpha REAL,
+            is_primary INTEGER NOT NULL,
+            resolved_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(signal_id, horizon_days)
+        );
         """
     )
     conn.commit()
     return conn
 
 
+# The canonical primary horizon (nousergon_lib.quant.horizons.DEFAULT_POLICY).
+_PRIMARY_HORIZON = 21
+
+
 def _seed_signal(conn, sym, score_date, beat_21d=None,
                  log_alpha_21d=None, score=70.0):
+    """Seed a score_performance identity row + (if resolved) its canonical
+    21d outcome in BOTH the wide column (legacy schema realism) and the
+    long-format store (the production read path post-cutover)."""
     conn.execute(
         "INSERT INTO score_performance (symbol, score_date, score, beat_spy_21d, "
         "log_alpha_21d) VALUES (?, ?, ?, ?, ?)",
         (sym, score_date, score, beat_21d, log_alpha_21d),
     )
+    if beat_21d is not None:
+        conn.execute(
+            "INSERT INTO score_performance_outcomes "
+            "(signal_id, symbol, score_date, horizon_days, beat_spy, "
+            " stock_return, spy_return, log_alpha, is_primary, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            (
+                f"{sym}:{score_date}", sym, score_date, _PRIMARY_HORIZON,
+                beat_21d, None, None, log_alpha_21d,
+                f"{score_date}T00:00:00+00:00",
+            ),
+        )
 
 
 def _seed_population(conn, sym, sector):
