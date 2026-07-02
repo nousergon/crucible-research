@@ -347,6 +347,29 @@ class ArchiveManager:
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
+    def write_research_intel(self, trading_date: str, intel: dict) -> None:
+        """Write the neutral, product-facing ``research_intel`` artifact to S3
+        (config#1500, Phase 0 of EPIC config#1499).
+
+        A NEW SIBLING to signals.json — NOT a replacement. signals.json and
+        its executor/predictor consumers are UNTOUCHED. This artifact carries
+        ONLY the neutral derived intel (regime label + narrative, sector
+        ratings/modifiers, market breadth, per-ticker attractiveness + generic
+        thesis) under the strict allowlist enforced by
+        ``research_intel.schema.json`` in nousergon_lib.contracts. Consumers
+        (Metron Advisor, product surfaces) read this WITHOUT touching the
+        edge-mixed signals.json.
+
+        Parallels :meth:`write_signals_json`: writes both the dated artifact
+        and the ``latest.json`` pointer. The payload already carries ``date``
+        and ``generated_at`` (stamped by ``_build_research_intel_payload``), so
+        unlike ``write_signals_json`` we do not re-wrap it here — the bytes we
+        write are exactly the bytes the producer contract test validated.
+        """
+        body = json.dumps(intel, indent=2, default=str)
+        self._s3_put(f"research_intel/{trading_date}.json", body)
+        self._s3_put("research_intel/latest.json", body)
+
     def write_shadow_signals_json(
         self, producer_name: str, trading_date: str, generated_at: str, signals: dict
     ) -> str:

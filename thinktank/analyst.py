@@ -151,6 +151,7 @@ def build_thesis(
         base_run_id=client.run_id,
         ticker=ticker,
         version=thesis.version,
+        trading_day=trading_day,
         result=result,
         system=_ANALYST_SYSTEM,
         user=rendered,
