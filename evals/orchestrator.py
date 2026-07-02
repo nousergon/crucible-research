@@ -109,6 +109,35 @@ def should_escalate_to_sonnet(
 # ── Capture-corpus listing ────────────────────────────────────────────────
 
 
+def expand_lookback_dates(date: str, lookback_days: int) -> list[str]:
+    """The ``lookback_days`` TRADING days strictly before ``date``
+    (newest first) — the Submit handler's ``capture_lookback_days``
+    expansion.
+
+    Trading days, not calendar days (Brian, 2026-07-02): daily
+    producers (thinktank, config#1579) partition their captures by
+    ``trading_day`` per the fleet date convention, so weekend/holiday
+    runs land in the LAST trading day's partition (a Friday partition
+    accrues Fri+Sat+Sun runs' outputs — expected). Enumerating trading
+    days therefore covers every capture. The boundary case — a weekend
+    run writing into Friday's partition AFTER Saturday's batch already
+    ran — is handled by the already-judged dedup in
+    ``build_batch_plan``, which re-enumerates that partition the NEXT
+    week (a 6-trading-day lookback from Saturday reaches the prior
+    Friday) and skips only what was already judged."""
+    from datetime import date as _date
+
+    from nousergon_lib import trading_calendar as _tc
+
+    y, m, d = (int(x) for x in date.split("-"))
+    cur = _date(y, m, d)
+    out: list[str] = []
+    for _ in range(lookback_days):
+        cur = _tc.previous_trading_day(cur)
+        out.append(str(cur))
+    return out
+
+
 def _build_capture_prefix(date: str) -> str:
     """``decision_artifacts/{Y}/{M}/{D}/`` — partition layout that
     ``alpha_engine_lib.decision_capture`` writes to."""
@@ -116,7 +145,13 @@ def _build_capture_prefix(date: str) -> str:
     return f"decision_artifacts/{y}/{m}/{d}/"
 
 
-def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
+def list_capture_keys(
+    s3: Any,
+    *,
+    date: str,
+    bucket: str,
+    agent_id_prefixes: list[str] | None = None,
+) -> list[str]:
     """Enumerate every captured artifact key under the date partition.
 
     Excludes the ``_eval/`` subtree — those are eval artifacts (output
@@ -124,6 +159,12 @@ def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
     Excludes any keys not ending in ``.json`` (defensive — the partition
     should only contain captures, but a stray prefix shouldn't crash
     the run).
+
+    ``agent_id_prefixes`` (optional) filters to keys whose agent segment
+    (``decision_artifacts/{Y}/{M}/{D}/{agent_id}/{run_id}.json``) starts
+    with one of the given prefixes — the seam that lets a second Submit
+    invocation judge one artifact family (e.g. ``thinktank_``) without
+    re-judging everything else in the partition (config#1579 P2).
     """
     prefix = _build_capture_prefix(date)
     paginator = s3.get_paginator("list_objects_v2")
@@ -133,8 +174,42 @@ def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
             key = obj["Key"]
             if "/_eval/" in key or not key.endswith(".json"):
                 continue
+            if agent_id_prefixes is not None:
+                parts = key.split("/")
+                agent_seg = parts[-2] if len(parts) >= 2 else ""
+                if not any(agent_seg.startswith(p) for p in agent_id_prefixes):
+                    continue
             keys.append(key)
     return keys
+
+
+def load_already_judged_keys(
+    s3: Any, *, dates: list[str], bucket: str
+) -> set[str]:
+    """Capture keys already scored, per the ``_eval_by_capture``
+    manifests (which index ACTUAL written evals — a batch that failed
+    before persisting evals leaves no manifest entries, so its
+    artifacts correctly re-enter the next plan; the manifests'
+    ~24h eventual consistency is far inside the weekly cadence).
+    A missing/unreadable manifest yields no dedup for that date — the
+    failure mode is a harmless duplicate eval, never a silent skip."""
+    judged: set[str] = set()
+    for d in dates:
+        key = f"decision_artifacts/_eval_by_capture/{d}/manifest.json"
+        try:
+            raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        except Exception:  # noqa: BLE001 — absent manifest = nothing judged yet
+            continue
+        try:
+            manifest = json.loads(raw)
+        except Exception:  # noqa: BLE001 — unreadable manifest = no dedup (dup evals, not skips)
+            logger.warning("[batch_plan] unreadable eval manifest %s — no dedup for %s", key, d)
+            continue
+        for entry in manifest.get("entries", manifest.get("evals", [])) or []:
+            jk = entry.get("judged_artifact_s3_key")
+            if jk:
+                judged.add(jk)
+    return judged
 
 
 def _load_capture_artifact(
@@ -414,6 +489,8 @@ def build_batch_plan(
     judge_only: bool = False,
     s3_client: Optional[Any] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    extra_dates: Optional[list[str]] = None,
+    agent_id_prefixes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """List captures, resolve rubrics, and build the (request_payload,
     plan_entries) pair for the Submit Lambda.
@@ -436,7 +513,34 @@ def build_batch_plan(
     eval_prefix = JUDGE_ONLY_EVAL_PREFIX if judge_only else DEFAULT_EVAL_PREFIX
     cw_namespace = JUDGE_ONLY_CW_NAMESPACE if judge_only else DEFAULT_NAMESPACE
 
-    capture_keys = list_capture_keys(s3, date=date, bucket=bucket)
+    # ``date`` plus optional ``extra_dates`` — the weekly graph writes only
+    # on Saturday, but daily producers (thinktank) land in weekday
+    # partitions; a caller judging that family passes the week's dates
+    # (with agent_id_prefixes to avoid re-judging already-judged families).
+    all_dates = [date] + [d for d in (extra_dates or []) if d != date]
+    capture_keys: list[str] = []
+    for _d in all_dates:
+        capture_keys.extend(
+            list_capture_keys(
+                s3, date=_d, bucket=bucket, agent_id_prefixes=agent_id_prefixes
+            )
+        )
+    # Already-judged dedup (Brian, 2026-07-02): a multi-date lookback
+    # re-enumerates partitions that earlier batches partially judged
+    # (e.g. weekend thinktank runs writing into Friday's partition after
+    # Saturday's batch ran). Skip anything an ACTUAL eval already scored.
+    skipped_already_judged = 0
+    if len(all_dates) > 1:
+        judged_keys = load_already_judged_keys(s3, dates=all_dates, bucket=bucket)
+        if judged_keys:
+            before = len(capture_keys)
+            capture_keys = [k for k in capture_keys if k not in judged_keys]
+            skipped_already_judged = before - len(capture_keys)
+            if skipped_already_judged:
+                logger.info(
+                    "[batch_plan] skipped %d already-judged captures (dedup)",
+                    skipped_already_judged,
+                )
     requests: list[dict[str, Any]] = []
     plan_entries: list[dict[str, Any]] = []
     client_side_skips: list[dict[str, Any]] = []
@@ -539,6 +643,7 @@ def build_batch_plan(
         "judge_run_id": judge_run_id,
         "capture_keys_total": len(capture_keys),
         "skipped_unmapped": skipped_unmapped,
+        "skipped_already_judged": skipped_already_judged,
         "client_side_skips": client_side_skips,
         "plan_entries": plan_entries,
         "requests": requests,

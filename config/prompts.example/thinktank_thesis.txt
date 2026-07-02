@@ -1,0 +1,35 @@
+# version: 0.1.0
+Write (or re-underwrite) the investment thesis for {ticker} (sector: {sector}).
+
+Update reason: {update_reason}
+Event context (if this is an event-driven update): {event_context}
+
+PRIOR THESIS (build on it; do not restate unchanged sections verbatim — refresh what the inputs move):
+{prior_thesis}
+
+CURRENT HOUSE THEMES (consume these; do NOT re-derive macro/sector from scratch):
+Macro: {macro_theme}
+Sector: {sector_theme}
+
+QUANT CONTEXT — attractiveness board row (sector-neutral pillar scores 0-100, metrics):
+{board_row}
+
+WEEKLY RESEARCH SIGNAL (the weekly pipeline's current stance on this name, may be empty):
+{weekly_signal}
+
+NEWS AGGREGATE (recent article counts, LM sentiment, event severity):
+{news_aggregate}
+
+FILINGS EXCERPTS (retrieved from 10-K/10-Q/8-K/earnings transcripts):
+{filings_excerpts}
+
+Requirements:
+- Ground every claim in the inputs above where possible; flag clearly when you
+  are reasoning from general knowledge instead.
+- moat: assess durability of competitive advantage, not marketing language.
+- valuation: relate the board's value/quality pillars and metrics to the story.
+- market_dynamics: how the CURRENT macro/sector themes bear on this name.
+- risks: most material first; specific, falsifiable.
+- catalysts: concrete and dated where possible.
+- stance/conviction: your call as an analyst; conviction 0-100.
+- summary: 3-5 sentences an executor could act on.

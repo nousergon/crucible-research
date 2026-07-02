@@ -1,0 +1,21 @@
+# version: 0.1.0
+Daily events sweep. Covered tickers in this batch: {tickers}
+
+Market regime: {market_regime}
+
+Per-ticker news aggregates (article counts, LM sentiment means, event counts,
+max/mean event severity, event categories, top event descriptions). An empty
+object means no news signal today for that ticker:
+{news_rows}
+
+For EVERY ticker in the batch, return one assessment:
+- action "update_thesis" ONLY for genuinely thesis-relevant developments:
+  guidance changes, M&A, regulatory action, major product/contract news,
+  severe sentiment or event-severity spikes. Routine coverage drift, minor
+  price moves, and low-severity chatter are action "none".
+- severity 0-100 reflects how thesis-relevant today's flow is.
+- rationale: one-two sentences naming the specific signal you keyed on.
+
+Also set macro_relevant: if anything in this batch is market-wide relevant
+(rates, jobs/inflation prints, broad regulatory shifts, systemic credit
+events), describe it in 1-3 sentences; otherwise leave it empty.

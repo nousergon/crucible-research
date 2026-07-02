@@ -118,6 +118,17 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "scoring/attractiveness_history.py": 1,
     "scoring/attractiveness_trajectory.py": 1,
     "scripts/aggregate_costs.py": 1,
+    # Distillation SFT-corpus stats artifact
+    # (decision_artifacts/distillation/corpus_stats/{date}.json + latest.json).
+    # SECONDARY observability built fail-soft as a non-fatal post-step of the
+    # research run (WARNs, never fails the run; signals.json is primary). Reads
+    # the whole _sft_raw corpus and rewrites a rebuildable summary; the console
+    # Distillation-Corpus panel consumer graceful-degrades when absent → absence
+    # is NOT a silent failure and needs no daily freshness-SLA alarm. Per-file
+    # PUT pin only; ARTIFACT_REGISTRY row deferred until first Saturday
+    # production (register-with-or-after-producer — config#1544). One PUT site
+    # (loop over dated + latest keys in compute_corpus_stats).
+    "scripts/corpus_stats.py": 1,
     # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
     # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site
     # (_write_leaderboard) used by both build_scanner_leaderboard →
@@ -140,6 +151,22 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "scripts/backfill_eval_option_b.py": 1,
     "scripts/backfill_orphan_theses.py": 2,
     "scripts/run_judge_cross_validation.py": 1,
+    # Think-tank SFT capture flush (config#1579) — writes to the SAME
+    # decision_artifacts/_sft_raw/ accumulation stream as
+    # graph/llm_cost_tracker.py (producer tag crucible_thinktank), gated on
+    # ALPHA_ENGINE_DECISION_CAPTURE_ENABLED. Distillation training data, NOT a
+    # load-bearing freshness-SLA artifact — per-file PUT pin only (same
+    # rationale as the cost/capture streams above). One PUT site (flush_sft).
+    "thinktank/client.py": 1,
+    # The think tank's single write chokepoint: ALL thinktank/ namespace
+    # artifacts (coverage ledger, theses, themes, events, run manifests, month
+    # cost ledger) go through ThinktankStore._put — which is exactly what makes
+    # the namespace boundary auditable. OBSERVE-phase producer with NO live
+    # consumer yet (admission gate config#1579 P2 / restructure decision
+    # config#1580); consumers-to-be graceful-degrade on absence. Per-file PUT
+    # pin only; ARTIFACT_REGISTRY rows deferred until the artifacts become
+    # load-bearing (register-with-or-after-producer precedent, config#1393).
+    "thinktank/storage.py": 1,
 }
 
 

@@ -358,7 +358,7 @@ def create_qual_tools(context: dict) -> list:
             items.append({
                 "signal_date": m.get("signal_date", ""),
                 "score": m.get("score"),
-                "outcome_10d": m.get("outcome_10d"),
+                "outcome_21d": m.get("outcome_21d"),
                 "outcome_vs_spy": m.get("outcome_vs_spy"),
                 "lesson": m.get("lesson", ""),
                 "pattern_tags": m.get("pattern_tags", ""),

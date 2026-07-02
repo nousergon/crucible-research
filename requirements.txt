@@ -3,6 +3,11 @@ anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
 langsmith~=0.7
+# openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
+# talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
+# base_url. NOT used by the weekly research pipeline (which stays on
+# langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
+openai>=1.60
 
 # Evals
 agentevals~=0.0
@@ -35,14 +40,19 @@ pydantic~=2.7
 # git URL; CI pulls directly.
 # Tradeability cost engine (config#1399): nousergon_lib.quant.transaction_cost,
 # shipped in nousergon-lib v0.75.0 (#144 merged + tagged 2026-06-30).
-# research_intel contract (config#1500): the research_intel.schema.json +
-# SLOT_SCHEMAS["research_intel"] registration ship in nousergon-lib v0.77.0.
-# NOTE (DRAFT): this pin bump is a HARD DEPENDENCY on tagging lib v0.77.0
-# (see the sibling nousergon-lib PR). Until that tag exists, `pip install`
-# of this line will fail — that is the one repin the reviewer must land
-# after the lib PR merges + is tagged. test_lib_pin_lockstep keeps all three
-# deploy artifacts (this file + Dockerfile + Dockerfile.alerts) in lockstep.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.77.0
+# Bumped 0.75.0 -> 0.78.0 (config#1483/config#1530): the research/episodic
+# consumer cutover onto the long-format score_performance_outcomes store
+# needs nousergon_lib.quant.horizons (HorizonPolicy/OutcomeColumns, lib#147,
+# v0.77.0) + nousergon_lib.quant.horizon_guard (the shared burn-down-guard
+# testing primitive lifted on the second adoption, lib#149, v0.78.0) —
+# this repo adopts the shared guard directly rather than hand-rolling its
+# own copy (see tests/test_wide_horizon_column_burndown_guard.py).
+# Also satisfies the research_intel contract (config#1500): the
+# research_intel.schema.json + SLOT_SCHEMAS["research_intel"] registration
+# shipped in v0.77.0 and are still present in v0.78.0 (additive bump —
+# verified). test_lib_pin_lockstep keeps all three deploy artifacts (this
+# file + Dockerfile + Dockerfile.alerts) in lockstep.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.78.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
@@ -50,7 +60,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # directly (not via a nousergon-lib bump, which would drag the in-flight,
 # 7/3-cutover SF-rename refs in lib 0.74.0 into this repo). Floor guarantees
 # the upgrade even on a non-fresh venv.
-krepis>=0.6.0
+# Bumped 0.6.0 -> 0.7.0 (config#1545): infrastructure/deploy.sh's canary +
+# alert calls use the `krepis.aws invoke-canary` / `krepis.alerts` CLI, which
+# ships starting in krepis 0.7.0 — the 0.6.0 floor didn't actually guarantee
+# the CLI existed (it happened to resolve 0.7.0 anyway since that's the
+# latest release, masking the gap).
+krepis>=0.7.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5

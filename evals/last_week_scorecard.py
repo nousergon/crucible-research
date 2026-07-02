@@ -13,11 +13,13 @@ compact snapshot — the "last week's scorecard" — that downstream phases
 will inject into the CIO + Macro Economist prompts under a labeled section.
 
 Substrate joins:
-  - score_performance — per-BUY-signal beat-SPY at the canonical 21d
-    horizon + realized 21d log-alpha (sector taken from a JOIN against
-    `population` since score_performance is not self-describing on sector).
-    The retired 10d/30d outcome columns were replaced by the canonical
-    21d columns in the canonical-alpha cutover (config#1456).
+  - score_performance — per-BUY-signal identity (symbol/score_date/score),
+    joined against the long-format `score_performance_outcomes` store (via
+    `evals.outcome_store`) for the canonical-primary-horizon (21d) beat-SPY
+    flag + realized log-alpha (config#1483/config#1530 cutover — this
+    replaces the retired wide horizon-suffixed score_performance column
+    reads). Sector is taken from a JOIN against `population` since neither
+    table is self-describing on sector.
   - predictor_outcomes — per-prediction realized 21d log-alpha + correctness
     (canonical `correct` / `actual_log_alpha` with legacy `correct_5d` /
     `actual_5d_return` fallback for pre-2026-05-09 rows).
@@ -61,6 +63,8 @@ from alpha_engine_lib.eval_artifacts import (
     eval_latest_key,
     new_eval_run_id,
 )
+
+from evals import outcome_store
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +191,8 @@ def build_scorecard(
         else None
     )
 
-    sig_21d = [r for r in signal_rows if r["beat_spy_21d"] is not None]
-    overall_sig_21d = sum(r["beat_spy_21d"] for r in sig_21d) / len(sig_21d) if sig_21d else None
+    sig_21d = [r for r in signal_rows if r["beat_spy"] is not None]
+    overall_sig_21d = sum(r["beat_spy"] for r in sig_21d) / len(sig_21d) if sig_21d else None
 
     per_sector = _build_sector_rows(signal_rows)
     surprises, confirmations = _build_surprise_lists(predictor_rows)
@@ -254,37 +258,44 @@ def _fetch_signal_outcomes(
 ) -> list[dict]:
     """Pull per-BUY-signal hit-rate rows with sector via population JOIN.
 
-    `score_performance` doesn't carry sector. Population's current sector
-    is a reasonable proxy — sector reassignments inside a 4-week window
-    are rare enough to not bias the per-sector roll-up materially. When
-    a symbol is missing from `population` (was scanned but never entered
-    the tracked population), the row gets `sector="(unknown)"` and still
-    contributes to the overall hit rate.
+    `score_performance` doesn't carry sector or the canonical 21d outcome
+    (config#1483/config#1530 cutover: the outcome now lives in the
+    long-format `score_performance_outcomes` store, read via
+    `evals.outcome_store` and joined here by `(symbol, score_date)` — NOT the
+    retired wide horizon-suffixed score_performance columns). Population's
+    current sector is a reasonable proxy — sector reassignments inside a
+    4-week window are rare enough to not bias the per-sector roll-up
+    materially. When a symbol is missing from `population` (was scanned but
+    never entered the tracked population), the row gets `sector="(unknown)"`
+    and still contributes to the overall hit rate.
     """
     sql = """
         SELECT
             sp.symbol,
             sp.score_date,
             sp.score,
-            sp.beat_spy_21d,
-            sp.log_alpha_21d,
             COALESCE(p.sector, '(unknown)') AS sector
         FROM score_performance sp
         LEFT JOIN population p ON p.symbol = sp.symbol
         WHERE sp.score_date BETWEEN ? AND ?
     """
     rows = conn.execute(sql, (start, end)).fetchall()
-    return [
-        {
-            "symbol": r[0],
-            "score_date": r[1],
-            "score": r[2],
-            "beat_spy_21d": r[3],
-            "log_alpha_21d": r[4],
-            "sector": r[5],
-        }
-        for r in rows
-    ]
+    outcomes = outcome_store.load_primary_outcomes(conn, start, end)
+    result = []
+    for r in rows:
+        symbol, score_date = r[0], r[1]
+        outcome = outcomes.get((symbol, score_date))
+        result.append(
+            {
+                "symbol": symbol,
+                "score_date": score_date,
+                "score": r[2],
+                "beat_spy": outcome.beat_spy if outcome else None,
+                "log_alpha": outcome.log_alpha if outcome else None,
+                "sector": r[3],
+            }
+        )
+    return result
 
 
 def _fetch_market_regime(conn: sqlite3.Connection, on_or_before: str) -> Optional[str]:
@@ -315,9 +326,9 @@ def _build_sector_rows(signal_rows: list[dict]) -> list[SectorRow]:
     for sector, rows in sorted(by_sector.items()):
         if len(rows) < _MIN_SECTOR_N:
             continue
-        h21 = [r["beat_spy_21d"] for r in rows if r["beat_spy_21d"] is not None]
-        log_alpha_21d = [
-            r["log_alpha_21d"] for r in rows if r["log_alpha_21d"] is not None
+        h21 = [r["beat_spy"] for r in rows if r["beat_spy"] is not None]
+        sector_log_alphas = [
+            r["log_alpha"] for r in rows if r["log_alpha"] is not None
         ]
         out.append(
             SectorRow(
@@ -325,7 +336,8 @@ def _build_sector_rows(signal_rows: list[dict]) -> list[SectorRow]:
                 n_signals=len(rows),
                 hit_rate_21d=sum(h21) / len(h21) if h21 else None,
                 mean_log_alpha_21d=(
-                    sum(log_alpha_21d) / len(log_alpha_21d) if log_alpha_21d else None
+                    sum(sector_log_alphas) / len(sector_log_alphas)
+                    if sector_log_alphas else None
                 ),
             )
         )
