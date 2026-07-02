@@ -14,6 +14,13 @@ agent_ids are deliberately COARSE (``thinktank_thesis``, ``thinktank_theme``
 that gate (the thesis_update:{team}:{ticker} lesson). Ticker/theme identity
 rides in ``run_id`` and the snapshot instead.
 
+Captures are PARTITIONED BY TRADING DAY (Brian, 2026-07-02), per the fleet
+date convention: a Saturday/Sunday run analyzes Friday's data
+(``now_dual().trading_day``), so its captures belong in Friday's partition —
+the last trading day of the week simply accrues more outputs (Fri+Sat+Sun
+runs, expected). The judge's trading-day lookback + already-judged dedup
+(evals/orchestrator.py) rely on this partitioning.
+
 Gated on ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED`` (the fleet-wide capture
 switch). Write failures raise ``DecisionCaptureWriteError`` — never swallowed.
 """
@@ -44,10 +51,21 @@ def _enabled() -> bool:
     )
 
 
+def _partition_timestamp(trading_day: str):
+    """Wall-clock time-of-day on the TRADING day's date — controls the
+    capture key's date partition while preserving intra-day ordering."""
+    from datetime import date, datetime, timezone
+
+    y, m, d = (int(x) for x in trading_day.split("-"))
+    now = datetime.now(timezone.utc)
+    return datetime.combine(date(y, m, d), now.timetz())
+
+
 def _emit(
     *,
     agent_id: str,
     run_id: str,
+    trading_day: str,
     result: LLMCallResult,
     system: str,
     user: str,
@@ -77,6 +95,7 @@ def _emit(
         agent_output=agent_output,
         s3_bucket=bucket,
         s3_client=s3_client,
+        timestamp=_partition_timestamp(trading_day),
     )
     logger.info("decision capture written: %s", key)
     return key
@@ -87,6 +106,7 @@ def emit_thesis_capture(
     base_run_id: str,
     ticker: str,
     version: int,
+    trading_day: str,
     result: LLMCallResult,
     system: str,
     user: str,
@@ -99,6 +119,7 @@ def emit_thesis_capture(
     return _emit(
         agent_id=THESIS_AGENT_ID,
         run_id=f"{base_run_id}-{ticker}-v{version}",
+        trading_day=trading_day,
         result=result,
         system=system,
         user=user,
@@ -116,6 +137,7 @@ def emit_theme_capture(
     kind: str,
     key_slug: str,
     version: int,
+    trading_day: str,
     result: LLMCallResult,
     system: str,
     user: str,
@@ -128,6 +150,7 @@ def emit_theme_capture(
     return _emit(
         agent_id=THEME_AGENT_ID,
         run_id=f"{base_run_id}-{kind}-{key_slug}-v{version}",
+        trading_day=trading_day,
         result=result,
         system=system,
         user=user,

@@ -318,6 +318,7 @@ class ThemeKeeper:
             kind=kind,
             key_slug=_slug(key),
             version=theme.version,
+            trading_day=self._trading_day,
             result=llm,
             system=system,
             user=user,
