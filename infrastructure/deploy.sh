@@ -27,6 +27,7 @@ FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
+FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -137,7 +138,7 @@ build_and_deploy_main() {
   fi
 
   # -- scoring.yaml + universe.yaml ---------------------------------------
-  for yaml in scoring.yaml universe.yaml; do
+  for yaml in scoring.yaml universe.yaml thinktank.yaml; do
     if [ -f "config/$yaml" ]; then
       echo "Using existing config/$yaml (local dev workflow)"
     else
@@ -742,6 +743,22 @@ deploy_scanner() {
   _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
 }
 
+# Daily think-tank Lambda — config#1579 P1. Shared image with the main
+# runner; CMD override sets the entry to thinktank_handler.handler.
+# Timeout 900s (Lambda max) matches the EPIC's runner decision
+# ("EventBridge->Lambda first; move to the EC2-spot pattern if a run
+# breaches ~12 min") — a steady-state run is a few minutes (5 thesis
+# builds + chunked sweep + churn-gated themes), but a theme re-seed day
+# stacks ~12 extra tier calls. Memory 1024MB matches the main runner
+# (pandas substrate reader + boto3 working set). Secrets (OpenRouter key,
+# RAG DB URL, Voyage key) resolve at runtime from SSM via the get_secret
+# chokepoint — no function-level env var config needed. The EventBridge
+# schedule + Errors alarm live in infrastructure/setup-thinktank-schedule.sh
+# (idempotent, run once after first deploy creates the function).
+deploy_thinktank() {
+  _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -753,9 +770,10 @@ case "$TARGET" in
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
+  thinktank)             deploy_thinktank ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|both|all]"; exit 1 ;;
 esac
 
 echo ""
