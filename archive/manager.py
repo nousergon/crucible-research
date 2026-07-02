@@ -1311,7 +1311,7 @@ class ArchiveManager:
         for ticker in tickers:
             rows = self.db_conn.execute(
                 "SELECT ticker, signal_date, score, conviction, thesis_summary, "
-                "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags "
+                "outcome_21d, outcome_vs_spy, lesson, sector, pattern_tags "
                 "FROM memory_episodes WHERE ticker = ? AND created_date >= ? "
                 "ORDER BY signal_date DESC LIMIT ?",
                 (ticker, cutoff, max_per_ticker),
@@ -1320,7 +1320,7 @@ class ArchiveManager:
                 result[ticker] = [
                     {"ticker": r[0], "signal_date": r[1], "score": r[2],
                      "conviction": r[3], "thesis_summary": r[4],
-                     "outcome_10d": r[5], "outcome_vs_spy": r[6],
+                     "outcome_21d": r[5], "outcome_vs_spy": r[6],
                      "lesson": r[7], "sector": r[8], "pattern_tags": r[9]}
                     for r in rows
                 ]
@@ -1329,7 +1329,7 @@ class ArchiveManager:
         for sector in sectors:
             rows = self.db_conn.execute(
                 "SELECT ticker, signal_date, score, conviction, thesis_summary, "
-                "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags "
+                "outcome_21d, outcome_vs_spy, lesson, sector, pattern_tags "
                 "FROM memory_episodes WHERE sector = ? AND created_date >= ? "
                 "ORDER BY signal_date DESC LIMIT 5",
                 (sector, cutoff),
@@ -1340,7 +1340,7 @@ class ArchiveManager:
                     result.setdefault(t, []).append(
                         {"ticker": r[0], "signal_date": r[1], "score": r[2],
                          "conviction": r[3], "thesis_summary": r[4],
-                         "outcome_10d": r[5], "outcome_vs_spy": r[6],
+                         "outcome_21d": r[5], "outcome_vs_spy": r[6],
                          "lesson": r[7], "sector": r[8], "pattern_tags": r[9]}
                     )
 

@@ -33,7 +33,7 @@ class TestEpisodicMemory:
         am.db_conn.execute(
             "INSERT INTO memory_episodes "
             "(ticker, signal_date, score, conviction, thesis_summary, "
-            "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags, created_date) "
+            "outcome_21d, outcome_vs_spy, lesson, sector, pattern_tags, created_date) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("NVDA", "2026-03-10", 78, "rising", "AI infrastructure",
              -0.12, -0.09, "Check margin sustainability", "Technology",

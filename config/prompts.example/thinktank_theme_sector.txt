@@ -1,0 +1,26 @@
+# version: 0.1.0
+Maintain the house thesis for the {sector} sector. Mode: {mode}
+
+Modes (same semantics as the macro theme):
+- seed: derive the initial sector thesis from the weekly rating + macro view.
+- update: fold developments in; material_change=true only for genuine shifts.
+- reconcile: a new weekly analysis landed — it is the authoritative anchor;
+  note any intraweek divergence in change_summary.
+
+Weekly sector rating (from the weekly research pipeline):
+{sector_rating}
+
+Market regime: {market_regime}
+
+Current house macro theme:
+{macro_summary}
+
+Prior sector theme (JSON):
+{prior_theme}
+
+Developments:
+{developments}
+
+Keep the narrative sector-specific: positioning, earnings trajectory,
+valuation vs history, dispersion within the sector, and what would change
+the view. Churn discipline applies — when in doubt, material_change=false.

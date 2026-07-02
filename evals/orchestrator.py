@@ -109,6 +109,21 @@ def should_escalate_to_sonnet(
 # ── Capture-corpus listing ────────────────────────────────────────────────
 
 
+def expand_lookback_dates(date: str, lookback_days: int) -> list[str]:
+    """The ``lookback_days`` calendar dates strictly before ``date``
+    (newest first) — the Submit handler's ``capture_lookback_days``
+    expansion. Daily producers (thinktank, config#1579) write into
+    weekday partitions; the Saturday batch judges the whole week by
+    passing these as ``extra_dates``. Graph artifacts only exist on
+    Saturdays, so a lookback < 7 can never re-enumerate a previously
+    judged Saturday partition."""
+    from datetime import date as _date, timedelta
+
+    y, m, d = (int(x) for x in date.split("-"))
+    base = _date(y, m, d)
+    return [str(base - timedelta(days=i)) for i in range(1, lookback_days + 1)]
+
+
 def _build_capture_prefix(date: str) -> str:
     """``decision_artifacts/{Y}/{M}/{D}/`` — partition layout that
     ``alpha_engine_lib.decision_capture`` writes to."""
@@ -116,7 +131,13 @@ def _build_capture_prefix(date: str) -> str:
     return f"decision_artifacts/{y}/{m}/{d}/"
 
 
-def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
+def list_capture_keys(
+    s3: Any,
+    *,
+    date: str,
+    bucket: str,
+    agent_id_prefixes: list[str] | None = None,
+) -> list[str]:
     """Enumerate every captured artifact key under the date partition.
 
     Excludes the ``_eval/`` subtree — those are eval artifacts (output
@@ -124,6 +145,12 @@ def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
     Excludes any keys not ending in ``.json`` (defensive — the partition
     should only contain captures, but a stray prefix shouldn't crash
     the run).
+
+    ``agent_id_prefixes`` (optional) filters to keys whose agent segment
+    (``decision_artifacts/{Y}/{M}/{D}/{agent_id}/{run_id}.json``) starts
+    with one of the given prefixes — the seam that lets a second Submit
+    invocation judge one artifact family (e.g. ``thinktank_``) without
+    re-judging everything else in the partition (config#1579 P2).
     """
     prefix = _build_capture_prefix(date)
     paginator = s3.get_paginator("list_objects_v2")
@@ -133,6 +160,11 @@ def list_capture_keys(s3: Any, *, date: str, bucket: str) -> list[str]:
             key = obj["Key"]
             if "/_eval/" in key or not key.endswith(".json"):
                 continue
+            if agent_id_prefixes is not None:
+                parts = key.split("/")
+                agent_seg = parts[-2] if len(parts) >= 2 else ""
+                if not any(agent_seg.startswith(p) for p in agent_id_prefixes):
+                    continue
             keys.append(key)
     return keys
 
@@ -414,6 +446,8 @@ def build_batch_plan(
     judge_only: bool = False,
     s3_client: Optional[Any] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    extra_dates: Optional[list[str]] = None,
+    agent_id_prefixes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """List captures, resolve rubrics, and build the (request_payload,
     plan_entries) pair for the Submit Lambda.
@@ -436,7 +470,18 @@ def build_batch_plan(
     eval_prefix = JUDGE_ONLY_EVAL_PREFIX if judge_only else DEFAULT_EVAL_PREFIX
     cw_namespace = JUDGE_ONLY_CW_NAMESPACE if judge_only else DEFAULT_NAMESPACE
 
-    capture_keys = list_capture_keys(s3, date=date, bucket=bucket)
+    # ``date`` plus optional ``extra_dates`` — the weekly graph writes only
+    # on Saturday, but daily producers (thinktank) land in weekday
+    # partitions; a caller judging that family passes the week's dates
+    # (with agent_id_prefixes to avoid re-judging already-judged families).
+    all_dates = [date] + [d for d in (extra_dates or []) if d != date]
+    capture_keys: list[str] = []
+    for _d in all_dates:
+        capture_keys.extend(
+            list_capture_keys(
+                s3, date=_d, bucket=bucket, agent_id_prefixes=agent_id_prefixes
+            )
+        )
     requests: list[dict[str, Any]] = []
     plan_entries: list[dict[str, Any]] = []
     client_side_skips: list[dict[str, Any]] = []
