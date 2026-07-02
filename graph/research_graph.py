@@ -3624,6 +3624,38 @@ def archive_writer(state: ResearchState) -> dict:
         tool_call_counts_by_team=tool_call_counts_by_team,
     )
 
+    # ── research_intel neutral artifact (config#1500 — Phase 0 of #1499) ──────
+    # Publish the neutral, product-facing intel ONCE at derivation time to a
+    # NEW sibling artifact (research_intel/{date}.json + latest.json). Derived
+    # from the SAME already-computed run state as signals.json — recomputes
+    # NOTHING (regime/sector_ratings/modifiers/narrative from macro,
+    # attractiveness from score_aggregator, breadth from fetch_data). The edge
+    # (tuned weights, prompts, ENTER/EXIT judgment) stays in signals.json and
+    # crucible-research; only OUTPUT scores/labels/narratives cross this
+    # boundary (see _build_research_intel_payload's allowlist).
+    #
+    # ADDITIVE + fail-soft: this runs AFTER signals.json is already persisted,
+    # and a failure here is swallowed (WARN) so the neutral sibling can never
+    # sink the primary signals deliverable. The producer contract test
+    # (test_research_intel_producer_contract.py) + the nousergon_lib
+    # research_intel schema gate the shape.
+    try:
+        research_intel_payload = _build_research_intel_payload(state)
+        am.write_research_intel(run_date, research_intel_payload)
+        logger.info(
+            "[archive_writer] research_intel written → research_intel/%s.json "
+            "(+latest.json): regime=%s, %d sectors, %d tickers",
+            run_date,
+            research_intel_payload.get("market_regime"),
+            len(research_intel_payload.get("sector_ratings", {})),
+            len(research_intel_payload.get("attractiveness", {})),
+        )
+    except Exception as e:  # noqa: BLE001 — neutral sibling, never fatal
+        logger.warning(
+            "[archive_writer] research_intel write FAILED (non-fatal — "
+            "signals.json unaffected, executor path intact): %s", e,
+        )
+
     # ── Score-neutralization OBSERVE shadow (config#1142) ────────────────────
     # UNCONDITIONAL observability hung off the primary path AFTER signals.json is
     # already persisted: residualize the live composite cross-section against the
@@ -4368,6 +4400,111 @@ def _build_signals_payload(state: ResearchState) -> dict:
         "universe": universe,
         "buy_candidates": buy_candidates,
         "architecture_version": "sector_teams",
+    }
+
+
+# Contract version stamp for the research_intel artifact. Mirrors
+# nousergon_lib.contracts.SCHEMA_VERSIONS["research_intel"]; kept as a
+# module constant so the producer stamps it without importing the lib at
+# build time (the pure builder must stay import-light + I/O-free).
+RESEARCH_INTEL_SCHEMA_VERSION = 1
+
+# The strict market_breadth allowlist (config#1500). breadth is stored in
+# state["macro_data"] (fetch_data does macro_data.update(breadth)); we lift
+# ONLY these three neutral keys — never the raw macro_data (which also holds
+# vix / treasury / yield-curve inputs that are not part of this contract).
+_RESEARCH_INTEL_BREADTH_KEYS = (
+    "pct_above_50d_ma",
+    "pct_above_200d_ma",
+    "advance_decline_ratio",
+)
+
+
+def _build_research_intel_payload(state: ResearchState) -> dict:
+    """Build the neutral, product-facing ``research_intel`` artifact (config#1500).
+
+    A NEW sibling to ``signals.json`` (NOT a replacement — signals.json is
+    untouched). This is a PURE function (no I/O) that carves the neutral,
+    derived OUTPUT out of the already-computed run state and republishes it
+    under a STRICT allowlist. It recomputes NOTHING — every field is read
+    from a node output that already ran this cycle:
+
+      * ``market_regime`` / ``regime_narrative`` / ``sector_ratings`` /
+        ``sector_modifiers`` — from ``macro_economist_node``
+      * ``market_breadth`` — from ``fetch_data`` (lives in ``macro_data``)
+      * per-ticker ``attractiveness`` (final composite score + neutral
+        component breakdown) + generic ``thesis`` — from ``score_aggregator``
+        (``investment_theses``)
+
+    EDGE STAYS PRIVATE (config#1499 boundary): only OUTPUT scores / labels /
+    narratives are published. The tuned pillar/blend WEIGHTS carried on
+    ``composite_breakdown.legacy_blend`` (w_legacy_quant / w_legacy_qual /
+    w_factor) and ``composite_breakdown.pillar_contributions[].pillar_weight``
+    are deliberately DROPPED — the breakdown here carries component VALUES
+    only. ``thesis`` carries the generic sector-team bull_case + sector, NOT
+    the position/ENTER-EXIT judgment (that stays in signals.json). Prompts
+    are gitignored and never touch this path.
+    """
+    macro_data = state.get("macro_data", {}) or {}
+    market_breadth = {
+        k: macro_data.get(k) for k in _RESEARCH_INTEL_BREADTH_KEYS
+    }
+
+    # sector_ratings: carry ONLY {rating, rationale} (the neutral macro call).
+    # Any extra keys an upstream might attach are dropped by construction.
+    sector_ratings_out: dict[str, dict] = {}
+    for sector, entry in (state.get("sector_ratings", {}) or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        sector_ratings_out[sector] = {
+            "rating": entry.get("rating", "market_weight"),
+            "rationale": entry.get("rationale", ""),
+        }
+
+    # Per-ticker attractiveness + generic thesis, keyed by ticker, from the
+    # already-scored investment_theses (score_aggregator output).
+    attractiveness: dict[str, dict] = {}
+    for ticker, thesis in (state.get("investment_theses", {}) or {}).items():
+        breakdown = thesis.get("composite_breakdown") or {}
+        legacy = breakdown.get("legacy_blend") or {}
+        attractiveness[ticker] = {
+            "ticker": ticker,
+            # Final composite score (0-100) — the published attractiveness.
+            "score": thesis.get("final_score"),
+            "sector": thesis.get("sector"),
+            # Neutral component-VALUE breakdown — NO weights (edge stays
+            # private). Reads from the already-computed composite_breakdown;
+            # falls back to the flat thesis fields when the breakdown dict is
+            # absent (held-stock recompute path).
+            "breakdown": {
+                "quant_score": thesis.get("quant_score"),
+                "qual_score": thesis.get("qual_score"),
+                "factor_subscore": (
+                    legacy.get("factor_subscore")
+                    if legacy else thesis.get("factor_subscore")
+                ),
+                "weighted_base": breakdown.get("weighted_base")
+                if breakdown else thesis.get("weighted_base"),
+                "macro_shift": breakdown.get("macro_shift")
+                if breakdown else thesis.get("macro_shift"),
+            },
+            # Generic sector-team narrative only — NOT a position judgment.
+            "thesis": {
+                "bull_case": thesis.get("bull_case", ""),
+                "sector": thesis.get("sector"),
+            },
+        }
+
+    return {
+        "schema_version": RESEARCH_INTEL_SCHEMA_VERSION,
+        "date": state.get("run_date", ""),
+        "generated_at": state.get("run_time", ""),
+        "market_regime": state.get("market_regime", "neutral"),
+        "regime_narrative": state.get("macro_report", ""),
+        "sector_ratings": sector_ratings_out,
+        "sector_modifiers": state.get("sector_modifiers", {}),
+        "market_breadth": market_breadth,
+        "attractiveness": attractiveness,
     }
 
 

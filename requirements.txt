@@ -47,6 +47,11 @@ pydantic~=2.7
 # testing primitive lifted on the second adoption, lib#149, v0.78.0) —
 # this repo adopts the shared guard directly rather than hand-rolling its
 # own copy (see tests/test_wide_horizon_column_burndown_guard.py).
+# Also satisfies the research_intel contract (config#1500): the
+# research_intel.schema.json + SLOT_SCHEMAS["research_intel"] registration
+# shipped in v0.77.0 and are still present in v0.78.0 (additive bump —
+# verified). test_lib_pin_lockstep keeps all three deploy artifacts (this
+# file + Dockerfile + Dockerfile.alerts) in lockstep.
 nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.78.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
