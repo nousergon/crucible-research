@@ -116,6 +116,33 @@ def handler(event, context):
         logger.exception("[eval_judge_process_handler] process failed hard")
         return {"status": "ERROR", "batch_id": batch_id, "error": str(exc)}
 
+    # Maintain the _eval_by_capture index at write time (config#1579 P2):
+    # the batch-plan's already-judged dedup reads these manifests, and no
+    # scheduled aggregator exists — the write path owns its index. Secondary
+    # observability off the primary path: a failure here is WARN + summary
+    # field (the dedup then no-ops for the affected dates and the failure
+    # mode is a harmless duplicate eval next week, never a silent skip);
+    # build_manifests is idempotent, so any later run self-heals the index.
+    manifest_dates: list[str] = []
+    try:
+        from datetime import datetime, timezone
+
+        from evals.eval_manifest import build_manifests
+
+        written = build_manifests(
+            s3_client=__import__("boto3").client("s3"),
+            bucket=bucket,
+            judge_run_dates=[datetime.now(timezone.utc).date().isoformat()],
+        )
+        manifest_dates = sorted(written)
+    except Exception:  # noqa: BLE001 — index maintenance; recorded below
+        logger.warning(
+            "[eval_judge_process_handler] _eval_by_capture manifest build "
+            "failed — dedup will no-op for this batch's capture dates "
+            "(duplicate evals possible, never skips)", exc_info=True,
+        )
+    summary["manifest_capture_dates"] = manifest_dates
+
     status = "PARTIAL" if summary["failed"] else "OK"
     logger.info(
         "[eval_judge_process_handler] done status=%s haiku=%d sonnet=%d "

@@ -63,6 +63,7 @@ def test_thesis_capture_emits_decision_artifact(monkeypatch):
             base_run_id="run1",
             ticker="AAPL",
             version=1,
+            trading_day="2026-07-01",
             result=_fake_result(),
             system="sys",
             user="usr",
@@ -73,6 +74,8 @@ def test_thesis_capture_emits_decision_artifact(monkeypatch):
             s3_client=s3,
         )
         assert key is not None and f"/{THESIS_AGENT_ID}/" in key
+        # partitioned by TRADING day, not capture wall-clock date
+        assert key.startswith("decision_artifacts/2026/07/01/")
         artifact = json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
         assert artifact["agent_id"] == THESIS_AGENT_ID
         assert artifact["run_id"] == "run1-AAPL-v1"
@@ -90,6 +93,7 @@ def test_capture_disabled_is_noop(monkeypatch):
             kind="macro",
             key_slug="macro",
             version=1,
+            trading_day="2026-07-01",
             result=_fake_result(),
             system="s",
             user="u",
@@ -175,13 +179,63 @@ def test_build_batch_plan_default_shape_unchanged():
         assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
 
 
-def test_expand_lookback_dates():
+def test_expand_lookback_dates_trading_days():
     from evals.orchestrator import expand_lookback_dates
 
+    # Sat 2026-07-04: Fri 7/3 is the July-4th observed NYSE holiday —
+    # the lookback must skip both the weekend AND the holiday. (This is
+    # the first scheduled Saturday pass, so the case is live.)
     assert expand_lookback_dates("2026-07-04", 6) == [
-        "2026-07-03", "2026-07-02", "2026-07-01",
-        "2026-06-30", "2026-06-29", "2026-06-28",
+        "2026-07-02", "2026-07-01", "2026-06-30",
+        "2026-06-29", "2026-06-26", "2026-06-25",
     ]
     assert expand_lookback_dates("2026-07-04", 0) == []
-    # month boundary
-    assert expand_lookback_dates("2026-07-01", 1) == ["2026-06-30"]
+    # plain weekend crossing
+    assert expand_lookback_dates("2026-07-01", 3) == [
+        "2026-06-30", "2026-06-29", "2026-06-26",
+    ]
+
+
+def test_build_batch_plan_skips_already_judged(monkeypatch):
+    """Weekend-boundary correctness: a re-enumerated partition only
+    contributes captures no ACTUAL eval has scored yet."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        k1 = _put_capture(s3, date="2026-06-29", agent_id=THESIS_AGENT_ID, run_id="r1")
+        k2 = _put_capture(s3, date="2026-06-29", agent_id=THESIS_AGENT_ID, run_id="r2")
+        # r1 was judged by a prior batch — indexed in _eval_by_capture
+        s3.put_object(
+            Bucket=BUCKET,
+            Key="decision_artifacts/_eval_by_capture/2026-06-29/manifest.json",
+            Body=json.dumps({"entries": [{"judged_artifact_s3_key": k1}]}),
+        )
+        plan = build_batch_plan(
+            date="2026-07-04",
+            extra_dates=["2026-06-29"],
+            agent_id_prefixes=["thinktank_"],
+            bucket=BUCKET,
+            s3_client=s3,
+        )
+        assert [e["run_id"] for e in plan["plan_entries"]] == ["r2"]
+        assert plan["skipped_already_judged"] == 1
+        assert k2 not in {""}  # keep k2 referenced
+
+
+def test_single_date_plan_skips_dedup_lookup():
+    """Default single-date invocation must not consult manifests at all
+    (byte-identical legacy behavior)."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        k1 = _put_capture(s3, date="2026-07-04", agent_id="ic_cio", run_id="r1")
+        # a (bogus) manifest claiming r1 was judged must be IGNORED on
+        # the single-date path
+        s3.put_object(
+            Bucket=BUCKET,
+            Key="decision_artifacts/_eval_by_capture/2026-07-04/manifest.json",
+            Body=json.dumps({"entries": [{"judged_artifact_s3_key": k1}]}),
+        )
+        plan = build_batch_plan(date="2026-07-04", bucket=BUCKET, s3_client=s3)
+        assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
+        assert plan["skipped_already_judged"] == 0
