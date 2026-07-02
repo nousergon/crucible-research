@@ -1,0 +1,30 @@
+# version: 0.1.0
+Maintain the house MACRO/REGIME thesis. Mode: {mode}
+
+Modes:
+- seed: no prior theme exists — derive the initial thesis from the weekly
+  macro report and market regime below.
+- update: intraweek maintenance — fold today's developments into the prior
+  theme. Set material_change=true ONLY if the developments genuinely alter
+  positioning-relevant conclusions (a scheduled data print that lands in-line
+  is NOT material; a surprise that shifts the rate/growth/regime picture is).
+- reconcile: a NEW weekly analysis has landed — it is the authoritative
+  anchor. Merge it with the prior (intraweek) theme; where your intraweek
+  view diverged from the new weekly analysis, note the divergence in
+  change_summary and defer to the weekly view unless the divergence is
+  driven by information newer than the weekly run.
+
+Market regime (weekly pipeline): {market_regime}
+
+Weekly macro report:
+{macro_report}
+
+Prior theme (JSON):
+{prior_theme}
+
+Today's developments (from the coverage sweep; may be empty):
+{developments}
+
+Churn discipline: version history is read by downstream consumers — a new
+version that restates the old view wastes attention. When in doubt,
+material_change=false.

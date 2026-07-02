@@ -1,0 +1,56 @@
+# SAMPLE ONLY — documentation for open-source viewers. NEVER loaded at runtime.
+# The real file lives in the private alpha-engine-config repo at
+# research/thinktank.yaml (resolved via thinktank/settings.py; explicit
+# override: THINKTANK_CONFIG_PATH). Values below are illustrative defaults.
+
+thinktank:
+  bucket: alpha-engine-research
+
+  coverage:
+    daily_new_names: 5        # new theses initiated per daily run
+    rank_ceiling: 150         # never initiate coverage below this attractiveness rank
+    sweep_chunk_size: 25      # covered tickers per events-sweep LLM call
+    stale_after_days: 30      # informational staleness horizon
+
+  budget:
+    monthly_usd_default: 25.0             # hard cap fallback (guard fails CLOSED onto this)
+    ssm_param: /thinktank/monthly_budget_usd
+
+  llm:
+    providers:
+      openrouter:
+        base_url: https://openrouter.ai/api/v1
+        key_secret: OPENROUTER_API_KEY    # resolved via nousergon_lib.secrets
+      # Plug-and-play by construction — future swaps are config edits only:
+      # vllm_spot:
+      #   base_url: http://10.0.0.12:8000/v1
+      #   key_secret: VLLM_API_KEY
+      # openai:
+      #   base_url: https://api.openai.com/v1
+      #   key_secret: OPENAI_API_KEY
+      # anthropic_compat:
+      #   base_url: https://api.anthropic.com/v1
+      #   key_secret: ANTHROPIC_API_KEY
+
+    tiers:
+      sweep:      # cheap, high-volume: daily events sweep
+        provider: openrouter
+        model: openai/gpt-oss-120b
+        max_tokens: 4000
+        price_in_per_m: 0.15
+        price_out_per_m: 0.60
+        structured_outputs: true
+      themes:     # macro + sector theme maintenance
+        provider: openrouter
+        model: qwen/qwen3-235b-a22b-instruct
+        max_tokens: 4000
+        price_in_per_m: 0.50
+        price_out_per_m: 3.00
+        structured_outputs: false
+      thesis:     # deep per-name thesis writing
+        provider: openrouter
+        model: deepseek/deepseek-chat-v3.1
+        max_tokens: 8000
+        price_in_per_m: 0.60
+        price_out_per_m: 1.70
+        structured_outputs: false

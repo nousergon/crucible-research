@@ -3,6 +3,11 @@ anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
 langsmith~=0.7
+# openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
+# talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
+# base_url. NOT used by the weekly research pipeline (which stays on
+# langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
+openai>=1.60
 
 # Evals
 agentevals~=0.0
