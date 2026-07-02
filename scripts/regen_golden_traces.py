@@ -50,6 +50,9 @@ RUBRIC_AGENTS: dict[str, str] = {
     "eval_rubric_macro_economist": "macro_economist",
     "eval_rubric_ic_cio": "ic_cio",
     "eval_rubric_thesis_update": "thesis_update:technology:AAPL",
+    # Think-tank family (config#1579 P2) — coarse agent_ids by design.
+    "eval_rubric_thinktank_thesis": "thinktank_thesis",
+    "eval_rubric_thinktank_theme": "thinktank_theme",
 }
 
 # Shared golden DecisionArtifact. The input carries a recognizable marker

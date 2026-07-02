@@ -18,6 +18,7 @@ import logging
 from agents.prompt_loader import load_prompt
 
 from thinktank import THESIS_KEY_TMPL, THESIS_LATEST_TMPL
+from thinktank.capture import emit_thesis_capture
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, filings_excerpts
 from thinktank.schemas import (
@@ -138,6 +139,30 @@ def build_thesis(
         cost_usd=result.cost_usd,
     )
     _write_thesis(store, thesis)
+    emit_thesis_capture(
+        base_run_id=client.run_id,
+        ticker=ticker,
+        version=thesis.version,
+        result=result,
+        system=_ANALYST_SYSTEM,
+        user=rendered,
+        prompt_version_hash=prompt.hash,
+        input_data_snapshot={
+            "ticker": ticker,
+            "update_reason": update_reason,
+            "event_context": event_context,
+            "board_row": _slim_board_row(board_row),
+            "weekly_signal": signals_entry or {},
+            "news_aggregate": news or {},
+            "filings_excerpts": filings,
+            "macro_theme": themes.macro_summary(),
+            "sector_theme": themes.sector_summary(sector),
+            "prior_thesis": prior.thesis.model_dump() if prior else None,
+        },
+        agent_output=thesis.model_dump(),
+        bucket=store.bucket,
+        s3_client=store.s3,
+    )
     logger.info(
         "thesis written %s v%d (%s, stance=%s conviction=%d, $%.4f)",
         ticker,

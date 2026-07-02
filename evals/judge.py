@@ -171,6 +171,13 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
         return "eval_rubric_macro_economist"
     if agent_id == "ic_cio":
         return "eval_rubric_ic_cio"
+    # Think-tank family (config#1579 P2) — deliberately COARSE ids (not
+    # per-ticker/per-theme) so the rolling-mean floor's >=3-samples-per-combo
+    # gate is met; ticker/theme identity rides in run_id + the snapshot.
+    if agent_id == "thinktank_thesis":
+        return "eval_rubric_thinktank_thesis"
+    if agent_id == "thinktank_theme":
+        return "eval_rubric_thinktank_theme"
     return None
 
 

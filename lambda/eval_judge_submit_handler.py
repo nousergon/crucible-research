@@ -15,6 +15,11 @@ Event shape (all fields optional):
       "haiku_model": "claude-haiku-4-5",
       "sonnet_model": "claude-sonnet-4-6",
       "judge_only": false,           # isolated test-track outputs
+      "extra_dates": ["2026-06-29"], # optional: additional capture-date
+                                     # partitions to enumerate (daily
+                                     # producers, e.g. thinktank)
+      "agent_id_prefixes": ["thinktank_"],  # optional: only judge agent_ids
+                                     # with these prefixes (family selection)
     }
 
 Returns:
@@ -113,6 +118,10 @@ def handler(event, context):
     haiku_model = event.get("haiku_model", DEFAULT_HAIKU_MODEL)
     sonnet_model = event.get("sonnet_model", DEFAULT_SONNET_MODEL)
     judge_only = bool(event.get("judge_only", False))
+    # Optional family-selection params (config#1579 P2): judge daily
+    # producers (thinktank) whose artifacts land in weekday partitions.
+    extra_dates = event.get("extra_dates") or None
+    agent_id_prefixes = event.get("agent_id_prefixes") or None
 
     logger.info(
         "[eval_judge_submit_handler] start date=%s force_sonnet=%s "
@@ -125,6 +134,7 @@ def handler(event, context):
             date=date, bucket=bucket,
             haiku_model=haiku_model, sonnet_model=sonnet_model,
             force_sonnet_pass=force_sonnet_pass, judge_only=judge_only,
+            extra_dates=extra_dates, agent_id_prefixes=agent_id_prefixes,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_submit_handler] plan build failed")
