@@ -72,6 +72,12 @@ COPY rag/ ${LAMBDA_TASK_ROOT}/rag/
 # runtime; the handler's try/except catches it (non-fatal — Backtester
 # renders an empty cost section), but the parquet never gets written.
 COPY scripts/ ${LAMBDA_TASK_ROOT}/scripts/
+# thinktank/ is the daily research think-tank package (config#1579). The
+# thinktank Lambda shares this image with a CMD override to
+# thinktank_handler.handler; its private config (research/thinktank.yaml)
+# and prompts are staged into config/ by infrastructure/deploy.sh exactly
+# like scoring.yaml / universe.yaml / the agent prompts.
+COPY thinktank/ ${LAMBDA_TASK_ROOT}/thinktank/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
@@ -128,5 +134,13 @@ COPY lambda/aggregate_costs_handler.py ${LAMBDA_TASK_ROOT}/aggregate_costs_handl
 # runs its internal scanner. Phase 5 (later) cuts Research over to read
 # the artifact + retires the internal scanner.
 COPY lambda/scanner_handler.py ${LAMBDA_TASK_ROOT}/scanner_handler.py
+
+# Daily think-tank Lambda — same image, CMD override to
+# ["thinktank_handler.handler"]. Runs `thinktank.run.run_daily()` on the
+# EventBridge daily schedule (alpha-research-thinktank-daily, 14:30 UTC,
+# 7 days/week): top-5 uncovered thesis builds + events sweep + churn-gated
+# theme updates. Per config#1579 P1 (the EPIC's "EventBridge→Lambda first;
+# EC2-spot if a run breaches ~12 min" runner decision).
+COPY lambda/thinktank_handler.py ${LAMBDA_TASK_ROOT}/thinktank_handler.py
 
 CMD ["handler.handler"]

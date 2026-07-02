@@ -14,6 +14,7 @@ on:
       - 'scoring/**'
       - 'archive/**'
       - 'evals/**'
+      - 'thinktank/**'
       - 'health_status.py'
       - 'config.py'
       - 'requirements*.txt'
@@ -187,6 +188,21 @@ jobs:
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh scanner
+
+      # Daily think-tank Lambda — config#1579 P1. Same image-share pattern,
+      # CMD override sets the entry to thinktank_handler.handler. Invoked
+      # daily by the EventBridge rule alpha-research-thinktank-daily
+      # (infrastructure/setup-thinktank-schedule.sh); auto-deployed on every
+      # push so thinktank/ logic changes AND config-repo prompt/yaml changes
+      # (via the config-changed repository_dispatch) propagate without a
+      # manual step — per the standing always-wire-auto-deploy rule. The
+      # ci-deploy-guard test (tests/test_deploy_targets_invoked_by_workflow.py)
+      # enforces this step's existence.
+      - name: Deploy thinktank Lambda (alpha-engine-research-thinktank)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh thinktank
 
       - name: Report deployed version
         run: |
