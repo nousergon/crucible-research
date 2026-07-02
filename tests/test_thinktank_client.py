@@ -133,3 +133,15 @@ def test_sft_flush_writes_jsonl_and_raises_loud(monkeypatch):
         client2.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
         with pytest.raises(SftCaptureWriteError):
             client2.flush_sft(s3, "no-such-bucket-xyz", "2026-07-02")
+
+
+def test_sft_meta_rides_into_row_meta(monkeypatch):
+    client, _ = _client([json.dumps({"answer": "y", "score": 1})], monkeypatch)
+    client.complete(
+        "thesis", agent_id="a", system="s", user="u", response_model=_Out,
+        sft_meta={"ticker": "AAPL", "thesis_version": 3, "capture_run_id": "testrun-AAPL-v3"},
+    )
+    row = client._sft_rows["a"][0]
+    assert row.meta["ticker"] == "AAPL"
+    assert row.meta["capture_run_id"] == "testrun-AAPL-v3"
+    assert row.meta["run_id"] == "testrun"  # base keys not clobbered

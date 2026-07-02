@@ -109,6 +109,21 @@ def should_escalate_to_sonnet(
 # ── Capture-corpus listing ────────────────────────────────────────────────
 
 
+def expand_lookback_dates(date: str, lookback_days: int) -> list[str]:
+    """The ``lookback_days`` calendar dates strictly before ``date``
+    (newest first) — the Submit handler's ``capture_lookback_days``
+    expansion. Daily producers (thinktank, config#1579) write into
+    weekday partitions; the Saturday batch judges the whole week by
+    passing these as ``extra_dates``. Graph artifacts only exist on
+    Saturdays, so a lookback < 7 can never re-enumerate a previously
+    judged Saturday partition."""
+    from datetime import date as _date, timedelta
+
+    y, m, d = (int(x) for x in date.split("-"))
+    base = _date(y, m, d)
+    return [str(base - timedelta(days=i)) for i in range(1, lookback_days + 1)]
+
+
 def _build_capture_prefix(date: str) -> str:
     """``decision_artifacts/{Y}/{M}/{D}/`` — partition layout that
     ``alpha_engine_lib.decision_capture`` writes to."""

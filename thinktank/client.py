@@ -129,6 +129,7 @@ class ThinktankClient:
         response_model: type[T],
         prompt_id: str = "",
         prompt_version: str = "",
+        sft_meta: dict[str, Any] | None = None,
     ) -> LLMCallResult:
         """One structured LLM call on the named tier. Validates or raises."""
         tier = self.settings.tier(tier_name)
@@ -176,6 +177,7 @@ class ThinktankClient:
                 cost = self._record(
                     tier,
                     agent_id=agent_id,
+                    sft_meta=sft_meta,
                     messages=messages,
                     kwargs=kwargs,
                     raw_text=raw_text,
@@ -218,6 +220,7 @@ class ThinktankClient:
         self._record(
             tier,
             agent_id=agent_id,
+            sft_meta=sft_meta,
             messages=messages,
             kwargs=kwargs,
             raw_text=raw_text,
@@ -247,6 +250,7 @@ class ThinktankClient:
         output_tokens: int,
         prompt_id: str,
         prompt_version: str,
+        sft_meta: dict[str, Any] | None = None,
     ) -> float:
         cost = (
             input_tokens * tier.price_in_per_m + output_tokens * tier.price_out_per_m
@@ -269,6 +273,12 @@ class ThinktankClient:
                 structured_output=parsed.model_dump() if parsed is not None else None,
                 usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
                 cost_usd=cost,
+                # Entity identifiers (ticker / theme key / version / trading
+                # day) ride in sft_meta so corpus rows JOIN to judge scores
+                # (via capture_run_id -> RubricEvalArtifact.run_id) and to
+                # realized outcomes (ticker + trading_day) — the two joins
+                # distillation curation needs (judge-filtered SFT,
+                # outcome-weighted selection).
                 meta={
                     "run_id": self.run_id,
                     "agent_id": agent_id,
@@ -276,6 +286,7 @@ class ThinktankClient:
                     "tier": tier.name,
                     "prompt_id": prompt_id,
                     "prompt_version": prompt_version,
+                    **(sft_meta or {}),
                 },
             )
         )
