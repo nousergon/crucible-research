@@ -151,6 +151,31 @@ def _make_batch_result_succeeded(
     return result
 
 
+def _make_batch_result_malformed_stringified(custom_id: str):
+    """Batch result whose tool input carries dimension_scores as a
+    MALFORMED (unterminated) JSON string and no overall_reasoning —
+    the exact 2026-07-03 Haiku non-conformance shape (config#1650:
+    stop_reason=tool_use, NOT truncation; json.loads fails so the
+    schema's mode='before' salvage validator correctly falls through)."""
+    block = MagicMock(spec=["type", "name", "input"])
+    block.type = "tool_use"
+    block.name = "RubricEvalLLMOutput"
+    block.input = {
+        "dimension_scores": (
+            '[\n  {\n    "dimension": "d0",\n    "score": 4,\n'
+            '    "reasoning": "unterminated'
+        ),
+    }
+    msg = MagicMock(spec=["content"])
+    msg.content = [block]
+    result = MagicMock()
+    result.custom_id = custom_id
+    result.result = MagicMock()
+    result.result.type = "succeeded"
+    result.result.message = msg
+    return result
+
+
 def _make_batch_result_errored(custom_id: str, error_type: str = "server_error"):
     result = MagicMock()
     result.custom_id = custom_id
@@ -595,6 +620,134 @@ class TestProcessBatchResults:
         assert summary["haiku_evaluated"] == 2
         assert len(summary["failed"]) == 1
         assert summary["failed"][0]["stage"] == "batch_errored"
+
+    def test_parse_failure_recovers_via_sync_retry_tail(self, mocked_s3):
+        """config#1650: a batch result whose tool output fails schema parse
+        (malformed stringified dimension_scores) must get ONE synchronous
+        evaluate_artifact retry — recovered evals persist, count, and leave
+        the failed list EMPTY instead of silently thinning the corpus."""
+        from evals.orchestrator import (
+            build_batch_plan, submit_batch, process_batch_results,
+        )
+        from unittest.mock import patch
+        from evals import orchestrator as orch
+        from graph.state_schemas import (
+            RubricEvalArtifact, RubricDimensionScore,
+        )
+
+        plan = build_batch_plan(
+            date="2026-05-09", bucket="alpha-engine-research",
+            s3_client=mocked_s3,
+        )
+        fake_batch = MagicMock()
+        fake_batch.id = "msgbatch_test_retry"
+        fake_client = MagicMock()
+        fake_client.messages.batches.create.return_value = fake_batch
+        submit_result = submit_batch(
+            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+        )
+        plan_entries = json.loads(
+            mocked_s3.get_object(
+                Bucket="alpha-engine-research",
+                Key=submit_result["plan_s3_key"],
+            )["Body"].read()
+        )["plan_entries"]
+        # ic_cio's result is malformed; the rest parse clean.
+        fake_results = [
+            _make_batch_result_malformed_stringified(e["custom_id"])
+            if e["agent_id"] == "ic_cio"
+            else _make_batch_result_succeeded(e["custom_id"], scores=[4, 4, 4])
+            for e in plan_entries
+        ]
+        fake_client.messages.batches.results.return_value = iter(fake_results)
+
+        retried = []
+
+        def fake_evaluate(artifact, *, judge_run_id, judge_model,
+                          judged_artifact_s3_key, **kw):
+            retried.append((artifact.agent_id, judge_model))
+            return RubricEvalArtifact(
+                run_id=artifact.run_id,
+                judge_run_id=judge_run_id,
+                timestamp="2026-05-09T22:30:00Z",
+                judged_agent_id=artifact.agent_id,
+                rubric_id="eval_rubric_test",
+                rubric_version="1.0.0",
+                judge_model=judge_model,
+                dimension_scores=[
+                    RubricDimensionScore(dimension="d", score=4, reasoning="r"),
+                ],
+                overall_reasoning="ok",
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_evaluate):
+            summary = process_batch_results(
+                batch_id=submit_result["batch_id"],
+                plan_s3_key=submit_result["plan_s3_key"],
+                bucket="alpha-engine-research",
+                anthropic_client=fake_client,
+                s3_client=mocked_s3,
+                emit_metrics=False,
+            )
+        # The retry ran for exactly the failed item, with the SAME judge.
+        assert retried == [("ic_cio", summary["haiku_model"])]
+        assert summary["parse_retry_recovered"] == 1
+        assert summary["failed"] == []
+        # Recovered eval counts toward the haiku total like any other.
+        assert summary["haiku_evaluated"] == 3
+
+    def test_parse_retry_exhaustion_is_terminal_failed(self, mocked_s3):
+        """If the sync retry ALSO fails, the item is terminal-failed with
+        a stage naming the retry (fail-loud, run goes PARTIAL) — never
+        silently dropped and never retried unboundedly."""
+        from evals.orchestrator import (
+            build_batch_plan, submit_batch, process_batch_results,
+        )
+        from unittest.mock import patch
+        from evals import orchestrator as orch
+
+        plan = build_batch_plan(
+            date="2026-05-09", bucket="alpha-engine-research",
+            s3_client=mocked_s3,
+        )
+        fake_batch = MagicMock()
+        fake_batch.id = "msgbatch_test_retry_fail"
+        fake_client = MagicMock()
+        fake_client.messages.batches.create.return_value = fake_batch
+        submit_result = submit_batch(
+            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+        )
+        plan_entries = json.loads(
+            mocked_s3.get_object(
+                Bucket="alpha-engine-research",
+                Key=submit_result["plan_s3_key"],
+            )["Body"].read()
+        )["plan_entries"]
+        fake_results = [
+            _make_batch_result_malformed_stringified(e["custom_id"])
+            if e["agent_id"] == "ic_cio"
+            else _make_batch_result_succeeded(e["custom_id"], scores=[4, 4, 4])
+            for e in plan_entries
+        ]
+        fake_client.messages.batches.results.return_value = iter(fake_results)
+
+        with patch.object(
+            orch, "evaluate_artifact",
+            side_effect=RuntimeError("still non-conformant"),
+        ):
+            summary = process_batch_results(
+                batch_id=submit_result["batch_id"],
+                plan_s3_key=submit_result["plan_s3_key"],
+                bucket="alpha-engine-research",
+                anthropic_client=fake_client,
+                s3_client=mocked_s3,
+                emit_metrics=False,
+            )
+        assert summary["parse_retry_recovered"] == 0
+        stages = [f["stage"] for f in summary["failed"]]
+        assert stages == ["batch_parse_retry"]
+        assert "still non-conformant" in summary["failed"][0]["error"]
+        assert "original:" in summary["failed"][0]["error"]
 
     def test_empty_input_skip_marker_persisted_in_submit(self, mocked_s3):
         """The empty-input artifact (sector_qual:technology with
