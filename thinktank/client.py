@@ -330,6 +330,10 @@ class ThinktankClient:
                     structured_output=r.structured_output,
                     usage=r.usage,
                     cost_usd=r.cost_usd,
+                    # Real thinktank runs → provenance born tagged `live` (config#1539),
+                    # so the distillation corpus reader segregates these from any
+                    # future replay-minted/synthetic traces of the same agent.
+                    source="live",
                     meta=r.meta,
                 )
                 for r in rows

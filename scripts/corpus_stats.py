@@ -35,8 +35,19 @@ TRIGGER_TARGET = 1000                  # ~1000 deduped single-teacher pairs (con
 # Normalization — collapse v1 (top-level fields, no producer) + v2 (meta/producer)
 # ---------------------------------------------------------------------------
 def normalize(rec: dict, *, source_hint: str) -> dict | None:
-    """Return a normalized view or None if the record is not a usable SFT row."""
+    """Return a normalized view or None if the record is not a usable SFT row.
+
+    Reads three schema generations: v1 (top-level fields, no producer), v2
+    (meta/producer, source stuffed loosely into meta), and v3 (the standardized
+    top-level ``provenance`` block from nousergon_lib.sft #150 / config#1539 —
+    ``{source, content_hash}``). The v3 provenance is preferred when present so
+    segregation keys off the canonical, producer-stamped source (never a
+    fallback guess) and dedup keys off the writer's canonical content hash (the
+    same hash across producers, so a replay-mint and a live trace of the same
+    input collide exactly).
+    """
     meta = rec.get("meta") or {}
+    prov = rec.get("provenance") or {}          # v3 standardized block
     sv = rec.get("schema_version")
     agent_id = rec.get("agent_id") or meta.get("agent_id")
     if agent_id is None and "input_messages" not in rec:
@@ -46,15 +57,21 @@ def normalize(rec: dict, *, source_hint: str) -> dict | None:
         # v1 legacy or metron-by-path
         producer = "metron_advisor" if source_hint == "metron" else "crucible_research"
     model = rec.get("model") or rec.get("model_name")
-    source = meta.get("source") or rec.get("source") or "live"
+    # v3 provenance.source is authoritative (producer-stamped); fall back to the
+    # loose v1/v2 locations, then to "live" only when nothing recorded it.
+    source = prov.get("source") or meta.get("source") or rec.get("source") or "live"
     ts = rec.get("captured_at") or rec.get("timestamp") or ""
     run_id = rec.get("run_id") or meta.get("run_id") or ""
     task = (agent_id.split(":")[0] if agent_id else "advisor")
-    # content hash over the model INPUT (dedup identical teacher inputs)
-    inp = rec.get("input_messages")
-    basis = json.dumps(inp, sort_keys=True, ensure_ascii=False) if inp is not None \
-        else json.dumps([producer, agent_id, run_id, rec.get("call_seq")], ensure_ascii=False)
-    chash = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+    # Dedup key: prefer the writer's canonical provenance.content_hash (v3) so
+    # dedup is consistent with the lib's canonicalization across producers; else
+    # recompute over the model INPUT (v1/v2 records carry no content_hash).
+    chash = prov.get("content_hash")
+    if not chash:
+        inp = rec.get("input_messages")
+        basis = json.dumps(inp, sort_keys=True, ensure_ascii=False) if inp is not None \
+            else json.dumps([producer, agent_id, run_id, rec.get("call_seq")], ensure_ascii=False)
+        chash = hashlib.sha256(basis.encode("utf-8")).hexdigest()
     return {
         "producer": producer, "agent_id": agent_id or "", "task": task,
         "model": model or "unknown", "source": source,
