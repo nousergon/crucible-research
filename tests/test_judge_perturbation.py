@@ -22,13 +22,18 @@ from evals.perturbation import (
     CORRUPTIONS,
     REFERENCE_FIXTURES,
     Corruption,
+    _break_anchor_fidelity,
     _break_ranking_coherence,
+    _contradict_stance,
     _flatten_reasoning_depth,
     _flatten_signal_calibration,
     _gut_output_completeness,
     _misalign_evidence,
     _strip_citation_grounding,
+    _strip_input_groundedness,
     _strip_numerical_grounding,
+    _unearned_material_change,
+    _vacuous_moat,
     _verbosity_pad,
     format_scorecard,
     run_perturbation_battery,
@@ -43,6 +48,14 @@ def _quant() -> dict:
 
 def _qual() -> dict:
     return copy.deepcopy(REFERENCE_FIXTURES["eval_rubric_sector_qual"]["agent_output"])
+
+
+def _thesis() -> dict:
+    return copy.deepcopy(REFERENCE_FIXTURES["eval_rubric_thinktank_thesis"]["agent_output"])
+
+
+def _theme() -> dict:
+    return copy.deepcopy(REFERENCE_FIXTURES["eval_rubric_thinktank_theme"]["agent_output"])
 
 
 # ── Corruption determinism ─────────────────────────────────────────────────
@@ -109,6 +122,56 @@ class TestQualCorruptions:
             # bull weakened, bear (substantive) preserved → misalignment
             assert len(oa["bull_case"]) < len(ra["bull_case"])
             assert oa["bear_case"] == ra["bear_case"]
+
+
+class TestThinktankThesisCorruptions:
+    def test_strip_input_groundedness_removes_specific_references(self):
+        ref = _thesis()
+        out = _strip_input_groundedness(_thesis())
+        for field in ("business_summary", "filings_review", "news_sentiment",
+                      "valuation", "market_dynamics"):
+            assert out[field] != ref[field]
+            assert not _NUM.search(out[field]), f"{field} still cites a number"
+        # untouched — only groundedness should degrade
+        assert out["stance"] == ref["stance"]
+        assert out["risks"] == ref["risks"]
+
+    def test_vacuous_moat_replaces_with_marketing_language(self):
+        ref = _thesis()
+        out = _vacuous_moat(_thesis())
+        assert out["moat"] != ref["moat"]
+        assert not _NUM.search(out["moat"])
+        # untouched
+        assert out["business_summary"] == ref["business_summary"]
+
+    def test_contradict_stance_flips_stance_but_keeps_bullish_body(self):
+        ref = _thesis()
+        out = _contradict_stance(_thesis())
+        assert ref["stance"] == "attractive"
+        assert out["stance"] == "avoid"
+        # body (the bullish evidence) is untouched — the contradiction is
+        # purely stance-vs-body, not a rewrite of the evidence itself.
+        assert out["summary"] == ref["summary"]
+        assert out["moat"] == ref["moat"]
+
+
+class TestThinktankThemeCorruptions:
+    def test_unearned_material_change_flags_true_for_a_restatement(self):
+        ref = _theme()
+        out = _unearned_material_change(_theme())
+        assert ref["material_change"] is False
+        assert out["material_change"] is True
+        # narrative/drivers still read as a restatement, not an actual shift
+        assert out["narrative"] == ref["narrative"]
+        assert out["drivers"] == ref["drivers"]
+
+    def test_break_anchor_fidelity_silently_flips_stance(self):
+        ref = _theme()
+        out = _break_anchor_fidelity(_theme())
+        assert ref["stance"] == "overweight"
+        assert out["stance"] == "underweight"
+        # no divergence acknowledgment — change_summary stays empty
+        assert out["change_summary"] == ""
 
 
 def test_corruptions_do_not_mutate_the_shared_fixture():
