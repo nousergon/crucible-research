@@ -40,6 +40,20 @@ def _v1(agent_id, model, inp):
     }
 
 
+def _v3(agent_id, model, inp, *, producer="crucible_research", source="live", content_hash=None):
+    """A schema-v3 record: source + content_hash live in the standardized
+    top-level ``provenance`` block (nousergon_lib.sft #150 / config#1539)."""
+    rec = {
+        "schema_version": 3, "producer": producer, "captured_at": "2026-06-27T05:00:00+00:00",
+        "model": model, "call_seq": 0, "input_messages": inp, "output_text": "ok",
+        "meta": {"agent_id": agent_id, "run_id": "2026-06-26"},
+        "provenance": {"source": source},
+    }
+    if content_hash is not None:
+        rec["provenance"]["content_hash"] = content_hash
+    return rec
+
+
 def _run(records_by_key, gen_date="2026-07-01"):
     return cs.compute_stats(records_by_key, generated_date=gen_date)
 
@@ -66,6 +80,29 @@ def test_v1_and_v2_both_counted_and_producer_inferred():
     assert stats["totals"]["deduped_pairs"] == 2
     assert stats["by_producer"]["crucible_research"] == 2
     assert stats["by_schema_version"] == {"1": 1, "2": 1}
+
+
+def test_v3_provenance_source_is_authoritative_not_defaulted():
+    """A v3 record's source is read from provenance.source — a replay-minted
+    trace is segregated as `replay`, never silently defaulted to `live`
+    (config#1539: replay + live must not blend)."""
+    live = _v3("sector_quant:tech", "sonnet-5", [{"c": "AMD"}], source="live")
+    replay = _v3("sector_quant:tech", "sonnet-5", [{"c": "NVDA"}], source="replay")
+    stats = _run([("2026-06-27/r/a.jsonl", "research", _lines(live, replay))])
+    assert stats["by_source"] == {"live": 1, "replay": 1}
+    assert stats["by_schema_version"] == {"3": 2}
+
+
+def test_v3_dedup_keys_off_canonical_provenance_content_hash():
+    """Dedup uses the writer's canonical provenance.content_hash when present,
+    so two records the lib canonicalized to the SAME hash collapse even if their
+    raw input_messages differ (cross-producer canonicalization consistency)."""
+    a = _v3("sector_quant:tech", "sonnet-5", [{"c": "raw-A"}], content_hash="deadbeef")
+    b = _v3("sector_quant:tech", "sonnet-5", [{"c": "raw-B-different"}], content_hash="deadbeef")
+    stats = _run([("2026-06-27/r/x.jsonl", "research", _lines(a, b))])
+    assert stats["totals"]["raw_records"] == 2
+    assert stats["totals"]["duplicates_dropped"] == 1
+    assert stats["totals"]["deduped_pairs"] == 1
 
 
 def test_trigger_metric_is_dominant_teacher_quant():

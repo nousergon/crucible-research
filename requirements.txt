@@ -52,7 +52,15 @@ pydantic~=2.7
 # shipped in v0.77.0 and are still present in v0.78.0 (additive bump —
 # verified). test_lib_pin_lockstep keeps all three deploy artifacts (this
 # file + Dockerfile + Dockerfile.alerts) in lockstep.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.78.0
+# Bumped 0.78.0 -> 0.79.0 (config#1539): the SFT provenance chokepoint
+# (nousergon-lib#150) — typed SftProvenance (source live|replay|synthetic +
+# content_hash), build_record(source=) auto-stamp, and corpus dedup/segregate
+# utils. Additive + backward-compatible (build_record defaults source="live" +
+# schema_version 3), so this repo's two SFT producers (graph/llm_cost_tracker,
+# thinktank/client) are born correctly tagged and the distillation corpus reader
+# (scripts/corpus_stats.py) can segregate by (producer, task, teacher, source)
+# without blending replay-minted traces into live-accrued ones.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.79.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,

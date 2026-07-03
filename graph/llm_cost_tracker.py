@@ -1002,10 +1002,13 @@ def _flush_sft_rows_to_s3(
         )
         return None
 
-    # Build the canonical SFT record (nousergon_lib.sft, schema v2) from each staged
+    # Build the canonical SFT record (nousergon_lib.sft, schema v3) from each staged
     # per-call row, folding the constant frame-level dimensions into `meta` so the
     # stream stays self-describing. The shared builder is the cross-producer chokepoint
-    # (metron_advisor emits the same schema) — see metron-ops#99.
+    # (metron_advisor emits the same schema) — see metron-ops#99. `source="live"` is
+    # explicit (config#1539): these are real production research runs, so the record's
+    # provenance block is born tagged `live` and the distillation corpus reader never
+    # blends them with replay-minted or synthetic traces.
     records = [
         sft.build_record(
             "crucible_research",
@@ -1016,6 +1019,7 @@ def _flush_sft_rows_to_s3(
             invocation_params=row["invocation_params"],
             output_message=row["output_message"],
             output_text=row["output_text"],
+            source="live",
             meta={
                 "run_id": frame.run_id,
                 "agent_id": frame.agent_id,
