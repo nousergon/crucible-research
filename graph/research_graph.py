@@ -3767,35 +3767,29 @@ def archive_writer(state: ResearchState) -> dict:
             logger.error("Failed to save consolidated_report: %s", e)
 
     # Extract semantic memories from this run (Phase 3) — lowest-priority,
-    # best-effort, and the only UNBOUNDED (LLM-call) work left in the node.
-    # Deadline-gated: signals.json is already persisted above, so on a
-    # tail-latency-slow run we skip this rather than risk a SIGKILL here that
-    # would (a) return TIMEOUT to the SF for a delivered-signals run and
-    # (b) starve the "must not miss" scanner_eval logging that follows.
-    _deadline_hit, _elapsed = _secondary_work_deadline_exhausted(state)
-    if _deadline_hit:
-        logger.warning(
-            "[archive_writer] semantic extraction SKIPPED — secondary-work "
-            "deadline exhausted (%.0fs elapsed >= %.0fs budget). signals.json "
-            "already persisted; preserving the remaining Lambda budget for "
-            "eval logging + finalize so the run returns OK, not TIMEOUT.",
-            _elapsed, _secondary_deadline_budget_s(),
-        )
-    else:
-        try:
-            from memory.semantic import extract_semantic_memories
-            n_semantic = extract_semantic_memories(
-                db_conn=am.db_conn,
-                sector_team_outputs=state.get("sector_team_outputs", {}),
-                macro_report=state.get("macro_report", ""),
-                market_regime=state.get("market_regime", "neutral"),
-                ic_decisions=state.get("ic_decisions", []),
-                run_date=run_date,
-            )
-            if n_semantic:
-                logger.info("[archive_writer] extracted %d semantic memories", n_semantic)
-        except Exception as e:
-            logger.debug("[archive_writer] semantic extraction skipped: %s", e)
+    # best-effort, and an UNBOUNDED (LLM-call) tail task. Routed through the
+    # SINGLE archive_writer secondary-work chokepoint (_run_secondary_within_budget)
+    # so there is one gate implementation for the whole tail: on a tail-latency-slow
+    # run it is deadline-SKIPPED rather than risking a SIGKILL here that would
+    # (a) return TIMEOUT to the SF for a delivered-signals run and (b) starve the
+    # "must not miss" scanner_eval logging that follows. Same rationale — and now
+    # the same chokepoint — as the attractiveness-trajectory tail task below.
+    from memory.semantic import extract_semantic_memories
+
+    _sem_ran, n_semantic = _run_secondary_within_budget(
+        state,
+        "semantic extraction",
+        lambda: extract_semantic_memories(
+            db_conn=am.db_conn,
+            sector_team_outputs=state.get("sector_team_outputs", {}),
+            macro_report=state.get("macro_report", ""),
+            market_regime=state.get("market_regime", "neutral"),
+            ic_decisions=state.get("ic_decisions", []),
+            run_date=run_date,
+        ),
+    )
+    if _sem_ran and n_semantic:
+        logger.info("[archive_writer] extracted %d semantic memories", n_semantic)
 
     # ── Evaluation logging ──────────────────────────────────────────────────
     # Log all ~900 stocks with tech indicators for population baseline analysis.
