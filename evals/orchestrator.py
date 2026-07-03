@@ -934,6 +934,12 @@ def process_batch_results(
     haiku_evaluated = 0
     sonnet_evaluated = 0
     failed: list[dict[str, str]] = list(plan.get("client_side_skips", []))
+    # Batch results whose tool output failed schema parse (malformed
+    # stringified dimension_scores etc. — the 2026-07-03 weekly lost 12
+    # evals this way, config#1650). Each gets ONE synchronous
+    # evaluate_artifact retry after the stream (fresh decoder sample via
+    # the sync path's own MAX_JUDGE_RETRIES) before being terminal-failed.
+    parse_retry_queue: list[tuple[dict, str]] = []
     # Strip the empty_input_skip entries from `failed` — those are
     # successes (skip-marker eval persisted in Submit) not failures.
     # Preserve any `load` failures from the plan stage as failures.
@@ -1022,15 +1028,11 @@ def process_batch_results(
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "[batch_process] parse failed for custom_id=%s "
-                    "agent_id=%s judge=%s",
+                    "agent_id=%s judge=%s — queued for sync retry "
+                    "(config#1650)",
                     cid, entry["agent_id"], entry["judge_model"],
                 )
-                failed.append({
-                    "key": entry["capture_s3_key"],
-                    "agent_id": entry["agent_id"],
-                    "stage": "batch_parse",
-                    "error": str(exc),
-                })
+                parse_retry_queue.append((entry, str(exc)))
                 continue
 
             # Resolved model Anthropic actually ran (batch message 'model'
@@ -1084,6 +1086,70 @@ def process_batch_results(
                     "stage": "batch_persist",
                     "error": str(exc),
                 })
+
+    # Sync retry tail for batch parse failures (config#1650). The batch
+    # path had NO analog of the sync path's MAX_JUDGE_RETRIES: a judge
+    # response with malformed stringified dimension_scores (Haiku's known
+    # stochastic non-conformance — NOT token truncation; 7/3 failures were
+    # stop_reason=tool_use at ~1k of the 10752 cap) was terminal, silently
+    # thinning the eval corpus (12/85 lost on 2026-07-03, run=PARTIAL).
+    # One synchronous evaluate_artifact per failed item re-rolls the
+    # decoder via the sync path's own retry loop. Runs BEFORE the
+    # escalation tail so a recovered borderline Haiku eval still
+    # escalates to Sonnet. Cap bounds the Lambda budget: 40 × ≲8s ≪ the
+    # Process Lambda's 15-min ceiling; overflow is terminal-failed loud.
+    _PARSE_RETRY_CAP = 40
+    parse_retry_recovered = 0
+    for i, (entry, orig_err) in enumerate(parse_retry_queue):
+        if i >= _PARSE_RETRY_CAP:
+            failed.append({
+                "key": entry["capture_s3_key"],
+                "agent_id": entry["agent_id"],
+                "stage": "batch_parse_retry_capped",
+                "error": (
+                    f"parse-retry cap {_PARSE_RETRY_CAP} exceeded "
+                    f"({len(parse_retry_queue)} queued); original: {orig_err}"
+                ),
+            })
+            continue
+        try:
+            artifact = _load_capture_artifact(
+                s3, key=entry["capture_s3_key"], bucket=bucket,
+            )
+            retry_eval = evaluate_artifact(
+                artifact, judge_run_id=judge_run_id,
+                judge_model=entry["judge_model"],
+                judged_artifact_s3_key=entry["capture_s3_key"],
+            )
+            pkey = persist_eval_artifact(
+                retry_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
+            )
+            persisted_keys.append(pkey)
+            parse_retry_recovered += 1
+            if entry["judge_model"] == haiku_model:
+                haiku_evaluated += 1
+                haiku_evals_by_agent_run[
+                    (entry["agent_id"], entry["run_id"])
+                ] = retry_eval
+            elif entry["judge_model"] == sonnet_model:
+                sonnet_evaluated += 1
+            _try_emit(retry_eval)
+            logger.info(
+                "[batch_process] parse-retry recovered agent_id=%s judge=%s",
+                entry["agent_id"], entry["judge_model"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[batch_process] parse-retry FAILED for agent_id=%s "
+                "judge=%s (original parse error: %s)",
+                entry["agent_id"], entry["judge_model"], orig_err,
+            )
+            failed.append({
+                "key": entry["capture_s3_key"],
+                "agent_id": entry["agent_id"],
+                "stage": "batch_parse_retry",
+                "error": f"retry: {exc}; original: {orig_err}",
+            })
 
     # Sonnet-escalation tail (weekly cadence only). First-Saturday
     # already submitted Sonnet via the batch so we skip the tail in
@@ -1158,10 +1224,10 @@ def process_batch_results(
     logger.info(
         "[batch_process] done batch_id=%s date=%s haiku=%d sonnet=%d "
         "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
-        "metric_emission_failures=%d",
+        "parse_retry_recovered=%d metric_emission_failures=%d",
         batch_id, date, haiku_evaluated, sonnet_evaluated,
         plan.get("skipped_unmapped", 0), skipped_empty_input, len(failed),
-        metric_emission_failures,
+        parse_retry_recovered, metric_emission_failures,
     )
 
     return {
@@ -1174,6 +1240,7 @@ def process_batch_results(
         "skipped_unmapped": plan.get("skipped_unmapped", 0),
         "skipped_empty_input": skipped_empty_input,
         "metric_emission_failures": metric_emission_failures,
+        "parse_retry_recovered": parse_retry_recovered,
         "failed": failed,
         "persisted_keys": persisted_keys,
         "haiku_model": haiku_model,
