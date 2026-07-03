@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from graph.research_graph import (
+    _run_secondary_within_budget,
     _SECONDARY_DEADLINE_DEFAULT_S,
     _SECONDARY_DEADLINE_ENV,
     _secondary_deadline_budget_s,
@@ -82,3 +83,71 @@ class TestDeadlineGuard:
         naive = (datetime.now(timezone.utc) - timedelta(seconds=890)).replace(tzinfo=None)
         hit, elapsed = _secondary_work_deadline_exhausted({"run_time": naive.isoformat()})
         assert hit is True
+
+
+class TestSecondaryWithinBudgetChokepoint:
+    """The single chokepoint archive_writer's UNBOUNDED tail tasks route
+    through. Regression for the 2026-07-03 SF TIMEOUT: the attractiveness
+    trajectory (an unbounded ArcticDB-read + digest-email tail task) was NOT
+    deadline-gated, so on a tail-latency-slow run it was SIGKILL'd at the 900s
+    Lambda ceiling — returning a spurious States.Timeout to the Step Function
+    for a run whose signals.json had already landed AND starving the
+    must-not-miss upload_db that follows. Routing every unbounded tail task
+    through this helper means a slow run SKIPS the observability instead.
+    """
+
+    def test_runs_fn_and_returns_result_when_budget_remains(self, monkeypatch):
+        monkeypatch.setenv(_SECONDARY_DEADLINE_ENV, "780")
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return "artifact-key"
+
+        ran, result = _run_secondary_within_budget(
+            _state_started_seconds_ago(10), "unit task", fn,
+        )
+        assert ran is True
+        assert result == "artifact-key"
+        assert calls == [1]
+
+    def test_deadline_exhausted_skips_fn_entirely(self, monkeypatch):
+        """The whole point: on a slow run fn must NOT be invoked, so no
+        unbounded work can push the Lambda past 900s. fn raises if called."""
+        monkeypatch.setenv(_SECONDARY_DEADLINE_ENV, "780")
+
+        def fn():
+            raise AssertionError("fn must not run once the budget is exhausted")
+
+        ran, result = _run_secondary_within_budget(
+            _state_started_seconds_ago(890), "unit task", fn,
+        )
+        assert ran is False
+        assert result is None
+
+    def test_fn_exception_is_swallowed_fail_soft(self, monkeypatch):
+        """Best-effort observability must never fail a delivered-signals run:
+        an exception from fn is swallowed and reported as ran=True, result=None
+        (so the must-not-miss finalize still proceeds)."""
+        monkeypatch.setenv(_SECONDARY_DEADLINE_ENV, "780")
+
+        def fn():
+            raise RuntimeError("arcticdb read blew up")
+
+        ran, result = _run_secondary_within_budget(
+            _state_started_seconds_ago(10), "unit task", fn,
+        )
+        assert ran is True
+        assert result is None
+
+    def test_disabled_budget_still_runs_fn(self, monkeypatch):
+        """Budget<=0 disables the gate (fails OPEN) — fn always runs."""
+        monkeypatch.setenv(_SECONDARY_DEADLINE_ENV, "0")
+        calls = []
+        ran, result = _run_secondary_within_budget(
+            _state_started_seconds_ago(100000), "unit task",
+            lambda: calls.append(1) or "ok",
+        )
+        assert ran is True
+        assert result == "ok"
+        assert calls == [1]
