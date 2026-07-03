@@ -313,7 +313,14 @@ def _merge_candidates(
         qa = qual_by_ticker.get(ticker, {})
         merged.append({
             "ticker": ticker,
-            "quant_score": qp.get("quant_score", 0),
+            # No ``, 0`` default — a missing quant_score means the quant
+            # analyst's pick didn't carry a score (schema drop / partial
+            # extraction), NOT a genuine 0/100 rating. Silently coercing
+            # to 0 makes a missing input look like a worst-case score,
+            # which then flows into compute_composite_breakdown as real
+            # data (root cause of L4525 "Score 0.0" — config#680). Mirrors
+            # qual_score's existing None-on-missing convention below.
+            "quant_score": qp.get("quant_score"),
             "quant_rationale": qp.get("rationale", ""),
             "qual_score": qa.get("qual_score"),
             "bull_case": qa.get("bull_case", ""),
@@ -334,7 +341,9 @@ def _merge_candidates(
         if ticker not in {m["ticker"] for m in merged}:
             merged.append({
                 "ticker": ticker,
-                "quant_score": additional.get("quant_score", 0),
+                # Same no-coercion convention as the merged loop above —
+                # missing quant_score stays None, never a silent 0.
+                "quant_score": additional.get("quant_score"),
                 "quant_rationale": "",
                 "qual_score": additional.get("qual_score"),
                 "bull_case": additional.get("rationale", ""),
@@ -431,12 +440,20 @@ def _joint_finalization(
 
     if selection is None or not selection.selected_tickers:
         # Pass 1 failed entirely — combined-score fallback (preserves
-        # invariant that every team produces picks).
+        # invariant that every team produces picks). Reuses
+        # ``_candidate_composite_score`` (the same None-safe averaging
+        # used by the regime gate) instead of a local ``or 0`` coercion —
+        # a candidate with no quant_score/qual_score has no basis for
+        # ranking and must sink to the bottom, not be treated as a
+        # genuine 0/100 (which would silently outrank real low scorers
+        # and read downstream as a legitimate worst-case — L4525 /
+        # config#680 Score-0.0 root).
         for c in candidates:
-            qs = c.get("quant_score") or 0
-            qls = c.get("qual_score") or 0
-            c["_combined"] = (qs + qls) / 2 if qls else qs
-        candidates.sort(key=lambda x: x["_combined"], reverse=True)
+            c["_combined"] = _candidate_composite_score(c)
+        candidates.sort(
+            key=lambda x: (x["_combined"] is not None, x["_combined"]),
+            reverse=True,
+        )
         return {
             "picks": candidates[:TEAM_PICKS_PER_RUN],
             "rationale": "Fallback: selected by combined quant+qual score.",
