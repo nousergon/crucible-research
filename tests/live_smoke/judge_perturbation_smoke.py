@@ -39,13 +39,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ.setdefault("ALPHA_ENGINE_SECRETS_SOURCE", "env")
 
 # Curated high-signal subset (bounds cost: 1 reference judging per rubric
-# + one per corruption ≈ 6 Haiku calls). These corruptions are
+# + one per corruption ≈ 10 Haiku calls). These corruptions are
 # unambiguous degradations a competent judge must catch.
 _SUBSET_NAMES = {
     "strip_numerical_grounding",
     "break_ranking_coherence",
     "strip_citation_grounding",
     "flatten_reasoning_depth",
+    "strip_input_groundedness",
+    "vacuous_moat",
+    "contradict_stance",
+    "unearned_material_change",
+    "break_anchor_fidelity",
 }
 
 # Tolerant threshold for LLM variance. A healthy judge catches all four

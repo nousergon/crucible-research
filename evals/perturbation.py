@@ -164,6 +164,132 @@ _QUAL_INPUT_SNAPSHOT: dict[str, Any] = {
 }
 
 
+# Thinktank thesis (company-level) — mirrors CompanyThesisLLM
+# (thinktank/schemas.py) + the input_data_snapshot shape built in
+# thinktank/analyst.py::build_thesis. Bullish-but-honest reference: cites
+# specific board metrics/filings/news, names a real moat mechanism with its
+# erosion risk, reconciles valuation with the provided pillars, orders risks
+# by materiality, engages the provided macro/sector themes, and stance/
+# conviction follow from the body — a well-behaved judge should score all
+# six eval_rubric_thinktank_thesis dimensions HIGH.
+_THINKTANK_THESIS_REFERENCE: dict[str, Any] = {
+    "business_summary": (
+        "Cloud infrastructure + AI-accelerated compute leasing; unit economics "
+        "driven by fleet utilization (currently 78% per the board row) and "
+        "per-GPU-hour realized pricing."
+    ),
+    "moat": (
+        "Switching costs from multi-year reserved-capacity contracts plus a "
+        "scale advantage in power-constrained datacenter siting (the tech_score "
+        "77 in the board row reflects this build-out lead); erosion risk is "
+        "hyperscaler in-house silicon narrowing the leasing-vs-build cost gap "
+        "over a 3-5yr horizon."
+    ),
+    "filings_review": (
+        "Latest 10-Q capex guide raised to $2.1B (from $1.6B) to fund GPU fleet "
+        "expansion; management flagged a one-quarter lag between capex and "
+        "revenue recognition as new capacity ramps utilization."
+    ),
+    "news_sentiment": (
+        "News aggregate shows LM sentiment +0.34 over the trailing week on 4 "
+        "events, driven by a hyperscaler capacity-partnership announcement; no "
+        "negative-severity events recorded."
+    ),
+    "valuation": (
+        "Trading at 14x forward EV/EBITDA vs the sector's 18x median (per the "
+        "board row's value pillar); the discount is explained by the recent "
+        "capex step-up depressing near-term FCF, not by a growth-quality gap — "
+        "the quality pillar score of 81 doesn't support a structural discount."
+    ),
+    "market_dynamics": (
+        "The house macro theme's 'AI capex supercycle, mid-innings' view directly "
+        "supports continued fleet demand; the sector theme's utilization-rate "
+        "watch item is the one to track here specifically because this name's "
+        "78% utilization is the lever on the bull case."
+    ),
+    "risks": [
+        "Hyperscaler capacity partnership (the same one lifting sentiment this "
+        "week) could be renegotiated or in-sourced at renewal in 18 months",
+        "Power-siting constraints could cap fleet growth below the capex guide",
+        "General AI capex slowdown macro risk",
+    ],
+    "catalysts": [
+        "Q3 utilization print (board row's current 78% vs guide)",
+        "Reserved-capacity contract renewal disclosure",
+    ],
+    "stance": "attractive",
+    "conviction": 74,
+    "summary": (
+        "Bullish on continued fleet utilization gains supporting a valuation "
+        "re-rate toward sector median; primary risk is customer concentration "
+        "at contract renewal, which the current catalysts calendar should "
+        "resolve within two quarters."
+    ),
+}
+
+_THINKTANK_THESIS_INPUT_SNAPSHOT: dict[str, Any] = {
+    "ticker": "NVDA",
+    "update_reason": "event",
+    "event_context": "Hyperscaler capacity-partnership announcement (2026-07-01)",
+    "board_row": {
+        "ticker": "NVDA",
+        "sector": "technology",
+        "industry": "semiconductors",
+        "attractiveness_score": 79,
+        "pillars": {"value": 68, "quality": 81, "growth": 84},
+        "focus_score": 72,
+        "tech_score": 77,
+        "metrics": {"ev_ebitda_fwd": 14.0, "sector_median_ev_ebitda_fwd": 18.0,
+                    "utilization_rate": 0.78, "capex_guide_usd_b": 2.1},
+        "tradeability": {"avg_daily_volume": 41_000_000},
+    },
+    "weekly_signal": {"stance": "overweight", "rationale": "fleet utilization trend"},
+    "news_aggregate": {"lm_sentiment_7d": 0.34, "event_count_7d": 4, "severity_max": "low"},
+    "filings_excerpts": [
+        "Capex guidance raised to $2.1B from $1.6B to fund GPU fleet expansion.",
+        "Management: one-quarter lag between capex deployment and revenue recognition.",
+    ],
+    "macro_theme": "AI capex supercycle, mid-innings — demand still outstripping supply.",
+    "sector_theme": "Semiconductors: watch fleet utilization rates as the near-term signal.",
+    "prior_thesis": None,
+}
+
+# Thinktank theme (macro/sector keeper) — mirrors ThemeThesisLLM +
+# thinktank/themes.py::_store_new's input_data_snapshot, RECONCILE mode
+# (exercises anchor_fidelity most directly: reconcile must re-anchor to the
+# weekly view and honestly surface any divergence). Churn-disciplined:
+# material_change=False with a routine reconcile that finds no divergence.
+_THINKTANK_THEME_REFERENCE: dict[str, Any] = {
+    "narrative": (
+        "Reconciling to the new weekly sector report: semiconductors remain "
+        "overweight on AI capex demand. The intraweek utilization-rate watch "
+        "item is confirmed by this week's report rather than contradicted, so "
+        "no divergence to flag."
+    ),
+    "stance": "overweight",
+    "drivers": ["AI capex demand", "fleet utilization trend confirmed by weekly report"],
+    "watch_items": ["Q3 utilization prints across covered names", "hyperscaler capex guidance revisions"],
+    "material_change": False,
+    "change_summary": "",
+}
+
+_THINKTANK_THEME_INPUT_SNAPSHOT: dict[str, Any] = {
+    "kind": "sector",
+    "key": "technology",
+    "update_reason": "reconcile",
+    "market_regime": "risk-on",
+    "weekly_anchor_date": "2026-06-29",
+    "prior_theme": {
+        "narrative": "Semiconductors overweight on AI capex demand; watching fleet utilization.",
+        "stance": "overweight",
+        "drivers": ["AI capex demand"],
+        "watch_items": ["Q3 utilization prints across covered names"],
+        "material_change": True,
+        "change_summary": "Upgraded to overweight on capex-cycle acceleration.",
+    },
+}
+
+
 REFERENCE_FIXTURES: dict[str, dict[str, Any]] = {
     "eval_rubric_sector_quant": {
         "agent_id": "sector_quant:technology",
@@ -174,6 +300,16 @@ REFERENCE_FIXTURES: dict[str, dict[str, Any]] = {
         "agent_id": "sector_qual:technology",
         "agent_output": _QUAL_REFERENCE,
         "input_data_snapshot": _QUAL_INPUT_SNAPSHOT,
+    },
+    "eval_rubric_thinktank_thesis": {
+        "agent_id": "thinktank_thesis",
+        "agent_output": _THINKTANK_THESIS_REFERENCE,
+        "input_data_snapshot": _THINKTANK_THESIS_INPUT_SNAPSHOT,
+    },
+    "eval_rubric_thinktank_theme": {
+        "agent_id": "thinktank_theme",
+        "agent_output": _THINKTANK_THEME_REFERENCE,
+        "input_data_snapshot": _THINKTANK_THEME_INPUT_SNAPSHOT,
     },
 }
 
@@ -279,6 +415,59 @@ def _verbosity_pad(out: dict) -> dict:
     return out
 
 
+def _strip_input_groundedness(out: dict) -> dict:
+    """Thinktank thesis: delete every citation of the provided inputs (board
+    metrics, filings, news, weekly signal) — replace the input-referencing
+    sections with generic boilerplate that could apply to any name. Stance/
+    conviction/risks/catalysts untouched so only groundedness degrades.
+    Targets `input_groundedness`."""
+    out["business_summary"] = "The company operates in its industry and generates revenue."
+    out["filings_review"] = "Recent filings were reviewed; nothing unusual stood out."
+    out["news_sentiment"] = "News flow has been generally neutral to positive recently."
+    out["valuation"] = "The stock trades at a reasonable valuation relative to peers."
+    out["market_dynamics"] = "Current market conditions are broadly supportive."
+    return out
+
+
+def _vacuous_moat(out: dict) -> dict:
+    """Thinktank thesis: replace the moat assessment with marketing language —
+    no advantage mechanism, no erosion risk. Targets `moat_and_business_quality`."""
+    out["moat"] = "Strong brand, great products, and a loyal customer base."
+    return out
+
+
+def _contradict_stance(out: dict) -> dict:
+    """Thinktank thesis: leave the (bullish) body untouched but flip stance to
+    `avoid` with conviction that doesn't follow from the text — stance no
+    longer tracks the evidence. Targets `stance_consistency`."""
+    out["stance"] = "avoid"
+    out["conviction"] = 88
+    return out
+
+
+def _unearned_material_change(out: dict) -> dict:
+    """Thinktank theme: flag material_change=True for a reconcile that
+    actually just restates the prior view — the churn-discipline contract
+    (a new version must EARN material_change) is violated. Targets
+    `churn_discipline`."""
+    out["material_change"] = True
+    out["change_summary"] = "Reaffirming the prior view; no meaningful shift."
+    return out
+
+
+def _break_anchor_fidelity(out: dict) -> dict:
+    """Thinktank theme: for a reconcile, silently rewrite the anchored view
+    (flip stance) with no divergence acknowledgment in the narrative or
+    change_summary — ignores the weekly anchor entirely. Targets
+    `anchor_fidelity`."""
+    out["stance"] = "underweight"
+    out["narrative"] = (
+        "Semiconductors are now underweight given near-term demand softness."
+    )
+    out["change_summary"] = ""
+    return out
+
+
 @dataclass(frozen=True)
 class Corruption:
     name: str
@@ -304,6 +493,16 @@ CORRUPTIONS: list[Corruption] = [
                "reasoning_depth", _flatten_reasoning_depth),
     Corruption("misalign_evidence", "eval_rubric_sector_qual",
                "evidence_alignment", _misalign_evidence),
+    Corruption("strip_input_groundedness", "eval_rubric_thinktank_thesis",
+               "input_groundedness", _strip_input_groundedness),
+    Corruption("vacuous_moat", "eval_rubric_thinktank_thesis",
+               "moat_and_business_quality", _vacuous_moat),
+    Corruption("contradict_stance", "eval_rubric_thinktank_thesis",
+               "stance_consistency", _contradict_stance),
+    Corruption("unearned_material_change", "eval_rubric_thinktank_theme",
+               "churn_discipline", _unearned_material_change),
+    Corruption("break_anchor_fidelity", "eval_rubric_thinktank_theme",
+               "anchor_fidelity", _break_anchor_fidelity),
 ]
 
 
