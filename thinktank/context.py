@@ -86,6 +86,24 @@ def load_context(store: Any) -> ContextBundle:
     except Exception as exc:  # noqa: BLE001 — availability probe only
         logger.warning("thinktank context: rag availability probe failed: %s", exc)
         bundle.rag_available = False
+
+    if bundle.rag_available:
+        try:
+            from nousergon_lib.secrets import get_secret
+
+            if not get_secret("VOYAGE_API_KEY", required=False):
+                logger.warning(
+                    "thinktank context: rag_filings DB reachable but "
+                    "VOYAGE_API_KEY unresolved — per-ticker retrieve() will "
+                    "fail; recording rag_filings as absent"
+                )
+                bundle.rag_available = False
+        except Exception as exc:  # noqa: BLE001 — probe only, never raises
+            logger.warning(
+                "thinktank context: VOYAGE_API_KEY probe failed: %s", exc
+            )
+            bundle.rag_available = False
+
     bundle.sources_present["rag_filings"] = bundle.rag_available
 
     return bundle
