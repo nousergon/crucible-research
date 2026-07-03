@@ -49,7 +49,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, Callable, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -3340,6 +3340,54 @@ def _secondary_work_deadline_exhausted(state: ResearchState) -> tuple[bool, floa
     return (elapsed >= budget, elapsed)
 
 
+def _run_secondary_within_budget(
+    state: ResearchState, label: str, fn: Callable[[], Any],
+) -> tuple[bool, Any]:
+    """Run an UNBOUNDED best-effort observability task ``fn`` iff the
+    secondary-work wall-clock budget is not yet exhausted; otherwise SKIP it
+    (WARN) so the remaining Lambda budget is preserved for the must-not-miss
+    grade-history logging + ``upload_db`` that finalize the run.
+
+    Returns ``(ran, result)``. ``ran`` is False only when the task was
+    deadline-skipped. ``fn`` is invoked at most once; because signals.json is
+    already persisted by the time archive_writer reaches these tail tasks, any
+    exception ``fn`` raises is swallowed to a WARN (best-effort observability
+    must never fail a delivered-signals run) and returned as ``(True, None)``.
+
+    This is the single chokepoint for archive_writer's UNBOUNDED tail: every
+    tail task whose runtime has no internal bound (an LLM call, a full-universe
+    ArcticDB price read + digest email) MUST route through here so a
+    tail-latency-slow run degrades by SKIPPING observability rather than by a
+    SIGKILL at the 900s Lambda ceiling — a SIGKILL that returns a spurious
+    States.Timeout to the Step Function for a run whose signals.json already
+    landed AND starves the ``upload_db`` finalize that follows (a permanent
+    grade-history hole). Same rationale as the semantic-extraction gate above;
+    see the 2026-06-06 (semantic extraction) and 2026-07-03 (attractiveness
+    trajectory) SIGKILL incidents. NOTE: this SKIPS only best-effort,
+    already-fail-soft observability — it is NOT a swallow of a real failure; the
+    primary deliverables (signals.json + the must-not-miss grade history) still
+    land, and a genuine research failure still hard-fails upstream.
+    """
+    hit, elapsed = _secondary_work_deadline_exhausted(state)
+    if hit:
+        logger.warning(
+            "[archive_writer] %s SKIPPED — secondary-work deadline exhausted "
+            "(%.0fs elapsed >= %.0fs budget). signals.json already persisted; "
+            "preserving the remaining Lambda budget for the must-not-miss eval "
+            "logging + upload_db so the run returns OK, not TIMEOUT.",
+            label, elapsed, _secondary_deadline_budget_s(),
+        )
+        return (False, None)
+    try:
+        return (True, fn())
+    except Exception as e:  # noqa: BLE001 — best-effort observability, never fatal
+        logger.warning(
+            "[archive_writer] %s FAILED (non-fatal, observe-mode — "
+            "signals.json unaffected): %s", label, e,
+        )
+        return (True, None)
+
+
 def _build_scanner_eval_rows(
     *,
     scanner_universe: list,
@@ -3857,18 +3905,32 @@ def archive_writer(state: ResearchState) -> dict:
 
     # ── Attractiveness trajectory signal (orthogonalized factor-momentum) ────
     # Reads the attractiveness history (appended just above by the board write)
-    # + ArcticDB prices → the weekly "rising attractiveness / pre-repricing"
-    # signal + digest email. OBSERVE-MODE, SECONDARY observability: fail SOFT
-    # (a signal failure must not fail the research run); no-ops during warm-up.
-    try:
-        from scoring.attractiveness_trajectory import compute_and_write_trajectory
+    # + full-universe ArcticDB prices → the weekly "rising attractiveness /
+    # pre-repricing" signal + digest email. OBSERVE-MODE, SECONDARY
+    # observability: fail SOFT (a signal failure must not fail the research
+    # run); no-ops during warm-up.
+    #
+    # This is the SECOND unbounded best-effort item on the tail (the ArcticDB
+    # price reads + digest email have no internal time bound). On 2026-07-03 it
+    # was still running when the Lambda hit the 900s ceiling — for a run whose
+    # signals.json had already landed — and the SIGKILL there ALSO starved the
+    # must-not-miss upload_db that follows (the week's scanner/team/CIO grade
+    # history, written to the local DB above, was never uploaded). So it is now
+    # deadline-gated through the same chokepoint as semantic extraction: on a
+    # tail-latency-slow run it is SKIPPED, keeping the higher-priority DB
+    # logging + upload_db inside 900s so the run returns OK with signals + grade
+    # history delivered, not TIMEOUT.
+    from scoring.attractiveness_trajectory import compute_and_write_trajectory
 
-        tj_key = compute_and_write_trajectory(run_date)
-        logger.info("[archive_writer] attractiveness trajectory written → %s", tj_key or "(warm-up — skipped)")
-    except Exception as e:
-        logger.warning(
-            "[archive_writer] attractiveness trajectory FAILED (non-fatal, "
-            "observe-mode signal — signals.json unaffected): %s", e,
+    _tj_ran, tj_key = _run_secondary_within_budget(
+        state,
+        "attractiveness trajectory",
+        lambda: compute_and_write_trajectory(run_date),
+    )
+    if _tj_ran:
+        logger.info(
+            "[archive_writer] attractiveness trajectory written → %s",
+            tj_key or "(warm-up — skipped)",
         )
 
     # Log quant top-10 per team + final recommendations.
