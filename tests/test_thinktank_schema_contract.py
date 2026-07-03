@@ -10,10 +10,13 @@ from __future__ import annotations
 from thinktank.schemas import (
     CompanyThesis,
     CompanyThesisLLM,
+    CompanyThesisRatedLLM,
     CoverageLedger,
     EventRecord,
     LedgerEntry,
     MonthlyCostLedger,
+    RatingRow,
+    RatingsBoard,
     RunManifest,
     SweepBatchLLM,
     ThemeThesis,
@@ -32,8 +35,21 @@ _FROZEN_FIELDS = {
     CompanyThesisLLM: {
         "business_summary", "moat", "filings_review", "news_sentiment",
         "valuation", "market_dynamics", "risks", "catalysts", "stance",
-        "conviction", "summary",
+        "conviction", "summary", "rating", "rating_rationale",
     },
+    # Response contract for new generations: same field set, rating REQUIRED.
+    CompanyThesisRatedLLM: {
+        "business_summary", "moat", "filings_review", "news_sentiment",
+        "valuation", "market_dynamics", "risks", "catalysts", "stance",
+        "conviction", "summary", "rating", "rating_rationale",
+    },
+    RatingRow: {
+        "ticker", "sector", "rating", "rating_rationale", "stance",
+        "conviction", "summary", "thesis_version", "thesis_trading_day",
+        "update_reason", "attractiveness_score", "attractiveness_rank",
+        "rating_minus_attractiveness",
+    },
+    RatingsBoard: {"schema_version", "trading_day", "updated_at", "rows"},
     ThemeThesis: {
         "schema_version", "kind", "key", "version", "trading_day",
         "calendar_date", "update_reason", "theme", "weekly_anchor_date",
@@ -59,7 +75,7 @@ _FROZEN_FIELDS = {
         "started_at", "finished_at", "names_added", "names_refreshed",
         "theses_written", "sweep_tickers", "events_flagged",
         "event_updates_written", "themes_reconciled", "theme_updates_written",
-        "context_sources_present", "usage_by_tier", "total_cost_usd",
+        "ratings_rows", "context_sources_present", "usage_by_tier", "total_cost_usd",
         "budget_month_spent_usd", "budget_month_limit_usd", "errors",
     },
     MonthlyCostLedger: {"schema_version", "month", "spent_usd", "updated_at", "runs"},

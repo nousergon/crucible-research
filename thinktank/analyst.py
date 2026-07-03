@@ -23,7 +23,7 @@ from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, filings_excerpts
 from thinktank.schemas import (
     CompanyThesis,
-    CompanyThesisLLM,
+    CompanyThesisRatedLLM,
     SweepBatchLLM,
     TickerEventAssessment,
 )
@@ -102,7 +102,7 @@ def build_thesis(
         update_reason=update_reason,
         prior_thesis=prior.thesis.model_dump_json() if prior else "(none — initial coverage)",
         event_context=event_context or "(none)",
-        board_row=json.dumps(_slim_board_row(board_row), default=str),
+        board_row=json.dumps(_facts_board_row(board_row), default=str),
         weekly_signal=json.dumps(signals_entry or {}, default=str),
         news_aggregate=json.dumps(news or {}, default=str),
         filings_excerpts="\n---\n".join(filings) or "(no filings context available)",
@@ -114,7 +114,7 @@ def build_thesis(
         agent_id="analyst_thesis",
         system=_ANALYST_SYSTEM,
         user=rendered,
-        response_model=CompanyThesisLLM,
+        response_model=CompanyThesisRatedLLM,
         prompt_id=prompt.name,
         prompt_version=prompt.version,
         sft_meta={
@@ -160,7 +160,7 @@ def build_thesis(
             "ticker": ticker,
             "update_reason": update_reason,
             "event_context": event_context,
-            "board_row": _slim_board_row(board_row),
+            "board_row": _facts_board_row(board_row),
             "weekly_signal": signals_entry or {},
             "news_aggregate": news or {},
             "filings_excerpts": filings,
@@ -173,10 +173,11 @@ def build_thesis(
         s3_client=store.s3,
     )
     logger.info(
-        "thesis written %s v%d (%s, stance=%s conviction=%d, $%.4f)",
+        "thesis written %s v%d (%s, rating=%s stance=%s conviction=%d, $%.4f)",
         ticker,
         thesis.version,
         update_reason,
+        result.parsed.rating,
         result.parsed.stance,
         result.parsed.conviction,
         result.cost_usd,
@@ -184,17 +185,26 @@ def build_thesis(
     return thesis
 
 
-def _slim_board_row(row: dict | None) -> dict:
+def _facts_board_row(row: dict | None) -> dict:
+    """The board slice the model is allowed to see: FACTS only.
+
+    The thesis rating must be INDEPENDENT of the scanner's opinion (Brian,
+    2026-07-02), so every scanner-derived judgment is withheld from the
+    prompt — ``attractiveness_score``, ``focus_score``, ``tech_score``, and
+    the ``pillars`` sub-scores (they are literally the composite's
+    components). Raw ``metrics`` (valuation/growth/volatility facts) and
+    ``tradeability`` (liquidity/executability facts) stay: they are data,
+    not judgment. The composite still rides on the STORED artifact
+    (``CompanyThesis.attractiveness_score``) as divergence metadata — it
+    just never reaches the model. tests/test_thinktank_run.py pins the
+    exclusion against drift.
+    """
     if not row:
         return {}
     keep = (
         "ticker",
         "sector",
         "industry",
-        "attractiveness_score",
-        "pillars",
-        "focus_score",
-        "tech_score",
         "metrics",
         "tradeability",
     )
