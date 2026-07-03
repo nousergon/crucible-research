@@ -25,8 +25,9 @@ version (never a silent skip), and the SSM budget guard caps spend.
 Event shape (all fields optional):
 
     {
-      "dry_run_llm": true,   # shell-run smoke: boot + imports only, no S3
-      "dry_run": true        # plan-only: intake selection printed, no LLM/writes
+      "dry_run_llm": true,        # shell-run smoke: boot + imports only, no S3
+      "dry_run": true,            # plan-only: intake selection, no LLM/writes
+      "refresh_tickers": ["X"]    # operator refresh of covered names only
     }
 
 Returns ``{"status": "OK", "manifest": {...}}`` on success (or the
@@ -112,7 +113,11 @@ def handler(event, context):
     from thinktank.run import run_daily
 
     plan_only = bool(event.get("dry_run")) if isinstance(event, dict) else False
-    manifest = run_daily(dry_run=plan_only)
+    # Operator refresh: {"refresh_tickers": ["MNST", ...]} re-underwrites
+    # ONLY those covered names (no intake/sweep/themes) — the ad-hoc
+    # re-underwrite / rating-backfill knob. Absent on scheduled events.
+    refresh = event.get("refresh_tickers") if isinstance(event, dict) else None
+    manifest = run_daily(dry_run=plan_only, refresh_tickers=refresh)
 
     logger.info(
         "[thinktank_handler] done run_id=%s mode=%s trading_day=%s "
