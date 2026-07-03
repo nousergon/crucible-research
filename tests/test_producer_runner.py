@@ -1,5 +1,7 @@
-"""Tests for the challenger producer runner (config#1223 B3) — best-effort
-shadow emission, fail-soft per producer, prior-population threading."""
+"""Tests for the challenger producer runner (config#1223 B3 / config#1683) —
+FAIL-HARD shadow emission: per-producer isolation (each producer gets its
+attempt) but any gap raises ChallengerShadowGapError after the observe alert
+fires. Prior-population threading unchanged."""
 
 from __future__ import annotations
 
@@ -7,13 +9,18 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import producers.runner as runner  # noqa: E402
 from producers.registry import ProducerSpec  # noqa: E402
 
 
-def test_run_challengers_writes_failsoft_and_threads_population(monkeypatch):
+def test_run_challengers_isolates_attempts_then_raises_on_gap(monkeypatch):
+    """config#1683 fail-hard: a failing producer does not starve the other
+    producer's ATTEMPT (its artifact still lands), but the gap RAISES —
+    experiments never silently thin out."""
     seen = {}
 
     def good_build(run_date, am, *, run_time="", population=None):
@@ -29,6 +36,7 @@ def test_run_challengers_writes_failsoft_and_threads_population(monkeypatch):
         ProducerSpec("bad", "challenger", "v1", "raises", bad_build),
     ]
     monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: True)
 
     am = MagicMock()
     am.write_shadow_signals_json.side_effect = (
@@ -36,16 +44,16 @@ def test_run_challengers_writes_failsoft_and_threads_population(monkeypatch):
     )
 
     prior_pop = [{"ticker": "HELD"}]
-    res = runner.run_challengers(am, "2026-06-19", run_time="2026-06-19T09:00Z", population=prior_pop)
+    with pytest.raises(runner.ChallengerShadowGapError, match="bad"):
+        runner.run_challengers(
+            am, "2026-06-19", run_time="2026-06-19T09:00Z", population=prior_pop
+        )
 
-    # good wrote its shadow; bad is recorded but did NOT abort the run.
-    assert res["written"] == {"good": "signals_shadow/good/2026-06-19/signals.json"}
-    assert "bad" in res["errors"] and "boom" in res["errors"]["bad"]
-    # The snapshotted prior population + run_time are threaded to each producer.
+    # good's artifact was still written BEFORE the raise (isolation kept),
+    # and the snapshotted prior population + run_time were threaded through.
+    assert am.write_shadow_signals_json.call_count == 1
     assert seen["population"] is prior_pop
     assert seen["run_time"] == "2026-06-19T09:00Z"
-    # Only the good producer's payload was written (bad never reached the writer).
-    assert am.write_shadow_signals_json.call_count == 1
 
 
 def test_run_challengers_generated_at_falls_back_to_run_date(monkeypatch):
@@ -63,8 +71,8 @@ def test_run_challengers_generated_at_falls_back_to_run_date(monkeypatch):
 
 
 def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
-    """config#1403: a producer that emits nothing must fire a LOUD alert, not a
-    swallowed WARN — the always-on producers are expected to emit every run."""
+    """config#1403/#1683: a producer that emits nothing fires the LOUD observe
+    alert BEFORE the gap raises (the alert pages even if a caller catches)."""
     def good_build(run_date, am, *, run_time="", population=None):
         return {"date": run_date}
 
@@ -82,7 +90,8 @@ def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
 
     am = MagicMock()
     am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: "k"
-    runner.run_challengers(am, "2026-06-19")
+    with pytest.raises(runner.ChallengerShadowGapError):
+        runner.run_challengers(am, "2026-06-19")
 
     assert len(alerts) == 1
     msg, kw = alerts[0]
