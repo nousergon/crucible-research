@@ -86,7 +86,7 @@ class TestDryPaths:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({"dry_run": True}, None)
-        run.assert_called_once_with(dry_run=True)
+        run.assert_called_once_with(dry_run=True, refresh_tickers=None)
         assert result["status"] == "OK"
 
 
@@ -96,7 +96,7 @@ class TestSuccessPath:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({}, None)
-        run.assert_called_once_with(dry_run=False)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None)
         assert result == {
             "status": "OK",
             "manifest": {"run_id": "abc123def456", "mode": "daily"},
@@ -109,7 +109,7 @@ class TestSuccessPath:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler(None, None)
-        run.assert_called_once_with(dry_run=False)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None)
         assert result["status"] == "OK"
 
 
