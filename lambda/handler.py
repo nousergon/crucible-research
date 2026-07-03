@@ -277,6 +277,75 @@ def _is_scheduled_run_time() -> bool:
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
 
+def _run_challengers_only(event: dict) -> dict:
+    """Operator recovery mode (config#1683): re-emit the challenger producers'
+    shadow cohort for the MOST RECENT weekly run without re-running the
+    champion graph.
+
+    Event: ``{"mode": "challengers_only", "date": "YYYY-MM-DD"}`` where
+    ``date`` is the run_date of the latest completed weekly run.
+
+    The Saturday path snapshots the PRIOR population before the champion
+    mutates it; after the fact that snapshot is gone, so this mode
+    reconstructs it MEMBERSHIP-EXACTLY from the live population table by
+    dropping the rows the run itself entered (``entry_date == run_date``).
+    Membership is all the producers consume for selection (the exclusion set
+    + carry-forward), so the selection comparison is unaffected; carried
+    metadata (scores/tenure) reflects the post-run refresh. This is only
+    valid for the LATEST run — the fail-loud guard against
+    ``signals/latest.json`` refuses anything else.
+    """
+    import json as _json
+
+    run_date = event.get("date")
+    if not run_date:
+        raise ValueError("challengers_only requires event['date'] (YYYY-MM-DD)")
+
+    from archive.manager import ArchiveManager
+    archive = ArchiveManager()
+    archive.download_db()
+    try:
+        latest = _json.loads(
+            archive.s3.get_object(
+                Bucket=archive.bucket, Key="signals/latest.json"
+            )["Body"].read()
+        )
+        latest_date = latest.get("date")
+        if latest_date != run_date:
+            raise ValueError(
+                f"challengers_only is only valid for the latest run "
+                f"(latest={latest_date!r}, requested={run_date!r}) — the prior-"
+                f"population reconstruction is membership-exact only against "
+                f"the most recent population commit (config#1683)."
+            )
+
+        population = archive.load_population()
+        prior_population = [
+            p for p in population if p.get("entry_date") != run_date
+        ]
+        logger.info(
+            "[challengers_only] run_date=%s prior_population=%d "
+            "(current %d minus %d entered on run_date)",
+            run_date, len(prior_population), len(population),
+            len(population) - len(prior_population),
+        )
+
+        from producers.runner import run_challengers
+        shadow = run_challengers(
+            archive, run_date,
+            run_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            population=prior_population,
+        )
+        return {
+            "status": "OK",
+            "mode": "challengers_only",
+            "date": run_date,
+            "written": shadow["written"],
+        }
+    finally:
+        archive.close()
+
+
 @monitor_handler
 def handler(event, context):
     """
@@ -287,6 +356,11 @@ def handler(event, context):
       - weekly_run=True → bypass time gate (Saturday 06:00 UTC weekly schedule)
       - Otherwise → require 5:40-5:55am PT time window AND NYSE trading day
 
+    Operator modes:
+      - mode="challengers_only" + date=YYYY-MM-DD → re-emit the challenger
+        shadow cohort for the latest weekly run (config#1683 recovery path);
+        bypasses the time/trading-day gates, runs nothing else.
+
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
@@ -294,6 +368,9 @@ def handler(event, context):
     # invocation. Warm-container calls are a no-op via the _init_done flag.
     _ensure_init()
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+
+    if event.get("mode") == "challengers_only":
+        return _run_challengers_only(event)
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
@@ -544,25 +621,22 @@ def handler(event, context):
             final_state = graph.invoke(initial_state)
 
             # ── Challenger producers (config#1223 research observe substrate) ──
-            # Best-effort shadow: run the no-agent + single-agent producers on
-            # the same scanner candidates + prior population, writing each to
-            # signals_shadow/{producer}/. WHOLLY fail-soft — the champion's
-            # signals.json is already persisted; a challenger failure is recorded
-            # (WARN + the runner's errors map) but never fails the run. Runs only
-            # on a real pass (inside the non-dry branch).
-            try:
-                from producers.runner import run_challengers
-                _shadow = run_challengers(
-                    archive, run_date,
-                    run_time=final_state.get("run_time", "") or run_date,
-                    population=_prior_population,
-                )
-                logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
-            except Exception as _ce:  # noqa: BLE001 — defensive; never fail the champion
-                logger.warning(
-                    "[handler] challenger producers post-step failed "
-                    "(shadow mode, non-fatal): %s", _ce,
-                )
+            # FAIL-HARD (Brian ruling 2026-07-03, config#1683): the champion's
+            # signals.json is ALREADY persisted by the graph's archive_writer
+            # node before this step, so a raise here loses no live deliverable —
+            # it turns an experiment gap into a red run instead of weeks of
+            # silently-empty signals_shadow/ (the 6/27 audit, then the 7/3
+            # observe_alerts packaging miss — both invisible behind the previous
+            # WARN swallow). Experiment producers are producers; producers fail
+            # loud (feedback_no_silent_fails). run_challengers itself raises
+            # ChallengerShadowGapError on any producer gap.
+            from producers.runner import run_challengers
+            _shadow = run_challengers(
+                archive, run_date,
+                run_time=final_state.get("run_time", "") or run_date,
+                population=_prior_population,
+            )
+            logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
 
         # ── Trajectory validation (Phase 2 eval) ──────────────────
         _trajectory_result = None

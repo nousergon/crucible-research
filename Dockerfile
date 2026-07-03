@@ -84,6 +84,13 @@ COPY retry.py ${LAMBDA_TASK_ROOT}/
 COPY health_status.py ${LAMBDA_TASK_ROOT}/
 COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
+# observe_alerts.py is a repo-ROOT single-file module imported TRANSITIVELY
+# (producers/runner.py + scoring/leaderboard_producers.py). Omitting it
+# import-killed the whole challenger post-step on 2026-07-03 — the second
+# instance of the #340 packaging class (config#1683). The packaging guard
+# (tests/test_dockerfile_packaging.py) now walks the transitive import graph
+# so any new root module/package missing a COPY fails CI.
+COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
