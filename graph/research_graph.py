@@ -128,7 +128,7 @@ from scoring.focus_list import (
 from archive.manager import ArchiveManager
 from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
@@ -677,7 +677,7 @@ def fetch_data(state: ResearchState) -> dict:
     # RAG availability check (early, so we know before agents start)
     rag_available = False
     try:
-        from alpha_engine_lib.rag import is_available as _rag_is_available
+        from nousergon_lib.rag import is_available as _rag_is_available
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats
@@ -2168,7 +2168,7 @@ def score_aggregator(state: ResearchState) -> dict:
     # AQR-seeded non-zero, so any structural collapse in the LLM's pillar
     # emission would materially distort live final_score with zero prior
     # observation data). Per [[feedback_no_silent_fails]] this fires a
-    # Telegram alert via the canonical alpha_engine_lib.alerts CLI rather
+    # Telegram alert via the canonical nousergon_lib.alerts CLI rather
     # than swallowing — operator needs to see structural pillar failure
     # within minutes of SF completion, not after a week of bad signals.
     #
@@ -3628,7 +3628,7 @@ def archive_writer(state: ResearchState) -> dict:
         )
 
     # Write signals.json (backward compatible).
-    # Universe-membership check sourced from alpha_engine_lib.arcticdb so
+    # Universe-membership check sourced from nousergon_lib.arcticdb so
     # producer (research preflight) and consumer (executor's
     # filter_buy_candidates_to_universe) compare ENTER tickers against the
     # same authoritative ArcticDB universe library. Soft-skip if ArcticDB
@@ -3636,7 +3636,7 @@ def archive_writer(state: ResearchState) -> dict:
     # defense and will surface the gap there.
     universe_symbols: set[str] | None = None
     try:
-        from alpha_engine_lib.arcticdb import get_universe_symbols
+        from nousergon_lib.arcticdb import get_universe_symbols
         universe_symbols = get_universe_symbols(am.bucket)
     except Exception as e:
         logger.warning(

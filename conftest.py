@@ -8,7 +8,7 @@ runtime; tests without this default fail in CI where no region is
 configured. moto's mocked services also require region to be set.
 
 Also pins ``ALPHA_ENGINE_SECRETS_SOURCE=env`` for the test process so
-``alpha_engine_lib.secrets.get_secret()`` (post 2026-05-12 .env→SSM
+``nousergon_lib.secrets.get_secret()`` (post 2026-05-12 .env→SSM
 migration) reads from monkeypatched env vars only — never the real
 SSM Parameter Store. Set at module import time (not just inside a
 fixture body) because ``config.py`` reads secrets at module load,
@@ -40,7 +40,7 @@ def _isolate_secrets_from_ssm(monkeypatch):
     """
     monkeypatch.setenv("ALPHA_ENGINE_SECRETS_SOURCE", "env")
     try:
-        from alpha_engine_lib.secrets import clear_cache
+        from nousergon_lib.secrets import clear_cache
     except ImportError:
         yield
         return

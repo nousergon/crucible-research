@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 # Canonical experiment-package config resolver (alpha-engine-config#1157): the
 # lift of the five inline _find_config / load_config / config_loader copies into
 # the shared-lib chokepoint. _find_config below delegates to it.
-from alpha_engine_lib.config import resolve_experiment_config
+from nousergon_lib.config import resolve_experiment_config
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
     """Locate real config yaml across local, CI, and Lambda environments.
@@ -234,7 +234,7 @@ PILLAR_EMIT_ENABLED: bool = bool(_PILLAR_EMIT_CFG.get("enabled", False))
 # ── Pillar composite (Phase 4 cutover-with-AQR-seed, 2026-05-21) ────────────
 # Per-pillar weights + within-pillar α + legacy_blend weights used by
 # `scoring/composite.py::compute_composite_breakdown`. Σ all weights MUST
-# equal 1.0 (enforced by alpha_engine_lib.pillars.CompositeBreakdown
+# equal 1.0 (enforced by nousergon_lib.pillars.CompositeBreakdown
 # validator). Seeded with AQR/Asness institutional prior at Phase 4 cutover
 # (2026-05-21): quality 0.25 / value 0.20 / momentum 0.20 / growth 0.15 /
 # defensiveness 0.10 / stewardship 0.10, legacy_blend 0/0/0 — pure

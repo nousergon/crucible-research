@@ -2,7 +2,7 @@
 BM25 + vector arc).
 
 The qual analyst's ``query_filings`` tool was previously calling
-``alpha_engine_lib.rag.retrieve()`` with default arguments (vector
+``nousergon_lib.rag.retrieve()`` with default arguments (vector
 mode). After PR 3, it explicitly opts into hybrid mode with
 ``vector_weight=0.7`` and emits a structured INFO log carrying the
 per-result component scores for downstream observability (decision
@@ -32,7 +32,7 @@ def _mock_retrieval_result(
     rerank_score: float | None = None,
     rerank_method: str | None = None,
 ) -> MagicMock:
-    """Stand-in for `alpha_engine_lib.rag.retrieval.RetrievalResult`. We
+    """Stand-in for `nousergon_lib.rag.retrieval.RetrievalResult`. We
     don't import the real dataclass here because the test runs against
     the lib version pinned in requirements.txt, and a mocked result with
     the right attributes is sufficient.
@@ -75,11 +75,11 @@ class TestQualToolsHybridWiring:
             captured.update(kwargs)
             return [_mock_retrieval_result("c1", vec=0.7, combined=0.49)]
 
-        # `from alpha_engine_lib.rag import retrieve` runs INSIDE
+        # `from nousergon_lib.rag import retrieve` runs INSIDE
         # query_filings (deferred import for cold-start cost), so the
         # patch target is the lib symbol — the inline import resolves
         # against the patched module attribute.
-        with patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+        with patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -107,7 +107,7 @@ class TestQualToolsHybridWiring:
             _mock_retrieval_result("c2", vec=None, kw=0.42, combined=0.126),
         ]
 
-        with patch("alpha_engine_lib.rag.retrieve", return_value=results):
+        with patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -125,7 +125,7 @@ class TestQualToolsHybridWiring:
         assert "'combined_score': 0.637" in msg or "'combined_score': 0.126" in msg
 
     def test_query_filings_returns_empty_message_when_no_results(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieve", return_value=[]):
+        with patch("nousergon_lib.rag.retrieve", return_value=[]):
             tool_fn = _get_query_filings_tool()
             out = tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
         assert "No filing data found" in out
@@ -136,7 +136,7 @@ class TestQualToolsHybridWiring:
         """Failure mode contract preserved: a RAG outage must not crash
         the qual agent — return a fallback message and log a WARNING.
         """
-        with patch("alpha_engine_lib.rag.retrieve", side_effect=RuntimeError("neon down")):
+        with patch("nousergon_lib.rag.retrieve", side_effect=RuntimeError("neon down")):
             with caplog.at_level(logging.WARNING, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 out = tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -150,7 +150,7 @@ class TestQualToolsRerankFlag:
     The flag defaults unset (==> no rerank kwargs passed, hybrid-only
     path preserved). When set, `query_filings` widens the candidate
     fetch and passes the rerank knobs through to
-    ``alpha_engine_lib.rag.retrieve()``.
+    ``nousergon_lib.rag.retrieve()``.
 
     These tests patch the module-level ``_RAG_RERANK`` /
     ``_RAG_RERANK_INPUT_N`` constants directly because they're resolved
@@ -167,7 +167,7 @@ class TestQualToolsRerankFlag:
             return [_mock_retrieval_result("c1", vec=0.7, combined=0.49)]
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
-             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+             patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -189,7 +189,7 @@ class TestQualToolsRerankFlag:
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
              patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
-             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+             patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -215,7 +215,7 @@ class TestQualToolsRerankFlag:
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
              patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
-             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+             patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -238,7 +238,7 @@ class TestQualToolsRerankFlag:
         results = [_mock_retrieval_result("c1", vec=0.91, combined=0.637)]
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
-             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+             patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})

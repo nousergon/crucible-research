@@ -422,7 +422,7 @@ class TestBuildManifests:
     def test_latest_sidecar_is_not_indexed(self, mocked_s3):
         """The operator-UX latest.json sidecar is a pointer, not an eval
         artifact — the scanner must skip it."""
-        from alpha_engine_lib.eval_artifacts import eval_latest_key
+        from nousergon_lib.eval_artifacts import eval_latest_key
         _write_eval_flat(
             mocked_s3, judge_run_id="2605091430",
             judged_agent_id="ic_cio", judged_run_id="r1",

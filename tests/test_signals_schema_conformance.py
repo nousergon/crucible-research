@@ -3,7 +3,7 @@
 Complements ``test_signals_producer_contract.py`` (field-set pins on the pure
 builder): that test pins *which keys the producer emits*; this one validates
 *the assembled artifact* against the versioned Slot R contract in
-``alpha_engine_lib.contracts`` (lib >= 0.59.1) — the same schema executor /
+``nousergon_lib.contracts`` (lib >= 0.59.1) — the same schema executor /
 predictor / backtester consumer fixtures and external slot implementations
 validate against.
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 contracts = pytest.importorskip(
-    "alpha_engine_lib.contracts",
+    "nousergon_lib.contracts",
     reason="needs alpha-engine-lib[contracts] >= 0.59.1",
 )
 

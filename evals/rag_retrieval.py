@@ -11,7 +11,7 @@ without a live Neon connection:
    ``render_markdown_report``. No I/O, no DB.
 2. Harness orchestrator — ``run_eval`` calls the pure functions over
    each (query, method, vector_weight) condition. Takes a callable
-   ``retrieve_fn`` so live tests use real ``alpha_engine_lib.rag.retrieve``
+   ``retrieve_fn`` so live tests use real ``nousergon_lib.rag.retrieve``
    and unit tests inject a fake.
 3. CLI runner — ``scripts/run_rag_retrieval_eval.py`` wires the live
    retrieve_fn + reads the YAML test set + writes the markdown report.

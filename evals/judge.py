@@ -24,7 +24,7 @@ Two execution paths share the rubric-rendering + parsing core:
   class that nearly fired on the 2026-05-06 manual midweek SF run.
 
 Composes with:
-- Decision-artifact capture (alpha_engine_lib.decision_capture).
+- Decision-artifact capture (nousergon_lib.decision_capture).
 - Rubric prompts in alpha-engine-config (eval_rubric_*.txt at
   version 1.0.0+, loaded via ``agents.prompt_loader.load_prompt``).
 - Cost telemetry — sync eval LLM calls are tagged
@@ -45,8 +45,8 @@ import boto3
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.decision_capture import DecisionArtifact
+from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
@@ -60,7 +60,7 @@ def _new_judge_run_id() -> str:
     propagate it to every RubricEvalArtifact emitted by that batch.
     Solo / replay / smoke callers get a fresh id per call.
 
-    Delegates to ``alpha_engine_lib.eval_artifacts.new_eval_run_id``
+    Delegates to ``nousergon_lib.eval_artifacts.new_eval_run_id``
     (config#793 canonical-layout swap) — returns a ``YYMMDDHHMM``
     structured-timestamp string (sortable, human-readable) rather than
     the legacy UUIDv4. The timestamp encoding lets operators see when a
@@ -497,7 +497,7 @@ def build_batch_request(
     semantics, just transported via the Batches API).
 
     Delegates payload construction to
-    ``alpha_engine_lib.anthropic_payload.build_batches_request_params``
+    ``nousergon_lib.anthropic_payload.build_batches_request_params``
     (L334 chokepoint — second consumer of the lib's anthropic_payload
     substrate after morning-signal). The chokepoint enforces the
     server-tool ⊥ assistant-prefill invariant on the embedded
@@ -511,7 +511,7 @@ def build_batch_request(
     this function is invoked (the skip artifact is persisted
     client-side without spending a batch slot).
     """
-    from alpha_engine_lib.anthropic_payload import build_batches_request_params
+    from nousergon_lib.anthropic_payload import build_batches_request_params
 
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
@@ -868,7 +868,7 @@ def build_eval_s3_key(
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
 
-    **Canonical ``alpha_engine_lib.eval_artifacts`` layout (config#793
+    **Canonical ``nousergon_lib.eval_artifacts`` layout (config#793
     swap, supersedes the 2026-05-08 Option B nested partition):**
 
     Path shape (flat — no ``{date}/`` sub-partition)::
@@ -876,7 +876,7 @@ def build_eval_s3_key(
         {prefix}{judge_run_id}_{judged_agent_id}.{run_id}.{judge_model}.json
 
     Delegates the key format to
-    ``alpha_engine_lib.eval_artifacts.eval_artifact_key`` (single source
+    ``nousergon_lib.eval_artifacts.eval_artifact_key`` (single source
     of truth — we do NOT hand-roll the format). The eval-judge pipeline
     is a *multi-file-per-run* consumer: one judge batch mints one
     ``judge_run_id`` (now a ``YYMMDDHHMM`` structured timestamp from
@@ -957,7 +957,7 @@ def persist_eval_artifact(
 ) -> str:
     """Write an eval artifact to S3 and return the (dated) S3 key.
 
-    Writes under the canonical flat ``alpha_engine_lib.eval_artifacts``
+    Writes under the canonical flat ``nousergon_lib.eval_artifacts``
     layout (config#793) and, when ``update_latest`` is True, mirrors a
     ``latest.json`` operator-UX sidecar pointing at the just-written key
     (``eval_latest_key``). The dated key remains the forensic source of
@@ -994,7 +994,7 @@ def persist_eval_artifact(
     if update_latest:
         # Operator-UX sidecar mirror. Best-effort: the dated artifact is
         # the durable record; the sidecar is a rebuildable single-fetch
-        # pointer consumed by alpha_engine_lib.load_latest_eval_artifact.
+        # pointer consumed by nousergon_lib.load_latest_eval_artifact.
         sidecar_key = eval_latest_key(prefix)
         sidecar_body = json.dumps(
             {

@@ -6,7 +6,7 @@ layouts (config#793 dual-layout tolerance):
 
 * **Canonical flat** (current writes) —
   ``_eval/{YYMMDDHHMM}_{judged_agent_id}.{run_id}.{judge_model}.json``
-  per the ``alpha_engine_lib.eval_artifacts`` convention. The
+  per the ``nousergon_lib.eval_artifacts`` convention. The
   timestamp-encoded ``judge_run_id`` groups one batch's files by shared
   prefix; no date sub-partition.
 * **Legacy nested** (pre-config#793, NOT backfilled) —
@@ -58,7 +58,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.eval_artifacts import (
     EVAL_LATEST_FILENAME as DEFAULT_LATEST_FILENAME,
 )
 
@@ -134,7 +134,7 @@ def _list_eval_keys(
     """List every eval-artifact S3 key, tolerant of BOTH layouts.
 
     config#793 swapped new writes to the canonical flat
-    ``alpha_engine_lib.eval_artifacts`` layout
+    ``nousergon_lib.eval_artifacts`` layout
     (``{prefix}{YYMMDDHHMM}_{basename}.json``) from the legacy nested
     Option B layout (``{prefix}{judge_run_date}/{judge_run_id}/
     {basename}.json``). Months of historical artifacts live at the

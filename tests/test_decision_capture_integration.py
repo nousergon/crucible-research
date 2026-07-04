@@ -30,7 +30,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     DecisionCaptureWriteError,
     capture_decision,
@@ -497,10 +497,10 @@ class TestCaptureHardFailsOnS3Error:
             "PutObject",
         )
 
-        # capture_decision (in alpha_engine_lib.decision_capture) calls
+        # capture_decision (in nousergon_lib.decision_capture) calls
         # boto3.client("s3") at write time. Patch the lib-side import so
         # the stub takes effect across this whole call.
-        with patch("alpha_engine_lib.decision_capture.boto3.client", return_value=fake_s3):
+        with patch("nousergon_lib.decision_capture.boto3.client", return_value=fake_s3):
             from graph.research_graph import _capture_if_enabled
 
             with pytest.raises(DecisionCaptureWriteError):

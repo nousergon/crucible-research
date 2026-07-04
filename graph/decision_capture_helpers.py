@@ -2,7 +2,7 @@
 Decision-artifact capture helpers — one ``build_capture_payload(...)`` per
 producer node that returns ``(input_data_snapshot, summary)`` tuples.
 
-The actual S3 write happens in ``alpha_engine_lib.decision_capture.capture_decision``.
+The actual S3 write happens in ``nousergon_lib.decision_capture.capture_decision``.
 This module exists so each producer node has a single place to declare
 "what does the agent semantically depend on?" — which fields belong in
 ``input_data_snapshot`` for replay correctness, and what one-line summary

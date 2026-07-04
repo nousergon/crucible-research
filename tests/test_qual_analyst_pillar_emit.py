@@ -95,7 +95,7 @@ class TestDefaultOffBehavior:
     def test_flag_default_off_no_pillar_extraction(self, reloaded_qual):
         """With PILLAR_EMIT_ENABLED=False, only the legacy extraction runs
         and ``pillar_assessments`` returns as an empty dict."""
-        from alpha_engine_lib.agent_schemas import QualAnalystOutput, QualAssessment
+        from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
         qual_parsed = QualAnalystOutput(
             assessments=[
@@ -126,8 +126,8 @@ class TestOnFlagBehavior:
     ):
         """With PILLAR_EMIT_ENABLED=True a second extraction fires and
         its parsed batch is converted to a per-ticker dict."""
-        from alpha_engine_lib.agent_schemas import QualAnalystOutput, QualAssessment
-        from alpha_engine_lib.pillars import (
+        from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
+        from nousergon_lib.pillars import (
             MoatAssessment,
             PillarSubscore,
             QualitativePillarAssessment,
@@ -235,7 +235,7 @@ class TestParseFailureModes:
         exception lands relative to the legacy extraction (here: legacy
         succeeded first, pillar extraction then raises, outer except
         catches → assessments populated but error field set)."""
-        from alpha_engine_lib.agent_schemas import QualAnalystOutput, QualAssessment
+        from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
         qual_parsed = QualAnalystOutput(
             assessments=[QualAssessment(ticker="NVDA", qual_score=80)]
@@ -268,7 +268,7 @@ class TestParseFailureModes:
     def test_strict_mode_raises_on_pillar_parse_error(self, reloaded_qual):
         """Strict-mode parse failure on the pillar extraction must raise —
         symmetric with the legacy QualAnalystOutput strict-mode contract."""
-        from alpha_engine_lib.agent_schemas import QualAnalystOutput, QualAssessment
+        from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
         qual_parsed = QualAnalystOutput(
             assessments=[QualAssessment(ticker="NVDA", qual_score=80)]

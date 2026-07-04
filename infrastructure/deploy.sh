@@ -357,8 +357,8 @@ else:
     # ``exit 1``. Lib alerts CLI exits 0 if any channel (SNS or
     # Telegram) succeeded. Target is ``krepis.alerts`` (config#1339): the
     # alerts module relocated to krepis (MIT) at nousergon-lib v0.66.0 and
-    # ``alpha_engine_lib.alerts`` is now a runpy-silent alias shim, so
-    # ``-m alpha_engine_lib.alerts`` would no-op. krepis is pulled
+    # ``nousergon_lib.alerts`` is now a runpy-silent alias shim, so
+    # ``-m nousergon_lib.alerts`` would no-op. krepis is pulled
     # transitively by the nousergon-lib pin (hard dep ``krepis>=0.2.0``).
     python3 -m krepis.alerts publish \
       --severity error \
@@ -449,7 +449,7 @@ build_and_deploy_alerts() {
 #
 # The eval-judge Lambda runs ``lambda/eval_judge_handler.py`` (LLM-as-judge
 # orchestrator). It needs the same dependency set as the main runner
-# (langchain_anthropic, alpha_engine_lib, prompt loader, schemas), so
+# (langchain_anthropic, nousergon_lib, prompt loader, schemas), so
 # rather than build a parallel image we point this function at the same
 # ECR image and override CMD via ``--image-config`` to
 # ``eval_judge_handler.handler``.

@@ -2,7 +2,7 @@
 
 Hybrid retrieval (vector + Full-Text Search) over SEC filings, earnings transcripts, and thesis history. Provides the qual analyst agents with deep fundamental context beyond headlines and consensus data.
 
-> **Retrieval-only** in this repo. The shared retrieval/db/embeddings/schema code lives in [`alpha_engine_lib.rag`](https://github.com/nousergon/nousergon-lib/tree/main/src/alpha_engine_lib/rag) (since lib v0.3.0; hybrid-retrieval API since v0.6.0). RAG **ingestion** lives in [`nousergon-data/rag/pipelines/`](https://github.com/nousergon/nousergon-data/tree/main/rag/pipelines) and runs as part of the weekly Step Function via that repo's `infrastructure/spot_data_weekly.sh`.
+> **Retrieval-only** in this repo. The shared retrieval/db/embeddings/schema code lives in [`nousergon_lib.rag`](https://github.com/nousergon/nousergon-lib/tree/main/src/nousergon_lib/rag) (since lib v0.3.0; hybrid-retrieval API since v0.6.0). RAG **ingestion** lives in [`nousergon-data/rag/pipelines/`](https://github.com/nousergon/nousergon-data/tree/main/rag/pipelines) and runs as part of the weekly Step Function via that repo's `infrastructure/spot_data_weekly.sh`.
 
 ## Architecture
 
@@ -32,10 +32,10 @@ The lib's `retrieve()` API supports three methods (since v0.6.0):
 
 | Caller | Imports |
 |---|---|
-| `agents/sector_teams/qual_tools.py` | `from alpha_engine_lib.rag import retrieve` (qual analyst's `query_filings` tool, hybrid mode) |
-| `graph/research_graph.py` | `from alpha_engine_lib.rag import is_available` (gates RAG access at graph startup) |
+| `agents/sector_teams/qual_tools.py` | `from nousergon_lib.rag import retrieve` (qual analyst's `query_filings` tool, hybrid mode) |
+| `graph/research_graph.py` | `from nousergon_lib.rag import is_available` (gates RAG access at graph startup) |
 
-The lib re-exports `retrieve`, `ingest_document`, `document_exists`, `embed_texts`, `get_connection`, and `is_available`. Schema is shipped as package data (`alpha_engine_lib.rag/schema.sql`); the `0001_content_tsv.sql` migration is shipped at `alpha_engine_lib.rag/migrations/`.
+The lib re-exports `retrieve`, `ingest_document`, `document_exists`, `embed_texts`, `get_connection`, and `is_available`. Schema is shipped as package data (`nousergon_lib.rag/schema.sql`); the `0001_content_tsv.sql` migration is shipped at `nousergon_lib.rag/migrations/`.
 
 ## Environment Variables
 

@@ -29,7 +29,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # fetchers/price_fetcher.py); [flow_doctor] pulls flow-doctor for the
 # handler's setup_logging call; [rag] pulls psycopg2-binary + pgvector +
 # numpy for the qual analyst's `query_filings` tool which calls
-# `alpha_engine_lib.rag.retrieve()`. Excludes pytest / python-dotenv /
+# `nousergon_lib.rag.retrieve()`. Excludes pytest / python-dotenv /
 # pre-installed Lambda runtime deps (boto3 etc.).
 #
 # IMPORTANT: keep this `@vX.Y.Z` tag in sync with the pin in

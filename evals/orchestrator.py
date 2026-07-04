@@ -42,7 +42,7 @@ from typing import Any, Optional
 
 import boto3
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
+from nousergon_lib.decision_capture import DecisionArtifact
 
 from agents.prompt_loader import load_prompt
 from evals.judge import (
@@ -140,7 +140,7 @@ def expand_lookback_dates(date: str, lookback_days: int) -> list[str]:
 
 def _build_capture_prefix(date: str) -> str:
     """``decision_artifacts/{Y}/{M}/{D}/`` — partition layout that
-    ``alpha_engine_lib.decision_capture`` writes to."""
+    ``nousergon_lib.decision_capture`` writes to."""
     y, m, d = date.split("-")
     return f"decision_artifacts/{y}/{m}/{d}/"
 

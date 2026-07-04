@@ -1,5 +1,5 @@
 """
-Email sender — delegates to ``alpha_engine_lib.email_sender.send_email``
+Email sender — delegates to ``nousergon_lib.email_sender.send_email``
 (the L4356 chokepoint that consolidates Gmail SMTP + AWS SES fallback
 across alpha-engine modules).
 
@@ -7,7 +7,7 @@ Pre-consolidation note: the local Gmail/SES dispatch with App Password
 documentation lived here. The lib chokepoint preserves the same Gmail
 SMTP primary + SES fallback semantics and the same secret resolution
 (``GMAIL_APP_PASSWORD``, ``EMAIL_SENDER``, ``EMAIL_RECIPIENTS``,
-``AWS_REGION``). See ``alpha_engine_lib/email_sender.py`` for the
+``AWS_REGION``). See ``nousergon_lib/email_sender.py`` for the
 canonical docstring.
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from alpha_engine_lib.email_sender import send_email as _lib_send_email
+from nousergon_lib.email_sender import send_email as _lib_send_email
 from config import AWS_REGION
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def send_email(
     sender: str,
     region: str = AWS_REGION,
 ) -> bool:
-    """Backwards-compatible wrapper over ``alpha_engine_lib.email_sender.send_email``.
+    """Backwards-compatible wrapper over ``nousergon_lib.email_sender.send_email``.
 
     Existing callers in this repo pass ``(subject, html_body, plain_body,
     recipients, sender, region)`` — the lib API takes

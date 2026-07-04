@@ -25,7 +25,7 @@ import logging
 from datetime import date, datetime
 from typing import Optional
 
-from alpha_engine_lib.universe import filter_to_universe
+from nousergon_lib.universe import filter_to_universe
 from graph.state_schemas import ADVANCE_DECISIONS
 from scoring.composite import normalize_conviction
 
@@ -500,7 +500,7 @@ def compute_exits_and_open_slots(
     # both downstream prereqs. Drops here are separate from score-based
     # rotations and don't count toward ``max_rotations_per_run`` (they
     # aren't volitional trades, they're reconciliation).
-    # Membership predicate is delegated to ``alpha_engine_lib.universe`` so
+    # Membership predicate is delegated to ``nousergon_lib.universe`` so
     # this Layer 1 filter and the executor's Layer 2 ``signal_reader`` filter
     # share one canonical code path (no silent divergence on universe drift).
     if constituents is not None:

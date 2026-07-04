@@ -1,4 +1,4 @@
-"""Shared RAG retrieval tools — wraps ``alpha_engine_lib.rag.retrieve``
+"""Shared RAG retrieval tools — wraps ``nousergon_lib.rag.retrieve``
 for use by qual / quant / thesis_update agents.
 
 Wave 1 PR E of the institutional data-revamp arc (plan doc:
@@ -13,7 +13,7 @@ Pairs with the producer-side ingest pipelines in alpha-engine-data:
   - Existing: 10-K / 10-Q / 8-K / earnings_transcript / thesis
 
 All retrieval goes through the existing hybrid (BM25 + pgvector)
-retriever in alpha_engine_lib.rag — same one the qual analyst's
+retriever in nousergon_lib.rag — same one the qual analyst's
 ``query_filings`` tool already calls. This module wraps it with:
 
   - **Source-filter helpers** so callers can scope to "news only" /
@@ -103,9 +103,9 @@ def _do_retrieve(
     structured-log emission so each tool wrapper doesn't repeat it.
 
     ``retrieve_fn`` is injectable for tests; production uses
-    ``alpha_engine_lib.rag.retrieve``."""
+    ``nousergon_lib.rag.retrieve``."""
     if retrieve_fn is None:
-        from alpha_engine_lib.rag import retrieve
+        from nousergon_lib.rag import retrieve
         retrieve_fn = retrieve
     retrieve_kwargs = {
         "query": query,

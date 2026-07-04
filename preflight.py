@@ -2,7 +2,7 @@
 Research Lambda preflight: connectivity checks run at the top of each
 handler invocation before any real work starts.
 
-Primitives live in ``alpha_engine_lib.preflight.BasePreflight``; this
+Primitives live in ``nousergon_lib.preflight.BasePreflight``; this
 module composes them into two mode-specific sequences matching the
 research Lambdas.
 
@@ -26,7 +26,7 @@ import os
 
 import pandas as pd
 
-from alpha_engine_lib.preflight import BasePreflight
+from nousergon_lib.preflight import BasePreflight
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class ResearchPreflight(BasePreflight):
         ``universe`` library holds the ~910 S&P 500+400 constituents). Its
         last-row date is the cleanest proxy for "DataPhase1 has run recently."
 
-        Trading-day-aware via ``alpha_engine_lib.dates.is_fresh_in_trading_days``
+        Trading-day-aware via ``nousergon_lib.dates.is_fresh_in_trading_days``
         (lib v0.27.0). max_stale=5 trading days tolerates a research-only
         Saturday run after a holiday-shortened week without false-failing —
         tighter freshness is enforced by the predictor's daily inference,
@@ -94,7 +94,7 @@ class ResearchPreflight(BasePreflight):
         that double-counted weekends/holidays as staleness.
         """
         from datetime import datetime, timezone
-        from alpha_engine_lib.dates import (
+        from nousergon_lib.dates import (
             expected_last_close,
             is_fresh_in_trading_days,
             trading_days_stale,

@@ -53,7 +53,7 @@ def _make_am_with_s3_responses(responses: dict[str, bytes | None]):
     """Build an ArchiveManager with an in-memory S3 client.
 
     The real ArchiveManager.load_regime_substrate now delegates to
-    alpha_engine_lib.eval_artifacts.load_latest_eval_artifact, which
+    nousergon_lib.eval_artifacts.load_latest_eval_artifact, which
     uses self.s3.get_object directly (boto3-like interface). So we
     install a stub on self.s3 that handles get_object."""
     import io

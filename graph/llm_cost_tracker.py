@@ -3,8 +3,8 @@ LLM cost telemetry tracker — wires Anthropic SDK token counts into the
 ``DecisionArtifact`` capture stream and emits a per-call JSONL cost stream.
 
 This is the consumer side of the per-run LLM cost telemetry workstream
-(ROADMAP P1). The price-table primitive lives in ``alpha_engine_lib.cost``
-(v0.2.3+); the capture wrapper lives in ``alpha_engine_lib.decision_capture``.
+(ROADMAP P1). The price-table primitive lives in ``nousergon_lib.cost``
+(v0.2.3+); the capture wrapper lives in ``nousergon_lib.decision_capture``.
 This module is the glue: a LangChain callback handler that pulls
 ``input_tokens`` / ``output_tokens`` / ``cache_read_input_tokens`` /
 ``cache_creation_input_tokens`` from every ``ChatAnthropic`` response, plus
@@ -102,7 +102,7 @@ from typing import Any, Iterator, Literal, Optional
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from alpha_engine_lib.cost import (
+from nousergon_lib.cost import (
     PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
@@ -112,7 +112,7 @@ from alpha_engine_lib.cost import (
     load_tool_fees,
     recompute_cost,
 )
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )

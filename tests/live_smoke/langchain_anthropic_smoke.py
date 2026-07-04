@@ -27,7 +27,7 @@ Stays out of pytest's default collection because the file lives under
 ``tests/live_smoke/`` and the filename doesn't match ``test_*.py``.
 
 Composes with morning-signal #34 (raw-SDK chokepoint) +
-alpha-engine-lib #78 (``alpha_engine_lib.anthropic_payload``).
+alpha-engine-lib #78 (``nousergon_lib.anthropic_payload``).
 """
 
 from __future__ import annotations

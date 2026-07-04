@@ -123,7 +123,7 @@ def _authored_parse_case() -> dict:
 
 def _live_parse_case() -> dict:
     """Capture a real judge response on the sector_quant golden."""
-    from alpha_engine_lib.decision_capture import DecisionArtifact
+    from nousergon_lib.decision_capture import DecisionArtifact
     from evals.judge import evaluate_artifact
 
     artifact = DecisionArtifact(

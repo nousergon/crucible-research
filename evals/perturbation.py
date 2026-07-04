@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from statistics import mean
 from typing import Any, Callable, Optional
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,

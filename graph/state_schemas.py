@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # unchanged. State-machine objects (SectorTeamOutput, MacroEconomistOutput,
 # CIOOutput, InvestmentThesis) stay in this module — they're research-
 # internal state types, not LLM-output contracts.
-from alpha_engine_lib.agent_schemas import (
+from nousergon_lib.agent_schemas import (
     CIORawDecision,
     CIORawDecisionLiteral,
     CIORawOutput,
@@ -60,7 +60,7 @@ from alpha_engine_lib.agent_schemas import (
 )
 
 __all__ = [
-    # Re-exported from alpha_engine_lib.agent_schemas for backward
+    # Re-exported from nousergon_lib.agent_schemas for backward
     # compatibility with existing call sites.
     "CIORawDecision",
     "CIORawDecisionLiteral",
@@ -382,7 +382,7 @@ class PopulationRotationEvent(BaseModel):
 # ── LLM-extraction schemas — lifted to alpha-engine-lib ──────────────────
 #
 # The typed shapes passed to ``llm.with_structured_output(Schema)`` at
-# each agent boundary live in ``alpha_engine_lib.agent_schemas`` (lifted
+# each agent boundary live in ``nousergon_lib.agent_schemas`` (lifted
 # 2026-05-05, lib v0.4.0). They're re-exported at the top of this module
 # so existing imports from ``graph.state_schemas`` keep working
 # unchanged. The split is:

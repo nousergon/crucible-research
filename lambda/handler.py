@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -200,12 +200,12 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
 def is_trading_day(date: datetime.date | None = None) -> bool:
     """Return True if date (default: today) is an NYSE trading day.
 
-    Delegates to the alpha_engine_lib.trading_calendar chokepoint
+    Delegates to the nousergon_lib.trading_calendar chokepoint
     (L4466/config#886) — the scanner Lambda already resolves through the
     lib, and two calendar sources in one repo is the drift class that
     produced the 2026-05-30 calendar-vs-trading-day recovery failure.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return _tc.is_trading_day(d)
 
@@ -231,12 +231,12 @@ def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
     so Friday-stamped signals read Monday morning (age=3d) stay well
     inside tolerance.
 
-    Delegates to the alpha_engine_lib.trading_calendar chokepoint
+    Delegates to the nousergon_lib.trading_calendar chokepoint
     (L4466/config#886) — formerly a repo-local exchange_calendars
     resolver, a second calendar source of truth that could silently
     drift from the lib the scanner resolves through.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
 
@@ -403,7 +403,7 @@ def handler(event, context):
     # Preflight runs AFTER the skip gates — no point paying head_bucket +
     # ANTHROPIC_API_KEY validation on invocations we're about to skip.
     # ANTHROPIC_API_KEY is resolved on-demand via
-    # alpha_engine_lib.secrets.get_secret() at consumer sites.
+    # nousergon_lib.secrets.get_secret() at consumer sites.
     from preflight import ResearchPreflight
     ResearchPreflight(
         bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),

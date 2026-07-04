@@ -102,13 +102,13 @@ def _summarize_snapshot_id(versions: list[int]) -> str:
 def _connect_arctic() -> object:
     """Open the ArcticDB ``universe`` library. Hard-fail on unreachable.
 
-    Thin wrapper over ``alpha_engine_lib.arcticdb.open_universe_lib`` —
+    Thin wrapper over ``nousergon_lib.arcticdb.open_universe_lib`` —
     the lib chokepoint (L2771) centralizes S3 URI construction and
     ``get_library`` error wrapping. Local wrapper retained so
     ``PriceFetchError`` semantics (a research-specific exception type)
     are preserved on the failure path.
     """
-    from alpha_engine_lib.arcticdb import open_universe_lib
+    from nousergon_lib.arcticdb import open_universe_lib
     try:
         return open_universe_lib(_S3_BUCKET)
     except Exception as exc:

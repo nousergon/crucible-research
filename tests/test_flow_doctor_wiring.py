@@ -132,7 +132,7 @@ class TestSetupLoggingAttach:
 
     def test_disabled_attaches_no_flow_doctor_handler(self, monkeypatch, reset_root_logger):
         monkeypatch.setenv("FLOW_DOCTOR_ENABLED", "0")
-        from alpha_engine_lib.logging import setup_logging
+        from nousergon_lib.logging import setup_logging
         setup_logging(
             "research-test-disabled",
             flow_doctor_yaml=str(REPO_ROOT / "flow-doctor.yaml"),
@@ -146,7 +146,7 @@ class TestSetupLoggingAttach:
     def test_enabled_attaches_flow_doctor_handler(
         self, stub_flow_doctor_env, reset_root_logger, temp_flow_doctor_yaml
     ):
-        from alpha_engine_lib.logging import setup_logging, get_flow_doctor
+        from nousergon_lib.logging import setup_logging, get_flow_doctor
         setup_logging(
             "research-test-enabled",
             flow_doctor_yaml=temp_flow_doctor_yaml,
@@ -161,7 +161,7 @@ class TestSetupLoggingAttach:
     def test_exclude_patterns_plumbed_to_handler(
         self, stub_flow_doctor_env, reset_root_logger, temp_flow_doctor_yaml
     ):
-        from alpha_engine_lib.logging import setup_logging
+        from nousergon_lib.logging import setup_logging
         patterns = [r"langgraph retry exhausted", r"anthropic 5\d\d transient"]
         setup_logging(
             "research-test-patterns",
@@ -263,7 +263,7 @@ class TestNoDeadFlowDoctorPlumbing:
     These tests prevent quiet re-introduction.
 
     If a graph node ever LEGITIMATELY needs flow-doctor as an explicit
-    consumer, prefer ``from alpha_engine_lib.logging import get_flow_doctor``
+    consumer, prefer ``from nousergon_lib.logging import get_flow_doctor``
     in the node module itself rather than threading via state — keeps the
     dependency local and the test trivial to update.
     """
@@ -274,8 +274,8 @@ class TestNoDeadFlowDoctorPlumbing:
         assert "state['flow_doctor']" not in text
         # The get_flow_doctor import is dropped too — handler.py only needs
         # setup_logging now. (alerts_handler.py likewise.)
-        assert "from alpha_engine_lib.logging import setup_logging, get_flow_doctor" not in text
-        assert "from alpha_engine_lib.logging import get_flow_doctor" not in text
+        assert "from nousergon_lib.logging import setup_logging, get_flow_doctor" not in text
+        assert "from nousergon_lib.logging import get_flow_doctor" not in text
 
     def test_no_graph_node_consumes_state_flow_doctor(self):
         """If a node ever introduces state["flow_doctor"] as a real consumer,

@@ -37,7 +37,7 @@ finally block.
   ``feedback_no_silent_fails``: telemetry is observability, not
   correctness — a CW outage must not take down a Sat SF run. This
   mirrors how the substrate health check tolerates SNS publish
-  failures (alpha_engine_lib/transparency.py).
+  failures (nousergon_lib/transparency.py).
 
 **Disable for tests / smoke runs:** set
 ``ALPHA_ENGINE_AGENT_TELEMETRY_ENABLED=false``. Default is enabled

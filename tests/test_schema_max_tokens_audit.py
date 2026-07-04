@@ -189,7 +189,7 @@ def _resolve_schema(name: str):
         return getattr(state_schemas, name)
 
     # Fallbacks — schemas that live in module-local files (not the shared
-    # alpha_engine_lib.agent_schemas re-export surface).
+    # nousergon_lib.agent_schemas re-export surface).
     from agents.investment_committee import ic_cio
 
     if hasattr(ic_cio, name):

@@ -45,7 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
 # is visible to ChatAnthropic at call time.
 load_dotenv(override=True)
 
-from alpha_engine_lib.decision_capture import DecisionArtifact  # noqa: E402
+from nousergon_lib.decision_capture import DecisionArtifact  # noqa: E402
 
 from evals.judge import evaluate_artifact, resolve_rubric_for_agent  # noqa: E402
 
@@ -56,7 +56,7 @@ _DEFAULT_AGENTS = ("macro_economist", "ic_cio")
 
 def _build_s3_prefix(date_str: str, agent_id: str) -> str:
     """``decision_artifacts/{YYYY}/{MM}/{DD}/{agent_id}/`` — partition layout
-    matches what ``alpha_engine_lib.decision_capture`` writes."""
+    matches what ``nousergon_lib.decision_capture`` writes."""
     y, m, d = date_str.split("-")
     return f"decision_artifacts/{y}/{m}/{d}/{agent_id}/"
 

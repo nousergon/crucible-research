@@ -279,7 +279,7 @@ def create_qual_tools(context: dict) -> list:
             doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
         """
         try:
-            from alpha_engine_lib.rag import retrieve
+            from nousergon_lib.rag import retrieve
             from datetime import date, timedelta
 
             _rag_stats["attempted"] += 1
@@ -384,7 +384,7 @@ def create_qual_tools(context: dict) -> list:
     # consume the producer-side substrate (news → RAG via PR A.3,
     # filings via existing 8-K/10-K/Q pipelines + PR B Form 4
     # parquet). search_news/filings/transcripts wrap
-    # alpha_engine_lib.rag.retrieve with doc_type-scoped queries +
+    # nousergon_lib.rag.retrieve with doc_type-scoped queries +
     # shared stats + structured INFO logging.
     from agents.sector_teams.rag_retrieval_tools import (
         build_rag_retrieval_tools,

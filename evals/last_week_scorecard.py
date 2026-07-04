@@ -58,7 +58,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # Canonical S3 prefix for the scorecard pipeline. Same partition shape
 # as `predictor/variant_gates/triple_barrier` and the eval-judge pipeline
 # — flat `{prefix}/{run_id}.json` + `{prefix}/latest.json` sidecar per
-# the institutional layout codified in `alpha_engine_lib.eval_artifacts`.
+# the institutional layout codified in `nousergon_lib.eval_artifacts`.
 DEFAULT_SCORECARD_PREFIX = "research/last_week_scorecard"
 
 # Top-K surprise / confirmation lists. Bounded so prompt-injection cost

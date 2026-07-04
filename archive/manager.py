@@ -239,7 +239,7 @@ class ArchiveManager:
               → archive_writer → save_moat_profile (this method)
 
         ``moat_assessment`` shape: dict-dump of
-        ``alpha_engine_lib.pillars.MoatAssessment`` — at minimum carries
+        ``nousergon_lib.pillars.MoatAssessment`` — at minimum carries
         ``primary_type``; usually also ``secondary_types``, ``trend``,
         and ``rationale``. Permissive (extra="allow") on the lib side so
         forward-compat LLM drift is tolerated here too.
@@ -660,7 +660,7 @@ class ArchiveManager:
         consumes this as a strong prior; macro agent remains the final
         regime authority.
 
-        Delegates to ``alpha_engine_lib.eval_artifacts.load_latest_eval_artifact``
+        Delegates to ``nousergon_lib.eval_artifacts.load_latest_eval_artifact``
         for canonical sidecar→artifact resolution. The lib helper
         returns ``None`` gracefully on any failure mode (missing
         sidecar, malformed pointer, missing artifact body, parse
@@ -669,7 +669,7 @@ class ArchiveManager:
         the substrate-influences-LLM layer; the macro agent's final
         regime call is still authoritative for downstream consumers.
         """
-        from alpha_engine_lib.eval_artifacts import load_latest_eval_artifact
+        from nousergon_lib.eval_artifacts import load_latest_eval_artifact
 
         return load_latest_eval_artifact(
             self.s3, bucket=self.bucket, prefix="regime",
@@ -683,14 +683,14 @@ class ArchiveManager:
         ``regime/{YYMMDDHHMM}.json`` shape; ``regime/latest.json`` is a
         pure pointer sidecar (skipped by the lib helper).
 
-        Delegates to ``alpha_engine_lib.eval_artifacts.list_eval_artifacts``,
+        Delegates to ``nousergon_lib.eval_artifacts.list_eval_artifacts``,
         which returns the parsed payloads oldest → newest, caps to the
         ``n_recent`` most-recent runs, and degrades gracefully to ``[]``
         on any listing/read failure (pre-deploy state, S3 hiccup, parse
         error). Used by the consolidated brief's regime-trend block;
         callers must tolerate an empty / short list.
         """
-        from alpha_engine_lib.eval_artifacts import list_eval_artifacts
+        from nousergon_lib.eval_artifacts import list_eval_artifacts
 
         try:
             return list_eval_artifacts(

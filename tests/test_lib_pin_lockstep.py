@@ -12,10 +12,10 @@ This drift class has bitten production twice:
 
   - 2026-05-06: ``requirements.txt`` bumped @v0.4.0 → @v0.5.1 but the
     Dockerfile kept installing v0.3.0; Research Lambda canary failed
-    with ``ModuleNotFoundError: alpha_engine_lib.agent_schemas``.
+    with ``ModuleNotFoundError: nousergon_lib.agent_schemas``.
   - 2026-05-12: predictor PR #147 bumped ``requirements.txt`` →
     v0.12.0 but missed ``requirements-lambda.txt``; predictor Lambda
-    canary failed with ``ModuleNotFoundError: alpha_engine_lib.secrets``.
+    canary failed with ``ModuleNotFoundError: nousergon_lib.secrets``.
 
 The Dockerfile comment block warns about this — clearly not enough.
 This test re-greps all three files on every CI run so a future

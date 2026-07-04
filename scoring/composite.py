@@ -379,7 +379,7 @@ def compute_composite_breakdown(
 ):
     """Compute the Phase 4 7-term composite breakdown.
 
-    Returns a ``CompositeBreakdown`` (from alpha_engine_lib.pillars) with:
+    Returns a ``CompositeBreakdown`` (from nousergon_lib.pillars) with:
       * 6 ``PillarContribution`` entries (or empty when both pillar_assessment
         and factor_profile are absent — pure legacy path)
       * 1 ``LegacyComponentBlend`` carrying the opaque legacy quant/qual/factor
@@ -409,7 +409,7 @@ def compute_composite_breakdown(
                                      blend (weight kept, value treated as 0).
       * ALL inputs None           → score_failed=True, final_score=None.
     """
-    from alpha_engine_lib.pillars import (
+    from nousergon_lib.pillars import (
         CompositeBreakdown,
         LegacyComponentBlend,
         PillarContribution,
