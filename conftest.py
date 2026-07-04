@@ -13,6 +13,12 @@ migration) reads from monkeypatched env vars only — never the real
 SSM Parameter Store. Set at module import time (not just inside a
 fixture body) because ``config.py`` reads secrets at module load,
 which happens during test collection before per-test fixtures fire.
+
+Also isolates ``config.get_research_params()`` from live S3
+(``config#799``) — any environment with real AWS creds for the
+``alpha-engine-research`` bucket (e.g. this project's own executor IAM
+role) would otherwise make tests silently depend on whatever the
+backtester has currently written to ``config/research_params.json``.
 """
 
 from __future__ import annotations
@@ -47,3 +53,22 @@ def _isolate_secrets_from_ssm(monkeypatch):
     clear_cache()
     yield
     clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_research_params_from_s3(monkeypatch):
+    """Force ``config.get_research_params()`` to resolve to pure YAML
+    defaults for the duration of each test, regardless of what the
+    backtester has actually written to S3 or of any AWS creds present
+    in the process. Tests that want to exercise a specific
+    ``research_params`` value (e.g. ``cio_mode``) should monkeypatch
+    ``get_research_params`` directly rather than relying on this
+    fixture's default.
+    """
+    import config as research_config
+
+    monkeypatch.setattr(research_config, "_research_params_cache", None)
+    monkeypatch.setattr(
+        research_config, "_load_research_params_from_s3", lambda: None
+    )
+    yield

@@ -563,6 +563,13 @@ _RP_DEFAULTS: dict = {
     "insider_unique_buyers_boost": float(_rp_yaml.get("insider_unique_buyers_boost", 2.5)),
     "insider_net_sentiment_threshold": float(_rp_yaml.get("insider_net_sentiment_threshold", -0.5)),
     "insider_net_sentiment_cap": float(_rp_yaml.get("insider_net_sentiment_cap", -2.0)),
+    # CIO mode override (config#799) — written by backtester's
+    # optimizer/pipeline_optimizer.py:apply_cio_mode when its tightened
+    # promotion gate (backtester#171) fires a sustained CIO-underperformance
+    # recommendation. "deterministic" routes run_cio through
+    # _fallback_selection (skips the LLM call); any other value (including
+    # absent) is a no-op and preserves today's LLM-evaluated behavior.
+    "cio_mode": str(_rp_yaml.get("cio_mode", "")),
 }
 
 # Module-level cache: populated once per cold-start by get_research_params().

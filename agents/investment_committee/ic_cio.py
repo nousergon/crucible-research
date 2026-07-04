@@ -22,6 +22,7 @@ from config import (
     PER_STOCK_MODEL,
     MAX_TOKENS_STRATEGIC,
     ANTHROPIC_API_KEY,
+    get_research_params,
 )
 from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
@@ -176,6 +177,21 @@ def run_cio(
             "advanced_tickers": [],
             "entry_theses": {},
         }
+
+    # config#799: backtester's optimizer/pipeline_optimizer.py:apply_cio_mode
+    # writes cio_mode="deterministic" to S3 research_params.json when its
+    # promotion gate (backtester#171) finds the CIO's LLM evaluation is
+    # underperforming a plain combined-score ranking. Bypass the LLM call
+    # entirely and advance by floor via the existing fallback path — do NOT
+    # invoke the LLM first and discard its output, since that would still
+    # incur the cost/latency this mode exists to avoid.
+    if get_research_params().get("cio_mode") == "deterministic":
+        log.info(
+            "[cio] cio_mode=deterministic — bypassing LLM evaluation, "
+            "advancing floor=%d by combined score",
+            floor,
+        )
+        return _fallback_selection(candidates, floor)
 
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
