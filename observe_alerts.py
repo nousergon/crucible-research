@@ -10,12 +10,11 @@ neither ``scanner/leaderboard/`` nor ``research/producer_leaderboard/`` written
 to S3 — yet every one of those failures only ever produced a swallowed WARN, so
 the gap went unseen for weeks (its earn-its-keep cohort gate has ZERO data).
 
-This wraps the canonical ``krepis.alerts.publish`` in a best-effort call so the
-operator is paged (SNS + Telegram) within minutes of SF completion. It mirrors
-the existing inline pattern in ``graph/research_graph.py`` (pillar-coverage /
-pillar-distribution gates). Alerting is SECONDARY observability: if the publish
-itself fails we log + return False — the WARN log + CW Logs alarm remain the
-backstop — and we NEVER raise (the caller is on an observe-only, fail-soft path).
+Routes through ``ops_alerts.publish_ops_alert`` (SNS + flow-doctor forum topics)
+instead of raw ``krepis.alerts.publish(telegram=True)``. Alerting is SECONDARY
+observability: if the publish itself fails we log + return False — the WARN log
++ CW Logs alarm remain the backstop — and we NEVER raise (the caller is on an
+observe-only, fail-soft path).
 """
 from __future__ import annotations
 
@@ -33,23 +32,19 @@ def publish_observe_alert(
 ) -> bool:
     """Publish a LOUD alert for an always-on observe-artifact failure/gap.
 
-    Best-effort (SNS + Telegram via the canonical ``krepis.alerts.publish``).
-    Returns ``True`` iff the alert was published; NEVER raises — alerting is
-    secondary observability and the caller is on a fail-soft path.
+    Best-effort (SNS + flow-doctor). Returns ``True`` iff the alert was
+    published; NEVER raises — alerting is secondary observability and the
+    caller is on a fail-soft path.
     """
     try:
-        from krepis.alerts import publish as alerts_publish
+        from ops_alerts import publish_ops_alert
 
-        kwargs: dict = {
-            "message": message,
-            "severity": severity,
-            "source": source,
-            "sns": True,
-            "telegram": True,
-        }
-        if dedup_key is not None:
-            kwargs["dedup_key"] = dedup_key
-        alerts_publish(**kwargs)
+        publish_ops_alert(
+            message,
+            severity=severity,
+            source=source,
+            dedup_key=dedup_key,
+        )
         return True
     except Exception as exc:  # noqa: BLE001 — secondary observability, never fatal
         logger.warning(
