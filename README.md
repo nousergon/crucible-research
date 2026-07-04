@@ -1,8 +1,8 @@
 # alpha-engine-research
 
-> Part of [**Nous Ergon**](https://nousergon.ai) — a harness for rigorous AI/ML experiments in finance: an equity research-and-trading system instrumented end-to-end. Repo and S3 names use the underlying project name `alpha-engine`.
+> Part of [**Crucible**](https://nousergon.ai) — a [Nous Ergon](https://nousergon.ai) product: a harness for rigorous AI/ML experiments in finance, an equity research-and-trading system instrumented end-to-end. Repo and S3 names use the underlying project codename `alpha-engine`.
 
-[![Part of Nous Ergon](https://img.shields.io/badge/Part_of-Nous_Ergon-1a73e8?style=flat-square)](https://nousergon.ai)
+[![Part of Crucible](https://img.shields.io/badge/Part_of-Crucible-1a73e8?style=flat-square)](https://nousergon.ai)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?style=flat-square)](https://www.python.org/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1C3D5A?style=flat-square)](https://langchain-ai.github.io/langgraph/)
 [![Anthropic Claude](https://img.shields.io/badge/Anthropic_Claude-1a73e8?style=flat-square)](https://www.anthropic.com/)
