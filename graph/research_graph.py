@@ -2142,8 +2142,9 @@ def score_aggregator(state: ResearchState) -> dict:
     # path remain load-bearing.
     if pillar_coverage_skip_count > 0:
         try:
-            from krepis.alerts import publish as alerts_publish
-            alerts_publish(
+            from ops_alerts import publish_ops_alert
+
+            publish_ops_alert(
                 message=(
                     f"[score_aggregator] pillar coverage gap — skipped "
                     f"{pillar_coverage_skip_count} signal(s) due to "
@@ -2153,8 +2154,6 @@ def score_aggregator(state: ResearchState) -> dict:
                 ),
                 severity="WARN",
                 source="research:score_aggregator",
-                sns=True,
-                telegram=True,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(
@@ -2334,13 +2333,12 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
     )
     try:
-        from krepis.alerts import publish as alerts_publish
-        alerts_publish(
+        from ops_alerts import publish_ops_alert
+
+        publish_ops_alert(
             message=msg,
             severity="WARN",
             source="research:score_aggregator",
-            sns=True,
-            telegram=True,
             dedup_key=dedup_key,
         )
     except Exception as e:  # noqa: BLE001

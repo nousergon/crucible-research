@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir "nousergon-lib[flow_doctor] @ git+https://github.
 COPY config/ ${LAMBDA_TASK_ROOT}/config/
 COPY config.py ${LAMBDA_TASK_ROOT}/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
+COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 
 # Alerts Lambda handler

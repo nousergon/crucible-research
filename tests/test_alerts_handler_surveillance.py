@@ -24,10 +24,9 @@ import pytest
 from botocore.exceptions import ClientError
 
 # alerts_handler.py lives under lambda/ which is not a package; add to path.
-sys.path.insert(
-    0,
-    str(Path(__file__).resolve().parent.parent / "lambda"),
-)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "lambda"))
+sys.path.insert(0, str(_REPO_ROOT))
 
 import alerts_handler as ah  # noqa: E402
 
@@ -276,12 +275,12 @@ class TestHandlerIntegration:
 
     @patch("alerts_handler.is_market_open", return_value=True)
     @patch("preflight.ResearchPreflight")
-    @patch("alerts_handler.send_message")
+    @patch("ops_alerts.publish_ops_alert")
     @patch("alerts_handler.boto3.client")
     def test_stale_heartbeat_fires_critical_push_and_short_circuits(
         self,
         mock_boto3_client,
-        mock_send_message,
+        mock_publish_ops_alert,
         _mock_preflight,
         _mock_open,
         stale_heartbeat_payload,
@@ -295,22 +294,23 @@ class TestHandlerIntegration:
         result = ah.handler({}, None)
 
         assert result["status"] == "DAEMON_DOWN"
-        mock_send_message.assert_called_once()
-        msg = mock_send_message.call_args.args[0]
+        mock_publish_ops_alert.assert_called_once()
+        msg = mock_publish_ops_alert.call_args.args[0]
+        assert mock_publish_ops_alert.call_args.kwargs["severity"] == "critical"
         assert "DAEMON DOWN" in msg
         # No call to research.db download — handler short-circuited.
         s3.download_file.assert_not_called()
 
     @patch("alerts_handler.is_market_open", return_value=True)
     @patch("preflight.ResearchPreflight")
-    @patch("alerts_handler.send_message")
+    @patch("ops_alerts.publish_ops_alert")
     @patch("alerts_handler.send_rollup")
     @patch("alerts_handler.boto3.client")
     def test_clean_run_emits_no_findings_when_universe_aligned(
         self,
         mock_boto3_client,
         mock_send_rollup,
-        mock_send_message,
+        mock_publish_ops_alert,
         _mock_preflight,
         _mock_open,
         fresh_heartbeat_payload,
@@ -344,18 +344,18 @@ class TestHandlerIntegration:
         assert result["status"] == "OK"
         assert result["findings_count"] == 0
         mock_send_rollup.assert_not_called()
-        mock_send_message.assert_not_called()
+        mock_publish_ops_alert.assert_not_called()
 
     @patch("alerts_handler.is_market_open", return_value=True)
     @patch("preflight.ResearchPreflight")
-    @patch("alerts_handler.send_message")
+    @patch("ops_alerts.publish_ops_alert")
     @patch("alerts_handler.send_rollup")
     @patch("alerts_handler.boto3.client")
     def test_universe_drift_emits_finding(
         self,
         mock_boto3_client,
         mock_send_rollup,
-        mock_send_message,
+        mock_publish_ops_alert,
         _mock_preflight,
         _mock_open,
         fresh_heartbeat_payload,
@@ -381,7 +381,7 @@ class TestHandlerIntegration:
         mock_send_rollup.assert_called_once()
         findings = mock_send_rollup.call_args.args[0]
         assert any("Universe drift" in f for f in findings)
-        mock_send_message.assert_not_called()
+        mock_publish_ops_alert.assert_not_called()
 
 
 def _wire_s3_mock(mock_boto3_client, *, heartbeat, latest_prices, seeded_db_src, monkeypatch):

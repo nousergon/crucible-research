@@ -175,6 +175,7 @@ def test_publish_carries_dedup_key():
         f"dedup_key must namespace this incident class; got "
         f"{kwargs['dedup_key']!r}"
     )
+    assert kwargs["telegram"] is False
 
 
 def test_dedup_key_uses_run_date_from_thesis_when_present():
