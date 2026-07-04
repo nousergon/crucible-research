@@ -81,7 +81,7 @@ setup_logging(
 
 logger = logging.getLogger(__name__)
 
-from alpha_engine_lib.telegram import send_message, send_rollup
+from alpha_engine_lib.telegram import send_rollup
 from config import (
     AWS_REGION,
     PRICE_MOVE_THRESHOLD_PCT,
@@ -285,7 +285,14 @@ def handler(event, context):
     is_stale, stale_reason = _heartbeat_stale(heartbeat, _HEARTBEAT_STALE_SEC)
     if is_stale:
         msg = f"\U0001f6a8 *DAEMON DOWN*\n{stale_reason}"
-        send_message(msg)  # default disable_notification=False → push
+        from ops_alerts import publish_ops_alert
+
+        publish_ops_alert(
+            msg,
+            severity="critical",
+            source="research:alerts_handler",
+            dedup_key=f"daemon_down_{stale_reason[:80]}",
+        )
         logger.error("Heartbeat stale: %s", stale_reason)
         return {"status": "DAEMON_DOWN", "reason": stale_reason}
 

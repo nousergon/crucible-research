@@ -91,6 +91,7 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # (tests/test_dockerfile_packaging.py) now walks the transitive import graph
 # so any new root module/package missing a COPY fails CI.
 COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
+COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
