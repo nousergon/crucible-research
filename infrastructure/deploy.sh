@@ -595,10 +595,19 @@ deploy_rationale_clustering() {
     # hit the 600s ceiling at event 269. Setting timeout on EVERY
     # update (not just create) so existing Lambdas pick up the bump
     # without a destroy-recreate cycle.
+    # Bump memory 1024 → 3008MB (config#1650 item 3): the SF Task
+    # ceiling was already synced to the Lambda's 900s timeout
+    # (nousergon-data#606), but the clustering pass still chronically
+    # timed out — Lambda CPU scales with memory, so this Lambda was
+    # CPU-starved for a compute-bound clustering workload. Set on
+    # EVERY update (not just create), same rationale as the timeout
+    # bump above: existing Lambdas must pick this up without a
+    # destroy-recreate cycle.
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
       --image-config "$IMAGE_CONFIG" \
       --timeout 900 \
+      --memory-size 3008 \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -608,7 +617,7 @@ deploy_rationale_clustering() {
       --image-config "$IMAGE_CONFIG" \
       --role "$ROLE_ARN" \
       --timeout 900 \
-      --memory-size 1024 \
+      --memory-size 3008 \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
