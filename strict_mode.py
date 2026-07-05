@@ -1,7 +1,7 @@
 """Strict-mode validation env-var helper.
 
 Lives at repo root (alongside ``preflight.py``, ``retry.py``,
-``health_status.py``) so both ``graph/research_graph.py`` (state-shape
+``data_manifest.py``) so both ``graph/research_graph.py`` (state-shape
 validators) and the ``agents/`` LLM-extraction sites can import it
 without a circular import. ``graph`` depends on ``agents``, so a shared
 helper at either layer would create a one-way violation; root level is

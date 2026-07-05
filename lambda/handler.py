@@ -657,13 +657,20 @@ def handler(event, context):
 
         # Write health status on success
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             _population = final_state.get("new_population", [])
             _rotations = final_state.get("population_rotation_events", [])
+            _email_sent = final_state.get("email_sent", False)
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="ok",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=True),
+                    Deliverable(
+                        name="research_email",
+                        required=False,
+                        produced=_email_sent,
+                    ),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 summary={
@@ -671,13 +678,14 @@ def handler(event, context):
                     "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
                     "market_regime": final_state.get("market_regime", "unknown"),
                 },
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)
 
         # Write data manifest
         try:
-            from health_status import write_data_manifest
+            from data_manifest import write_data_manifest
             write_data_manifest(
                 bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
@@ -789,14 +797,16 @@ def handler(event, context):
 
         # Write health status on failure
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="failed",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=False),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 error=str(e),
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)
