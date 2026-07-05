@@ -15,7 +15,7 @@ on:
       - 'archive/**'
       - 'evals/**'
       - 'thinktank/**'
-      - 'health_status.py'
+      - 'data_manifest.py'
       - 'config.py'
       - 'requirements*.txt'
       - 'Dockerfile*'

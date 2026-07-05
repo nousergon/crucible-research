@@ -42,7 +42,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.83.0" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.86.0" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
@@ -81,7 +81,7 @@ COPY thinktank/ ${LAMBDA_TASK_ROOT}/thinktank/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
-COPY health_status.py ${LAMBDA_TASK_ROOT}/
+COPY data_manifest.py ${LAMBDA_TASK_ROOT}/
 COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # observe_alerts.py is a repo-ROOT single-file module imported TRANSITIVELY
