@@ -304,12 +304,12 @@ class TestHandlerIntegration:
     @patch("alerts_handler.is_market_open", return_value=True)
     @patch("preflight.ResearchPreflight")
     @patch("ops_alerts.publish_ops_alert")
-    @patch("alerts_handler.send_rollup")
+    @patch("ops_alerts.publish_ops_digest")
     @patch("alerts_handler.boto3.client")
     def test_clean_run_emits_no_findings_when_universe_aligned(
         self,
         mock_boto3_client,
-        mock_send_rollup,
+        mock_publish_ops_digest,
         mock_publish_ops_alert,
         _mock_preflight,
         _mock_open,
@@ -343,18 +343,18 @@ class TestHandlerIntegration:
 
         assert result["status"] == "OK"
         assert result["findings_count"] == 0
-        mock_send_rollup.assert_not_called()
+        mock_publish_ops_digest.assert_not_called()
         mock_publish_ops_alert.assert_not_called()
 
     @patch("alerts_handler.is_market_open", return_value=True)
     @patch("preflight.ResearchPreflight")
     @patch("ops_alerts.publish_ops_alert")
-    @patch("alerts_handler.send_rollup")
+    @patch("ops_alerts.publish_ops_digest")
     @patch("alerts_handler.boto3.client")
     def test_universe_drift_emits_finding(
         self,
         mock_boto3_client,
-        mock_send_rollup,
+        mock_publish_ops_digest,
         mock_publish_ops_alert,
         _mock_preflight,
         _mock_open,
@@ -378,8 +378,8 @@ class TestHandlerIntegration:
 
         assert result["status"] == "OK"
         assert result["findings_count"] >= 1
-        mock_send_rollup.assert_called_once()
-        findings = mock_send_rollup.call_args.args[0]
+        mock_publish_ops_digest.assert_called_once()
+        findings = mock_publish_ops_digest.call_args.args[0]
         assert any("Universe drift" in f for f in findings)
         mock_publish_ops_alert.assert_not_called()
 

@@ -81,7 +81,6 @@ setup_logging(
 
 logger = logging.getLogger(__name__)
 
-from alpha_engine_lib.telegram import send_rollup
 from config import (
     AWS_REGION,
     PRICE_MOVE_THRESHOLD_PCT,
@@ -325,8 +324,15 @@ def handler(event, context):
     # 5. Emit findings as silent rollup digest (no phone buzz unless heartbeat
     #    fired above)
     if findings:
+        from ops_alerts import publish_ops_digest
+
         header = f"Surveillance Digest — {len(findings)} finding{'s' if len(findings) != 1 else ''}"
-        send_rollup(findings, header=header)
+        publish_ops_digest(
+            findings,
+            header=header,
+            source="research:alerts_handler",
+            dedup_key=f"surveillance_digest_{header}",
+        )
 
     return {
         "status": "OK",
