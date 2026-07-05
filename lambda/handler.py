@@ -146,11 +146,23 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
             {tid: v["n_obs"] for tid, v in team_accuracy.items()},
         )
     except Exception as tae:
-        # Shadow-mode WARN-not-fatal — see docstring.
+        # §61 pre-persistence carve-out: this producer runs BEFORE the
+        # graph persists the champion signals.json (it feeds adaptive slot
+        # allocation), so it cannot raise without sacrificing the live
+        # deliverable. Non-fatal — but the failure now lands on an ALARMED
+        # surface with a consumer (observe_alerts → SNS + flow-doctor forum),
+        # not a bare WARN nobody reads (ARCHITECTURE.md §61 / config#1684).
         logger.warning(
             "team_accuracy emission failed (shadow mode — non-fatal): %s",
             tae,
             exc_info=True,
+        )
+        from observe_alerts import publish_observe_alert
+        publish_observe_alert(
+            f"team_accuracy producer emission FAILED (non-fatal, live path "
+            f"unaffected): {tae}",
+            source="research-runner:team_accuracy",
+            dedup_key=f"team_accuracy_emit_fail:{trading_date}",
         )
 
 
@@ -188,12 +200,22 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
             sc.n_resolved_signals_21d,
         )
     except Exception as sce:
-        # Shadow-mode WARN-not-fatal. Promote to ERROR + raise in Phase 2
-        # when CIO/Macro prompts depend on the scorecard artifact.
+        # §61 pre-persistence carve-out (config#1684): runs before the graph
+        # persists signals.json, so it cannot raise without losing the live
+        # deliverable. Non-fatal — but promoted NOW from a bare WARN to an
+        # ALARMED surface with a consumer (observe_alerts → SNS + flow-doctor).
+        # The "Phase 2 promotion" the old comment deferred is this.
         logger.warning(
             "Scorecard emission failed (shadow mode — non-fatal): %s",
             sce,
             exc_info=True,
+        )
+        from observe_alerts import publish_observe_alert
+        publish_observe_alert(
+            f"scorecard producer emission FAILED (non-fatal, live path "
+            f"unaffected): {sce}",
+            source="research-runner:scorecard",
+            dedup_key=f"scorecard_emit_fail:{trading_date}",
         )
 
 
@@ -514,7 +536,17 @@ def handler(event, context):
             if n_memories:
                 logger.info("Extracted %d new episodic memories from outcomes", n_memories)
         except Exception as _me:
+            # §61 pre-persistence carve-out (config#1684): episodic memory
+            # feeds the graph, so it must run first and cannot raise. Non-fatal,
+            # but loud on an alarmed surface, not a silent WARN.
             logger.warning("memory extraction skipped: %s", _me)
+            from observe_alerts import publish_observe_alert
+            publish_observe_alert(
+                f"episodic memory extraction FAILED (non-fatal, live path "
+                f"unaffected): {_me}",
+                source="research-runner:memory_extraction",
+                dedup_key=f"memory_extraction_fail:{run_date}",
+            )
 
         # ── Auto-gate: stub-LLM dry-run before real pass ─────────────
         # Catches bugs below the LLM layer (graph orchestration, schema
@@ -651,7 +683,21 @@ def handler(event, context):
                     "Trajectory validation failed: %s", _trajectory_result["failures"]
                 )
         except Exception as _te:
+            # §61 (config#1684): an INFRA error in the trajectory validator
+            # (distinct from a validation that ran and FAILED, handled+ERROR'd
+            # above) was silently swallowed. Now loud on an alarmed surface.
+            # This runs post-persistence so it is *eligible* to raise, but
+            # reding an already-shipped run on an eval-infra error has a wide
+            # blast radius (SF FAILED → fleet-SF-watch), so we take the alarmed
+            # carve-out; promoting to a hard raise is a follow-up judgment call.
             logger.warning("trajectory validation skipped: %s", _te)
+            from observe_alerts import publish_observe_alert
+            publish_observe_alert(
+                f"trajectory validation INFRA error (non-fatal, signals already "
+                f"shipped): {_te}",
+                source="research-runner:trajectory_validation",
+                dedup_key=f"trajectory_validation_infra_fail:{run_date}",
+            )
 
         archive.close()
 
