@@ -29,11 +29,15 @@ def _format_rollup(findings: list[str], *, header: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _telegram_notifier_for_topic(fd, topic) -> object | None:
-    from flow_doctor.notify.telegram import TelegramNotifier
-    from nousergon_lib.flow_doctor_fleet import fleet_telegram_thread_id_env
+# Matches flow-doctor.yaml + fleet_telegram_forum_topics_ops.md — no lib
+# flow_doctor_fleet import until research lib-pin catches up (v0.82.0+).
+_OPS_HEALTH_THREAD_ENV = "FLOW_DOCTOR_TELEGRAM_THREAD_OPS_HEALTH"
 
-    want = os.environ.get(fleet_telegram_thread_id_env(topic))
+
+def _telegram_notifier_for_thread_env(fd, thread_env: str) -> object | None:
+    from flow_doctor.notify.telegram import TelegramNotifier
+
+    want = os.environ.get(thread_env)
     if not want:
         return None
     for notifier in fd._notifiers:
@@ -110,9 +114,7 @@ def publish_ops_digest(
         )
         return False
 
-    from nousergon_lib.flow_doctor_fleet import FleetTelegramTopic
-
-    notifier = _telegram_notifier_for_topic(fd, FleetTelegramTopic.OPS_HEALTH)
+    notifier = _telegram_notifier_for_thread_env(fd, _OPS_HEALTH_THREAD_ENV)
     if notifier is None:
         logger.warning(
             "ops-health Telegram notifier unavailable — digest not sent (source=%s)",

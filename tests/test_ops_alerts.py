@@ -42,7 +42,7 @@ def test_publish_ops_digest_false_when_flow_doctor_inactive(_mock_fd):
     assert publish_ops_digest(["drift"], source="test") is False
 
 
-@patch("ops_alerts._telegram_notifier_for_topic")
+@patch("ops_alerts._telegram_notifier_for_thread_env")
 @patch("ops_alerts.get_flow_doctor")
 def test_publish_ops_digest_sends_silent_raw(mock_get_fd, mock_find_notifier):
     mock_notifier = MagicMock()
