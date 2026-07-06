@@ -62,7 +62,11 @@ _ALLOWLIST: dict[str, set[int]] = {
     # (+1 line near the top) and a default_request_timeout= kwarg on the
     # strategic-tier ChatAnthropic above the critic (+1 line); net +2.
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {567},
+    # then 567 → 579 by the config#1753 rendered-prompt-capture fix:
+    # ``run_macro_agent``'s return dict grew a ``"rendered_prompt"`` key
+    # (+ explanatory comment, 12 lines total) above the critic function;
+    # net +12. Same intentional 512-literal critic call, just relocated.
+    "agents/macro_agent.py": {579},
 }
 
 

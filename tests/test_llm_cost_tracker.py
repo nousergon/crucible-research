@@ -413,6 +413,121 @@ class TestPromptPropagation:
         assert ctx.prompt_version_hash == "deadbeef"
         assert ctx.user_prompt == "You are the CIO. Decide."
 
+    def test_rendered_prompt_kwarg_overrides_template_text(
+        self, patched_pricing_path, tmp_path,
+    ):
+        """config#1753: passing ``rendered_prompt=`` at call time should
+        populate ``FullPromptContext.user_prompt`` with the SUBSTITUTED
+        string, not the raw ``LoadedPrompt.text`` template — the root-cause
+        bug was ``user_prompt`` always reflecting the unrendered template
+        (literal ``{placeholder}`` text), never what was actually sent to
+        the LLM via ``HumanMessage(content=...)``.
+        """
+        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from agents.prompt_loader import LoadedPrompt
+
+        template = LoadedPrompt(
+            name="ic_cio_evaluation",
+            text="Ratings: {ratings_text}\nExits: {exit_text}",
+            version="1.0.0",
+            hash="cafef00d",
+            source_path=tmp_path / "fake.txt",
+        )
+        rendered = "Ratings: tech=overweight\nExits: none this cycle"
+
+        with track_llm_cost(
+            agent_id="agent_rendered",
+            prompt=template,
+            rendered_prompt=rendered,
+            model_name_fallback="claude-sonnet-4-6",
+        ):
+            pass
+
+        _, ctx = pop_metadata_for("agent_rendered")
+        assert ctx.user_prompt == rendered
+        # Unsubstituted placeholders must NOT leak into the captured artifact.
+        assert "{ratings_text}" not in ctx.user_prompt
+        assert "{exit_text}" not in ctx.user_prompt
+        # prompt_version_hash still stamped from the LoadedPrompt template —
+        # rendered_prompt only replaces user_prompt, not the provenance metadata.
+        assert ctx.prompt_version_hash == "cafef00d"
+
+    def test_rendered_prompt_set_on_yielded_frame(self, patched_pricing_path, tmp_path):
+        """config#1753: call sites where rendering happens deep inside a
+        function invoked WITHIN the ``with track_llm_cost(...) as frame:``
+        block (e.g. ic_cio.run_cio, macro_agent.run_macro_agent) can't pass
+        ``rendered_prompt=`` at entry — the string isn't known yet. They
+        instead assign ``frame.rendered_prompt`` before the block exits;
+        this must be picked up at frame-exit the same as the kwarg form.
+        """
+        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from agents.prompt_loader import LoadedPrompt
+
+        template = LoadedPrompt(
+            name="macro_agent",
+            text="Prior cycle: {prior_cycle_scorecard}",
+            version="4.1.0",
+            hash="beefcafe",
+            source_path=tmp_path / "fake.txt",
+        )
+        rendered = "Prior cycle: regime=bull, VIX=14.2"
+
+        with track_llm_cost(
+            agent_id="agent_frame_mutated",
+            prompt=template,
+            model_name_fallback="claude-sonnet-4-6",
+        ) as frame:
+            # Simulates a call site setting this after an inner function
+            # (that rendered + sent the prompt) returns the rendered string.
+            frame.rendered_prompt = rendered
+
+        _, ctx = pop_metadata_for("agent_frame_mutated")
+        assert ctx.user_prompt == rendered
+        assert "{prior_cycle_scorecard}" not in ctx.user_prompt
+
+    def test_no_rendered_prompt_falls_back_to_template_text(
+        self, patched_pricing_path, tmp_path,
+    ):
+        """Backward compatibility: call sites that don't pass
+        ``rendered_prompt`` (e.g. multi-call ReAct scopes with no single
+        canonical rendered string) keep the pre-fix fallback behavior —
+        ``user_prompt`` from ``prompt.text``.
+        """
+        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from agents.prompt_loader import LoadedPrompt
+
+        template = LoadedPrompt(
+            name="quant_analyst_user",
+            text="Screen sector: {sector_list_text}",
+            version="1.0.0",
+            hash="0ff1ce",
+            source_path=tmp_path / "fake.txt",
+        )
+
+        with track_llm_cost(
+            agent_id="agent_no_rendered",
+            prompt=template,
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            pass
+
+        _, ctx = pop_metadata_for("agent_no_rendered")
+        assert ctx.user_prompt == template.text
+
+    def test_no_prompt_no_rendered_prompt_placeholder(self, patched_pricing_path):
+        """Neither ``prompt`` nor ``rendered_prompt`` supplied — placeholder
+        message names the agent, matching pre-fix behavior.
+        """
+        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+
+        with track_llm_cost(
+            agent_id="agent_bare", model_name_fallback="claude-haiku-4-5",
+        ):
+            pass
+
+        _, ctx = pop_metadata_for("agent_bare")
+        assert ctx.user_prompt == "<user prompt for agent_bare not provided>"
+
 
 # ── Run-type Literal enforcement ─────────────────────────────────────────
 

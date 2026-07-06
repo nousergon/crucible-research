@@ -724,6 +724,7 @@ def evaluate_artifact(
         node_name="eval_judge_node",
         run_type="weekly_research",
         prompt=loaded_prompt,
+        rendered_prompt=rendered,
         model_name_fallback=judge_model,
         run_id=artifact.run_id,
     ):
