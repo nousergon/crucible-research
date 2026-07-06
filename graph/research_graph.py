@@ -1461,7 +1461,7 @@ def macro_economist_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt("macro_agent"),
-    ):
+    ) as _macro_frame:
         result = run_macro_agent_with_reflection(
             prior_report=prior_report,
             prior_date=prior_date,
@@ -1480,6 +1480,11 @@ def macro_economist_node(state: ResearchState) -> dict:
             # template renders the placeholder as blank in that case.
             prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
         )
+        # config#1753: thread the actually-rendered primary-agent prompt
+        # (what was handed to HumanMessage(...) inside run_macro_agent)
+        # onto the frame so FullPromptContext.user_prompt captures the
+        # substituted text instead of the raw LoadedPrompt template.
+        _macro_frame.rendered_prompt = result.get("rendered_prompt")
 
     macro_state_update = {
         "macro_report": result.get("report_md", ""),
@@ -2519,7 +2524,7 @@ def cio_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt(_cio_prompt_name),
-    ):
+    ) as _cio_frame:
         if CIO_CRITIC_ENABLED:
             cio_result, _cio_reflection_log = run_cio_with_reflection(
                 **_cio_call_kwargs
@@ -2534,6 +2539,11 @@ def cio_node(state: ResearchState) -> dict:
             )
         else:
             cio_result = run_cio(**_cio_call_kwargs)
+        # config#1753: thread the actually-rendered CIO prompt (what was
+        # handed to HumanMessage(...) inside run_cio) onto the frame so
+        # FullPromptContext.user_prompt captures the substituted text
+        # instead of the raw LoadedPrompt template.
+        _cio_frame.rendered_prompt = cio_result.get("rendered_prompt")
 
     # Schema validation on CIO output shapes (strict-by-default).
     for decision in cio_result.get("decisions", []):
