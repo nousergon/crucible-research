@@ -45,8 +45,8 @@ import boto3
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.decision_capture import DecisionArtifact
+from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
@@ -511,7 +511,7 @@ def build_batch_request(
     this function is invoked (the skip artifact is persisted
     client-side without spending a batch slot).
     """
-    from alpha_engine_lib.anthropic_payload import build_batches_request_params
+    from nousergon_lib.anthropic_payload import build_batches_request_params
 
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:

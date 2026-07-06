@@ -409,7 +409,7 @@ def compute_composite_breakdown(
                                      blend (weight kept, value treated as 0).
       * ALL inputs None           → score_failed=True, final_score=None.
     """
-    from alpha_engine_lib.pillars import (
+    from nousergon_lib.pillars import (
         CompositeBreakdown,
         LegacyComponentBlend,
         PillarContribution,

@@ -279,7 +279,7 @@ def create_qual_tools(context: dict) -> list:
             doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
         """
         try:
-            from alpha_engine_lib.rag import retrieve
+            from nousergon_lib.rag import retrieve
             from datetime import date, timedelta
 
             _rag_stats["attempted"] += 1

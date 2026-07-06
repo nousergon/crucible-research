@@ -18,7 +18,7 @@ from typing import Optional
 import boto3
 import requests
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 

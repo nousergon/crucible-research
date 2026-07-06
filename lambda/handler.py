@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -205,7 +205,7 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     lib, and two calendar sources in one repo is the drift class that
     produced the 2026-05-30 calendar-vs-trading-day recovery failure.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return _tc.is_trading_day(d)
 
@@ -236,7 +236,7 @@ def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
     resolver, a second calendar source of truth that could silently
     drift from the lib the scanner resolves through.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
 

@@ -45,7 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
 # is visible to ChatAnthropic at call time.
 load_dotenv(override=True)
 
-from alpha_engine_lib.decision_capture import DecisionArtifact  # noqa: E402
+from nousergon_lib.decision_capture import DecisionArtifact  # noqa: E402
 
 from evals.judge import evaluate_artifact, resolve_rubric_for_agent  # noqa: E402
 

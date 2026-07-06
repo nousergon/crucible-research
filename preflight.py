@@ -26,7 +26,7 @@ import os
 
 import pandas as pd
 
-from alpha_engine_lib.preflight import BasePreflight
+from nousergon_lib.preflight import BasePreflight
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class ResearchPreflight(BasePreflight):
         that double-counted weekends/holidays as staleness.
         """
         from datetime import datetime, timezone
-        from alpha_engine_lib.dates import (
+        from nousergon_lib.dates import (
             expected_last_close,
             is_fresh_in_trading_days,
             trading_days_stale,

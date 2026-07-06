@@ -105,7 +105,7 @@ def _do_retrieve(
     ``retrieve_fn`` is injectable for tests; production uses
     ``alpha_engine_lib.rag.retrieve``."""
     if retrieve_fn is None:
-        from alpha_engine_lib.rag import retrieve
+        from nousergon_lib.rag import retrieve
         retrieve_fn = retrieve
     retrieve_kwargs = {
         "query": query,
