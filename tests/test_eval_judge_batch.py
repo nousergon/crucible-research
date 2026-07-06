@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,

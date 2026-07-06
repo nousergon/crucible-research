@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from alpha_engine_lib.pillars import QualitativePillarAssessment
+from nousergon_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError

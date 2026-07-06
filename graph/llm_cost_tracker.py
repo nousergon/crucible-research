@@ -106,7 +106,7 @@ from typing import Any, Iterator, Literal, Optional
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from alpha_engine_lib.cost import (
+from nousergon_lib.cost import (
     PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
@@ -116,7 +116,7 @@ from alpha_engine_lib.cost import (
     load_tool_fees,
     recompute_cost,
 )
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )

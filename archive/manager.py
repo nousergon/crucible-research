@@ -695,7 +695,7 @@ class ArchiveManager:
         the substrate-influences-LLM layer; the macro agent's final
         regime call is still authoritative for downstream consumers.
         """
-        from alpha_engine_lib.eval_artifacts import load_latest_eval_artifact
+        from nousergon_lib.eval_artifacts import load_latest_eval_artifact
 
         return load_latest_eval_artifact(
             self.s3, bucket=self.bucket, prefix="regime",
@@ -716,7 +716,7 @@ class ArchiveManager:
         error). Used by the consolidated brief's regime-trend block;
         callers must tolerate an empty / short list.
         """
-        from alpha_engine_lib.eval_artifacts import list_eval_artifacts
+        from nousergon_lib.eval_artifacts import list_eval_artifacts
 
         try:
             return list_eval_artifacts(

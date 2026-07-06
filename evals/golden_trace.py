@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
+from nousergon_lib.decision_capture import DecisionArtifact
 
 from agents.prompt_loader import load_prompt
 from evals.judge import _render_rubric, parse_batch_message

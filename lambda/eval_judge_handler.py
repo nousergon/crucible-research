@@ -61,7 +61,7 @@ _install_ls_patch()
 # matching the main research handler. exclude_patterns kept empty —
 # the canonical lib pattern (mirrors lambda/handler.py:58) forces an
 # explicit decision once real ERROR-level noise is observed.
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(

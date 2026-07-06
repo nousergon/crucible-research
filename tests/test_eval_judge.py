@@ -26,7 +26,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
@@ -177,7 +177,7 @@ class TestBuildEvalS3Key:
         """The key is built by alpha_engine_lib.eval_artifacts.eval_artifact_key
         — we do NOT hand-roll the format. Pin the equivalence so a drift
         in either side is caught."""
-        from alpha_engine_lib.eval_artifacts import eval_artifact_key
+        from nousergon_lib.eval_artifacts import eval_artifact_key
         from evals.judge import build_eval_s3_key, DEFAULT_EVAL_PREFIX
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
@@ -306,7 +306,7 @@ class TestNewJudgeRunId:
 
     def test_sortable_chronologically(self):
         from datetime import datetime, timezone
-        from alpha_engine_lib.eval_artifacts import new_eval_run_id
+        from nousergon_lib.eval_artifacts import new_eval_run_id
         earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc))
         later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=timezone.utc))
         assert earlier < later  # lexicographic = chronological
@@ -744,7 +744,7 @@ class TestPersistEvalArtifact:
     def test_writes_latest_sidecar_pointing_at_artifact(self, mocked_s3):
         """The latest.json sidecar mirrors the most-recently-written key
         and is resolvable by the lib's load_latest_eval_artifact reader."""
-        from alpha_engine_lib.eval_artifacts import (
+        from nousergon_lib.eval_artifacts import (
             eval_latest_key, load_latest_eval_artifact,
         )
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
@@ -780,7 +780,7 @@ class TestPersistEvalArtifact:
         assert loaded["judged_agent_id"] == "ic_cio"
 
     def test_update_latest_false_skips_sidecar(self, mocked_s3):
-        from alpha_engine_lib.eval_artifacts import eval_latest_key
+        from nousergon_lib.eval_artifacts import eval_latest_key
         from botocore.exceptions import ClientError
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
 

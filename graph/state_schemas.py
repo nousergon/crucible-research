@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # unchanged. State-machine objects (SectorTeamOutput, MacroEconomistOutput,
 # CIOOutput, InvestmentThesis) stay in this module — they're research-
 # internal state types, not LLM-output contracts.
-from alpha_engine_lib.agent_schemas import (
+from nousergon_lib.agent_schemas import (
     CIORawDecision,
     CIORawDecisionLiteral,
     CIORawOutput,

@@ -21,7 +21,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,

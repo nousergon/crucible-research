@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 # Canonical experiment-package config resolver (alpha-engine-config#1157): the
 # lift of the five inline _find_config / load_config / config_loader copies into
 # the shared-lib chokepoint. _find_config below delegates to it.
-from alpha_engine_lib.config import resolve_experiment_config
+from nousergon_lib.config import resolve_experiment_config
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
     """Locate real config yaml across local, CI, and Lambda environments.

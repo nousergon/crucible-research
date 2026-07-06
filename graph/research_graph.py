@@ -128,7 +128,7 @@ from scoring.focus_list import (
 from archive.manager import ArchiveManager
 from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
@@ -709,7 +709,7 @@ def fetch_data(state: ResearchState) -> dict:
     # RAG availability check (early, so we know before agents start)
     rag_available = False
     try:
-        from alpha_engine_lib.rag import is_available as _rag_is_available
+        from nousergon_lib.rag import is_available as _rag_is_available
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats
@@ -3677,7 +3677,7 @@ def archive_writer(state: ResearchState) -> dict:
     # defense and will surface the gap there.
     universe_symbols: set[str] | None = None
     try:
-        from alpha_engine_lib.arcticdb import get_universe_symbols
+        from nousergon_lib.arcticdb import get_universe_symbols
         universe_symbols = get_universe_symbols(am.bucket)
     except Exception as e:
         logger.warning(

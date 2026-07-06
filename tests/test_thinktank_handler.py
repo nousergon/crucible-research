@@ -137,7 +137,7 @@ class TestColdStartHydration:
     ):
         secrets = {"RAG_DATABASE_URL": "postgres://x", "VOYAGE_API_KEY": "vk"}
         with patch(
-            "alpha_engine_lib.secrets.get_secret", side_effect=secrets.__getitem__
+            "nousergon_lib.secrets.get_secret", side_effect=secrets.__getitem__
         ) as get_secret:
             handler_mod._ensure_init()
         assert {c.args[0] for c in get_secret.call_args_list} == set(secrets)
@@ -150,13 +150,13 @@ class TestColdStartHydration:
     def test_existing_env_values_not_refetched(self, handler_mod, monkeypatch):
         monkeypatch.setenv("RAG_DATABASE_URL", "postgres://already")
         monkeypatch.setenv("VOYAGE_API_KEY", "already")
-        with patch("alpha_engine_lib.secrets.get_secret") as get_secret:
+        with patch("nousergon_lib.secrets.get_secret") as get_secret:
             handler_mod._ensure_init()
         get_secret.assert_not_called()
 
     def test_init_runs_once(self, handler_mod):
         with patch(
-            "alpha_engine_lib.secrets.get_secret", return_value="v"
+            "nousergon_lib.secrets.get_secret", return_value="v"
         ) as get_secret:
             handler_mod._ensure_init()
             handler_mod._ensure_init()
