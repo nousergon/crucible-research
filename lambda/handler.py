@@ -140,10 +140,17 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
             s3_client=boto3.client("s3"),
             bucket=bucket,
         )
+        # team_accuracy is the schema_version-1 envelope (config#1844) —
+        # analyze_team_performance already WARNs with the full counts when
+        # status="insufficient".
         logger.info(
-            "team_accuracy emitted: %d teams with resolved observations (%s)",
-            len(team_accuracy),
-            {tid: v["n_obs"] for tid, v in team_accuracy.items()},
+            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d "
+            "n_resolved_outcomes=%d (%s)",
+            team_accuracy["status"],
+            team_accuracy["n_teams"],
+            team_accuracy["n_advance_picks"],
+            team_accuracy["n_resolved_outcomes"],
+            {tid: v["n_obs"] for tid, v in team_accuracy["teams"].items()},
         )
     except Exception as tae:
         # Shadow-mode WARN-not-fatal — see docstring.
