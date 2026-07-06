@@ -14,6 +14,7 @@ Builds the artifact specified in §3 of the plan doc:
       "population_tickers": [...],  // current holdings + grandfathered
       "scanner_tickers": [...],     // quant-filtered top picks
       "agent_input_set": [...],     // union — what agents will evaluate
+      "scanner_eval_log": [...],    // per-ticker gate verdict (config#1458)
       "filters_applied": {...},
       "stats": {
         "universe_size": N,
@@ -222,6 +223,41 @@ def _build_technical_scores_from_feature_store(
     return technical_scores, n_enriched
 
 
+def _json_safe_scalar(value: Any) -> Any:
+    """Cast a single eval-log value to a plain JSON-serializable scalar.
+
+    ``data/scanner.py``'s ``_eval_log`` entries are built from feature-store
+    dicts (already plain ``float``/``str``/``bool``/``None`` per
+    ``feature_store_reader.read_latest_features``'s ``float(row[col])`` cast)
+    or the OHLCV fallback (``compute_technical_indicators``, also
+    pre-cast). This is a defensive belt-and-suspenders cast — NOT a fix for a
+    known numpy leak — so a future change to either upstream source can't
+    silently reintroduce a ``json.dumps`` failure in
+    ``write_candidates_artifact``.
+    """
+    if value is None or isinstance(value, (bool, str, int, float)):
+        return value
+    # numpy scalar types (e.g. np.float64, np.int64) expose .item() to
+    # convert to the equivalent plain Python scalar.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except (ValueError, TypeError):
+            pass
+    return value
+
+
+def _json_safe_eval_log(eval_log: list[dict]) -> list[dict]:
+    """Return a copy of ``eval_log`` with every value cast JSON-safe (see
+    :func:`_json_safe_scalar`) so ``write_candidates_artifact``'s
+    ``json.dumps`` can never choke on a stray numpy/pandas scalar."""
+    return [
+        {k: _json_safe_scalar(v) for k, v in rec.items()}
+        for rec in (eval_log or [])
+    ]
+
+
 def _resolved_scanner_params() -> dict:
     """Snapshot the scanner filter thresholds for the ``filters_applied``
     artifact field. Mirrors ``data.scanner.run_quant_filter``'s read of
@@ -293,6 +329,21 @@ def build_candidates_artifact(
     )
     scanner_tickers = [c["ticker"] for c in candidate_dicts]
 
+    # ``run_quant_filter`` stashes the per-ticker gate verdict (quant_filter_pass
+    # / filter_fail_reason / scan_path / liquidity_pass / volatility_pass) on
+    # its own ``_last_eval_log`` module attribute as a side effect — but that
+    # stash is process-local. The Research Lambda runs `run_quant_filter` in a
+    # SEPARATE process (or doesn't call it at all post-L1995-Phase5) and reads
+    # only this artifact via ``am.load_candidates_json``, so the eval log must
+    # be carried across that process boundary through ``candidates.json``
+    # itself rather than relying on the module-attribute stash (config#1458 /
+    # alpha-engine-config#1458 — the stash read in Research's archive_writer
+    # was always empty by construction, producing quant_filter_pass=0 for
+    # 100% of rows every cycle post-PR#344).
+    eval_log = _json_safe_eval_log(
+        getattr(run_quant_filter, "_last_eval_log", None) or []
+    )
+
     # ── 5. Build artifact ─────────────────────────────────────────────────
     # Population = prior cycle's holdings list. Phase 1 reads it from the
     # prior signals.json::population; Phase 5 cutover will source it from
@@ -329,6 +380,7 @@ def build_candidates_artifact(
         "population_tickers": population_tickers,
         "scanner_tickers": scanner_tickers,
         "agent_input_set": agent_input_set,
+        "scanner_eval_log": eval_log,
         "filters_applied": _resolved_scanner_params(),
         "stats": {
             "universe_size": len(constituents),
