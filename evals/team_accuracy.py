@@ -28,14 +28,36 @@ actually entered the live population (per ``agents/investment_committee/ic_cio.p
 candidates never traded, so their hypothetical realized return isn't a
 reflection of the team's live decision quality.
 
-Output shape: ``{team_id: {"accuracy": float in [0,1], "n_obs": int}}``,
-written verbatim to ``config/team_accuracy.json`` — the exact contract
-``archive/manager.py::load_team_accuracy`` documents and
-``agents/sector_teams/team_config.py::_accuracy_adjustment`` consumes
-(gated on ``n_obs >= ADAPTIVE_SLOT_MIN_OBS`` there, so under-sampled teams
-are still emitted here — filtering happens once, at the read site — and
-the artifact stays a complete audit trail rather than a lossy pre-filtered
-view).
+Output shape (schema_version 1, config#1844 — self-describing envelope)::
+
+    {
+      "schema_version": 1,
+      "status": "ok" | "insufficient",
+      "as_of": "YYYY-MM-DD",
+      "n_teams": int,
+      "n_advance_picks": int,        # ADVANCE rows in window (resolved or not)
+      "n_resolved_outcomes": int,    # join hits == sum of per-team n_obs
+      "horizon_days": int,           # canonical primary horizon (21)
+      "teams": {team_id: {"accuracy": float in [0,1], "n_obs": int}},
+    }
+
+written to ``config/team_accuracy.json``. The per-team payload under
+``teams`` is the exact contract ``archive/manager.py::load_team_accuracy``
+unwraps and ``agents/sector_teams/team_config.py::_accuracy_adjustment``
+consumes (gated on ``n_obs >= ADAPTIVE_SLOT_MIN_OBS`` there, so
+under-sampled teams are still emitted here — filtering happens once, at the
+read site — and the artifact stays a complete audit trail rather than a
+lossy pre-filtered view).
+
+WHY an envelope (config#1844): on 2026-07-03 the live artifact was a bare
+``{}`` — indistinguishable between honest insufficiency and silent
+starvation (the config#1456/config#1840 bug class). Verified cause: the
+long-format ``score_performance_outcomes`` store was first populated by
+DataPhase2's signal_returns collector at 16:43 UTC that day, ~7h AFTER this
+producer ran (09:46 UTC) inside the Research Lambda — an honest first-
+population ordering gap, not a broken join. The envelope makes any future
+empty payload carry its reason: counts + ``status="insufficient"`` +
+a WARN log, never a bare ``{}``.
 
 Failure posture: like the scorecard, this runs shadow-safe. Callers should
 WARN-and-continue on any exception so the primary deliverable (the morning
@@ -52,6 +74,8 @@ import sqlite3
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from nousergon_lib.quant.horizons import DEFAULT_POLICY
+
 from evals import outcome_store
 
 logger = logging.getLogger(__name__)
@@ -60,6 +84,25 @@ logger = logging.getLogger(__name__)
 # Not the dated/latest eval-artifacts partition pattern — the consumer
 # contract predates that convention and reads this single well-known key.
 TEAM_ACCURACY_S3_KEY = "config/team_accuracy.json"
+
+# Envelope schema version (config#1844). Bump only on breaking shape changes;
+# additive fields ride the same version per the S3 contract-safety rule.
+SCHEMA_VERSION = 1
+
+# Envelope keys save_team_accuracy requires — the structural guard that a
+# bare `{}` (or any pre-envelope shape) can never reach S3 again.
+_REQUIRED_ENVELOPE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "as_of",
+        "n_teams",
+        "n_advance_picks",
+        "n_resolved_outcomes",
+        "horizon_days",
+        "teams",
+    }
+)
 
 # Lookback window for the accuracy computation. Wider than the 4-week
 # scorecard window on purpose: ADAPTIVE_SLOT_MIN_OBS=8 resolved recs/team
@@ -75,7 +118,7 @@ def analyze_team_performance(
     conn: sqlite3.Connection,
     as_of_date: date,
     lookback_weeks: int = DEFAULT_LOOKBACK_WEEKS,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, Any]:
     """Compute each team's realized 21d-horizon hit rate from research.db.
 
     ``as_of_date`` is the Saturday this analysis is being built FOR — i.e.
@@ -83,33 +126,68 @@ def analyze_team_performance(
     ``as_of_date`` so the current cycle's own (unresolved) picks can't leak
     in, mirroring ``last_week_scorecard.build_scorecard``.
 
-    Returns ``{team_id: {"accuracy": float, "n_obs": int}}`` for every team
+    Returns the schema_version-1 envelope (see module docstring). ``teams``
+    carries ``{team_id: {"accuracy": float, "n_obs": int}}`` for every team
     with at least one resolved observation in the window. Teams with zero
     resolved observations are omitted (not zero-filled) so the consumer's
     "team absent from the map" graceful-degrade path — already required by
     ``_accuracy_adjustment`` — is exercised rather than a fabricated 0.0
     accuracy that would look like a real bottom-percentile signal.
+
+    Zero-data windows return ``status="insufficient"`` with the counts that
+    explain WHY (``n_advance_picks`` vs ``n_resolved_outcomes``) plus a WARN
+    log — never a bare ``{}`` (config#1844, fail-loud doctrine).
     """
     window_end = as_of_date - timedelta(days=1)
     window_start = window_end - timedelta(weeks=lookback_weeks)
 
-    rows = _fetch_team_outcomes(conn, window_start.isoformat(), window_end.isoformat())
+    rows, n_advance_picks = _fetch_team_outcomes(
+        conn, window_start.isoformat(), window_end.isoformat()
+    )
 
     by_team: dict[str, list[int]] = {}
     for r in rows:
         by_team.setdefault(r["team_id"], []).append(r["beat_spy"])
 
-    result: dict[str, dict[str, Any]] = {}
+    teams: dict[str, dict[str, Any]] = {}
     for team_id, outcomes in sorted(by_team.items()):
         n_obs = len(outcomes)
         accuracy = sum(outcomes) / n_obs
-        result[team_id] = {"accuracy": accuracy, "n_obs": n_obs}
-    return result
+        teams[team_id] = {"accuracy": accuracy, "n_obs": n_obs}
+
+    n_resolved_outcomes = len(rows)
+    status = "ok" if teams else "insufficient"
+    if status == "insufficient":
+        logger.warning(
+            "team_accuracy: zero resolved observations in window %s..%s — "
+            "emitting status=insufficient (n_advance_picks=%d, "
+            "n_resolved_outcomes=%d, horizon_days=%d). Either no ADVANCE "
+            "picks have reached the primary horizon yet, or the "
+            "score_performance_outcomes store hasn't been populated for "
+            "this window (it is written by DataPhase2 AFTER this producer "
+            "runs — see config#1844).",
+            window_start.isoformat(),
+            window_end.isoformat(),
+            n_advance_picks,
+            n_resolved_outcomes,
+            DEFAULT_POLICY.primary_horizon,
+        )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "as_of": as_of_date.isoformat(),
+        "n_teams": len(teams),
+        "n_advance_picks": n_advance_picks,
+        "n_resolved_outcomes": n_resolved_outcomes,
+        "horizon_days": DEFAULT_POLICY.primary_horizon,
+        "teams": teams,
+    }
 
 
 def _fetch_team_outcomes(
     conn: sqlite3.Connection, start: str, end: str
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """Pull per-pick realized 21d beat-SPY outcomes, attributed to team_id.
 
     Joins CIO-ADVANCED picks (``cio_evaluations``, has ``team_id``, no
@@ -121,8 +199,14 @@ def _fetch_team_outcomes(
     same research cycle for the same date, so the pair keys align. Only
     resolved rows and only ``team_id IS NOT NULL`` rows (defensive — CIO
     evaluations for exit-only / non-team-sourced candidates may carry a null
-    team) count. Returns dicts keyed ``team_id``/``beat_spy`` (the long
-    store's field name, NOT the retired wide column name).
+    team) count.
+
+    Returns ``(rows, n_advance_picks)``: ``rows`` are dicts keyed
+    ``team_id``/``beat_spy`` (the long store's field name, NOT the retired
+    wide column name) for picks WITH a resolved outcome; ``n_advance_picks``
+    is the total ADVANCE-pick count in the window regardless of resolution,
+    so the envelope can state how much of the input side survived the join
+    (config#1844).
     """
     sql = """
         SELECT
@@ -142,7 +226,7 @@ def _fetch_team_outcomes(
         if outcome is None or outcome.beat_spy is None:
             continue
         result.append({"team_id": team_id, "beat_spy": outcome.beat_spy})
-    return result
+    return result, len(rows)
 
 
 def save_team_accuracy(
@@ -152,11 +236,15 @@ def save_team_accuracy(
     bucket: str,
     key: str = TEAM_ACCURACY_S3_KEY,
 ) -> None:
-    """Write ``team_accuracy`` to the fixed S3 key the consumer reads.
+    """Write the ``team_accuracy`` envelope to the fixed S3 key the consumer reads.
 
     Single-key overwrite (like ``population/latest.json``), not a dated +
     latest sidecar pair — ``load_team_accuracy`` only ever reads ``key``
     directly, so there's no dated-history reader to serve.
+
+    Refuses (ValueError) any payload that is not a complete schema_version-1
+    envelope — the structural chokepoint that guarantees a bare ``{}`` (the
+    config#1844 defect) can never reach S3 again, whatever the caller does.
 
     Per [[feedback_no_silent_fails]] this raises on any S3 failure — same
     posture as ``emit_scorecard_to_s3``. The caller (Lambda handler) is
@@ -165,6 +253,17 @@ def save_team_accuracy(
     """
     if not bucket:
         raise ValueError("save_team_accuracy requires a non-empty bucket")
+    if not isinstance(team_accuracy, dict) or not _REQUIRED_ENVELOPE_KEYS.issubset(
+        team_accuracy
+    ):
+        missing = _REQUIRED_ENVELOPE_KEYS - set(
+            team_accuracy if isinstance(team_accuracy, dict) else ()
+        )
+        raise ValueError(
+            "save_team_accuracy requires the schema_version-1 envelope "
+            f"(config#1844) — missing keys: {sorted(missing)}. A bare "
+            "per-team dict (pre-envelope shape) must never be written."
+        )
     payload = json.dumps(team_accuracy, indent=2).encode("utf-8")
     s3_client.put_object(
         Bucket=bucket,
