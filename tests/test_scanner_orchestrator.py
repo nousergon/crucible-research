@@ -180,7 +180,7 @@ class TestBuildCandidatesArtifact:
         for key in (
             "run_date", "scanner_version", "generated_at",
             "population_tickers", "scanner_tickers", "agent_input_set",
-            "filters_applied", "stats",
+            "scanner_eval_log", "filters_applied", "stats",
         ):
             assert key in artifact, f"artifact missing field: {key}"
 
@@ -323,6 +323,140 @@ class TestBuildCandidatesArtifact:
             "min_avg_volume", "min_price", "max_atr_pct", "tech_score_min",
         ):
             assert key in fa
+
+
+class TestScannerEvalLogPassthrough:
+    """config#1458: candidates.json must carry run_quant_filter's per-ticker
+    eval log so the Research Lambda (a SEPARATE process from the one that
+    calls run_quant_filter here) can join it in without relying on the
+    process-local ``run_quant_filter._last_eval_log`` module-attribute stash.
+    """
+
+    def _setup_patches(self, **kwargs):
+        return TestBuildCandidatesArtifact._setup_patches(self, **kwargs)
+
+    def _apply_patches(self, patches):
+        return TestBuildCandidatesArtifact._apply_patches(self, patches)
+
+    def _build_with_eval_log(self, eval_log, *, quant_result=None):
+        """Build the artifact with ``run_quant_filter`` mocked to mimic its
+        real side effect: stashing ``_last_eval_log`` on the (module-level)
+        callable itself. Patching ``data.scanner.run_quant_filter`` replaces
+        that name with a MagicMock, so the attribute must be set on the mock
+        instance — exactly what ``data.scanner_orchestrator``'s
+        ``getattr(run_quant_filter, "_last_eval_log", ...)`` reads."""
+        from data.scanner_orchestrator import build_candidates_artifact
+
+        constituents = [f"T{i}" for i in range(900)]
+        sector_map = {t: "Technology" for t in constituents}
+        fs_features = {t: {"rsi_14": 55.0} for t in constituents}
+
+        patches = self._setup_patches(
+            constituents=constituents, sector_map=sector_map,
+            fs_features=fs_features, daily_closes={},
+            quant_result=quant_result if quant_result is not None else [],
+        )
+        with self._apply_patches(patches):
+            import data.scanner as scanner_mod
+            if eval_log is not None:
+                scanner_mod.run_quant_filter._last_eval_log = eval_log
+            else:
+                # Simulate the stash never having been set (fresh mock).
+                if hasattr(scanner_mod.run_quant_filter, "_last_eval_log"):
+                    del scanner_mod.run_quant_filter._last_eval_log
+            artifact = build_candidates_artifact(
+                run_date="2026-05-30",
+                s3_client=MagicMock(),
+                bucket="test-bucket",
+            )
+        return artifact
+
+    def test_artifact_captures_eval_log_stashed_by_run_quant_filter(self):
+        """build_candidates_artifact must copy run_quant_filter's stashed
+        eval log into the artifact's ``scanner_eval_log`` field."""
+        eval_log = [
+            {"ticker": "T0", "quant_filter_pass": 1, "scan_path": "momentum"},
+            {"ticker": "T1", "quant_filter_pass": 0,
+             "filter_fail_reason": "liquidity"},
+        ]
+        artifact = self._build_with_eval_log(
+            eval_log, quant_result=[{"ticker": "T0"}],
+        )
+        assert artifact["scanner_eval_log"] == eval_log
+
+    def test_artifact_eval_log_empty_when_stash_unavailable(self):
+        """No _last_eval_log stashed (e.g. run_quant_filter mocked out
+        entirely in a test, or a future contract break) — must degrade to
+        [] rather than raise."""
+        artifact = self._build_with_eval_log(None, quant_result=[])
+        assert artifact["scanner_eval_log"] == []
+
+    def test_eval_log_numpy_scalars_are_cast_json_safe(self):
+        """Defensive belt-and-suspenders: if a future change to the
+        eval-log inputs leaks a numpy scalar in, build_candidates_artifact
+        must still produce a JSON-serializable artifact (write_candidates_artifact
+        calls json.dumps on it)."""
+        import numpy as np
+        from data.scanner_orchestrator import write_candidates_artifact
+
+        eval_log = [
+            {"ticker": "T0", "quant_filter_pass": np.int64(1),
+             "tech_score": np.float64(72.5), "avg_volume_20d": np.float32(1e6)},
+        ]
+        artifact = self._build_with_eval_log(
+            eval_log, quant_result=[{"ticker": "T0"}],
+        )
+
+        # Values still numerically correct, but now plain python scalars.
+        rec = artifact["scanner_eval_log"][0]
+        assert rec["quant_filter_pass"] == 1
+        assert isinstance(rec["quant_filter_pass"], int)
+        assert rec["tech_score"] == pytest.approx(72.5)
+        assert isinstance(rec["tech_score"], float)
+        assert isinstance(rec["avg_volume_20d"], float)
+
+        # And json.dumps (what write_candidates_artifact actually calls)
+        # must not raise.
+        s3 = MagicMock()
+        write_candidates_artifact(artifact, s3_client=s3, bucket="test-bucket")
+        call_kwargs = s3.put_object.call_args.kwargs
+        body = json.loads(call_kwargs["Body"])
+        assert body["scanner_eval_log"][0]["quant_filter_pass"] == 1
+
+    def test_scanner_eval_log_round_trips_through_write_and_load(self):
+        """End-to-end: build -> write -> read back via
+        ArchiveManager.load_candidates_json must preserve scanner_eval_log
+        byte-for-byte (the eval-log entries are plain JSON scalars)."""
+        from data.scanner_orchestrator import write_candidates_artifact
+        from archive.manager import ArchiveManager
+
+        eval_log = [
+            {"ticker": "T0", "quant_filter_pass": 1, "scan_path": "momentum",
+             "tech_score": 81.3, "sector": "Technology"},
+            {"ticker": "T1", "quant_filter_pass": 0,
+             "filter_fail_reason": "rank_cutoff"},
+        ]
+        artifact = self._build_with_eval_log(
+            eval_log, quant_result=[{"ticker": "T0"}],
+        )
+
+        # Fake S3 store: capture the put_object body, serve it back on get_object.
+        store: dict[str, bytes] = {}
+
+        def _put_object(Bucket, Key, Body, ContentType):
+            store[Key] = Body if isinstance(Body, bytes) else bytes(Body)
+
+        s3 = MagicMock()
+        s3.put_object.side_effect = _put_object
+        write_candidates_artifact(artifact, s3_client=s3, bucket="test-bucket")
+
+        class _AM:
+            def _s3_get(self, key):
+                data = store.get(key)
+                return data.decode("utf-8") if data is not None else None
+
+        loaded = ArchiveManager.load_candidates_json(_AM(), "2026-05-30")
+        assert loaded["scanner_eval_log"] == eval_log
 
 
 class TestWriteCandidatesArtifact:

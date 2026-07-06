@@ -49,7 +49,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Annotated, Any, Callable, Optional, TypedDict
+from typing import Annotated, Any, Callable, NamedTuple, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -360,6 +360,19 @@ class ResearchState(TypedDict, total=False):
     # timeout). ``scanner_universe`` stays the FULL universe for the
     # exit_evaluator constituent whitelist.
     agent_input_set: Annotated[list[str], take_last]
+    # The scanner gate's per-ticker verdict detail (quant_filter_pass /
+    # filter_fail_reason / scan_path / liquidity_pass / volatility_pass),
+    # sourced from candidates.json::scanner_eval_log in fetch_data
+    # (cross-process safe: candidates.json is the S3 artifact the standalone
+    # Scanner SF state writes, already read here via am.load_candidates_json)
+    # rather than the in-process ``run_quant_filter._last_eval_log`` module
+    # stash. That stash is empty in THIS Lambda — Research no longer calls
+    # run_quant_filter itself post-L1995-Phase5; only the standalone Scanner
+    # SF state does, in its own process (config#1458: the stash read in
+    # archive_writer was always empty by construction, degrading
+    # quant_filter_pass to 0 for 100% of rows every cycle). Empty list when
+    # candidates.json carries none (absent field, or the dry-run-stub path).
+    scanner_eval_log: Annotated[list, take_last]
     sector_map: Annotated[dict[str, str], take_last]
     macro_data: Annotated[dict, take_last]
     current_population: Annotated[list[dict], take_last]
@@ -604,12 +617,23 @@ def _read_institutional_substrate(
 
 # ── Node Functions ────────────────────────────────────────────────────────────
 
+class AgentInputSetResolution(NamedTuple):
+    """Return shape of :func:`_resolve_agent_input_set`.
+
+    ``scanner_eval_log`` rides along with ``agent_input_set`` because both
+    are sourced from the SAME ``am.load_candidates_json(run_date)`` call —
+    returning them together avoids a second S3 round-trip from ``fetch_data``.
+    """
+    agent_input_set: list[str]
+    scanner_eval_log: list[dict]
+
+
 def _resolve_agent_input_set(
     am: "ArchiveManager",
     run_date: str,
     scanner_universe: list[str],
     population_tickers: list[str],
-) -> list[str]:
+) -> AgentInputSetResolution:
     """Resolve the sector-team screening input (L1995 Phase 5 / L4464).
 
     The standalone Scanner SF state (run upstream of Research) writes
@@ -632,10 +656,17 @@ def _resolve_agent_input_set(
     The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the stub/offline
     installers) relaxes this to a full-universe fallback for wiring validation;
     production never sets it.
+
+    Also returns ``scanner_eval_log`` — ``candidates.json``'s per-ticker
+    scanner gate verdict (config#1458), read here (rather than a second call
+    to ``am.load_candidates_json``) since this function already loads the
+    artifact. Empty on the dry-run-stub fallback path (no real candidates.json
+    was read) or when the artifact predates this field.
     """
     import os as _os
     candidates = am.load_candidates_json(run_date)
     scanner_tickers = (candidates or {}).get("scanner_tickers") or []
+    scanner_eval_log = (candidates or {}).get("scanner_eval_log") or []
     if not scanner_tickers:
         if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() == "true":
             logger.warning(
@@ -644,6 +675,7 @@ def _resolve_agent_input_set(
                 "(NOT a real candidate selection)", run_date,
             )
             scanner_tickers = scanner_universe
+            scanner_eval_log = []
         else:
             raise RuntimeError(
                 f"[fetch_data] candidates.json missing or empty scanner_tickers "
@@ -658,7 +690,7 @@ def _resolve_agent_input_set(
         "(scanner %d ∪ held population %d)",
         len(agent_input_set), len(scanner_tickers), len(population_tickers),
     )
-    return agent_input_set
+    return AgentInputSetResolution(agent_input_set, scanner_eval_log)
 
 
 def fetch_data(state: ResearchState) -> dict:
@@ -702,7 +734,7 @@ def fetch_data(state: ResearchState) -> dict:
     all_tickers = list(set(population_tickers + scanner_universe))
 
     # ── L1995 Phase 5 cutover: sector-team screening input ───────────────────
-    agent_input_set = _resolve_agent_input_set(
+    agent_input_set, scanner_eval_log = _resolve_agent_input_set(
         am, run_date, scanner_universe, population_tickers,
     )
 
@@ -1008,6 +1040,7 @@ def fetch_data(state: ResearchState) -> dict:
     return {
         "scanner_universe": scanner_universe,
         "agent_input_set": agent_input_set,
+        "scanner_eval_log": scanner_eval_log,
         "sector_map": sector_map,
         "price_data": price_data,
         "data_snapshot_id": data_snapshot_id,
@@ -3847,20 +3880,28 @@ def archive_writer(state: ResearchState) -> dict:
 
     # The AUTHORITATIVE per-ticker scanner verdict (quant_filter_pass +
     # filter_fail_reason + scan_path + the liquidity/volatility gate flags) is
-    # computed by run_quant_filter and stashed on its _last_eval_log during the
-    # scanner stage of THIS graph run — the only place the funnel reason for each
-    # of the ~900 names exists. Join it in here rather than reconstructing
-    # placeholder rows (which dropped fail_reason → NULL and mis-set
-    # quant_filter_pass to agent team-picks). Same in-process stash the shadow
-    # candidate-gen specs already rely on (scanner_orchestrator).
-    from data.scanner import run_quant_filter
-
-    scanner_eval_log = getattr(run_quant_filter, "_last_eval_log", None) or []
+    # computed by run_quant_filter and travels here via candidates.json ::
+    # scanner_eval_log → ResearchState (set in fetch_data) — the only place
+    # the funnel reason for each of the ~900 names exists. Join it in here
+    # rather than reconstructing placeholder rows (which dropped fail_reason →
+    # NULL and mis-set quant_filter_pass to agent team-picks).
+    #
+    # NOTE: this is deliberately NOT ``run_quant_filter._last_eval_log`` (a
+    # process-local module-attribute stash). Research no longer calls
+    # run_quant_filter in this process post-L1995-Phase5 — only the
+    # standalone Scanner SF state does, in ITS OWN process — so that stash is
+    # always empty here (config#1458: the prior version of this code read the
+    # stash directly and silently degraded quant_filter_pass to 0 for 100% of
+    # rows, every cycle, since PR#344 merged). ``scanner_orchestrator.
+    # build_shadow_candidate_artifacts`` still reads the stash directly and
+    # correctly — it runs in the SAME process as the run_quant_filter call
+    # that populates it.
+    scanner_eval_log = state.get("scanner_eval_log") or []
     if not scanner_eval_log:
         logger.warning(
-            "[archive_writer] scanner eval log unavailable — scanner_evaluations "
-            "gate detail (filter_fail_reason / scan_path / true quant_filter_pass) "
-            "degrades to null/0 this cycle"
+            "[archive_writer] candidates.json carried no scanner_eval_log for "
+            "this cycle — scanner_evaluations gate detail (filter_fail_reason "
+            "/ scan_path / true quant_filter_pass) degrades to null/0 this cycle"
         )
     scanner_evals = _build_scanner_eval_rows(
         scanner_universe=scanner_universe,
