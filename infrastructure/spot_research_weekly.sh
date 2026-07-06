@@ -35,12 +35,17 @@
 #      the instance profile below can (a) be passed by the dashboard-box role
 #      and (b) read the Research SSM secrets + read/write s3://alpha-engine-
 #      research. Starts from the established Saturday-launcher profile.
-#  (2) CONFIG RESOLUTION — this launcher runs the box from a fresh clone's
-#      repo-local `config/` (the package-first FALLBACK). If the weekly run
-#      must resolve the STAGED experiment-package copy (deploy.sh semantics,
-#      ALPHA_ENGINE_EXPERIMENT_ID) instead of repo-local, add the S3
-#      stage+pull mirroring crucible-research/infrastructure/deploy.sh here
-#      (predictor's spot_train.sh stages predictor.yaml the same way).
+#  (2) CONFIG RESOLUTION — RESOLVED 2026-07-06 (pre-rehearsal review): a
+#      fresh public clone has NO prompts and NO real YAMLs (both gitignored;
+#      prompt_loader HARD-FAILS with no .example fallback — the 2026-04-11
+#      silent-sample-fallback incident is why). This launcher now stages the
+#      dispatcher's private alpha-engine-config `research/` subtree to S3 as
+#      a single tarball and the box extracts it to
+#      /home/ec2-user/alpha-engine-config/research/ — prompt_loader/config.py
+#      search path #1 (HOME-sibling), the same files deploy.sh stages into
+#      the Lambda image. Hard-fails at dispatch if prompts are absent
+#      (deploy.sh parity). Single-key cp avoids needing s3:ListBucket on the
+#      spot profile. Rehearsal still validates the resolution end-to-end.
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +118,20 @@ echo "  Force         : $FORCE"
 echo "  Transport     : SSM via lib chokepoint (python -m krepis.ssm_dispatcher)"
 
 # ── Cleanup + spot-interruption retry trap (installed BEFORE launch) ─────────
+# Locate the private alpha-engine-config research/ subtree on the dispatcher
+# (ae-dashboard clones + boot-pulls the private repo; laptop fallback for
+# manual runs). Hard-fail if prompts are missing — deploy.sh parity: an
+# image/box without the real prompts must never ship/run (2026-04-11).
+RESEARCH_CONFIG_SRC="/home/ec2-user/alpha-engine-config/research"
+if [ ! -d "$RESEARCH_CONFIG_SRC" ]; then
+    RESEARCH_CONFIG_SRC="$HOME/Development/alpha-engine-config/research"
+fi
+if ! ls "$RESEARCH_CONFIG_SRC/prompts/"*.txt >/dev/null 2>&1; then
+    echo "ERROR: research prompts not found at $RESEARCH_CONFIG_SRC/prompts/ —" >&2
+    echo "is alpha-engine-config cloned + pulled on this host? (deploy.sh parity check)" >&2
+    exit 1
+fi
+
 INSTANCE_ID=""
 S3_STAGING=""
 
@@ -212,6 +231,15 @@ S3_STAGING="s3://${S3_BUCKET}/${S3_STAGING_PREFIX}"
 echo "==> Waiting for instance to enter running state..."
 aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$AWS_REGION"
 
+# Stage the private research config surface (prompts + scoring/universe/
+# thinktank YAMLs + any experiment-package subdirs) as ONE tarball — the
+# spot pulls it with a single GetObject (no ListBucket needed on the spot
+# profile, matching the proven spot_data_weekly config.yaml pattern).
+echo "==> Staging alpha-engine-config/research/ → ${S3_STAGING}/research-config.tgz"
+tar -C "$RESEARCH_CONFIG_SRC" -czf /tmp/research-config-${RUN_ID}.tgz .
+aws s3 cp "/tmp/research-config-${RUN_ID}.tgz" "${S3_STAGING}/research-config.tgz" --region "$AWS_REGION" --only-show-errors
+rm -f "/tmp/research-config-${RUN_ID}.tgz"
+
 # ── SSM dispatch primitive (lib chokepoint) ──────────────────────────────────
 # Thin wrapper around `python -m krepis.ssm_dispatcher run` (invoked directly
 # via krepis per config#1649); failure-only substrate, preserves inner exit.
@@ -245,8 +273,8 @@ ENV_EOF
 # ── Bootstrap: watchdog + python + git + clone ───────────────────────────────
 # Spot-side systemd watchdog shuts the box down after MAX_RUNTIME_SECONDS
 # regardless of dispatcher state (orphan backstop — the dispatcher EXIT trap
-# only fires on a clean dispatcher exit). The box runs from a fresh clone; its
-# repo-local config/ is the package-first fallback (see VERIFY-IN-REHEARSAL 2).
+# only fires on a clean dispatcher exit). The box runs from a fresh clone +
+# the STAGED private research config surface (see resolved item 2 above).
 echo "==> Bootstrapping spot (watchdog, python, clone)..."
 run_ssm "bootstrap" 600 <<BOOTSTRAP
 set -eo pipefail
@@ -257,7 +285,15 @@ dnf install -y -q python3.12 python3.12-pip python3.12-devel git gcc 2>/dev/null
     dnf install -y -q python3 python3-pip python3-devel git gcc
 echo "Using: \$(\$PYTHON_BIN --version)"
 git clone --depth 1 --branch ${BRANCH} https://github.com/nousergon/crucible-research.git /home/ec2-user/research
-echo "Bootstrap complete: crucible-research cloned at ${BRANCH}."
+# Private research config surface (prompts + YAMLs): extract to the
+# prompt_loader/config.py HOME-sibling search path. Without this the box
+# HARD-FAILS at load_prompt (no .example fallback, by design).
+mkdir -p /home/ec2-user/alpha-engine-config/research
+aws s3 cp ${S3_STAGING}/research-config.tgz /tmp/research-config.tgz --region ${AWS_REGION} --only-show-errors
+tar -xzf /tmp/research-config.tgz -C /home/ec2-user/alpha-engine-config/research
+rm -f /tmp/research-config.tgz
+ls /home/ec2-user/alpha-engine-config/research/prompts/*.txt >/dev/null || { echo "ERROR: staged prompts missing after extract"; exit 1; }
+echo "Bootstrap complete: crucible-research cloned at ${BRANCH}; research config staged."
 BOOTSTRAP
 
 # ── Install python deps ──────────────────────────────────────────────────────

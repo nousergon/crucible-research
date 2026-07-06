@@ -93,3 +93,22 @@ def test_each_krepis_module_executes_under_runpy(module):
     assert out.returncode != 0 or produced_output, (
         f"{module} behaved like a guard-less shim (exit 0, no output) under python -m"
     )
+
+
+def test_launcher_stages_private_research_config_for_the_box():
+    """A fresh public clone has NO prompts and NO real YAMLs (gitignored;
+    prompt_loader hard-fails with no .example fallback — the 2026-04-11
+    silent-sample-fallback incident class). The launcher MUST stage the
+    private config-repo research/ subtree and the box MUST extract it to
+    the prompt_loader/config.py HOME-sibling search path, with deploy.sh
+    parity hard-fails on both sides (config#1687 pre-rehearsal review)."""
+    sh = _SCRIPT.read_text()
+    # Dispatcher side: source check hard-fails without prompts, then stages
+    # ONE tarball (single-key GetObject on the spot; no ListBucket needed).
+    assert 'RESEARCH_CONFIG_SRC="/home/ec2-user/alpha-engine-config/research"' in sh
+    assert "research prompts not found" in sh
+    assert "research-config.tgz" in sh
+    # Box side: extract to search path #1 and verify prompts landed.
+    assert "mkdir -p /home/ec2-user/alpha-engine-config/research" in sh
+    assert "tar -xzf /tmp/research-config.tgz -C /home/ec2-user/alpha-engine-config/research" in sh
+    assert "staged prompts missing after extract" in sh
