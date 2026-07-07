@@ -252,18 +252,28 @@ def _load_signals(s3: Any, bucket: str, date_str: str) -> Optional[dict]:
 
 
 def _load_evals(s3: Any, bucket: str, run_date: date_type) -> list[dict]:
-    """All RubricEvalArtifact JSONs under ``_eval/{run_date}/`` (any subdir)."""
-    prefix = f"{_EVAL_PREFIX}/{run_date.isoformat()}/"
-    artifacts: list[dict] = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []) or []:
-            key = obj["Key"]
-            if not key.endswith(".json"):
-                continue
-            doc = _get_json(s3, bucket, key)
-            if doc is not None:
-                artifacts.append(doc)
+    """All RubricEvalArtifact JSONs under ``_eval/`` in the flat layout
+    (config#793 — prior nested layout is no longer emitted).
+
+    Reuses the loader from evals/judge_outcome_ic to maintain consistency
+    across the rubric + judge_outcome_ic components. The rubric metrics
+    report over all evals in the flat prefix; filtering by run_date is no
+    longer applicable with the flat layout since execution date is not
+    encoded in the S3 partition (the date semantics are now in each artifact's
+    timestamps / capture keys). This is correct for the Saturday reporting
+    use case (one research run per Saturday writes all weekly evals)."""
+    from evals.judge_outcome_ic import load_eval_artifacts
+
+    artifacts = load_eval_artifacts(s3, bucket)
+
+    if not artifacts:
+        logger.warning(
+            "[build_agent_quality] zero evals found in the flat _eval/ prefix "
+            "(run_date=%s) — this is expected only on the first run after a "
+            "research reset; otherwise check that the judge layer is emitting",
+            run_date,
+        )
+
     return artifacts
 
 

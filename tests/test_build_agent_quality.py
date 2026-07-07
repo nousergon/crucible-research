@@ -443,3 +443,35 @@ class TestJudgeOutcomeIC:
         # the research.db precondition is broken in this synthetic world).
         art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
         assert "judge_outcome_ic" in art
+
+
+class TestFlatLayoutRegression:
+    """Regression: config#1840 — _load_evals must enumerate the flat _eval/
+    layout, not the legacy nested _eval/{run_date}/ partition (config#793 swap).
+    This test locks the fix so a future rename/reorganization can't silently
+    re-break the rubric blocks."""
+
+    def test_rubric_metrics_load_from_flat_layout(self, s3):
+        """Evals in the flat layout are loaded for rubric_pass_rate/distribution."""
+        # Seed: flat layout evals (NOT the old nested structure).
+        # We reuse the TestJudgeOutcomeIC fixture (_seed_judge_history) which
+        # already uses the canonical flat layout.
+        _seed_judge_history(s3)
+        # Also need signals for volume adequacy + one cost row.
+        _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(30))
+        _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_RUN_DATE.isoformat()}/a/x.jsonl",
+                   [_cost_row(0.50)])
+
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        # The flat-layout evals are now loaded, so rubric blocks are populated.
+        assert "judge_rubric_pass_rate" in art, (
+            "judge_rubric_pass_rate missing — _load_evals did not load "
+            "from flat _eval/ layout"
+        )
+        assert art["judge_rubric_pass_rate"]["value"] > 0, (
+            "rubric metrics are zero — evals loaded but invalid structure"
+        )
+        assert art["judge_rubric_pass_rate"]["n"] == 6, (
+            "Expected 6 evals from flat layout (2 dates x 3 tickers)"
+        )
+        assert "judge_rubric_distribution" in art
