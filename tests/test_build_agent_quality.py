@@ -471,7 +471,7 @@ class TestFlatLayoutRegression:
         assert art["judge_rubric_pass_rate"]["value"] > 0, (
             "rubric metrics are zero — evals loaded but invalid structure"
         )
-        assert art["judge_rubric_pass_rate"]["n"] == 6, (
-            "Expected 6 evals from flat layout (2 dates x 3 tickers)"
+        assert art["judge_rubric_pass_rate"]["n"] == 7, (
+            "Expected 6 evals from flat layout (2 dates x 3 tickers + 1 slate-level unattributable)"
         )
         assert "judge_rubric_distribution" in art
