@@ -74,13 +74,71 @@ class FMPDailyLimitError(RuntimeError):
     pass
 
 
+class FMPPlanLimitedError(RuntimeError):
+    """Raised when an FMP endpoint returns 402 (not covered by current plan).
+
+    Distinct from ``FMPDailyLimitError``: a 402 is a deterministic,
+    per-plan rejection (this endpoint is simply not entitled), not a
+    transient/quota condition. It must never be retried — see the
+    per-endpoint circuit breaker below.
+    """
+    pass
+
+
 def fmp_budget_exhausted() -> bool:
     """Check if the FMP daily budget has been used up."""
     return _fmp_daily_count >= _FMP_DAILY_LIMIT
 
 
+# ── 402 circuit breaker ───────────────────────────────────────────────────────
+# FMP returns 402 Payment Required for endpoints the current plan doesn't
+# cover (e.g. grades-consensus, price-target-consensus). This is a deterministic
+# per-plan rejection, not a transient failure — retrying it just burns the
+# per-run wall clock (Research Lambda has a 900s ceiling) for a guaranteed
+# repeat failure. Trip a breaker per endpoint on the first 402 seen in a run;
+# every subsequent call to that endpoint short-circuits (no HTTP call, no log
+# spam) and increments a skip counter that the run summary can report.
+#
+# Module-level state mirrors the existing ``_fmp_daily_count`` idiom above —
+# this codebase already tracks FMP run/day state at module scope rather than
+# threading a context object through the fetch call chain, so the breaker
+# follows the same pattern for consistency. ``reset_fmp_402_breaker()`` lets
+# a fresh Lambda invocation (or a test) start from a clean slate.
+_fmp_402_tripped: dict[str, bool] = {}
+_fmp_402_skipped_count: dict[str, int] = {}
+
+
+def reset_fmp_402_breaker() -> None:
+    """Clear all per-endpoint 402 breaker state. Call at the start of a run."""
+    _fmp_402_tripped.clear()
+    _fmp_402_skipped_count.clear()
+
+
+def fmp_402_skip_counts() -> dict[str, int]:
+    """Return a copy of the per-endpoint 402-skip counters for the run summary.
+
+    Keys are FMP endpoint names (e.g. ``grades-consensus``); values are the
+    number of calls short-circuited by the breaker because that endpoint had
+    already tripped on a 402 earlier in the run.
+    """
+    return dict(_fmp_402_skipped_count)
+
+
 def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STABLE) -> dict | list:
     global _fmp_last_call, _fmp_daily_count
+
+    # 402 circuit breaker: if this endpoint already tripped earlier in the
+    # run, skip the call entirely — no HTTP request, no per-call log line.
+    # Checked before the API key / rate-limit bookkeeping so a tripped
+    # endpoint costs nothing on repeat tickers. Keyed on the bare endpoint
+    # name (e.g. "grades-consensus"), not the full URL with params, since
+    # the 402 is a plan-level rejection independent of the ticker.
+    if _fmp_402_tripped.get(endpoint):
+        _fmp_402_skipped_count[endpoint] = _fmp_402_skipped_count.get(endpoint, 0) + 1
+        raise FMPPlanLimitedError(
+            f"FMP {endpoint} circuit-broken after 402 earlier this run — skipping"
+        )
+
     api_key = get_secret("FMP_API_KEY", required=False, default="")
     if not api_key:
         raise RuntimeError("FMP_API_KEY environment variable not set.")
@@ -107,6 +165,23 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
                 _save_fmp_counter(_fmp_daily_count)
 
         resp = requests.get(url, params=p, timeout=_TIMEOUT)
+
+        if resp.status_code == 402:
+            # 402 Payment Required: this endpoint is not covered by the
+            # current FMP plan. Deterministic per-plan rejection, NOT
+            # transient — do not retry/backoff. Trip the breaker so every
+            # remaining ticker this run skips the call outright, log
+            # exactly ONE summary WARN (not per-ticker spam), and count
+            # this first occurrence as a skip too so the run-summary
+            # counter reflects total calls avoided.
+            _fmp_402_tripped[endpoint] = True
+            _fmp_402_skipped_count[endpoint] = _fmp_402_skipped_count.get(endpoint, 0) + 1
+            logger.warning(
+                "FMP %s returned 402 (not covered by current plan) — "
+                "circuit-breaking this endpoint for the rest of the run",
+                endpoint,
+            )
+            raise FMPPlanLimitedError(f"FMP {endpoint} returned 402 — plan does not cover this endpoint")
 
         if resp.status_code == 429:
             # 429 means daily quota is exhausted — stop all FMP calls immediately
@@ -161,6 +236,10 @@ def fetch_analyst_consensus(ticker: str, current_price: Optional[float] = None) 
             result["consensus_rating"] = g.get("consensus")
             total = sum(g.get(k, 0) or 0 for k in ("strongBuy", "buy", "hold", "sell", "strongSell"))
             result["num_analysts"] = total or None
+    except FMPPlanLimitedError as e:
+        # Breaker already logged its one-time WARN and counted the skip —
+        # avoid per-ticker log spam on every subsequent call this run.
+        logger.debug("FMP grades-consensus skipped for %s: %s", ticker, e)
     except Exception as e:
         logger.warning("FMP grades-consensus failed for %s: %s", ticker, e)
 
@@ -170,6 +249,8 @@ def fetch_analyst_consensus(ticker: str, current_price: Optional[float] = None) 
         if isinstance(data, list) and data:
             pt = data[0]
             result["mean_target"] = pt.get("targetConsensus")
+    except FMPPlanLimitedError as e:
+        logger.debug("FMP price-target-consensus skipped for %s: %s", ticker, e)
     except Exception as e:
         logger.warning("FMP price-target-consensus failed for %s: %s", ticker, e)
 
