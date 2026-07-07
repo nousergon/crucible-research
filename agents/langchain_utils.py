@@ -843,6 +843,48 @@ def get_final_text(messages: list) -> str:
     return ""
 
 
+# ── Silent step-budget exhaustion detection (config#1822) ────────────────────
+#
+# ``langgraph.prebuilt.chat_agent_executor``'s internal ``call_model`` node
+# tracks a managed ``remaining_steps`` channel derived from the
+# ``recursion_limit`` passed at invoke time. When ``remaining_steps < 2``
+# and the model still wants to call a tool, the executor does NOT raise
+# ``GraphRecursionError`` — it swaps in a synthetic AIMessage with this
+# EXACT literal content and returns the graph invocation normally (see
+# ``_are_more_steps_needed`` / ``call_model`` in that module). That is a
+# SEPARATE, earlier-firing guard than the graph-level recursion_limit crash
+# that ``GraphRecursionError`` covers; ``quant_analyst.py`` /
+# ``qual_analyst.py`` only ever caught the latter.
+#
+# Investigation (config#1822, 2026-07-03 defensives/financials/consumer
+# qual + healthcare/industrials quant): the 7/3 weekly's "90-102 tool
+# calls, 0 assessments" teams all terminated with this exact sentinel as
+# ``final_text``. Because it arrives as a normal, non-empty AI message,
+# the calling code's ``if not final_text: raise ...`` guard never fires
+# either — the decoupled structured-output extraction runs against this
+# boilerplate string, correctly finds no picks/assessments in it, and the
+# team silently contributes zero output with ``error=None, partial=False``.
+# That is exactly the "vanishes instead of surfacing" failure the issue
+# calls out: score_aggregator's ALL-AGENTS-STRICT gate only inspects
+# ``error`` and ``partial`` — this failure mode set neither.
+LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL = (
+    "Sorry, need more steps to process this request."
+)
+
+
+def is_step_budget_exhausted_sentinel(final_text: str | None) -> bool:
+    """True iff ``final_text`` IS (not merely contains) the prebuilt
+    ReAct executor's silent step-budget-exhaustion bailout message.
+
+    Exact-match (after stripping) rather than substring — this is a fixed
+    literal owned by langgraph, not agent-authored prose that might
+    legitimately reference running out of time/steps.
+    """
+    return bool(final_text) and final_text.strip() == (
+        LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL
+    )
+
+
 # ── Bounded transcript serialization (decision-review / L4567) ────────────────
 #
 # The ReAct agents (quant, qual) discard their full reasoning after the

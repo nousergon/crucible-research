@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agents.langchain_utils import serialize_transcript
+from agents.langchain_utils import (
+    is_step_budget_exhausted_sentinel,
+    serialize_transcript,
+)
 
 
 def _human(text):
@@ -79,3 +82,47 @@ def test_empty_and_json_serializable():
     assert serialize_transcript([]) == []
     out = serialize_transcript([_human("hi"), _ai("bye")])
     json.dumps(out)  # must be JSON-serializable for the S3 artifact
+
+
+# ── is_step_budget_exhausted_sentinel (config#1822) ───────────────────────────
+#
+# langgraph.prebuilt.chat_agent_executor's internal remaining_steps guard
+# swaps in this EXACT literal AIMessage content and returns normally
+# (no GraphRecursionError) once its step budget is nearly exhausted. The
+# quant/qual analysts must detect it exactly (not by substring) so
+# genuine analyst prose that happens to mention running low on steps
+# isn't misclassified, and must not miss the real sentinel via a stray
+# whitespace/case difference from a future langgraph version bump.
+
+
+def test_sentinel_exact_match_detected():
+    assert is_step_budget_exhausted_sentinel(
+        "Sorry, need more steps to process this request."
+    ) is True
+
+
+def test_sentinel_detected_with_surrounding_whitespace():
+    assert is_step_budget_exhausted_sentinel(
+        "  Sorry, need more steps to process this request.  \n"
+    ) is True
+
+
+def test_sentinel_not_detected_for_normal_analysis_text():
+    assert is_step_budget_exhausted_sentinel(
+        "Based on the data, my top pick is AAPL with a quant_score of 82."
+    ) is False
+
+
+def test_sentinel_not_detected_for_substring_containing_text():
+    """Exact-match only — prose that happens to mention the phrase (but
+    isn't literally just the langgraph bailout) must not be misclassified
+    as a step-budget exhaustion."""
+    assert is_step_budget_exhausted_sentinel(
+        "Sorry, need more steps to process this request. Actually here "
+        "are my final picks: AAPL, MSFT."
+    ) is False
+
+
+def test_sentinel_handles_none_and_empty():
+    assert is_step_budget_exhausted_sentinel(None) is False
+    assert is_step_budget_exhausted_sentinel("") is False

@@ -718,6 +718,14 @@ def fetch_data(state: ResearchState) -> dict:
     except Exception as e:
         logger.warning("[fetch_data] RAG availability check failed: %s", e)
 
+    # Reset the FMP 402 circuit breaker for this run (module-level state — see
+    # data/fetchers/analyst_fetcher.py). Without this, a container reused
+    # across Lambda invocations would keep an endpoint tripped from a prior
+    # run's 402 forever, silently starving a run where the plan issue may
+    # have since been fixed.
+    from data.fetchers.analyst_fetcher import reset_fmp_402_breaker
+    reset_fmp_402_breaker()
+
     # Load S&P 900 universe
     scanner_universe, wikipedia_sector_map = fetch_sp500_sp400_with_sectors()
     logger.info("[fetch_data] %d tickers in S&P 900 universe", len(scanner_universe))
@@ -1012,6 +1020,16 @@ def fetch_data(state: ResearchState) -> dict:
     news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
         _pre_fetch_held_enrichment(population_tickers)
     )
+
+    # Surface the FMP 402 circuit-breaker skip counts in the run summary log
+    # (config#1821). The breaker itself already logs one WARN per endpoint
+    # at trip time; this is the run-level counter so a known-dead endpoint
+    # shows up in the summary rather than as a silent data hole.
+    from data.fetchers.analyst_fetcher import fmp_402_skip_counts
+    _402_skips = fmp_402_skip_counts()
+    if _402_skips:
+        logger.info("[fetch_data] FMP 402 circuit breaker skips: %s", _402_skips)
+
     substrate_by_ticker: dict[str, dict] = {}
     import os as _os
     if _os.environ.get("INSTITUTIONAL_SUBSTRATE_ENABLED", "").lower() == "true":
