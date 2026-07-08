@@ -397,18 +397,15 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
         # when FMP is unavailable. ``bool(value)`` short-circuits both
         # ``None`` and empty containers; we want at least one field with
         # actual content.
+        #
+        # config#1821 Option B (2026-07-08): consensus_rating / mean_target
+        # / num_analysts / rating_changes were removed from
+        # fetch_analyst_consensus's returned shape (the FMP endpoints that
+        # populated them 402'd for every ticker on the current plan).
+        # earnings_surprises is the only field left to check.
         analyst_is_substantive = (
             isinstance(analyst, dict)
-            and any(
-                bool(analyst.get(k))
-                for k in (
-                    "consensus_rating",
-                    "mean_target",
-                    "num_analysts",
-                    "rating_changes",
-                    "earnings_surprises",
-                )
-            )
+            and bool(analyst.get("earnings_surprises"))
         )
         return not prior_summary and not news_articles and not analyst_is_substantive
 

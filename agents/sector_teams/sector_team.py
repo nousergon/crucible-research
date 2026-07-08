@@ -590,13 +590,19 @@ def _update_thesis_for_held_stock(
             base_news_summary=news_summary,
         )
 
+    # config#1821 Option B (2026-07-08): analyst consensus rating / price
+    # target / upside were removed from fetch_analyst_consensus's returned
+    # shape (the FMP endpoints that populated them 402'd for every ticker
+    # on the current plan). Earnings surprises remain a live field.
     analyst_summary = ""
     if analyst_data:
-        analyst_summary = (
-            f"Consensus: {analyst_data.get('consensus_rating', 'N/A')}, "
-            f"Target: ${analyst_data.get('mean_target', 'N/A')}, "
-            f"Upside: {analyst_data.get('upside_pct', 'N/A')}%"
-        )
+        surprises = analyst_data.get("earnings_surprises") or []
+        if surprises:
+            latest = surprises[0]
+            analyst_summary = (
+                f"Latest earnings surprise ({latest.get('date', 'N/A')}): "
+                f"{latest.get('surprise_pct', 'N/A')}%"
+            )
 
     loaded_prompt = load_prompt("sector_team_thesis_update")
     prompt = loaded_prompt.format(

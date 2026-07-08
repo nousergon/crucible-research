@@ -17,7 +17,6 @@ log = logging.getLogger(__name__)
 
 NEWS_VOLUME_THRESHOLD = 3        # novel articles in a week
 PRICE_MOVE_ATR_MULTIPLE = 2.0    # price move > 2 × ATR triggers update
-ANALYST_REVISION_PCT = 10.0      # price target revision > 10%
 EARNINGS_PROXIMITY_DAYS = 5      # days before/after earnings
 INSIDER_CLUSTER_THRESHOLD = 2    # insiders transacting in 30d
 
@@ -77,21 +76,13 @@ def check_material_triggers(
         except Exception as e:
             log.debug("Price move check failed for %s: %s", ticker, e)
 
-    # 3. Analyst revision
-    if analyst_data:
-        rating_changes = analyst_data.get("rating_changes", [])
-        if rating_changes:
-            triggers.append("analyst_rating_change")
-        pt_upside = analyst_data.get("upside_pct")
-        if prior_thesis and pt_upside is not None:
-            prior_upside = prior_thesis.get("price_target_upside")
-            if prior_upside is not None:
-                try:
-                    pct_change = abs(float(pt_upside) - float(prior_upside))
-                    if pct_change >= ANALYST_REVISION_PCT:
-                        triggers.append("analyst_target_revision")
-                except (ValueError, TypeError):
-                    pass
+    # 3. Analyst revision — REMOVED (config#1821 Option B, 2026-07-08).
+    # This used to key off ``analyst_data["rating_changes"]`` /
+    # ``analyst_data["upside_pct"]``, both sourced from FMP's
+    # grades-consensus / price-target-consensus endpoints. Those endpoints
+    # 402'd for every ticker on the current plan (never populated in
+    # practice) and were removed from fetch_analyst_consensus's returned
+    # shape entirely, so this check would now always be a no-op.
 
     # 4. Earnings proximity
     if analyst_data:

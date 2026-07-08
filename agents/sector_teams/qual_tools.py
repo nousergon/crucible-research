@@ -144,6 +144,13 @@ def create_qual_tools(context: dict) -> list:
                 "earnings_surprises": ac.get("earnings_surprises", [])[:4],
             })
 
+        # config#1821 Option B (2026-07-08): fetch_analyst_consensus no
+        # longer sources consensus_rating / mean_target / num_analysts /
+        # rating_changes — those came from FMP's grades-consensus /
+        # price-target-consensus endpoints, which 402'd for every ticker
+        # on the current plan and were removed from the feature contract.
+        # Only earnings_surprises (a different, still-live v3 endpoint)
+        # remains in this fallback path.
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus
 
         try:
@@ -154,11 +161,6 @@ def create_qual_tools(context: dict) -> list:
             data = fetch_analyst_consensus(ticker, current_price=cp)
             return json.dumps({
                 "ticker": ticker,
-                "consensus_rating": data.get("consensus_rating", "N/A"),
-                "num_analysts": data.get("num_analysts", 0),
-                "mean_target": data.get("mean_target"),
-                "upside_pct": round(data.get("upside_pct", 0), 1) if data.get("upside_pct") else None,
-                "rating_changes": data.get("rating_changes", [])[:5],
                 "earnings_surprises": data.get("earnings_surprises", [])[:4],
             })
         except Exception as e:
