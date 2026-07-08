@@ -4098,10 +4098,162 @@ def archive_writer(state: ResearchState) -> dict:
     return {}
 
 
+# ── Slim briefing email (config#856 Phase 2.5) ───────────────────────────────
+#
+# Mirrors the crucible-executor EOD-email conversion (executor/eod_emailer.py,
+# alpha-engine-config#856 "pull-for-state console page + push-on-transition
+# emails only", shipped as crucible-executor#276 / crucible-dashboard#237):
+# the full consolidated report is no longer rendered inline in the email.
+# It's already persisted verbatim by archive_writer
+# (ArchiveManager.save_consolidated_report — UNCHANGED by this conversion,
+# still written to consolidated/{run_date}/morning.md) and rendered by the
+# console's Research Briefing Archive page
+# (alpha-engine-dashboard views/17_Research_Briefing_Archive.py). The email
+# now carries only a compact at-a-glance summary + a deep-link there.
+#
+# Deep-link gap (flagged, not fixed here — this PR does not touch
+# crucible-dashboard): UNLIKE the executor's "eod-report" slug — pinned via
+# ``url_path=`` in the dashboard's app.py and guarded against drift by
+# tests/test_eod_report_page.py (see executor/eod_emailer.py
+# EOD_REPORT_SLUG) — the Research Briefing Archive page has NO pinned
+# url_path and no per-run query-param handling at all:
+#
+#   1. It's rendered as an unpinned sub-view TAB ("Briefing Archive") lazily
+#      hosted inside views/host_research_signals.py (itself also unpinned in
+#      app.py's navigation table), selected via shared/view_host.py's
+#      documented ``?tab=`` bookmark query param.
+#   2. Streamlit's default (filename-derived) url_path for that host page is
+#      "host_research_signals" — verified directly against the
+#      ``page_icon_and_name()`` slug algorithm in the dashboard's pinned
+#      ``streamlit>=1.40`` floor — but nothing in either repo guards that
+#      string the way "eod-report" is guarded, so a file rename would break
+#      this link silently.
+#   3. The page itself reads no ``?date=``/``?run=`` query param — "latest
+#      inline + prior ~2 weeks click-to-expand" is the whole UI (confirmed:
+#      no ``st.query_params`` usage in that view at all). So this is
+#      necessarily a link to the GENERAL archive (which shows today's
+#      just-persisted brief as "latest" for a same-day open), NOT a
+#      deep-link scoped to this specific run the way
+#      ``…/eod-report?date=YYYY-MM-DD`` is.
+#
+# (This repo's own scoring/attractiveness_trajectory.py already hand-rolled a
+# *different*, likely-stale link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"``
+# — into the analogous host_universe_scanner.py host tab, ignoring the
+# host/tab indirection entirely. That's the failure mode this link avoids by
+# using the real filename-derived slug plus the documented ``?tab=``
+# mechanism, but it's the same class of gap: a dashboard follow-up should
+# pin a url_path for this surface — and ideally add ``?date=`` support —
+# the way eod-report/director/model-zoo/analysis already do.)
+RESEARCH_BRIEFING_SLUG = "host_research_signals"
+RESEARCH_BRIEFING_TAB = "Briefing Archive"
+
+_SLIM_EMAIL_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<style>
+  body {{ font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.6;
+          color: #222; max-width: 700px; margin: 0 auto; padding: 20px; }}
+  h2   {{ font-size: 15px; border-bottom: 1px solid #999; padding-bottom: 4px; margin-top: 24px; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+  th, td {{ border: 1px solid #ccc; padding: 4px 10px; text-align: left; }}
+  th {{ background: #f0f0f0; }}
+  .cta  {{ display: inline-block; margin: 14px 0; padding: 10px 18px;
+           background: #0b5; color: #fff !important; text-decoration: none;
+           border-radius: 4px; font-weight: bold; }}
+  .foot {{ margin-top: 28px; font-size: 11px; color: #888;
+           border-top: 1px solid #ccc; padding-top: 8px; }}
+</style>
+</head>
+<body>
+{body}
+<div class="foot">Alpha Engine Research | {date}</div>
+</body>
+</html>
+"""
+
+
+def _research_briefing_url(console_base_url: str | None = None) -> str:
+    """Deep-link to the console's Research Briefing Archive tab.
+
+    General-archive link only — see the gap note above the
+    ``RESEARCH_BRIEFING_SLUG`` constant; the page has no per-run scoping to
+    deep-link into.
+    """
+    from urllib.parse import quote
+
+    from krepis.console import console_url
+
+    base_url = console_url(RESEARCH_BRIEFING_SLUG, base=console_base_url)
+    return f"{base_url}?tab={quote(RESEARCH_BRIEFING_TAB)}"
+
+
+def _build_slim_briefing_email(state: ResearchState) -> tuple[str, str]:
+    """Build the slim morning-briefing email body: ``(html_body, plain_body)``.
+
+    A compact summary (run date, regime, population headline counts) plus a
+    deep-link to the console archive — NOT the full consolidated report.
+    The full report is persisted separately and unconditionally by
+    ``archive_writer`` via ``ArchiveManager.save_consolidated_report``
+    (untouched by this function; see the module note above ``email_sender``).
+    """
+    run_date = state.get("run_date", "")
+    regime = (state.get("market_regime") or "neutral").upper()
+    new_pop = state.get("new_population", []) or []
+    current_pop = state.get("current_population", []) or []
+    exits = state.get("exits", []) or []
+
+    current_tickers = {p["ticker"] for p in current_pop if "ticker" in p}
+    new_tickers = {p["ticker"] for p in new_pop if "ticker" in p}
+    n_entrants = len(new_tickers - current_tickers)
+    n_pop = len(new_pop)
+    n_exits = len(exits)
+
+    url = _research_briefing_url()
+
+    html_parts = [
+        "<h2>Daily Research Brief</h2>",
+        "<table>",
+        "<tr><th>Metric</th><th>Value</th></tr>",
+        f"<tr><td>Run date</td><td>{run_date}</td></tr>",
+        f"<tr><td>Regime</td><td>{regime}</td></tr>",
+        "<tr><td>Population</td><td>"
+        f"{n_pop} stocks ({n_entrants} new, {n_pop - n_entrants} existing, "
+        f"{n_exits} exited)</td></tr>",
+        "</table>",
+        f'<a class="cta" href="{url}">View full research briefing on the console →</a>',
+        '<p style="font-size:11px;color:#888;">Sector allocation, per-ticker '
+        "ratings/rationale, regime trend, and risk posture are on the "
+        "console archive.</p>",
+    ]
+    html_body = _SLIM_EMAIL_HTML_TEMPLATE.format(
+        body="\n".join(html_parts), date=run_date,
+    )
+
+    plain_body = "\n".join([
+        f"Alpha Engine Research — {run_date}",
+        "=" * 40,
+        f"Regime:     {regime}",
+        f"Population: {n_pop} stocks ({n_entrants} new, "
+        f"{n_pop - n_entrants} existing, {n_exits} exited)",
+        "",
+        f"Full briefing: {url}",
+        "",
+    ])
+    return html_body, plain_body
+
+
 def email_sender(state: ResearchState) -> dict:
-    """Send the morning email with properly rendered HTML."""
+    """Send the slim morning-briefing email: summary + console deep-link.
+
+    As of 2026-07-03 (alpha-engine-config#856 Phase 2.5) this is a SLIM
+    link email — see the module note above ``RESEARCH_BRIEFING_SLUG`` for
+    the full rationale and the per-run deep-link gap. The full consolidated
+    report is unaffected: ``archive_writer`` still unconditionally persists
+    it verbatim via ``ArchiveManager.save_consolidated_report`` before this
+    node ever runs.
+    """
     from emailer.sender import send_email
-    from emailer.formatter import format_email
     from config import EMAIL_RECIPIENTS, EMAIL_SENDER
 
     logger.info("[email_sender] starting")
@@ -4111,7 +4263,7 @@ def email_sender(state: ResearchState) -> dict:
     if consolidated:
         try:
             subject = f"Alpha Engine Research — {run_date}"
-            html_body, plain_body = format_email(consolidated, run_date)
+            html_body, plain_body = _build_slim_briefing_email(state)
             send_email(
                 subject=subject,
                 html_body=html_body,
