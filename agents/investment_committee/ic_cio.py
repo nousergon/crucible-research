@@ -4,6 +4,21 @@ CIO Agent — evaluates all sector team recommendations in a single batch Sonnet
 The CIO sees all candidates simultaneously and selects up to `max_new_entrants` for advancement (floor-enforced; `open_slots` is informational only — see `_compute_advance_bounds`).
 Evaluates on 5 dimensions: risk/reward asymmetry (primary), team conviction, macro alignment, portfolio fit, catalyst specificity.
 Writes entry theses for advanced stocks. All decisions (advance, reject, deadlock) saved.
+
+config#798 PR 2/6 note (2026-07-08 groom pass — see PR body for full writeup):
+this module does NOT contain the per-stock macro_modifier score adjustment the
+issue's PR 2 spec describes relocating. That arithmetic lives in
+``scoring/composite.py::compute_composite_score`` /
+``compute_composite_breakdown`` (the ``macro_shift`` overlay, already
+flag-gated OFF-capable via ``macro_overlay_enabled`` /
+``aggregator.macro_overlay.enabled``, config#1060/#1061). Per-sector slot
+allocation driven by ``sector_ratings`` ALSO already exists, unconditionally,
+in two places upstream of this file:
+``agents/sector_teams/team_config.py::compute_team_slots`` (team-level) and
+``data/population_selector.py::compute_sector_slots`` (population-level).
+Whoever resumes PR 2 should reconcile the issue's file target against this
+existing infrastructure rather than adding a third, competing relocation
+site here.
 """
 
 from __future__ import annotations
