@@ -79,7 +79,7 @@ class TestQualToolsHybridWiring:
         # query_filings (deferred import for cold-start cost), so the
         # patch target is the lib symbol — the inline import resolves
         # against the patched module attribute.
-        with patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+        with patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -107,7 +107,7 @@ class TestQualToolsHybridWiring:
             _mock_retrieval_result("c2", vec=None, kw=0.42, combined=0.126),
         ]
 
-        with patch("alpha_engine_lib.rag.retrieve", return_value=results):
+        with patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -125,7 +125,7 @@ class TestQualToolsHybridWiring:
         assert "'combined_score': 0.637" in msg or "'combined_score': 0.126" in msg
 
     def test_query_filings_returns_empty_message_when_no_results(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieve", return_value=[]):
+        with patch("nousergon_lib.rag.retrieve", return_value=[]):
             tool_fn = _get_query_filings_tool()
             out = tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
         assert "No filing data found" in out
@@ -136,7 +136,7 @@ class TestQualToolsHybridWiring:
         """Failure mode contract preserved: a RAG outage must not crash
         the qual agent — return a fallback message and log a WARNING.
         """
-        with patch("alpha_engine_lib.rag.retrieve", side_effect=RuntimeError("neon down")):
+        with patch("nousergon_lib.rag.retrieve", side_effect=RuntimeError("neon down")):
             with caplog.at_level(logging.WARNING, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 out = tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -167,7 +167,7 @@ class TestQualToolsRerankFlag:
             return [_mock_retrieval_result("c1", vec=0.7, combined=0.49)]
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
-             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+             patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -189,7 +189,7 @@ class TestQualToolsRerankFlag:
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
              patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
-             patch("alpha_engine_lib.rag.retrieve", side_effect=fake_retrieve):
+             patch("nousergon_lib.rag.retrieve", side_effect=fake_retrieve):
             tool_fn = _get_query_filings_tool()
             tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
 
@@ -215,7 +215,7 @@ class TestQualToolsRerankFlag:
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", "cross_encoder"), \
              patch("agents.sector_teams.qual_tools._RAG_RERANK_INPUT_N", 30), \
-             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+             patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})
@@ -238,7 +238,7 @@ class TestQualToolsRerankFlag:
         results = [_mock_retrieval_result("c1", vec=0.91, combined=0.637)]
 
         with patch("agents.sector_teams.qual_tools._RAG_RERANK", None), \
-             patch("alpha_engine_lib.rag.retrieve", return_value=results):
+             patch("nousergon_lib.rag.retrieve", return_value=results):
             with caplog.at_level(logging.INFO, logger="agents.sector_teams.qual_tools"):
                 tool_fn = _get_query_filings_tool()
                 tool_fn.invoke({"ticker": "AAPL", "query": "competitive moat"})

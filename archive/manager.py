@@ -629,25 +629,51 @@ class ArchiveManager:
     def load_team_accuracy(self) -> dict | None:
         """Load the per-team historical-accuracy artifact (config#926).
 
-        Producer: the backtester's team-performance analysis
-        (``optimizer/pipeline_optimizer.analyze_team_performance``), written to
-        ``config/team_accuracy.json`` as
-        ``{team_id: {"accuracy": float, "n_obs": int}}``. Consumed by
-        ``compute_team_slots`` to nudge per-team eligible-pick counts by
-        historical hit rate.
+        Producer: ``evals/team_accuracy.py::analyze_team_performance`` (runs
+        in this repo's Lambda handler), written to
+        ``config/team_accuracy.json``. Since config#1844 the artifact is a
+        self-describing envelope (``{"schema_version": 1, "status": ...,
+        counts..., "teams": {team_id: {"accuracy": float, "n_obs": int}}}``);
+        before that it was the bare per-team mapping. This loader unwraps
+        the envelope and returns just the per-team mapping — the exact shape
+        ``compute_team_slots`` consumes to nudge per-team eligible-pick
+        counts by historical hit rate — so the downstream contract is
+        unchanged.
+
+        Dual-shape tolerance (S3 contract-safety rule — consumer handles
+        both formats first): the legacy bare-dict branch exists so the
+        currently-live pre-envelope object parses until the enveloped
+        producer's first Saturday overwrite. Remove the legacy branch after
+        2026-07-13 (1 week past the 2026-07-06 config#1844 ship).
 
         Returns ``None`` gracefully on any failure (missing artifact, parse
-        error) so adaptive allocation degrades to the static behavior.
+        error, malformed envelope) so adaptive allocation degrades to the
+        static behavior.
         """
         raw = self._s3_get("config/team_accuracy.json")
         if not raw:
             return None
         try:
             data = json.loads(raw)
-            return data if isinstance(data, dict) else None
         except Exception as e:
             log.debug("team_accuracy parse failed: %s", e)
             return None
+        if not isinstance(data, dict):
+            return None
+        if "schema_version" in data and "teams" in data:
+            # Enveloped shape (config#1844, schema_version >= 1).
+            teams = data.get("teams")
+            if not isinstance(teams, dict):
+                log.warning(
+                    "team_accuracy envelope malformed: 'teams' is %s, not a "
+                    "dict — degrading to static allocation",
+                    type(teams).__name__,
+                )
+                return None
+            return teams
+        # Legacy bare {team_id: {...}} shape — dual-shape window, remove
+        # after 2026-07-13 (see docstring).
+        return data
 
     def load_regime_substrate(self) -> dict | None:
         """Load the most recent regime substrate artifact.
@@ -669,7 +695,7 @@ class ArchiveManager:
         the substrate-influences-LLM layer; the macro agent's final
         regime call is still authoritative for downstream consumers.
         """
-        from alpha_engine_lib.eval_artifacts import load_latest_eval_artifact
+        from nousergon_lib.eval_artifacts import load_latest_eval_artifact
 
         return load_latest_eval_artifact(
             self.s3, bucket=self.bucket, prefix="regime",
@@ -690,7 +716,7 @@ class ArchiveManager:
         error). Used by the consolidated brief's regime-trend block;
         callers must tolerate an empty / short list.
         """
-        from alpha_engine_lib.eval_artifacts import list_eval_artifacts
+        from nousergon_lib.eval_artifacts import list_eval_artifacts
 
         try:
             return list_eval_artifacts(

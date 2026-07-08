@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -140,10 +140,17 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
             s3_client=boto3.client("s3"),
             bucket=bucket,
         )
+        # team_accuracy is the schema_version-1 envelope (config#1844) —
+        # analyze_team_performance already WARNs with the full counts when
+        # status="insufficient".
         logger.info(
-            "team_accuracy emitted: %d teams with resolved observations (%s)",
-            len(team_accuracy),
-            {tid: v["n_obs"] for tid, v in team_accuracy.items()},
+            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d "
+            "n_resolved_outcomes=%d (%s)",
+            team_accuracy["status"],
+            team_accuracy["n_teams"],
+            team_accuracy["n_advance_picks"],
+            team_accuracy["n_resolved_outcomes"],
+            {tid: v["n_obs"] for tid, v in team_accuracy["teams"].items()},
         )
     except Exception as tae:
         # Shadow-mode WARN-not-fatal — see docstring.
@@ -205,7 +212,7 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     lib, and two calendar sources in one repo is the drift class that
     produced the 2026-05-30 calendar-vs-trading-day recovery failure.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return _tc.is_trading_day(d)
 
@@ -236,7 +243,7 @@ def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
     resolver, a second calendar source of truth that could silently
     drift from the lib the scanner resolves through.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
 
@@ -657,13 +664,20 @@ def handler(event, context):
 
         # Write health status on success
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             _population = final_state.get("new_population", [])
             _rotations = final_state.get("population_rotation_events", [])
+            _email_sent = final_state.get("email_sent", False)
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="ok",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=True),
+                    Deliverable(
+                        name="research_email",
+                        required=False,
+                        produced=_email_sent,
+                    ),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 summary={
@@ -671,13 +685,14 @@ def handler(event, context):
                     "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
                     "market_regime": final_state.get("market_regime", "unknown"),
                 },
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)
 
         # Write data manifest
         try:
-            from health_status import write_data_manifest
+            from data_manifest import write_data_manifest
             write_data_manifest(
                 bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
@@ -789,14 +804,16 @@ def handler(event, context):
 
         # Write health status on failure
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="failed",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=False),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 error=str(e),
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)

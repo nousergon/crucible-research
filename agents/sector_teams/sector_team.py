@@ -150,6 +150,13 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # Scope wraps the quant ReAct loop (multiple Anthropic calls incl. the
     # decoupled structured-output extraction + any empty-picks retry). The
     # user-prompt template stamps prompt_id/version onto ModelMetadata.
+    # config#1753 audit note: this scope is intentionally NOT threaded
+    # with ``rendered_prompt`` — a ReAct loop has no single canonical
+    # rendered user-prompt string (multiple tool-calling turns, each with
+    # its own message list); ``FullPromptContext.user_prompt`` falls back
+    # to the raw ``LoadedPrompt.text`` template here, same as before this
+    # fix. Only the single-shot batch-call sites (ic_cio, macro_economist,
+    # eval_judge) have one rendered string to thread.
     with track_llm_cost(
         agent_id=f"sector_quant:{team_id}",
         sector_team_id=team_id,

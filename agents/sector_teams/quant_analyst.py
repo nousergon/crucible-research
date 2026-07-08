@@ -324,6 +324,37 @@ def run_quant_analyst(
         tool_calls = _extract_tool_calls(messages)
         final_text = _get_final_text(messages)
 
+        # config#1822: the prebuilt ReAct executor's internal step-budget
+        # guard (langgraph.prebuilt.chat_agent_executor's remaining_steps
+        # check) fires BEFORE the graph-level recursion_limit would ever
+        # raise GraphRecursionError — it swaps in a fixed bailout AIMessage
+        # and returns normally instead. That message survives as a
+        # non-empty final_text, sails past the empty-text guard below, and
+        # the structured-output extraction correctly-but-uselessly finds
+        # zero picks in it — a team silently contributes nothing with
+        # error=None, partial=False (invisible to score_aggregator's
+        # ALL-AGENTS-STRICT gate). Treat it exactly like the
+        # GraphRecursionError case: a degraded-but-non-fatal partial
+        # result, loudly tagged so it surfaces in the run summary + the
+        # decision-artifact capture (which persists this whole dict).
+        if is_step_budget_exhausted_sentinel(final_text):
+            log.warning(
+                "[quant:%s] ReAct loop hit the internal step-budget "
+                "sentinel ('%s') after %d tool calls — treating as "
+                "recursion-limit exhaustion (partial, not error). "
+                "sector_tickers=%d",
+                team_id, final_text.strip(), len(tool_calls), len(sector_tickers),
+            )
+            return {
+                "team_id": team_id,
+                "ranked_picks": [],
+                "tool_calls": tool_calls,
+                "iterations": len(tool_calls),
+                "error": None,
+                "partial": True,
+                "partial_reason": "remaining_steps_exhausted",
+            }
+
         # ── Decoupled structured-output extraction ──────────────────────
         # Drives ``with_structured_output(include_raw=True)`` directly so
         # the strict-mode parsing-error contract is honored — no markdown-
@@ -622,6 +653,7 @@ from agents.langchain_utils import (
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_react_with_recovery,
     invoke_with_rate_limit_retry,
+    is_step_budget_exhausted_sentinel,
     make_tool_use_repair_hook,
 )
 

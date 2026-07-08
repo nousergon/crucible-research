@@ -483,6 +483,18 @@ def run_macro_agent(
         "sector_modifiers": macro_json.get("sector_modifiers", _DEFAULT_SECTOR_MODIFIERS.copy()),
         "sector_ratings": macro_json.get("sector_ratings", _derive_sector_ratings(_DEFAULT_SECTOR_MODIFIERS)),
         "material_changes": bool(macro_json.get("material_changes", False)),
+        # config#1753: the actually-rendered primary-agent prompt (post
+        # ``_PROMPT_TEMPLATE.format(...)``) — this is what was handed to
+        # ``HumanMessage(content=prompt)`` above, not the raw template.
+        # Threaded back up through ``run_macro_agent_with_reflection`` so
+        # ``research_graph.py``'s ``track_llm_cost`` scope can stamp it
+        # onto ``FullPromptContext.user_prompt`` instead of falling back
+        # to the unsubstituted ``LoadedPrompt.text`` template body. The
+        # critic prompt (``run_macro_critic``) is a refinement pass, not
+        # the canonical decision prompt, so it's intentionally excluded —
+        # mirrors the existing ModelMetadata prompt_id/version comment
+        # in research_graph.py's macro call site.
+        "rendered_prompt": prompt,
     }
 
 

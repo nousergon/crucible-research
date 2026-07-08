@@ -101,13 +101,25 @@ def create_qual_tools(context: dict) -> list:
                 ]
                 return json.dumps({"ticker": ticker, "article_count": len(articles), "articles": trimmed})
 
-        from data.fetchers.news_fetcher import fetch_news_for_ticker
+        # config#1822: this used to import a `fetch_news_for_ticker` symbol
+        # that has never existed in data.fetchers.news_fetcher (drifted
+        # since the 2026-03-22 sector-team-agents commit, 22cad19b — the
+        # real entry point is `fetch_all_news`, which returns
+        # {"yahoo": [...], "edgar_8k": [...]}). The deferred import meant
+        # this ImportError only fired at tool-call time (never at module
+        # load / deploy), so it went undetected for ~3 months: every
+        # qual-analyst call to this tool silently errored, burning tool-
+        # call budget for zero information and contributing to the
+        # 90-102-tool-call/0-assessment pattern in config#1822.
+        from data.fetchers.news_fetcher import fetch_all_news
 
         try:
-            articles = fetch_news_for_ticker(ticker, lookback_days=days)
+            news = fetch_all_news(ticker, hours=days * 24)
+            articles = news.get("yahoo", []) + news.get("edgar_8k", [])
             trimmed = [
-                {"headline": a.get("headline", ""), "source": a.get("source", ""),
-                 "published": a.get("published_utc", ""),
+                {"headline": a.get("headline", "") or a.get("title", ""),
+                 "source": a.get("source", ""),
+                 "published": a.get("published_utc", "") or a.get("date", ""),
                  "excerpt": (a.get("article_excerpt", "") or "")[:300]}
                 for a in articles[:10]
             ]
@@ -185,11 +197,18 @@ def create_qual_tools(context: dict) -> list:
 
     @tool
     def get_sec_filings(ticker: str) -> str:
-        """Get recent SEC filings (8-K, 10-K, 10-Q) for corporate actions and disclosures."""
-        from data.fetchers.news_fetcher import fetch_sec_filings
+        """Get recent SEC filings (8-K) for corporate actions and disclosures."""
+        # config#1822: `fetch_sec_filings` has never existed in
+        # data.fetchers.news_fetcher (see get_news_articles above for the
+        # same drift). The module's only SEC-filings fetcher is
+        # `fetch_edgar_8k` (8-K only — there is no 10-K/10-Q fetcher in
+        # this module; deep filing text is covered separately by the
+        # query_filings/search_filings RAG tools below). Narrowing the
+        # docstring to match what this tool actually returns.
+        from data.fetchers.news_fetcher import fetch_edgar_8k
 
         try:
-            filings = fetch_sec_filings(ticker)
+            filings = fetch_edgar_8k(ticker, days=90)
             trimmed = [{"title": f.get("title", ""), "date": f.get("date", ""),
                         "form_type": f.get("form_type", "")} for f in filings[:5]]
             return json.dumps({"ticker": ticker, "filings": trimmed})
@@ -252,10 +271,19 @@ def create_qual_tools(context: dict) -> list:
                 "total_new_shares": 0,
             })
 
-        from data.fetchers.institutional_fetcher import fetch_institutional_activity as _fetch
+        # config#1822: `fetch_institutional_activity` has never existed in
+        # data.fetchers.institutional_fetcher (same drift class as
+        # get_news_articles/get_sec_filings above). The real entry point
+        # is `fetch_institutional_accumulation`, which takes a LIST of
+        # tickers and returns {ticker: {...}} — batch-shaped because the
+        # underlying 13F EDGAR lookups are the expensive part. Call it
+        # with a single-ticker list and unwrap.
+        from data.fetchers.institutional_fetcher import (
+            fetch_institutional_accumulation as _fetch,
+        )
 
         try:
-            data = _fetch(ticker)
+            data = _fetch([ticker]).get(ticker, {})
             return json.dumps({
                 "ticker": ticker,
                 "n_funds_accumulating": data.get("n_funds_accumulating", 0),
@@ -279,7 +307,7 @@ def create_qual_tools(context: dict) -> list:
             doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
         """
         try:
-            from alpha_engine_lib.rag import retrieve
+            from nousergon_lib.rag import retrieve
             from datetime import date, timedelta
 
             _rag_stats["attempted"] += 1

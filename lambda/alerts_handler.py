@@ -64,7 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # Structured logging + flow-doctor singleton from alpha-engine-lib.
 # See lambda/handler.py for the full rationale. flow-doctor.yaml ships
 # in the Lambda task root (Dockerfile.alerts COPY).
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -81,7 +81,6 @@ setup_logging(
 
 logger = logging.getLogger(__name__)
 
-from alpha_engine_lib.telegram import send_message, send_rollup
 from config import (
     AWS_REGION,
     PRICE_MOVE_THRESHOLD_PCT,
@@ -285,7 +284,14 @@ def handler(event, context):
     is_stale, stale_reason = _heartbeat_stale(heartbeat, _HEARTBEAT_STALE_SEC)
     if is_stale:
         msg = f"\U0001f6a8 *DAEMON DOWN*\n{stale_reason}"
-        send_message(msg)  # default disable_notification=False → push
+        from ops_alerts import publish_ops_alert
+
+        publish_ops_alert(
+            msg,
+            severity="critical",
+            source="research:alerts_handler",
+            dedup_key=f"daemon_down_{stale_reason[:80]}",
+        )
         logger.error("Heartbeat stale: %s", stale_reason)
         return {"status": "DAEMON_DOWN", "reason": stale_reason}
 
@@ -318,8 +324,15 @@ def handler(event, context):
     # 5. Emit findings as silent rollup digest (no phone buzz unless heartbeat
     #    fired above)
     if findings:
+        from ops_alerts import publish_ops_digest
+
         header = f"Surveillance Digest — {len(findings)} finding{'s' if len(findings) != 1 else ''}"
-        send_rollup(findings, header=header)
+        publish_ops_digest(
+            findings,
+            header=header,
+            source="research:alerts_handler",
+            dedup_key=f"surveillance_digest_{header}",
+        )
 
     return {
         "status": "OK",

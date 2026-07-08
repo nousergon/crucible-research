@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from alpha_engine_lib.pillars import QualitativePillarAssessment
+from nousergon_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
@@ -201,6 +201,40 @@ def run_qual_analyst(
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
         final_text = _get_final_text(messages)
+
+        # config#1822: the 2026-07-03 weekly's defensives/financials/
+        # consumer qual teams each burned 90-102 tool calls and produced 0
+        # assessments with error=None, partial=False — invisible to
+        # score_aggregator's ALL-AGENTS-STRICT gate. Root cause: the
+        # prebuilt ReAct executor's internal step-budget guard
+        # (langgraph.prebuilt.chat_agent_executor's remaining_steps check)
+        # fires BEFORE the graph-level recursion_limit would raise
+        # GraphRecursionError — it swaps in a fixed bailout AIMessage and
+        # returns normally instead of raising. That message is a non-empty
+        # final_text, so it sails past the empty-text guard below and the
+        # structured-output extraction correctly-but-uselessly finds zero
+        # assessments in it. Treat it exactly like the GraphRecursionError
+        # case: a degraded-but-non-fatal partial result, loudly tagged so
+        # it surfaces in the run summary + the decision-artifact capture
+        # (which persists this whole dict).
+        if is_step_budget_exhausted_sentinel(final_text):
+            log.warning(
+                "[qual:%s] ReAct loop hit the internal step-budget "
+                "sentinel ('%s') after %d tool calls — treating as "
+                "recursion-limit exhaustion (partial, not error).",
+                team_id, final_text.strip(), len(tool_calls),
+            )
+            return {
+                "team_id": team_id,
+                "assessments": [],
+                "additional_candidate": None,
+                "tool_calls": tool_calls,
+                "iterations": len(tool_calls),
+                "error": None,
+                "partial": True,
+                "partial_reason": "remaining_steps_exhausted",
+                "pillar_assessments": {},
+            }
 
         # ── Decoupled structured-output extraction ──────────────────────
         # Mirrors quant_analyst + macro_agent / peer_review / ic_cio. The
@@ -429,6 +463,7 @@ from agents.langchain_utils import (
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_react_with_recovery,
     invoke_structured_with_validation_retry,
+    is_step_budget_exhausted_sentinel,
     make_tool_use_repair_hook,
 )
 

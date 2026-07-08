@@ -58,7 +58,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.eval_artifacts import (
     EVAL_LATEST_FILENAME as DEFAULT_LATEST_FILENAME,
 )
 

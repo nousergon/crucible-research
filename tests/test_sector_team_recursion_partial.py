@@ -114,6 +114,82 @@ def test_quant_analyst_still_errors_on_other_exceptions(fresh_modules):
     assert result.get("partial", False) is False
 
 
+# ── Silent step-budget exhaustion (config#1822) ───────────────────────────────
+#
+# The 2026-07-03 weekly's defensives/financials/consumer qual teams (and
+# healthcare/industrials quant, via the retry path) burned 90-102 tool
+# calls and produced zero output with error=None, partial=False — invisible
+# to score_aggregator's ALL-AGENTS-STRICT gate. Root cause: langgraph's
+# prebuilt ReAct executor swaps in a fixed "Sorry, need more steps..."
+# AIMessage and returns NORMALLY (no GraphRecursionError) once its internal
+# remaining_steps guard trips — one step earlier than the graph-level
+# recursion_limit crash the existing tests above cover. These tests lock
+# the fix: that sentinel must be detected and treated as partial=True,
+# NOT silently extracted-from (which always yields zero picks) or crashed
+# on (there's nothing to catch — the call returns normally).
+
+
+def _quant_agent_result_with_sentinel(n_tool_call_messages: int = 40):
+    """Build a fake ``agent.invoke()`` return value whose final AI message
+    is the langgraph step-budget-exhaustion sentinel, preceded by a pile
+    of tool-call bookkeeping messages so ``len(tool_calls)`` is non-trivial
+    (mirrors the real 90+-tool-call artifacts)."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    messages = []
+    for i in range(n_tool_call_messages):
+        ai = AIMessage(content="", tool_calls=[{
+            "name": "get_price_performance", "args": {"tickers": ["AAPL"]},
+            "id": f"call_{i}",
+        }])
+        messages.append(ai)
+        messages.append(ToolMessage(content="{}", tool_call_id=f"call_{i}", name="get_price_performance"))
+    messages.append(AIMessage(content="Sorry, need more steps to process this request."))
+    return {"messages": messages}
+
+
+def test_quant_analyst_returns_partial_on_step_budget_sentinel(fresh_modules):
+    """The langgraph-internal 'need more steps' bailout must be treated
+    like GraphRecursionError: partial=True, error=None, empty picks — NOT
+    fed into the structured-output extractor (which would just silently
+    yield zero picks with no signal that anything went wrong)."""
+    from agents.sector_teams import quant_analyst as _qa
+
+    fake_agent = MagicMock()
+    fake_agent.invoke.return_value = _quant_agent_result_with_sentinel()
+
+    with patch.object(_qa, "create_react_agent", return_value=fake_agent):
+        result = _qa.run_quant_analyst(**_quant_kwargs())
+
+    assert result["error"] is None, "sentinel must NOT populate error field"
+    assert result["partial"] is True
+    assert result["partial_reason"] == "remaining_steps_exhausted"
+    assert result["ranked_picks"] == []
+    # extract_tool_calls records one entry per AI tool_call PLUS one per
+    # paired ToolMessage response, so 40 (ai, tool) rounds → 80 entries.
+    assert result["iterations"] == 80, "tool calls actually made must still be counted"
+
+
+def test_quant_retry_does_not_fire_on_step_budget_sentinel(fresh_modules):
+    """partial=True must suppress the empty-picks retry — the agent
+    already spent its full budget; a same-input retry won't help."""
+    from agents.sector_teams import quant_analyst as _qa
+
+    sentinel_result = {
+        "team_id": "technology",
+        "ranked_picks": [], "tool_calls": [{}] * 40,
+        "iterations": 40, "error": None, "partial": True,
+        "partial_reason": "remaining_steps_exhausted",
+    }
+
+    with patch.object(_qa, "run_quant_analyst", return_value=sentinel_result) as mock_run:
+        result = _qa.run_quant_analyst_with_retry(**_quant_kwargs())
+
+    assert mock_run.call_count == 1, "step-budget exhaustion must NOT trigger retry"
+    assert result["retry_attempted"] is False
+    assert result["partial"] is True
+
+
 # ── Qual analyst graceful degradation ─────────────────────────────────────────
 
 
@@ -158,6 +234,34 @@ def test_qual_analyst_still_errors_on_other_exceptions(fresh_modules):
     assert result["error"] is not None
     assert "ValueError" in result["error"]
     assert result.get("partial", False) is False
+
+
+def test_qual_analyst_returns_partial_on_step_budget_sentinel(fresh_modules):
+    """config#1822 reproduction: defensives/financials/consumer on the
+    2026-07-03 weekly each hit this exact sentinel after 90-102 tool
+    calls and silently produced 0 assessments with error=None,
+    partial=False. Must now be tagged partial=True so score_aggregator's
+    ALL-AGENTS-STRICT gate can see it instead of the team vanishing."""
+    from agents.sector_teams import qual_analyst as _qual
+
+    fake_agent = MagicMock()
+    fake_agent.invoke.return_value = _quant_agent_result_with_sentinel(
+        n_tool_call_messages=45,
+    )
+
+    with patch.object(_qual, "create_react_agent", return_value=fake_agent):
+        result = _qual.run_qual_analyst(**_qual_kwargs())
+
+    assert result["error"] is None, "sentinel must NOT populate error field"
+    assert result["partial"] is True
+    assert result["partial_reason"] == "remaining_steps_exhausted"
+    assert result["assessments"] == []
+    assert result["additional_candidate"] is None
+    assert result["pillar_assessments"] == {}
+    # extract_tool_calls records one entry per AI tool_call PLUS one per
+    # paired ToolMessage response, so 45 (ai, tool) rounds → 90 entries —
+    # matches the real defensives.json artifact's iterations=90.
+    assert result["iterations"] == 90
 
 
 # ── sector_team aggregation: partial bubbles up ───────────────────────────────

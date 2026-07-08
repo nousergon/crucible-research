@@ -49,7 +49,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Annotated, Any, Callable, Optional, TypedDict
+from typing import Annotated, Any, Callable, NamedTuple, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -128,7 +128,7 @@ from scoring.focus_list import (
 from archive.manager import ArchiveManager
 from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
@@ -360,6 +360,19 @@ class ResearchState(TypedDict, total=False):
     # timeout). ``scanner_universe`` stays the FULL universe for the
     # exit_evaluator constituent whitelist.
     agent_input_set: Annotated[list[str], take_last]
+    # The scanner gate's per-ticker verdict detail (quant_filter_pass /
+    # filter_fail_reason / scan_path / liquidity_pass / volatility_pass),
+    # sourced from candidates.json::scanner_eval_log in fetch_data
+    # (cross-process safe: candidates.json is the S3 artifact the standalone
+    # Scanner SF state writes, already read here via am.load_candidates_json)
+    # rather than the in-process ``run_quant_filter._last_eval_log`` module
+    # stash. That stash is empty in THIS Lambda — Research no longer calls
+    # run_quant_filter itself post-L1995-Phase5; only the standalone Scanner
+    # SF state does, in its own process (config#1458: the stash read in
+    # archive_writer was always empty by construction, degrading
+    # quant_filter_pass to 0 for 100% of rows every cycle). Empty list when
+    # candidates.json carries none (absent field, or the dry-run-stub path).
+    scanner_eval_log: Annotated[list, take_last]
     sector_map: Annotated[dict[str, str], take_last]
     macro_data: Annotated[dict, take_last]
     current_population: Annotated[list[dict], take_last]
@@ -604,12 +617,23 @@ def _read_institutional_substrate(
 
 # ── Node Functions ────────────────────────────────────────────────────────────
 
+class AgentInputSetResolution(NamedTuple):
+    """Return shape of :func:`_resolve_agent_input_set`.
+
+    ``scanner_eval_log`` rides along with ``agent_input_set`` because both
+    are sourced from the SAME ``am.load_candidates_json(run_date)`` call —
+    returning them together avoids a second S3 round-trip from ``fetch_data``.
+    """
+    agent_input_set: list[str]
+    scanner_eval_log: list[dict]
+
+
 def _resolve_agent_input_set(
     am: "ArchiveManager",
     run_date: str,
     scanner_universe: list[str],
     population_tickers: list[str],
-) -> list[str]:
+) -> AgentInputSetResolution:
     """Resolve the sector-team screening input (L1995 Phase 5 / L4464).
 
     The standalone Scanner SF state (run upstream of Research) writes
@@ -632,10 +656,17 @@ def _resolve_agent_input_set(
     The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the stub/offline
     installers) relaxes this to a full-universe fallback for wiring validation;
     production never sets it.
+
+    Also returns ``scanner_eval_log`` — ``candidates.json``'s per-ticker
+    scanner gate verdict (config#1458), read here (rather than a second call
+    to ``am.load_candidates_json``) since this function already loads the
+    artifact. Empty on the dry-run-stub fallback path (no real candidates.json
+    was read) or when the artifact predates this field.
     """
     import os as _os
     candidates = am.load_candidates_json(run_date)
     scanner_tickers = (candidates or {}).get("scanner_tickers") or []
+    scanner_eval_log = (candidates or {}).get("scanner_eval_log") or []
     if not scanner_tickers:
         if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() == "true":
             logger.warning(
@@ -644,6 +675,7 @@ def _resolve_agent_input_set(
                 "(NOT a real candidate selection)", run_date,
             )
             scanner_tickers = scanner_universe
+            scanner_eval_log = []
         else:
             raise RuntimeError(
                 f"[fetch_data] candidates.json missing or empty scanner_tickers "
@@ -658,7 +690,7 @@ def _resolve_agent_input_set(
         "(scanner %d ∪ held population %d)",
         len(agent_input_set), len(scanner_tickers), len(population_tickers),
     )
-    return agent_input_set
+    return AgentInputSetResolution(agent_input_set, scanner_eval_log)
 
 
 def fetch_data(state: ResearchState) -> dict:
@@ -677,7 +709,7 @@ def fetch_data(state: ResearchState) -> dict:
     # RAG availability check (early, so we know before agents start)
     rag_available = False
     try:
-        from alpha_engine_lib.rag import is_available as _rag_is_available
+        from nousergon_lib.rag import is_available as _rag_is_available
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats
@@ -685,6 +717,14 @@ def fetch_data(state: ResearchState) -> dict:
         reset_rag_stats()
     except Exception as e:
         logger.warning("[fetch_data] RAG availability check failed: %s", e)
+
+    # Reset the FMP 402 circuit breaker for this run (module-level state — see
+    # data/fetchers/analyst_fetcher.py). Without this, a container reused
+    # across Lambda invocations would keep an endpoint tripped from a prior
+    # run's 402 forever, silently starving a run where the plan issue may
+    # have since been fixed.
+    from data.fetchers.analyst_fetcher import reset_fmp_402_breaker
+    reset_fmp_402_breaker()
 
     # Load S&P 900 universe
     scanner_universe, wikipedia_sector_map = fetch_sp500_sp400_with_sectors()
@@ -702,7 +742,7 @@ def fetch_data(state: ResearchState) -> dict:
     all_tickers = list(set(population_tickers + scanner_universe))
 
     # ── L1995 Phase 5 cutover: sector-team screening input ───────────────────
-    agent_input_set = _resolve_agent_input_set(
+    agent_input_set, scanner_eval_log = _resolve_agent_input_set(
         am, run_date, scanner_universe, population_tickers,
     )
 
@@ -980,6 +1020,16 @@ def fetch_data(state: ResearchState) -> dict:
     news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
         _pre_fetch_held_enrichment(population_tickers)
     )
+
+    # Surface the FMP 402 circuit-breaker skip counts in the run summary log
+    # (config#1821). The breaker itself already logs one WARN per endpoint
+    # at trip time; this is the run-level counter so a known-dead endpoint
+    # shows up in the summary rather than as a silent data hole.
+    from data.fetchers.analyst_fetcher import fmp_402_skip_counts
+    _402_skips = fmp_402_skip_counts()
+    if _402_skips:
+        logger.info("[fetch_data] FMP 402 circuit breaker skips: %s", _402_skips)
+
     substrate_by_ticker: dict[str, dict] = {}
     import os as _os
     if _os.environ.get("INSTITUTIONAL_SUBSTRATE_ENABLED", "").lower() == "true":
@@ -1008,6 +1058,7 @@ def fetch_data(state: ResearchState) -> dict:
     return {
         "scanner_universe": scanner_universe,
         "agent_input_set": agent_input_set,
+        "scanner_eval_log": scanner_eval_log,
         "sector_map": sector_map,
         "price_data": price_data,
         "data_snapshot_id": data_snapshot_id,
@@ -1428,7 +1479,7 @@ def macro_economist_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt("macro_agent"),
-    ):
+    ) as _macro_frame:
         result = run_macro_agent_with_reflection(
             prior_report=prior_report,
             prior_date=prior_date,
@@ -1447,6 +1498,11 @@ def macro_economist_node(state: ResearchState) -> dict:
             # template renders the placeholder as blank in that case.
             prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
         )
+        # config#1753: thread the actually-rendered primary-agent prompt
+        # (what was handed to HumanMessage(...) inside run_macro_agent)
+        # onto the frame so FullPromptContext.user_prompt captures the
+        # substituted text instead of the raw LoadedPrompt template.
+        _macro_frame.rendered_prompt = result.get("rendered_prompt")
 
     macro_state_update = {
         "macro_report": result.get("report_md", ""),
@@ -2142,8 +2198,9 @@ def score_aggregator(state: ResearchState) -> dict:
     # path remain load-bearing.
     if pillar_coverage_skip_count > 0:
         try:
-            from krepis.alerts import publish as alerts_publish
-            alerts_publish(
+            from ops_alerts import publish_ops_alert
+
+            publish_ops_alert(
                 message=(
                     f"[score_aggregator] pillar coverage gap — skipped "
                     f"{pillar_coverage_skip_count} signal(s) due to "
@@ -2153,8 +2210,6 @@ def score_aggregator(state: ResearchState) -> dict:
                 ),
                 severity="WARN",
                 source="research:score_aggregator",
-                sns=True,
-                telegram=True,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(
@@ -2334,13 +2389,12 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
     )
     try:
-        from krepis.alerts import publish as alerts_publish
-        alerts_publish(
+        from ops_alerts import publish_ops_alert
+
+        publish_ops_alert(
             message=msg,
             severity="WARN",
             source="research:score_aggregator",
-            sns=True,
-            telegram=True,
             dedup_key=dedup_key,
         )
     except Exception as e:  # noqa: BLE001
@@ -2488,7 +2542,7 @@ def cio_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt(_cio_prompt_name),
-    ):
+    ) as _cio_frame:
         if CIO_CRITIC_ENABLED:
             cio_result, _cio_reflection_log = run_cio_with_reflection(
                 **_cio_call_kwargs
@@ -2503,6 +2557,11 @@ def cio_node(state: ResearchState) -> dict:
             )
         else:
             cio_result = run_cio(**_cio_call_kwargs)
+        # config#1753: thread the actually-rendered CIO prompt (what was
+        # handed to HumanMessage(...) inside run_cio) onto the frame so
+        # FullPromptContext.user_prompt captures the substituted text
+        # instead of the raw LoadedPrompt template.
+        _cio_frame.rendered_prompt = cio_result.get("rendered_prompt")
 
     # Schema validation on CIO output shapes (strict-by-default).
     for decision in cio_result.get("decisions", []):
@@ -3636,7 +3695,7 @@ def archive_writer(state: ResearchState) -> dict:
     # defense and will surface the gap there.
     universe_symbols: set[str] | None = None
     try:
-        from alpha_engine_lib.arcticdb import get_universe_symbols
+        from nousergon_lib.arcticdb import get_universe_symbols
         universe_symbols = get_universe_symbols(am.bucket)
     except Exception as e:
         logger.warning(
@@ -3839,20 +3898,28 @@ def archive_writer(state: ResearchState) -> dict:
 
     # The AUTHORITATIVE per-ticker scanner verdict (quant_filter_pass +
     # filter_fail_reason + scan_path + the liquidity/volatility gate flags) is
-    # computed by run_quant_filter and stashed on its _last_eval_log during the
-    # scanner stage of THIS graph run — the only place the funnel reason for each
-    # of the ~900 names exists. Join it in here rather than reconstructing
-    # placeholder rows (which dropped fail_reason → NULL and mis-set
-    # quant_filter_pass to agent team-picks). Same in-process stash the shadow
-    # candidate-gen specs already rely on (scanner_orchestrator).
-    from data.scanner import run_quant_filter
-
-    scanner_eval_log = getattr(run_quant_filter, "_last_eval_log", None) or []
+    # computed by run_quant_filter and travels here via candidates.json ::
+    # scanner_eval_log → ResearchState (set in fetch_data) — the only place
+    # the funnel reason for each of the ~900 names exists. Join it in here
+    # rather than reconstructing placeholder rows (which dropped fail_reason →
+    # NULL and mis-set quant_filter_pass to agent team-picks).
+    #
+    # NOTE: this is deliberately NOT ``run_quant_filter._last_eval_log`` (a
+    # process-local module-attribute stash). Research no longer calls
+    # run_quant_filter in this process post-L1995-Phase5 — only the
+    # standalone Scanner SF state does, in ITS OWN process — so that stash is
+    # always empty here (config#1458: the prior version of this code read the
+    # stash directly and silently degraded quant_filter_pass to 0 for 100% of
+    # rows, every cycle, since PR#344 merged). ``scanner_orchestrator.
+    # build_shadow_candidate_artifacts`` still reads the stash directly and
+    # correctly — it runs in the SAME process as the run_quant_filter call
+    # that populates it.
+    scanner_eval_log = state.get("scanner_eval_log") or []
     if not scanner_eval_log:
         logger.warning(
-            "[archive_writer] scanner eval log unavailable — scanner_evaluations "
-            "gate detail (filter_fail_reason / scan_path / true quant_filter_pass) "
-            "degrades to null/0 this cycle"
+            "[archive_writer] candidates.json carried no scanner_eval_log for "
+            "this cycle — scanner_evaluations gate detail (filter_fail_reason "
+            "/ scan_path / true quant_filter_pass) degrades to null/0 this cycle"
         )
     scanner_evals = _build_scanner_eval_rows(
         scanner_universe=scanner_universe,

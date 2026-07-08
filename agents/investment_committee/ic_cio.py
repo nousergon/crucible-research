@@ -285,17 +285,29 @@ def run_cio(
                 raise RuntimeError(msg)
             # Lax mode: fall through to post-process, which tolerates the
             # still-missing tickers by treating them as REJECT.
-        return _post_process_cio_decisions(
+        cio_result = _post_process_cio_decisions(
             decisions_dicts, candidates, floor, cap,
             held_tickers=held_tickers,
             force_fill_conviction_floor=force_fill_conviction_floor,
         )
+        # config#1753: the actually-rendered CIO prompt (post
+        # ``_build_cio_prompt(...)``) — what was handed to
+        # ``HumanMessage(content=prompt)`` above, not the raw
+        # ``LoadedPrompt`` template. Threaded back so the
+        # ``research_graph.py`` call site's ``track_llm_cost`` scope can
+        # stamp it onto ``FullPromptContext.user_prompt`` instead of
+        # falling back to the unsubstituted template text.
+        cio_result["rendered_prompt"] = prompt
+        return cio_result
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
         if is_strict_validation_enabled():
             raise
         # Lax fallback advances only `floor` (not `cap`). When the LLM signal is
         # unusable, be conservative — don't force max-advance on broken data.
+        # No successful LLM call landed on this path (evaluation failed
+        # before/at the API call), so there's no rendered prompt to thread —
+        # the frame's user_prompt falls back to the raw LoadedPrompt.text.
         return _fallback_selection(candidates, floor)
 
 

@@ -60,7 +60,11 @@ pydantic~=2.7
 # thinktank/client) are born correctly tagged and the distillation corpus reader
 # (scripts/corpus_stats.py) can segregate by (producer, task, teacher, source)
 # without blending replay-minted traces into live-accrued ones.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.79.0
+# Bumped 0.83.0 -> 0.86.0 (config#1727 Phase C): migrate health enrichment
+# writes to nousergon_lib.health (Deliverable + derive_status + write_health).
+# Cross-sectional 6-pillar attractiveness chokepoint (nousergon_lib.quant.attractiveness,
+# lib#164 / v0.88.0) — shared with Metron Holdings + universe_board backfill.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
