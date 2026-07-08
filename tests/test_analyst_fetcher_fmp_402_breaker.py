@@ -1,14 +1,23 @@
 """Tests for the FMP 402 circuit breaker in data/fetchers/analyst_fetcher.py.
 
-config#1821: ALL FMP ``grades-consensus`` / ``price-target-consensus`` calls
-return 402 Payment Required (current plan doesn't cover these endpoints) —
-for every ticker, every run. Two failure modes fixed here:
+config#1821 (2026-05, part a): FMP's ``grades-consensus`` /
+``price-target-consensus`` stable-API endpoints returned 402 Payment
+Required (current plan doesn't cover these endpoints) — for every ticker,
+every run. Two failure modes fixed here (#391):
 
 1. Wasted runtime: without a breaker, every ticker re-attempts (and
    ``resp.raise_for_status()`` on a 402 is a real HTTP round-trip each
    time) — ~74s of serial 402s inside fetch_data alone.
 2. Silent data hole: per-ticker ``logger.warning`` spam with no
    run-level signal that the endpoint is structurally dead this run.
+
+The breaker itself is generic (keyed on the bare endpoint name), so these
+tests exercise it directly via ``_fmp_get`` with placeholder endpoint
+names rather than the two real endpoints above — config#1821 Option B
+(2026-07-08, part b) subsequently removed the ``grades-consensus`` /
+``price-target-consensus`` calls from ``fetch_analyst_consensus``
+entirely (see ``test_fetch_analyst_consensus.py``), but the breaker
+mechanism remains live infrastructure for any other FMP endpoint.
 
 These tests pin:
 * A 402 trips the breaker on the FIRST call for that endpoint, logs
@@ -62,10 +71,10 @@ class TestFMP402Breaker:
     def test_first_402_trips_breaker_and_raises_plan_limited(self, _mock_secret):
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)) as mock_get:
             with pytest.raises(af.FMPPlanLimitedError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert mock_get.call_count == 1
-        assert af._fmp_402_tripped["grades-consensus"] is True
-        assert af.fmp_402_skip_counts() == {"grades-consensus": 1}
+        assert af._fmp_402_tripped["test-endpoint-a"] is True
+        assert af.fmp_402_skip_counts() == {"test-endpoint-a": 1}
 
     def test_402_is_never_retried(self, _mock_secret):
         """The gotcha from the issue: 402 is deterministic per-plan, not
@@ -74,7 +83,7 @@ class TestFMP402Breaker:
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)) as mock_get, \
              patch("data.fetchers.analyst_fetcher.time.sleep") as mock_sleep:
             with pytest.raises(af.FMPPlanLimitedError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert mock_get.call_count == 1
         # No backoff sleep should ever be invoked for a 402.
         mock_sleep.assert_not_called()
@@ -84,16 +93,16 @@ class TestFMP402Breaker:
         make any HTTP request at all — the call short-circuits."""
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)) as mock_get:
             with pytest.raises(af.FMPPlanLimitedError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
             assert mock_get.call_count == 1
 
             for ticker in ("MSFT", "GOOG", "NVDA"):
                 with pytest.raises(af.FMPPlanLimitedError):
-                    af._fmp_get("grades-consensus", {"symbol": ticker})
+                    af._fmp_get("test-endpoint-a", {"symbol": ticker})
             # No new HTTP calls made for the 3 subsequent tickers.
             assert mock_get.call_count == 1
 
-        assert af.fmp_402_skip_counts() == {"grades-consensus": 4}
+        assert af.fmp_402_skip_counts() == {"test-endpoint-a": 4}
 
     def test_exactly_one_warn_log_for_repeated_402s(self, _mock_secret, caplog):
         """ONE summary WARN per endpoint, not per-ticker spam — the
@@ -104,30 +113,34 @@ class TestFMP402Breaker:
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)):
             for ticker in ("AAPL", "MSFT", "GOOG"):
                 with pytest.raises(af.FMPPlanLimitedError):
-                    af._fmp_get("grades-consensus", {"symbol": ticker})
+                    af._fmp_get("test-endpoint-a", {"symbol": ticker})
 
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warn_records) == 1
         assert "402" in warn_records[0].message
 
     def test_breaker_is_per_endpoint_not_global(self, _mock_secret):
-        """Tripping grades-consensus must not affect price-target-consensus
+        """Tripping test-endpoint-a must not affect test-endpoint-b
         (or any other endpoint) — each endpoint gets its own breaker."""
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)):
             with pytest.raises(af.FMPPlanLimitedError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
 
-        assert af._fmp_402_tripped.get("price-target-consensus") is not True
+        assert af._fmp_402_tripped.get("test-endpoint-b") is not True
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(200, [{"targetConsensus": 100.0}])) as mock_get:
-            data = af._fmp_get("price-target-consensus", {"symbol": "AAPL"})
+            data = af._fmp_get("test-endpoint-b", {"symbol": "AAPL"})
         assert data == [{"targetConsensus": 100.0}]
         assert mock_get.call_count == 1
 
-    def test_fetch_analyst_consensus_end_to_end_breaker_trip_then_skip(self, _mock_secret, caplog):
-        """Full ``fetch_analyst_consensus`` call path: first ticker trips
-        both endpoint breakers (one WARN each), subsequent tickers return
-        the skeleton dict with no additional WARNs and no HTTP calls for
-        the tripped endpoints."""
+    def test_fetch_analyst_consensus_never_calls_removed_endpoints(self, _mock_secret, caplog):
+        """Regression guard for config#1821 Option B (2026-07-08):
+        ``fetch_analyst_consensus`` must never call ``grades-consensus``
+        or ``price-target-consensus`` again — those calls (and the
+        fields they populated) were removed from the feature contract
+        because the endpoints 402'd for every ticker on the current
+        plan. Only the earnings-surprises v3 endpoint should be hit, and
+        the breaker state for the two removed endpoints must never be
+        touched."""
         import logging
         caplog.set_level(logging.WARNING, logger="data.fetchers.analyst_fetcher")
 
@@ -135,41 +148,31 @@ class TestFMP402Breaker:
 
         def _fake_get(url, params=None, timeout=None):
             call_log.append(url)
-            if "earning_surprises" in url:
-                return _resp(200, [])
-            return _resp(402)
+            return _resp(200, [])
 
         with patch("data.fetchers.analyst_fetcher.requests.get", side_effect=_fake_get):
             for ticker in ("AAPL", "MSFT", "GOOG"):
                 result = af.fetch_analyst_consensus(ticker)
-                assert result["consensus_rating"] is None
-                assert result["mean_target"] is None
+                assert set(result.keys()) == {"ticker", "current_price", "earnings_surprises"}
 
-        # 2 endpoints x 1 real HTTP 402 call each (breaker trips after AAPL),
-        # plus 1 earnings-surprises call per ticker (unaffected endpoint).
-        grades_calls = [u for u in call_log if "grades-consensus" in u]
-        pt_calls = [u for u in call_log if "price-target-consensus" in u]
-        assert len(grades_calls) == 1
-        assert len(pt_calls) == 1
+        assert all("earning_surprises" in u for u in call_log)
+        assert len(call_log) == 3  # one earnings-surprises call per ticker, nothing else
 
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warn_records) == 2  # one per endpoint, ever
-        assert af.fmp_402_skip_counts() == {
-            "grades-consensus": 3,
-            "price-target-consensus": 3,
-        }
+        assert len(warn_records) == 0
+        assert af.fmp_402_skip_counts() == {}
 
     def test_reset_breaker_clears_state_for_new_run(self, _mock_secret):
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(402)):
             with pytest.raises(af.FMPPlanLimitedError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
-        assert af.fmp_402_skip_counts() == {"grades-consensus": 1}
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
+        assert af.fmp_402_skip_counts() == {"test-endpoint-a": 1}
 
         af.reset_fmp_402_breaker()
         assert af.fmp_402_skip_counts() == {}
 
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(200, [{"consensus": "buy"}])) as mock_get:
-            data = af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+            data = af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert data == [{"consensus": "buy"}]
         assert mock_get.call_count == 1
 
@@ -181,7 +184,7 @@ class TestExisting429And5xxSemanticsUndisturbed:
     def test_429_still_raises_fmp_daily_limit_error_and_maxes_out_counter(self, _mock_secret):
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(429)):
             with pytest.raises(af.FMPDailyLimitError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         # 429 semantics unchanged: daily counter forced to the limit.
         assert af._fmp_daily_count == af._FMP_DAILY_LIMIT
         assert af.fmp_budget_exhausted() is True
@@ -194,13 +197,13 @@ class TestExisting429And5xxSemanticsUndisturbed:
         same) endpoint's calls to be treated as circuit-broken."""
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(429)):
             with pytest.raises(af.FMPDailyLimitError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
 
         # Budget now exhausted (real, pre-existing 429 behavior) — reset it
         # to isolate just the breaker assertion.
         af._fmp_daily_count = 0
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(200, [{"consensus": "hold"}])) as mock_get:
-            data = af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+            data = af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert data == [{"consensus": "hold"}]
         assert mock_get.call_count == 1
 
@@ -210,7 +213,7 @@ class TestExisting429And5xxSemanticsUndisturbed:
         not silently swallowed."""
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(500)):
             with pytest.raises(requests.HTTPError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert af._fmp_402_tripped == {}
         assert af.fmp_402_skip_counts() == {}
 
@@ -223,10 +226,10 @@ class TestExisting429And5xxSemanticsUndisturbed:
         change that pre-existing shape while adding the 402 branch)."""
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(500)) as mock_get:
             with pytest.raises(requests.HTTPError):
-                af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+                af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert mock_get.call_count == 1
 
         with patch("data.fetchers.analyst_fetcher.requests.get", return_value=_resp(200, [{"consensus": "buy"}])) as mock_get2:
-            data = af._fmp_get("grades-consensus", {"symbol": "AAPL"})
+            data = af._fmp_get("test-endpoint-a", {"symbol": "AAPL"})
         assert data == [{"consensus": "buy"}]
         assert mock_get2.call_count == 1

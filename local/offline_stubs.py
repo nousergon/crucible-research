@@ -95,19 +95,20 @@ def _stub_fetch_all_news(ticker, hours=48):
 
 
 def _stub_fetch_analyst_consensus(ticker, current_price=None):
+    # config#1821 Option B (2026-07-08): consensus_rating / num_analysts /
+    # mean_target / upside_pct / rating_changes were removed from the real
+    # fetch_analyst_consensus's returned shape (the FMP endpoints that
+    # populated them 402'd for every ticker on the current plan) — this
+    # stub mirrors the real function so offline dry runs match production.
     logger.info("[offline] stub fetch_analyst_consensus: %s", ticker)
     rng = random.Random(hash(ticker))
     price = current_price or rng.uniform(50, 500)
-    target = price * rng.uniform(0.9, 1.3)
     return {
         "ticker": ticker,
-        "consensus_rating": rng.choice(["Strong Buy", "Buy", "Hold"]),
-        "num_analysts": rng.randint(5, 30),
-        "mean_target": round(target, 2),
         "current_price": round(price, 2),
-        "upside_pct": round((target / price - 1) * 100, 1),
-        "rating_changes": "None recent",
-        "earnings_surprise": "+2.5%",
+        "earnings_surprises": [
+            {"date": "2026-06-15", "actual": 1.2, "estimated": 1.15, "surprise_pct": round(rng.uniform(-5, 5), 1)},
+        ],
     }
 
 

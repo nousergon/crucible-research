@@ -298,36 +298,14 @@ def run_quant_filter(
     return result
 
 
-def confirm_deep_value_with_analyst(
-    candidates: list[dict],
-    analyst_data: dict[str, dict],
-    min_consensus: str = "Buy",
-) -> list[dict]:
-    """
-    Stage 2 (partial): For deep_value_pending candidates, confirm analyst conviction.
-    Removes candidates that don't meet the analyst threshold; promotes path field.
-    """
-    _CONSENSUS_RANK = {
-        "Strong Buy": 5, "Buy": 4, "Hold": 3, "Underperform": 2, "Sell": 1,
-    }
-    min_rank = _CONSENSUS_RANK.get(min_consensus, 4)
-
-    result = []
-    for c in candidates:
-        if c.get("path") != "deep_value_pending":
-            result.append(c)
-            continue
-
-        adata = analyst_data.get(c["ticker"], {})
-        consensus = adata.get("consensus_rating", "Hold")
-        rank = _CONSENSUS_RANK.get(consensus, 0)
-
-        if rank >= min_rank:
-            c = {**c, "path": "deep_value"}
-            result.append(c)
-        # else: drop this candidate — analyst conviction too low
-
-    return result
+# confirm_deep_value_with_analyst was removed config#1821 Option B
+# (2026-07-08): it was unused (no call sites anywhere in the codebase) and
+# keyed off ``analyst_data[...]["consensus_rating"]``, which was sourced
+# from FMP's grades-consensus endpoint — 402'd for every ticker on the
+# current plan and removed from fetch_analyst_consensus's returned shape.
+# Reintroducing a deep-value analyst-confirmation stage would need a new
+# data source; wiring "deep_value_pending" candidates to that stage is
+# tracked separately (it was never wired to this function to begin with).
 
 
 def evaluate_candidate_rotation(
