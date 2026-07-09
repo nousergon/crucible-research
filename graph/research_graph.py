@@ -1540,6 +1540,25 @@ def macro_economist_node(state: ResearchState) -> dict:
     return macro_state_update
 
 
+def _load_metron_supplemental_sectors(run_date: str, bucket: str | None = None) -> dict[str, str]:
+    """Metron-held/watchlisted tickers outside the S&P500+400 universe get their GICS
+    sector from the sidecar alpha-engine-data writes alongside its supplemental
+    factor-scoring snapshot (metron-ops#177). Optional and fail-soft — absent on any
+    run where that producer found nothing to add, or hasn't shipped yet; never blocks
+    ``compute_factor_profiles_node``."""
+    import boto3
+
+    bucket = bucket or os.environ.get("S3_BUCKET", "alpha-engine-research")
+    key = f"features/metron_supplemental/{run_date}/sectors.json"
+    try:
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj["Body"].read()).get("sectors", {})
+    except Exception as e:  # noqa: BLE001 - genuinely optional artifact, never raise
+        logger.info("[compute_factor_profiles] no Metron supplemental sectors for %s (%s)", run_date, e)
+        return {}
+
+
 def compute_factor_profiles_node(state: ResearchState) -> dict:
     """Produce the institutional factor-profile substrate for this run.
 
@@ -1591,6 +1610,11 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
             "(feedback_no_silent_fails) rather than letting focus-list + "
             "factor-blend silently degrade."
         )
+
+    # Additive only (never overrides an S&P500+400/population sector already in
+    # sector_map) — metron-ops#177.
+    supplemental_sectors = _load_metron_supplemental_sectors(run_date)
+    sector_map = {**sector_map, **{t: s for t, s in supplemental_sectors.items() if t not in sector_map}}
 
     try:
         s3_key = compute_and_write_factor_profiles(
