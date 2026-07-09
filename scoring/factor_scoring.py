@@ -384,6 +384,12 @@ def compute_and_write_factor_profiles(
     Reads:
       - s3://{bucket}/features/{run_date}/technical.parquet
       - s3://{bucket}/features/{run_date}/fundamental.parquet
+      - s3://{bucket}/features/metron_supplemental/{run_date}/{technical,fundamental}.parquet
+        (OPTIONAL — metron-ops#164: Metron-held/watchlisted tickers outside the
+        S&P500+400 universe above, written by alpha-engine-data's
+        compute_metron_supplemental_features. Absent on any run where the
+        producer found nothing to add, or hasn't shipped yet — never blocks
+        the main compute.)
 
     Writes:
       - s3://{bucket}/factors/profiles/{run_date}/by_ticker.json
@@ -403,8 +409,23 @@ def compute_and_write_factor_profiles(
         obj = s3.get_object(Bucket=bucket, Key=key)
         return pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
 
+    def _read_metron_supplemental(parquet_name: str) -> pd.DataFrame | None:
+        key = f"features/metron_supplemental/{run_date_str}/{parquet_name}.parquet"
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            return pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
+        except Exception:  # noqa: BLE001 - genuinely optional artifact, never fabricate/raise
+            return None
+
     technical_df = _read("technical")
     fundamental_df = _read("fundamental")
+
+    supplemental_technical = _read_metron_supplemental("technical")
+    if supplemental_technical is not None and not supplemental_technical.empty:
+        technical_df = pd.concat([technical_df, supplemental_technical], ignore_index=True)
+    supplemental_fundamental = _read_metron_supplemental("fundamental")
+    if supplemental_fundamental is not None and not supplemental_fundamental.empty:
+        fundamental_df = pd.concat([fundamental_df, supplemental_fundamental], ignore_index=True)
 
     profiles = compute_factor_composites(
         technical_df=technical_df,

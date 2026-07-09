@@ -23,6 +23,7 @@ threads profiles through state).
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,7 +62,9 @@ def test_node_calls_producer_with_state_run_date_and_sector_map():
     with patch(
         "graph.research_graph.compute_and_write_factor_profiles",
         return_value="factors/profiles/2026-05-18/by_ticker.json",
-    ) as mock_producer:
+    ) as mock_producer, patch(
+        "graph.research_graph._load_metron_supplemental_sectors", return_value={},
+    ):
         delta = compute_factor_profiles_node(state)
 
     mock_producer.assert_called_once_with(
@@ -86,13 +89,74 @@ def test_node_defaults_sector_map_to_empty_when_absent():
     with patch(
         "graph.research_graph.compute_and_write_factor_profiles",
         return_value="factors/profiles/2026-05-18/by_ticker.json",
-    ) as mock_producer:
+    ) as mock_producer, patch(
+        "graph.research_graph._load_metron_supplemental_sectors", return_value={},
+    ):
         delta = compute_factor_profiles_node({"run_date": "2026-05-18"})
 
     mock_producer.assert_called_once_with(
         run_date="2026-05-18", sector_map={},
     )
     assert delta["factor_profiles_written"] is True
+
+
+# ── metron-ops#164: supplemental sector union ────────────────────────────────
+
+def test_node_unions_metron_supplemental_sectors_additively():
+    """Metron-held tickers outside S&P500+400 get their sector unioned in
+    from the supplemental sidecar (metron-ops#164) — additive only, never
+    overriding an existing S&P500+400/population sector."""
+    from graph.research_graph import compute_factor_profiles_node
+
+    state = {
+        "run_date": "2026-05-18",
+        "sector_map": {"NVDA": "Information Technology"},
+    }
+
+    with patch(
+        "graph.research_graph.compute_and_write_factor_profiles",
+        return_value="factors/profiles/2026-05-18/by_ticker.json",
+    ) as mock_producer, patch(
+        "graph.research_graph._load_metron_supplemental_sectors",
+        # Conflicting entry for NVDA must NOT override the existing mapping.
+        return_value={"MARUY": "Industrials", "NVDA": "SHOULD_NOT_WIN"},
+    ):
+        compute_factor_profiles_node(state)
+
+    mock_producer.assert_called_once_with(
+        run_date="2026-05-18",
+        sector_map={"NVDA": "Information Technology", "MARUY": "Industrials"},
+    )
+
+
+def test_load_metron_supplemental_sectors_fail_soft_on_missing_artifact():
+    """Absent sidecar (producer hasn't run, or found nothing to add this
+    week) degrades to {} rather than raising — this node's own core-parquet
+    reads stay fail-loud; only this optional add-on is soft."""
+    from graph.research_graph import _load_metron_supplemental_sectors
+
+    with patch("boto3.client") as mock_boto:
+        mock_boto.return_value.get_object.side_effect = Exception("NoSuchKey")
+        assert _load_metron_supplemental_sectors("2026-05-18") == {}
+
+
+def test_load_metron_supplemental_sectors_reads_sidecar():
+    from unittest.mock import MagicMock
+
+    from graph.research_graph import _load_metron_supplemental_sectors
+
+    body = MagicMock()
+    body.read.return_value = json.dumps(
+        {"schema_version": 1, "date": "2026-05-18", "sectors": {"MARUY": "Industrials"}}
+    ).encode()
+    with patch("boto3.client") as mock_boto:
+        mock_boto.return_value.get_object.return_value = {"Body": body}
+        result = _load_metron_supplemental_sectors("2026-05-18", bucket="test-bucket")
+
+    assert result == {"MARUY": "Industrials"}
+    mock_boto.return_value.get_object.assert_called_once_with(
+        Bucket="test-bucket", Key="features/metron_supplemental/2026-05-18/sectors.json",
+    )
 
 
 # ── (b) fail-loud paths (feedback_no_silent_fails) ───────────────────────────
@@ -111,6 +175,8 @@ def test_node_raises_on_producer_exception(caplog):
         side_effect=RuntimeError(
             "NoSuchKey: features/2026-05-18/technical.parquet"
         ),
+    ), patch(
+        "graph.research_graph._load_metron_supplemental_sectors", return_value={},
     ):
         with pytest.raises(RuntimeError, match="NoSuchKey"):
             compute_factor_profiles_node(state)
