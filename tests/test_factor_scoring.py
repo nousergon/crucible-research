@@ -522,7 +522,7 @@ class TestPillarComposites:
 
 
 # ── compute_and_write_factor_profiles: optional Metron supplemental source
-# (metron-ops#164) ────────────────────────────────────────────────────────────
+# (metron-ops#177) ────────────────────────────────────────────────────────────
 
 class TestComputeAndWriteFactorProfilesSupplemental:
     """A second, additive parquet source at

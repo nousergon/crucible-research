@@ -385,7 +385,7 @@ def compute_and_write_factor_profiles(
       - s3://{bucket}/features/{run_date}/technical.parquet
       - s3://{bucket}/features/{run_date}/fundamental.parquet
       - s3://{bucket}/features/metron_supplemental/{run_date}/{technical,fundamental}.parquet
-        (OPTIONAL — metron-ops#164: Metron-held/watchlisted tickers outside the
+        (OPTIONAL — metron-ops#177: Metron-held/watchlisted tickers outside the
         S&P500+400 universe above, written by alpha-engine-data's
         compute_metron_supplemental_features. Absent on any run where the
         producer found nothing to add, or hasn't shipped yet — never blocks

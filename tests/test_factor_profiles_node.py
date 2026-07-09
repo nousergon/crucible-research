@@ -100,11 +100,11 @@ def test_node_defaults_sector_map_to_empty_when_absent():
     assert delta["factor_profiles_written"] is True
 
 
-# ── metron-ops#164: supplemental sector union ────────────────────────────────
+# ── metron-ops#177: supplemental sector union ────────────────────────────────
 
 def test_node_unions_metron_supplemental_sectors_additively():
     """Metron-held tickers outside S&P500+400 get their sector unioned in
-    from the supplemental sidecar (metron-ops#164) — additive only, never
+    from the supplemental sidecar (metron-ops#177) — additive only, never
     overriding an existing S&P500+400/population sector."""
     from graph.research_graph import compute_factor_profiles_node
 
