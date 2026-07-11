@@ -143,6 +143,16 @@ COPY lambda/aggregate_costs_handler.py ${LAMBDA_TASK_ROOT}/aggregate_costs_handl
 # the artifact + retires the internal scanner.
 COPY lambda/scanner_handler.py ${LAMBDA_TASK_ROOT}/scanner_handler.py
 
+# Weekly judge-sensitivity scorecard Lambda (Phase B, config#752) — same
+# image, CMD override to ["perturbation_battery_handler.handler"]. Runs the
+# synthetic-perturbation battery on the Saturday SF cadence and writes
+# decision_artifacts/_perturbation/_report/{date,latest}/sensitivity.{json,md}
+# for the backtester evaluator email. Needs the eval-judge image because the
+# battery makes live Anthropic calls (the no-LLM rolling-mean Lambda can't host
+# it). Provisioned in AWS as alpha-engine-research-perturbation-battery with a
+# --image-config CMD override, like the other eval-judge handlers above.
+COPY lambda/perturbation_battery_handler.py ${LAMBDA_TASK_ROOT}/perturbation_battery_handler.py
+
 # Daily think-tank Lambda — same image, CMD override to
 # ["thinktank_handler.handler"]. Runs `thinktank.run.run_daily()` on the
 # EventBridge daily schedule (alpha-research-thinktank-daily, 14:30 UTC,
