@@ -734,7 +734,7 @@ def invoke_structured_with_validation_retry(
         ``ValidationError`` and the caller's existing fail-loud branch
         (e.g., ``raise RuntimeError(...)``) fires as before.
     """
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, ToolMessage
 
     current_messages = list(messages)
     ls_metadata = ls_metadata or {}
@@ -776,11 +776,11 @@ def invoke_structured_with_validation_retry(
             )
             return final_resp
 
-        # Build a correction message that names the specific schema violation
-        # so the LLM can fix the offending field directly. The raw AIMessage
-        # from the failed attempt is included so the model sees its own prior
-        # output in context (full conversation, not just a fresh prompt).
-        correction = HumanMessage(content=(
+        # Build a correction that names the specific schema violation so the
+        # LLM can fix the offending field directly. The failed ``raw`` AIMessage
+        # from the prior attempt is included so the model sees its own output in
+        # context (full conversation, not just a fresh prompt).
+        correction_text = (
             f"Your prior response failed schema validation:\n\n"
             f"{type(parsing_error).__name__}: {parsing_error}\n\n"
             f"Please re-submit your response with the schema corrections "
@@ -791,13 +791,52 @@ def invoke_structured_with_validation_retry(
             f"the exact type (string vs number vs boolean vs list). "
             f"Preserve all the substantive content from your prior "
             f"response — only fix the schema violation."
-        ))
+        )
 
         raw = final_resp.get("raw")
-        if raw is not None:
-            current_messages = list(messages) + [raw, correction]
+        # ``with_structured_output`` is FORCED TOOL-USE: on a validation failure
+        # the ``raw`` AIMessage carries a ``tool_use`` block. Anthropic requires
+        # the VERY NEXT message to be a ``tool_result`` answering that tool_use —
+        # appending a plain HumanMessage here orphans the tool_use and 400s with
+        # "`tool_use` ids were found without `tool_result` blocks immediately
+        # after" (config#2245: the 2026-07-11 Saturday Research failure, exposed
+        # once crucible-research#402 routed the held-thesis update through this
+        # chokepoint). The SOTA correction is to answer the failed tool_call with
+        # a ToolMessage/tool_result carrying the violation — this keeps the
+        # tool_use/tool_result pairing valid AND feeds the schema error back so
+        # the model re-emits a corrected tool call.
+        tool_call_ids = (
+            [tid for tid in _ai_tool_call_ids(raw) if tid] if raw is not None else []
+        )
+        if raw is not None and tool_call_ids:
+            # One tool_result per tool_use id in the failed turn (structured
+            # output emits a single call, but pair them all defensively — every
+            # tool_use MUST be answered or the 400 recurs).
+            correction_msgs = [
+                ToolMessage(content=correction_text, tool_call_id=tid)
+                for tid in tool_call_ids
+            ]
+            current_messages = list(messages) + [raw, *correction_msgs]
+        elif raw is not None:
+            # Plain-text structured output (no tool_use block in ``raw``) — a
+            # HumanMessage correction is already well-formed, no pairing needed.
+            current_messages = list(messages) + [
+                raw, HumanMessage(content=correction_text)
+            ]
         else:
-            current_messages = list(messages) + [correction]
+            current_messages = list(messages) + [HumanMessage(content=correction_text)]
+
+        # Belt (mirrors the ReAct loop's ``repair_tool_use_pairing`` discipline):
+        # never SEND an orphan tool_use. No-op when the pairing built above is
+        # valid (the normal path); self-heals any residual malformation carried
+        # in the caller's ``messages`` rather than letting it reach the API.
+        current_messages, _dropped_pairing = repair_tool_use_pairing(current_messages)
+        if _dropped_pairing:
+            log.warning(
+                "[%s] dropped orphan tool_use turn(s) %s from validation-retry "
+                "input before re-send (pre-existing malformed history)",
+                label, _dropped_pairing,
+            )
 
         log.info(
             "[%s] structured-output parse failed on attempt %d/%d "
