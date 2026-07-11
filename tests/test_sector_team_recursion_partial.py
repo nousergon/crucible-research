@@ -47,12 +47,75 @@ def fresh_modules():
 # ── Recursion-limit constants ─────────────────────────────────────────────────
 
 
-def test_quant_recursion_limit_is_max_iterations_times_2_plus_2():
-    """Locks the +2 budget bump that accounts for response_format
-    extraction. Regressing this resurrects the 2026-05-02 SF crash."""
-    from agents.sector_teams.quant_analyst import _QUANT_RECURSION_LIMIT
+def test_quant_recursion_limit_is_workload_derived():
+    """config#1822 (quant sibling of the qual fix): the quant ReAct budget
+    is DERIVED from the live workload (screened tickers × tools), not a
+    fixed constant, so it can never under-budget the bounded worst case.
+
+    Regressing this to a fixed ``QUANT_MAX_ITERATIONS * 2 + 2`` resurrects
+    the 2026-07-11 failure where the industrials team (13 tickers × ~9
+    tools) exceeded the tuned budget and returned 0 picks (partial) after
+    40 legitimate, non-repeating research calls."""
+    from agents.sector_teams.quant_analyst import (
+        _quant_recursion_limit,
+        _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    )
     from config import QUANT_MAX_ITERATIONS
-    assert _QUANT_RECURSION_LIMIT == QUANT_MAX_ITERATIONS * 2 + 2
+
+    def expected(n_tickers, n_tools):
+        # Superstep math: iterations = max(configured floor, workload rounds
+        # + synthesis margin); recursion_limit = 2×iterations + 2 (one LLM
+        # node + one tool node per round, +2 stop-turn tail).
+        rounds = n_tickers * n_tools + _REACT_SYNTHESIS_MARGIN_ROUNDS
+        return max(QUANT_MAX_ITERATIONS, rounds) * 2 + 2
+
+    # Derivation matches the documented formula across workloads.
+    assert _quant_recursion_limit(1, 1) == expected(1, 1)
+    assert _quant_recursion_limit(13, 9) == expected(13, 9)
+
+    # The incident workload (13 tickers × 9 tools) budgets for every tool on
+    # every ticker PLUS synthesis headroom — provably ABOVE the old fixed
+    # ceiling ``QUANT_MAX_ITERATIONS * 2 + 2`` that caused the 2026-07-11
+    # partial, whenever the configured floor is below the real workload.
+    assert (13 * 9 + _REACT_SYNTHESIS_MARGIN_ROUNDS) > QUANT_MAX_ITERATIONS
+    assert _quant_recursion_limit(13, 9) > QUANT_MAX_ITERATIONS * 2 + 2
+
+    # Monotonic in both tickers and tools (once past the floor).
+    assert _quant_recursion_limit(14, 9) > _quant_recursion_limit(13, 9)
+    assert _quant_recursion_limit(13, 10) > _quant_recursion_limit(13, 9)
+
+
+def test_quant_and_qual_share_the_workload_budget_chokepoint():
+    """Both analysts MUST derive their ReAct budget from the single shared
+    ``workload_derived_recursion_limit`` helper — no per-analyst copy of the
+    superstep math that could drift and re-open the config#1822 class on the
+    next sibling. Locks the chokepoint: each analyst's binding equals the
+    shared helper with its own configured floor."""
+    from agents.sector_teams.react_budget import (
+        workload_derived_recursion_limit,
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as SHARED_MARGIN,
+    )
+    from agents.sector_teams.quant_analyst import (
+        _quant_recursion_limit,
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUANT_MARGIN,
+    )
+    from agents.sector_teams.qual_analyst import (
+        _qual_recursion_limit,
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUAL_MARGIN,
+    )
+    from config import QUANT_MAX_ITERATIONS, QUAL_MAX_ITERATIONS
+
+    # Both analysts re-export the SAME margin object from the chokepoint.
+    assert QUANT_MARGIN is SHARED_MARGIN
+    assert QUAL_MARGIN is SHARED_MARGIN
+
+    # Each binding is exactly the shared helper with its analyst's floor.
+    assert _quant_recursion_limit(13, 9) == workload_derived_recursion_limit(
+        13, 9, floor_iterations=QUANT_MAX_ITERATIONS
+    )
+    assert _qual_recursion_limit(5, 13) == workload_derived_recursion_limit(
+        5, 13, floor_iterations=QUAL_MAX_ITERATIONS
+    )
 
 
 def test_qual_recursion_limit_is_workload_derived():
@@ -512,7 +575,7 @@ class TestQuantRetryOnEmpty:
         recursion_result = {
             "team_id": "technology",
             "ranked_picks": [], "tool_calls": [],
-            "iterations": _qa._QUANT_RECURSION_LIMIT,
+            "iterations": _qa._quant_recursion_limit(2, 9),
             "error": None, "partial": True,
             "partial_reason": "recursion_limit_exhausted",
         }

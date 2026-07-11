@@ -28,6 +28,10 @@ from config import (
 )
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
+from agents.sector_teams.react_budget import (
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    workload_derived_recursion_limit,
+)
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
@@ -65,47 +69,27 @@ class _QualPillarBatch(BaseModel):
 
 log = logging.getLogger(__name__)
 
-# LangGraph ReAct step budget. ``recursion_limit`` counts graph
-# supersteps; each ReAct round = 1 LLM node + 1 tool node = 2 supersteps,
-# plus a +2 tail for the stop turn. The budget MUST cover the bounded
-# worst-case workload: the agent researches each of ``n_picks`` tickers
-# across the ``n_tools`` available tools, and (confirmed in prod traces —
-# config#1822) calls them roughly ONE-per-round (near-sequential), so the
-# worst case is ``n_picks * n_tools`` tool rounds before it can synthesize
-# its answer.
-#
-# A hand-tuned ``QUAL_MAX_ITERATIONS`` constant does NOT scale with the
-# pick/tool counts and silently under-budgets when either grows. That is
-# the un-fixed residual of config#1822: on 2026-07-11 four qual teams
-# (5 picks × 13 tools = 65 worst-case rounds > the tuned budget) burned
-# 88–110 tool-call records doing legitimate, non-repeating research and
-# hit langgraph's internal step-budget sentinel mid-research → 0
-# assessments → ``partial`` → ALL-AGENTS-STRICT hard-fail. Bumping the
-# constant again would just move the cliff; deriving the ceiling from the
-# LIVE workload makes it provably adequate and self-adjusting as the pick
-# or tool set changes. ``QUAL_MAX_ITERATIONS`` is kept as a configurable
-# floor. This is a HOW-it-runs execution-budget fix: it lets the agent
-# COMPLETE its designed research and never changes what it concludes.
-#
-# Synthesis margin: rounds the agent needs AFTER its last tool call to
-# write the final answer, plus slack for the occasional legitimate
-# tool re-query. Beyond full workload coverage + this margin, a
-# non-terminating loop is not a budget problem — the step-budget sentinel
-# catches it and the team degrades LOUDLY (partial), never silently.
-_REACT_SYNTHESIS_MARGIN_ROUNDS = 10
+# LangGraph ReAct step budget — DERIVED from the live workload, not a
+# hand-tuned constant (config#1822). The superstep math and the rationale
+# for making this a shared chokepoint live in
+# ``agents.sector_teams.react_budget``; qual and quant both route through it
+# so the invariant is enforced in ONE place. ``_REACT_SYNTHESIS_MARGIN_ROUNDS``
+# is re-exported from that module (imported above) for the guard tests.
 
 
 def _qual_recursion_limit(n_picks: int, n_tools: int) -> int:
     """Workload-derived ReAct ``recursion_limit`` for the qual analyst.
 
-    Floors at the configured ``QUAL_MAX_ITERATIONS`` rounds but grows to
-    cover ``n_picks * n_tools`` tool rounds plus a synthesis margin, so the
-    agent can research every pick with every tool AND still synthesize its
-    assessment. See the module comment above for the superstep math.
+    Thin per-analyst binding over the shared
+    ``workload_derived_recursion_limit`` chokepoint: floors at the
+    configured ``QUAL_MAX_ITERATIONS`` rounds but grows to cover
+    ``n_picks * n_tools`` tool rounds plus a synthesis margin, so the agent
+    can research every pick with every tool AND still synthesize its
+    assessment.
     """
-    worst_case_rounds = n_picks * n_tools + _REACT_SYNTHESIS_MARGIN_ROUNDS
-    iterations = max(QUAL_MAX_ITERATIONS, worst_case_rounds)
-    return iterations * 2 + 2
+    return workload_derived_recursion_limit(
+        n_picks, n_tools, floor_iterations=QUAL_MAX_ITERATIONS
+    )
 
 
 def run_qual_analyst(
