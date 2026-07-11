@@ -27,7 +27,7 @@ from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_with_rate_limit_retry,
+    invoke_anthropic_safe,
 )
 from strict_mode import is_strict_validation_enabled
 
@@ -219,16 +219,13 @@ def run_cio(
         # the deadline the wrapper re-raises and (strict mode default)
         # the run hard-fails — no synthetic/empty CIO substitute is
         # promoted. Non-429 errors propagate immediately as before.
-        raw_output: CIORawOutput = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={
-                    "metadata": load_prompt(
-                        prompt_name
-                    ).langsmith_metadata()
-                },
-            ),
+        raw_output: CIORawOutput = invoke_anthropic_safe(
+            structured_llm,
+            [HumanMessage(content=prompt)],
             label="cio",
+            config={
+                "metadata": load_prompt(prompt_name).langsmith_metadata()
+            },
         )
         decisions_dicts = [d.model_dump() for d in raw_output.decisions]
         if not decisions_dicts:
@@ -376,12 +373,11 @@ def run_cio_critic(
 
     structured_llm = llm.with_structured_output(CIOCriticOutput)
     try:
-        verdict: CIOCriticOutput = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={"metadata": prompt_tmpl.langsmith_metadata()},
-            ),
+        verdict: CIOCriticOutput = invoke_anthropic_safe(
+            structured_llm,
+            [HumanMessage(content=prompt)],
             label="cio_critic",
+            config={"metadata": prompt_tmpl.langsmith_metadata()},
         )
         result = {
             "action": verdict.action,

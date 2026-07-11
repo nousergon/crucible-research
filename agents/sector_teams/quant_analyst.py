@@ -402,12 +402,11 @@ def run_quant_analyst(
             "return an empty list.\n\n"
             f"--- ANALYST ANSWER ---\n{final_text}"
         ))
-        extract_resp = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [extract_msg],
-                config={"metadata": _ls_metadata},
-            ),
+        extract_resp = invoke_anthropic_safe(
+            structured_llm,
+            [extract_msg],
             label=f"quant:{team_id}:extract",
+            config={"metadata": _ls_metadata},
         )
         parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
@@ -680,8 +679,8 @@ from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+    invoke_anthropic_safe,
     invoke_react_with_recovery,
-    invoke_with_rate_limit_retry,
     is_step_budget_exhausted_sentinel,
     make_tool_use_repair_hook,
 )
