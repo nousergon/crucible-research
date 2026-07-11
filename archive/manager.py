@@ -905,6 +905,9 @@ class ArchiveManager:
         Missing → NULL (the agent_override column defaults to 0 in the
         schema, but we still pass through so a writer-side override is
         respected when PR 4 lights up the @tool get_factor_profile boundary).
+        override_team_id (v23 migration, config#750) carries which team's quant
+        agent reached outside its focus list for an override row; NULL for
+        focus-list members / non-override rows.
         """
         if not self.db_conn:
             return
@@ -917,9 +920,9 @@ class ArchiveManager:
                     price_vs_ma200, current_price, avg_volume_20d,
                     focus_score, focus_stance, focus_team_id,
                     focus_rank_in_team, focus_rank_in_sector,
-                    focus_list_passed, agent_override)
+                    focus_list_passed, agent_override, override_team_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("sector"),
                     e.get("tech_score"), e.get("scan_path"),
@@ -932,6 +935,7 @@ class ArchiveManager:
                     e.get("focus_team_id"), e.get("focus_rank_in_team"),
                     e.get("focus_rank_in_sector"),
                     e.get("focus_list_passed", 0), e.get("agent_override", 0),
+                    e.get("override_team_id"),
                 ),
             )
 
