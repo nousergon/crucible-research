@@ -872,7 +872,26 @@ def invoke_structured_with_validation_retry(
                 )
             return final_resp
 
-        # Parse failed; decide whether to retry.
+        # Parse failed. Log this attempt loudly with the raw payload head so a
+        # production tool-XML leak (the config#2237 class — a literal
+        # ``<parameter ...>`` tag captured as a str where a list is required) is
+        # diagnosable from the logs WITHOUT re-running the artifact. This is the
+        # per-attempt diagnostic evals/judge.py kept in its bespoke loop before
+        # it migrated onto this chokepoint (config#2237); centralising it here
+        # gives every caller the same diagnostics rather than duplicating it.
+        raw_head = (
+            str(final_resp.get("raw"))[:300]
+            if final_resp.get("raw") is not None
+            else "(no raw)"
+        )
+        log.warning(
+            "[%s] structured-output parse attempt %d/%d failed: %s: %s; "
+            "raw head=%r",
+            label, attempt + 1, max_retries + 1,
+            type(parsing_error).__name__, parsing_error, raw_head,
+        )
+
+        # Decide whether to retry.
         if attempt >= max_retries:
             log.warning(
                 "[%s] structured-output failed after %d validation-retry "
