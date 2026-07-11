@@ -414,12 +414,20 @@ class ArchiveManager:
     def save_sector_team_run(
         self, run_date: str, team_id: str, output: dict,
     ) -> None:
-        """Persist a successfully-completed sector team's output to S3.
+        """Persist a FULLY-COMPLETED sector team's output to S3 for resume.
 
-        Called from ``sector_team_node`` immediately after a team
-        finishes WITHOUT an ``error`` (a partial team — recursion
-        exhausted — is still persisted: it has no error and re-running
-        it would just re-burn budget for the same empty result).
+        Only genuinely-successful teams are resumable checkpoints. A team
+        that ERRORED or came back PARTIAL (e.g. the qual ReAct agent hit
+        the step-budget sentinel → 0 assessments) is NOT persisted:
+        persisting it writes a poison pill, because ``load_sector_team_run``
+        would then short-circuit EVERY future rerun with the incomplete
+        result — the team could never recover and ALL-AGENTS-STRICT could
+        never pass (config#1822, 2026-07-11: three teams stuck partial
+        across four reruns). Prior behavior deliberately persisted partials
+        on the assumption a rerun "would just re-burn budget for the same
+        empty result" — true only while the ReAct budget was undersized;
+        once sized to the workload a rerun DOES recover, so a partial team
+        must be left unresumable.
 
         ``default=str`` mirrors ``write_signals_json`` — the team output
         carries only JSON-native types plus model_dump'd dicts, but the
@@ -427,6 +435,15 @@ class ArchiveManager:
         Persistence failure is non-fatal: log + continue (the team's
         in-memory output still flows; we only lose resumability for it).
         """
+        if output.get("error") or output.get("partial"):
+            log.info(
+                "[sector_team_run] NOT persisting %s for %s — team is "
+                "INCOMPLETE (error=%r partial=%r partial_reasons=%r); "
+                "leaving it unresumable so a rerun re-attempts it fresh.",
+                team_id, run_date, output.get("error"),
+                output.get("partial"), output.get("partial_reasons"),
+            )
+            return
         key = self._sector_team_run_key(run_date, team_id)
         envelope = {
             "run_date": run_date,
@@ -509,6 +526,25 @@ class ArchiveManager:
                 "[sector_team_run] persisted output at %s is malformed "
                 "(not a dict with team_id) — ignoring, team %s re-runs",
                 key, team_id,
+            )
+            return None
+        # Only genuinely-COMPLETE teams are resumable. A persisted output
+        # that is PARTIAL (e.g. qual step-budget exhaustion → 0
+        # assessments) or carries an ERROR is NOT done — short-circuiting a
+        # rerun with it permanently poisons recovery (the team can never
+        # succeed, ALL-AGENTS-STRICT can never pass). Re-run it fresh
+        # instead; with the workload-sized ReAct budget (config#1822) the
+        # re-run can now actually succeed. This guard also RETROACTIVELY
+        # neutralizes any partial artifact written before the persist-side
+        # guard existed — so already-poisoned checkpoints self-heal on the
+        # next rerun without any manual S3 surgery.
+        if output.get("partial") or output.get("error"):
+            log.warning(
+                "[sector_team_run] persisted %s for %s is INCOMPLETE "
+                "(partial=%r partial_reasons=%r error=%r) — NOT resuming a "
+                "non-successful team; it will be re-run fresh.",
+                team_id, run_date, output.get("partial"),
+                output.get("partial_reasons"), output.get("error"),
             )
             return None
         log.info(

@@ -1400,13 +1400,15 @@ def sector_team_node(state: ResearchState) -> dict:
 
     # ── Persist on success (resumability) ─────────────────────────────────
     # Write this team's full output to S3 NOW — before any other team
-    # can fail and ERROR the overall run. A team is persisted iff it has
-    # no hard ``error`` (a partial/recursion-exhausted team is persisted
-    # too: re-running it would just re-burn budget for the same empty
-    # result, and the aggregator already tolerates partials). A team
-    # that errored is NOT persisted so a re-run gets a fresh attempt at
-    # it (the backoff / a TPM-window reset may let it succeed).
-    if _am is not None and not result.get("error"):
+    # can fail and ERROR the overall run. A team is persisted iff it is
+    # FULLY COMPLETE: no hard ``error`` AND not ``partial``. An errored or
+    # partial (e.g. qual step-budget-exhausted) team is NOT persisted, so a
+    # re-run gets a fresh attempt at it — the backoff / a TPM-window reset /
+    # the workload-sized ReAct budget (config#1822) may let it succeed.
+    # Persisting a partial team would poison every future rerun via the
+    # resume short-circuit (``load_sector_team_run``). ``save_sector_team_run``
+    # enforces the same guard defensively.
+    if _am is not None and not result.get("error") and not result.get("partial"):
         try:
             _am.save_sector_team_run(run_date, team_id, result)
         except Exception as e:  # pragma: no cover — saver is already safe
