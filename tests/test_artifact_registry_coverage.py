@@ -78,6 +78,15 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "evals/judge.py": 2,
     "evals/last_week_scorecard.py": 2,
     "evals/orchestrator.py": 2,
+    # Phase B weekly judge-sensitivity scorecard (config#752). Single PUT
+    # site (loop over dated + latest json/md keys in emit_perturbation_report)
+    # writing decision_artifacts/_perturbation/_report/{date,latest}/
+    # sensitivity.{json,md}. Direct analog of evals/calibration_kappa.py: the
+    # prefix decision_artifacts/_perturbation/_report/ is grandfathered in
+    # ARTIFACT_REGISTRY.yaml — weekly between-PR-drift observability, consumer
+    # (backtester evaluator email) graceful-degrades, so not a load-bearing
+    # freshness SLA.
+    "evals/perturbation.py": 1,
     "evals/rationale_clustering.py": 1,
     "evals/rolling_mean.py": 1,
     # Saturday-SF team-accuracy producer (config#1422) — single fixed-key
