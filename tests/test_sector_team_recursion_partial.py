@@ -55,10 +55,42 @@ def test_quant_recursion_limit_is_max_iterations_times_2_plus_2():
     assert _QUANT_RECURSION_LIMIT == QUANT_MAX_ITERATIONS * 2 + 2
 
 
-def test_qual_recursion_limit_is_max_iterations_times_2_plus_2():
-    from agents.sector_teams.qual_analyst import _QUAL_RECURSION_LIMIT
+def test_qual_recursion_limit_is_workload_derived():
+    """config#1822: the qual ReAct budget is DERIVED from the live
+    workload (picks × tools), not a fixed constant, so it can never
+    under-budget the bounded worst case. A tiny workload floors at the
+    configured ``QUAL_MAX_ITERATIONS``; a large one grows past it.
+
+    Regressing this to a fixed ``QUAL_MAX_ITERATIONS * 2 + 2`` resurrects
+    the 2026-07-11 failure where 5 picks × 13 tools exceeded the tuned
+    budget and 4 qual teams returned 0 assessments (partial)."""
+    from agents.sector_teams.qual_analyst import (
+        _qual_recursion_limit,
+        _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    )
     from config import QUAL_MAX_ITERATIONS
-    assert _QUAL_RECURSION_LIMIT == QUAL_MAX_ITERATIONS * 2 + 2
+
+    def expected(n_picks, n_tools):
+        # Superstep math: iterations = max(configured floor, workload
+        # rounds + synthesis margin); recursion_limit = 2×iterations + 2
+        # (one LLM node + one tool node per round, +2 stop-turn tail).
+        rounds = n_picks * n_tools + _REACT_SYNTHESIS_MARGIN_ROUNDS
+        return max(QUAL_MAX_ITERATIONS, rounds) * 2 + 2
+
+    # Derivation matches the documented formula across workloads.
+    assert _qual_recursion_limit(1, 1) == expected(1, 1)
+    assert _qual_recursion_limit(5, 13) == expected(5, 13)
+
+    # The incident workload (5 picks × 13 tools) budgets for every tool on
+    # every pick PLUS synthesis headroom — provably ABOVE the old fixed
+    # ceiling ``QUAL_MAX_ITERATIONS * 2 + 2`` that caused the 2026-07-11
+    # partials, whenever the configured floor is below the real workload.
+    assert (5 * 13 + _REACT_SYNTHESIS_MARGIN_ROUNDS) > QUAL_MAX_ITERATIONS
+    assert _qual_recursion_limit(5, 13) > QUAL_MAX_ITERATIONS * 2 + 2
+
+    # Monotonic in both picks and tools (once past the floor).
+    assert _qual_recursion_limit(6, 13) > _qual_recursion_limit(5, 13)
+    assert _qual_recursion_limit(5, 14) > _qual_recursion_limit(5, 13)
 
 
 # ── Quant analyst graceful degradation ────────────────────────────────────────

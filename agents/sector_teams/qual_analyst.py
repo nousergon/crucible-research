@@ -65,10 +65,47 @@ class _QualPillarBatch(BaseModel):
 
 log = logging.getLogger(__name__)
 
-# +2 retained as defensive margin (was load-bearing for response_format's
-# extra call inside the LangGraph subgraph; after the 2026-05-02 refactor
-# the extraction is decoupled and the +2 is unused). See quant_analyst.py.
-_QUAL_RECURSION_LIMIT = QUAL_MAX_ITERATIONS * 2 + 2
+# LangGraph ReAct step budget. ``recursion_limit`` counts graph
+# supersteps; each ReAct round = 1 LLM node + 1 tool node = 2 supersteps,
+# plus a +2 tail for the stop turn. The budget MUST cover the bounded
+# worst-case workload: the agent researches each of ``n_picks`` tickers
+# across the ``n_tools`` available tools, and (confirmed in prod traces —
+# config#1822) calls them roughly ONE-per-round (near-sequential), so the
+# worst case is ``n_picks * n_tools`` tool rounds before it can synthesize
+# its answer.
+#
+# A hand-tuned ``QUAL_MAX_ITERATIONS`` constant does NOT scale with the
+# pick/tool counts and silently under-budgets when either grows. That is
+# the un-fixed residual of config#1822: on 2026-07-11 four qual teams
+# (5 picks × 13 tools = 65 worst-case rounds > the tuned budget) burned
+# 88–110 tool-call records doing legitimate, non-repeating research and
+# hit langgraph's internal step-budget sentinel mid-research → 0
+# assessments → ``partial`` → ALL-AGENTS-STRICT hard-fail. Bumping the
+# constant again would just move the cliff; deriving the ceiling from the
+# LIVE workload makes it provably adequate and self-adjusting as the pick
+# or tool set changes. ``QUAL_MAX_ITERATIONS`` is kept as a configurable
+# floor. This is a HOW-it-runs execution-budget fix: it lets the agent
+# COMPLETE its designed research and never changes what it concludes.
+#
+# Synthesis margin: rounds the agent needs AFTER its last tool call to
+# write the final answer, plus slack for the occasional legitimate
+# tool re-query. Beyond full workload coverage + this margin, a
+# non-terminating loop is not a budget problem — the step-budget sentinel
+# catches it and the team degrades LOUDLY (partial), never silently.
+_REACT_SYNTHESIS_MARGIN_ROUNDS = 10
+
+
+def _qual_recursion_limit(n_picks: int, n_tools: int) -> int:
+    """Workload-derived ReAct ``recursion_limit`` for the qual analyst.
+
+    Floors at the configured ``QUAL_MAX_ITERATIONS`` rounds but grows to
+    cover ``n_picks * n_tools`` tool rounds plus a synthesis margin, so the
+    agent can research every pick with every tool AND still synthesize its
+    assessment. See the module comment above for the superstep math.
+    """
+    worst_case_rounds = n_picks * n_tools + _REACT_SYNTHESIS_MARGIN_ROUNDS
+    iterations = max(QUAL_MAX_ITERATIONS, worst_case_rounds)
+    return iterations * 2 + 2
 
 
 def run_qual_analyst(
@@ -181,7 +218,14 @@ def run_qual_analyst(
         "user_prompt_hash": user_prompt.hash[:12],
     }
 
-    log.info("[qual:%s] starting ReAct agent with %d picks", team_id, len(quant_top5))
+    # Size the step budget to THIS invocation's workload (picks × tools),
+    # not a fixed constant — see ``_qual_recursion_limit`` (config#1822).
+    recursion_limit = _qual_recursion_limit(len(quant_top5), len(tools))
+    log.info(
+        "[qual:%s] starting ReAct agent with %d picks, %d tools "
+        "(recursion_limit=%d)",
+        team_id, len(quant_top5), len(tools), recursion_limit,
+    )
 
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
@@ -191,7 +235,7 @@ def run_qual_analyst(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config={
-                    "recursion_limit": _QUAL_RECURSION_LIMIT,
+                    "recursion_limit": recursion_limit,
                     "metadata": _ls_metadata,
                 },
             ),
@@ -329,14 +373,14 @@ def run_qual_analyst(
             "[qual:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 assessments). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, _QUAL_RECURSION_LIMIT,
+            team_id, recursion_limit,
         )
         return {
             "team_id": team_id,
             "assessments": [],
             "additional_candidate": None,
             "tool_calls": [],
-            "iterations": _QUAL_RECURSION_LIMIT,
+            "iterations": recursion_limit,
             "error": None,
             "partial": True,
             "partial_reason": "recursion_limit_exhausted",

@@ -361,6 +361,69 @@ class TestSectorTeamPersistence:
             archive.load_sector_team_run("2026-05-16", "technology") is None
         )
 
+    def test_partial_team_is_not_persisted_by_saver(self, archive):
+        """config#1822: a PARTIAL team (qual step-budget exhaustion → 0
+        assessments) must NOT be written as a resumable checkpoint —
+        persisting it poisons every future rerun's resume short-circuit."""
+        out = _team_output("healthcare", recs=[])
+        out["partial"] = True
+        out["partial_reasons"] = ["qual:remaining_steps_exhausted"]
+        archive.save_sector_team_run("2026-05-16", "healthcare", out)
+        key = "archive/sector_team_runs/2026-05-16/healthcare.json"
+        assert key not in archive.s3.store, (
+            "a partial team must NOT be persisted"
+        )
+
+    def test_errored_team_is_not_persisted_by_saver(self, archive):
+        """The saver enforces the no-error guard itself (defense in depth,
+        independent of the node-level call-site check)."""
+        out = _team_output("financials", recs=[])
+        out["error"] = "RateLimitError 429 — org rate limit"
+        archive.save_sector_team_run("2026-05-16", "financials", out)
+        key = "archive/sector_team_runs/2026-05-16/financials.json"
+        assert key not in archive.s3.store
+
+    def test_load_ignores_pre_existing_partial_artifact(self, archive):
+        """config#1822: an ALREADY-persisted partial artifact (written
+        before the persist-side guard existed) must be treated as absent on
+        resume, so the poisoned team re-runs fresh and self-heals — no
+        manual S3 surgery. This is the load-bearing recovery guarantee."""
+        key = "archive/sector_team_runs/2026-05-16/consumer.json"
+        partial = _team_output("consumer", recs=[])
+        partial["partial"] = True
+        partial["partial_reasons"] = ["qual:remaining_steps_exhausted"]
+        archive.s3.store[key] = json.dumps({
+            "run_date": "2026-05-16",
+            "team_id": "consumer",
+            "output": partial,
+        }).encode()
+        assert (
+            archive.load_sector_team_run("2026-05-16", "consumer") is None
+        ), "a persisted partial team must NOT short-circuit a rerun"
+
+    def test_load_ignores_pre_existing_errored_artifact(self, archive):
+        """Same guarantee for an errored artifact."""
+        key = "archive/sector_team_runs/2026-05-16/industrials.json"
+        errored = _team_output("industrials", recs=[])
+        errored["error"] = "some hard error"
+        archive.s3.store[key] = json.dumps({
+            "run_date": "2026-05-16",
+            "team_id": "industrials",
+            "output": errored,
+        }).encode()
+        assert (
+            archive.load_sector_team_run("2026-05-16", "industrials") is None
+        )
+
+    def test_successful_team_still_round_trips(self, archive):
+        """The guard must NOT regress the load-bearing invariant: a fully
+        SUCCESSFUL team is still persisted and resumed (zero re-work)."""
+        out = _team_output("technology", recs=[{"ticker": "NVDA"}])
+        archive.save_sector_team_run("2026-05-16", "technology", out)
+        loaded = archive.load_sector_team_run("2026-05-16", "technology")
+        assert loaded is not None
+        assert loaded["recommendations"] == [{"ticker": "NVDA"}]
+
 
 # ── Part C: resume short-circuit + persist-on-success in the node ─────────
 
