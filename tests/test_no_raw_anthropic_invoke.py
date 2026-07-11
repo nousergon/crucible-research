@@ -20,9 +20,10 @@ Sanctioned exceptions:
     (in-loop pairing is handled by the ReAct ``pre_model_hook``). These do not
     match the ``*_llm`` / ``*_structured`` / ``with_structured_output`` shapes
     below, so they are ignored by construction.
-  * ``evals/judge.py`` — migrated to the shared structured-output chokepoint by
-    crucible-research#407 (config#2237), in flight at the time this guard
-    landed. Remove from the allowlist once that PR merges.
+  (``evals/judge.py`` was the last raw structured send; crucible-research#407 /
+  config#2237 routed it through ``invoke_structured_with_validation_retry`` —
+  itself routed through ``invoke_anthropic_safe`` — so it is now covered
+  transitively and needs no allowlist entry.)
 """
 from __future__ import annotations
 
@@ -37,7 +38,6 @@ SCAN_DIRS = ("agents", "evals", "producers", "graph", "thinktank")
 # Files allowed to contain a raw structured-handle ``.invoke`` (see module doc).
 ALLOWLIST = {
     "agents/langchain_utils.py",
-    "evals/judge.py",  # crucible-research#407 (config#2237) — remove when merged
 }
 
 
