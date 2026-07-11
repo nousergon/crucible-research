@@ -3242,10 +3242,16 @@ def _compute_focus_list_audit_lookup(
 
     Returns ``{ticker: {focus_score, focus_stance, focus_team_id,
     focus_rank_in_team, focus_rank_in_sector, focus_list_passed,
-    agent_override}}`` for every ticker the factor substrate has a profile
-    for. ``focus_list_passed=1`` for top-N members. ``agent_override=1``
-    when the quant agent looked up this non-focus ticker via
-    @tool get_factor_profile during its team's run.
+    agent_override, override_team_id}}`` for every ticker the factor
+    substrate has a profile for. ``focus_list_passed=1`` for top-N members.
+    ``agent_override=1`` when the quant agent looked up this non-focus ticker
+    via @tool get_factor_profile during its team's run; ``override_team_id``
+    then names WHICH team's agent reached out (config#750 per-team override
+    attribution) — ``None`` for focus-list members and non-override rows.
+    Because sector teams partition tickers by sector, an override ticker is
+    overridden by at most one team; if the same ticker somehow appears in more
+    than one team's override set, attribution is deterministic (sorted-first
+    team wins).
 
     PR 4 path: when ``focus_list_by_team`` is provided (computed in
     ``compute_focus_list_node`` and threaded through state), this is a
@@ -3261,9 +3267,16 @@ def _compute_focus_list_audit_lookup(
     # PR 4 path — pure projection
     if focus_list_by_team is not None:
         lookup: dict[str, dict] = {}
-        all_overrides: set[str] = set()
-        for team_overrides in override_tickers_by_team.values():
-            all_overrides.update(team_overrides)
+        # Per-team override attribution (config#750): keep the OWNING team for
+        # each override ticker instead of unioning across teams into an
+        # anonymous set. Iterate teams in sorted order so that in the
+        # (structurally impossible — sectors partition tickers) event the same
+        # ticker appears in two teams' override sets, attribution is
+        # deterministic (sorted-first team wins) rather than dict-order-dependent.
+        override_team_by_ticker: dict[str, str] = {}
+        for team_id in sorted(override_tickers_by_team):
+            for ticker in override_tickers_by_team[team_id]:
+                override_team_by_ticker.setdefault(ticker, team_id)
 
         for team_id, entries in focus_list_by_team.items():
             for e in entries:
@@ -3276,15 +3289,16 @@ def _compute_focus_list_audit_lookup(
                     "focus_rank_in_sector": e["rank_in_sector"],
                     "focus_list_passed": 1,
                     "agent_override": 0,  # focus-list members aren't overrides
+                    "override_team_id": None,
                 }
 
         # Non-focus tickers the agent looked up via @tool get_factor_profile
-        # surface here with empty focus fields + agent_override=1. The
-        # dashboard reads (focus_list_passed=0 AND agent_override=1) as
-        # "agent reached outside the curated set" — the precision /
-        # recall / override-hit-rate audit primitives in §5.3 of the
-        # scanner plan doc.
-        for ticker in all_overrides:
+        # surface here with empty focus fields + agent_override=1 and the
+        # attributing team in override_team_id. The dashboard reads
+        # (focus_list_passed=0 AND agent_override=1) as "agent reached outside
+        # the curated set" — the precision / recall / override-hit-rate audit
+        # primitives in §5.3 of the scanner plan doc — now split per team.
+        for ticker, team_id in override_team_by_ticker.items():
             if ticker in lookup:
                 continue  # in focus list — not an override by definition
             lookup[ticker] = {
@@ -3295,6 +3309,7 @@ def _compute_focus_list_audit_lookup(
                 "focus_rank_in_sector": None,
                 "focus_list_passed": 0,
                 "agent_override": 1,
+                "override_team_id": team_id,
             }
         return lookup
 
@@ -3344,6 +3359,10 @@ def _compute_focus_list_audit_lookup(
                 "focus_rank_in_sector": e.rank_in_sector,
                 "focus_list_passed": 1,
                 "agent_override": 0,
+                # Legacy recompute path has no per-team override telemetry
+                # (overrides are only known from PR 4 state); attribution is
+                # None here — the projection path above is authoritative.
+                "override_team_id": None,
             }
 
     for ticker, entry in focus_scores.items():
@@ -3361,6 +3380,7 @@ def _compute_focus_list_audit_lookup(
             "focus_rank_in_sector": None,
             "focus_list_passed": 0,
             "agent_override": 0,
+            "override_team_id": None,
         }
 
     return lookup_legacy
