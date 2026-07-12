@@ -3603,6 +3603,14 @@ def archive_writer(state: ResearchState) -> dict:
     # building it twice is cheap and keeps the guard authoritative over
     # the precise bytes that would land in signals.json.
     _candidate_signals_payload = _build_signals_payload(state)
+    # Emit the research_optimizer boost columns (short_interest_adj /
+    # institutional_boost) onto the universe + buy_candidates entries here —
+    # the I/O belongs in the node, not in the pure builder, and annotating
+    # before the stub guard keeps the guarded bytes identical to the written
+    # bytes (config#1857). Reader-gated + env-flagged: a no-op emitting 0.0
+    # unless RESEARCH_BOOST_SIGNALS_ENABLED=true, so it never breaks the write.
+    from scoring.boost_signals import emit_boost_signals
+    emit_boost_signals(_candidate_signals_payload, run_date=run_date)
     assert_no_stub_output(
         signals_payload=_candidate_signals_payload,
         consolidated_report=state.get("consolidated_report", "") or "",
