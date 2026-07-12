@@ -26,7 +26,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
@@ -177,7 +177,7 @@ class TestBuildEvalS3Key:
         """The key is built by alpha_engine_lib.eval_artifacts.eval_artifact_key
         — we do NOT hand-roll the format. Pin the equivalence so a drift
         in either side is caught."""
-        from alpha_engine_lib.eval_artifacts import eval_artifact_key
+        from nousergon_lib.eval_artifacts import eval_artifact_key
         from evals.judge import build_eval_s3_key, DEFAULT_EVAL_PREFIX
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
@@ -306,7 +306,7 @@ class TestNewJudgeRunId:
 
     def test_sortable_chronologically(self):
         from datetime import datetime, timezone
-        from alpha_engine_lib.eval_artifacts import new_eval_run_id
+        from nousergon_lib.eval_artifacts import new_eval_run_id
         earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc))
         later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=timezone.utc))
         assert earlier < later  # lexicographic = chronological
@@ -562,6 +562,130 @@ class TestEvaluateArtifact:
         # Single attempt only.
         assert fake_structured.invoke.call_count == 1
 
+    def test_recovers_deterministic_tool_xml_leak_via_correction_feedback(self):
+        """config#2237: the judge routes through the shared
+        ``invoke_structured_with_validation_retry`` chokepoint (was a bespoke
+        bare re-roll). A DETERMINISTIC tool-XML leak — the model emitting a
+        literal ``<parameter name="dimension_scores">`` tag, captured by
+        langchain as a ``str`` where ``list[RubricDimensionScore]`` is required
+        — re-rolled IDENTICALLY under the old loop and could never recover (the
+        2026-07-11 CRUS-class hard-fail). The chokepoint feeds the Pydantic
+        ``ValidationError`` plus the model's own prior malformed output back as
+        correction context, so a later attempt corrects the field. Mirrors
+        ``test_held_thesis_strict::test_reroll_recovers_when_a_later_attempt_valid``.
+        """
+        from evals import judge as judge_mod
+        from graph.state_schemas import RubricEvalLLMOutput
+
+        # The deterministic leak: a literal tool-XML tag string where a list is
+        # required. Constructing the schema with it raises the SAME
+        # ValidationError every attempt — a bare re-roll can't fix it; only the
+        # correction-feedback retry can.
+        leaked_xml = '\n<parameter name="dimension_scores">numerical_grounding: 4\n'
+
+        def _leak_response():
+            try:
+                RubricEvalLLMOutput(
+                    dimension_scores=leaked_xml, overall_reasoning="x",
+                )
+                raise AssertionError(
+                    "expected RubricEvalLLMOutput to reject a str dimension_scores"
+                )
+            except Exception as exc:  # pydantic.ValidationError
+                parsing_error = exc
+            return {"raw": object(), "parsed": None, "parsing_error": parsing_error}
+
+        def _valid_response():
+            return {
+                "raw": MagicMock(
+                    response_metadata={"model": "claude-haiku-4-5-20251001"},
+                ),
+                "parsed": _make_llm_output(),
+                "parsing_error": None,
+            }
+
+        class _RecordingStructuredLLM:
+            def __init__(self, responses):
+                self._responses = responses
+                self.calls = []  # captured message list per invoke
+
+            def invoke(self, messages, config=None):
+                self.calls.append(messages)
+                idx = min(len(self.calls) - 1, len(self._responses) - 1)
+                return self._responses[idx]
+
+        # [leak, leak, valid] — recovers on the 3rd attempt under the preserved
+        # budget (MAX_JUDGE_RETRIES=3 → chokepoint max_retries=2 → 3 attempts).
+        structured = _RecordingStructuredLLM(
+            [_leak_response(), _leak_response(), _valid_response()]
+        )
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+            artifact = _make_artifact("sector_quant:technology")
+            result = judge_mod.evaluate_artifact(
+                artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+            )
+
+        # Recovered: a valid RubricEvalArtifact carrying the 3rd attempt's scores.
+        assert isinstance(result, RubricEvalArtifact)
+        assert len(result.dimension_scores) == 6
+        assert result.overall_reasoning == (
+            "Solid grounding; regime engagement weakest."
+        )
+        # resolved_model extraction (L4578(a)) preserved across the migration.
+        assert result.judge_resolved_model == "claude-haiku-4-5-20251001"
+
+        # 3 total attempts (fail-loud budget preserved).
+        assert len(structured.calls) == 3
+
+        # CORRECTION FEEDBACK — the discriminating assertion vs. a bare re-roll:
+        # attempt 1 sends only the rendered prompt; the retry does NOT re-send
+        # the identical single message but grows it with the prior raw output +
+        # a correction that names the schema violation.
+        assert len(structured.calls[0]) == 1
+        assert len(structured.calls[1]) > 1
+        retry_text = " ".join(
+            m.content for m in structured.calls[1]
+            if isinstance(getattr(m, "content", None), str)
+        )
+        assert "schema validation" in retry_text.lower()
+
+    def test_deterministic_leak_that_never_corrects_still_fails_loud(self):
+        """FAIL-LOUD is absolute (config#2237): a deterministic leak the model
+        never corrects across the full attempt budget must still ``raise`` — no
+        carry-forward, no swallow, no widened gate."""
+        from evals import judge as judge_mod
+        from graph.state_schemas import RubricEvalLLMOutput
+
+        leaked_xml = '\n<parameter name="dimension_scores">numerical_grounding: 4\n'
+
+        def _leak_response():
+            try:
+                RubricEvalLLMOutput(
+                    dimension_scores=leaked_xml, overall_reasoning="x",
+                )
+                raise AssertionError("expected ValidationError")
+            except Exception as exc:
+                parsing_error = exc
+            return {"raw": object(), "parsed": None, "parsing_error": parsing_error}
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.return_value = _leak_response()
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+            artifact = _make_artifact("sector_quant:technology")
+            with pytest.raises(RuntimeError, match="parse attempts failed"):
+                judge_mod.evaluate_artifact(
+                    artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+                )
+
+        # Full budget exhausted (MAX_JUDGE_RETRIES=3 → 3 attempts).
+        assert fake_structured.invoke.call_count == 3
+
 
 # ── persist_eval_artifact ─────────────────────────────────────────────────
 
@@ -744,7 +868,7 @@ class TestPersistEvalArtifact:
     def test_writes_latest_sidecar_pointing_at_artifact(self, mocked_s3):
         """The latest.json sidecar mirrors the most-recently-written key
         and is resolvable by the lib's load_latest_eval_artifact reader."""
-        from alpha_engine_lib.eval_artifacts import (
+        from nousergon_lib.eval_artifacts import (
             eval_latest_key, load_latest_eval_artifact,
         )
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
@@ -780,7 +904,7 @@ class TestPersistEvalArtifact:
         assert loaded["judged_agent_id"] == "ic_cio"
 
     def test_update_latest_false_skips_sidecar(self, mocked_s3):
-        from alpha_engine_lib.eval_artifacts import eval_latest_key
+        from nousergon_lib.eval_artifacts import eval_latest_key
         from botocore.exceptions import ClientError
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
 

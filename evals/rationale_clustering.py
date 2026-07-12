@@ -57,10 +57,12 @@ import logging
 import math
 import re
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 import boto3
+from botocore.config import Config as _BotoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,16 @@ CHAR_NGRAM_RANGE = (3, 5)
 """Character n-gram range for TF-IDF. 3-5 catches morphological
 patterns ("the P/E", "ratio of") and short skeletal templates without
 exploding feature dimensionality."""
+
+DEFAULT_LOAD_WORKERS = 32
+"""Thread-pool width for the S3 artifact fetch stage. The 2026-07-03
+weekly run timed out at 900s with 240MB/1024MB memory used and zero
+log lines for 15 minutes: the serial per-key ``get_object`` loop
+(~33k keys × ~27ms RTT) exceeded the whole Lambda budget before
+clustering — the only CPU-heavy stage — ever ran (config#1650 item 3).
+The load is network-bound, so threads are the right lever; the default
+S3 client's connection pool is sized to match in ``compute_and_emit``
+(injected clients manage their own pool)."""
 
 
 # ── Per-agent rationale extraction ───────────────────────────────────────
@@ -599,7 +611,10 @@ def compute_and_emit(
     statistically meaningless); the summary records them under
     ``skipped_thin_sample``.
     """
-    s3 = s3_client or boto3.client("s3")
+    s3 = s3_client or boto3.client(
+        "s3",
+        config=_BotoConfig(max_pool_connections=DEFAULT_LOAD_WORKERS * 2),
+    )
     cw = cloudwatch_client or (boto3.client("cloudwatch") if emit_metrics else None)
     end = end_time or datetime.now(timezone.utc)
     window_start = end - timedelta(days=window_days)
@@ -617,29 +632,81 @@ def compute_and_emit(
         len(keys), window_start.isoformat(), end.isoformat(),
     )
 
-    # Group rationales by agent_id.
-    by_agent: dict[str, list[str]] = defaultdict(list)
-    load_failures: list[dict[str, str]] = []
-
+    # Group keys by agent_id, chronologically. Keys embed zero-padded
+    # Y/M/D so a lexicographic sort IS date order (same-day ordering is
+    # immaterial). Chronological order matters twice: the key-level cap
+    # below keeps the most-recent tail, and the post-load rationale cap
+    # slices ``[-max:]`` — both assume oldest-first lists. (The listing
+    # itself iterates newest-day-first, which previously made the
+    # post-load "most-recent" cap actually keep the OLDEST tail.)
+    keys_by_agent: dict[str, list[str]] = defaultdict(list)
     for key in keys:
         agent_id = _agent_id_from_key(key)
         if agent_id is None:
             continue
-        try:
-            artifact = _load_artifact(s3, bucket=bucket, key=key)
-        except Exception as exc:  # noqa: BLE001
-            load_failures.append({"key": key, "error": str(exc)})
-            logger.warning(
-                "[rationale_clustering] load failure key=%s err=%s",
-                key, exc,
-            )
-            continue
+        keys_by_agent[agent_id].append(key)
 
-        rationales = extract_rationales(
-            artifact.get("agent_id", agent_id),
-            artifact.get("agent_output") or {},
-        )
-        by_agent[agent_id].extend(rationales)
+    # Key-level scope cap — fetch at most ``max_rationales_per_agent``
+    # most-recent artifacts per agent BEFORE any get_object call. The
+    # corpus grows every day; without a pre-fetch bound the load stage
+    # eventually re-times-out no matter how parallel it is. An artifact
+    # typically yields ≥1 rationale, so N keys keep the post-load cap
+    # near-saturated; that cap still applies afterwards because one
+    # artifact can yield MANY rationales. Cap firings are logged AND
+    # reported in the summary (no silent caps).
+    agents_key_capped: list[dict[str, Any]] = []
+    fetch_list: list[tuple[str, str]] = []
+    for agent_id in sorted(keys_by_agent):
+        agent_keys = sorted(keys_by_agent[agent_id])
+        if len(agent_keys) > max_rationales_per_agent:
+            agents_key_capped.append(
+                {
+                    "agent_id": agent_id,
+                    "discovered_keys": len(agent_keys),
+                    "fetched_keys": max_rationales_per_agent,
+                }
+            )
+            logger.warning(
+                "[rationale_clustering] agent %s keys capped %d → %d "
+                "(pre-fetch scope cap — bounds S3 load wall-clock, "
+                "config#1650 item 3)",
+                agent_id, len(agent_keys), max_rationales_per_agent,
+            )
+            agent_keys = agent_keys[-max_rationales_per_agent:]
+        fetch_list.extend((agent_id, k) for k in agent_keys)
+
+    # Parallel fetch. boto3 clients are thread-safe, and ``pool.map``
+    # preserves input order so ``by_agent`` stays chronological per
+    # agent. Per-key failures keep the existing fail-soft accounting
+    # (WARN + load_failures) — one stale artifact must not fail the
+    # weekly clustering run.
+    by_agent: dict[str, list[str]] = defaultdict(list)
+    load_failures: list[dict[str, str]] = []
+
+    def _fetch(
+        item: tuple[str, str],
+    ) -> tuple[str, str, Optional[dict[str, Any]], Optional[str]]:
+        item_agent_id, item_key = item
+        try:
+            artifact = _load_artifact(s3, bucket=bucket, key=item_key)
+            return item_agent_id, item_key, artifact, None
+        except Exception as exc:  # noqa: BLE001
+            return item_agent_id, item_key, None, str(exc)
+
+    with ThreadPoolExecutor(max_workers=DEFAULT_LOAD_WORKERS) as pool:
+        for agent_id, key, artifact, error in pool.map(_fetch, fetch_list):
+            if error is not None:
+                load_failures.append({"key": key, "error": error})
+                logger.warning(
+                    "[rationale_clustering] load failure key=%s err=%s",
+                    key, error,
+                )
+                continue
+            rationales = extract_rationales(
+                artifact.get("agent_id", agent_id),
+                artifact.get("agent_output") or {},
+            )
+            by_agent[agent_id].extend(rationales)
 
     # Cluster + emit per agent.
     per_agent_summary: list[dict[str, Any]] = []
@@ -758,6 +825,8 @@ def compute_and_emit(
         "load_failures": load_failures,
         "cluster_failures": cluster_failures,
         "agents_truncated_by_scope_cap": truncated_agents,
+        "agents_key_capped": agents_key_capped,
+        "artifacts_fetched": len(fetch_list),
         "max_rationales_per_agent": max_rationales_per_agent,
         "per_agent": per_agent_summary,
     }

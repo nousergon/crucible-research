@@ -45,7 +45,7 @@ import sys
 # (scanner, rationale_clustering, eval_rolling_mean, aggregate_costs).
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -84,7 +84,7 @@ def _ensure_init() -> None:
         return
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
-    from alpha_engine_lib.secrets import get_secret
+    from nousergon_lib.secrets import get_secret
 
     for name in ("RAG_DATABASE_URL", "VOYAGE_API_KEY"):
         if not os.environ.get(name):

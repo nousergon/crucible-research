@@ -414,12 +414,20 @@ class ArchiveManager:
     def save_sector_team_run(
         self, run_date: str, team_id: str, output: dict,
     ) -> None:
-        """Persist a successfully-completed sector team's output to S3.
+        """Persist a FULLY-COMPLETED sector team's output to S3 for resume.
 
-        Called from ``sector_team_node`` immediately after a team
-        finishes WITHOUT an ``error`` (a partial team — recursion
-        exhausted — is still persisted: it has no error and re-running
-        it would just re-burn budget for the same empty result).
+        Only genuinely-successful teams are resumable checkpoints. A team
+        that ERRORED or came back PARTIAL (e.g. the qual ReAct agent hit
+        the step-budget sentinel → 0 assessments) is NOT persisted:
+        persisting it writes a poison pill, because ``load_sector_team_run``
+        would then short-circuit EVERY future rerun with the incomplete
+        result — the team could never recover and ALL-AGENTS-STRICT could
+        never pass (config#1822, 2026-07-11: three teams stuck partial
+        across four reruns). Prior behavior deliberately persisted partials
+        on the assumption a rerun "would just re-burn budget for the same
+        empty result" — true only while the ReAct budget was undersized;
+        once sized to the workload a rerun DOES recover, so a partial team
+        must be left unresumable.
 
         ``default=str`` mirrors ``write_signals_json`` — the team output
         carries only JSON-native types plus model_dump'd dicts, but the
@@ -427,6 +435,15 @@ class ArchiveManager:
         Persistence failure is non-fatal: log + continue (the team's
         in-memory output still flows; we only lose resumability for it).
         """
+        if output.get("error") or output.get("partial"):
+            log.info(
+                "[sector_team_run] NOT persisting %s for %s — team is "
+                "INCOMPLETE (error=%r partial=%r partial_reasons=%r); "
+                "leaving it unresumable so a rerun re-attempts it fresh.",
+                team_id, run_date, output.get("error"),
+                output.get("partial"), output.get("partial_reasons"),
+            )
+            return
         key = self._sector_team_run_key(run_date, team_id)
         envelope = {
             "run_date": run_date,
@@ -509,6 +526,25 @@ class ArchiveManager:
                 "[sector_team_run] persisted output at %s is malformed "
                 "(not a dict with team_id) — ignoring, team %s re-runs",
                 key, team_id,
+            )
+            return None
+        # Only genuinely-COMPLETE teams are resumable. A persisted output
+        # that is PARTIAL (e.g. qual step-budget exhaustion → 0
+        # assessments) or carries an ERROR is NOT done — short-circuiting a
+        # rerun with it permanently poisons recovery (the team can never
+        # succeed, ALL-AGENTS-STRICT can never pass). Re-run it fresh
+        # instead; with the workload-sized ReAct budget (config#1822) the
+        # re-run can now actually succeed. This guard also RETROACTIVELY
+        # neutralizes any partial artifact written before the persist-side
+        # guard existed — so already-poisoned checkpoints self-heal on the
+        # next rerun without any manual S3 surgery.
+        if output.get("partial") or output.get("error"):
+            log.warning(
+                "[sector_team_run] persisted %s for %s is INCOMPLETE "
+                "(partial=%r partial_reasons=%r error=%r) — NOT resuming a "
+                "non-successful team; it will be re-run fresh.",
+                team_id, run_date, output.get("partial"),
+                output.get("partial_reasons"), output.get("error"),
             )
             return None
         log.info(
@@ -629,25 +665,51 @@ class ArchiveManager:
     def load_team_accuracy(self) -> dict | None:
         """Load the per-team historical-accuracy artifact (config#926).
 
-        Producer: the backtester's team-performance analysis
-        (``optimizer/pipeline_optimizer.analyze_team_performance``), written to
-        ``config/team_accuracy.json`` as
-        ``{team_id: {"accuracy": float, "n_obs": int}}``. Consumed by
-        ``compute_team_slots`` to nudge per-team eligible-pick counts by
-        historical hit rate.
+        Producer: ``evals/team_accuracy.py::analyze_team_performance`` (runs
+        in this repo's Lambda handler), written to
+        ``config/team_accuracy.json``. Since config#1844 the artifact is a
+        self-describing envelope (``{"schema_version": 1, "status": ...,
+        counts..., "teams": {team_id: {"accuracy": float, "n_obs": int}}}``);
+        before that it was the bare per-team mapping. This loader unwraps
+        the envelope and returns just the per-team mapping — the exact shape
+        ``compute_team_slots`` consumes to nudge per-team eligible-pick
+        counts by historical hit rate — so the downstream contract is
+        unchanged.
+
+        Dual-shape tolerance (S3 contract-safety rule — consumer handles
+        both formats first): the legacy bare-dict branch exists so the
+        currently-live pre-envelope object parses until the enveloped
+        producer's first Saturday overwrite. Remove the legacy branch after
+        2026-07-13 (1 week past the 2026-07-06 config#1844 ship).
 
         Returns ``None`` gracefully on any failure (missing artifact, parse
-        error) so adaptive allocation degrades to the static behavior.
+        error, malformed envelope) so adaptive allocation degrades to the
+        static behavior.
         """
         raw = self._s3_get("config/team_accuracy.json")
         if not raw:
             return None
         try:
             data = json.loads(raw)
-            return data if isinstance(data, dict) else None
         except Exception as e:
             log.debug("team_accuracy parse failed: %s", e)
             return None
+        if not isinstance(data, dict):
+            return None
+        if "schema_version" in data and "teams" in data:
+            # Enveloped shape (config#1844, schema_version >= 1).
+            teams = data.get("teams")
+            if not isinstance(teams, dict):
+                log.warning(
+                    "team_accuracy envelope malformed: 'teams' is %s, not a "
+                    "dict — degrading to static allocation",
+                    type(teams).__name__,
+                )
+                return None
+            return teams
+        # Legacy bare {team_id: {...}} shape — dual-shape window, remove
+        # after 2026-07-13 (see docstring).
+        return data
 
     def load_regime_substrate(self) -> dict | None:
         """Load the most recent regime substrate artifact.
@@ -669,7 +731,7 @@ class ArchiveManager:
         the substrate-influences-LLM layer; the macro agent's final
         regime call is still authoritative for downstream consumers.
         """
-        from alpha_engine_lib.eval_artifacts import load_latest_eval_artifact
+        from nousergon_lib.eval_artifacts import load_latest_eval_artifact
 
         return load_latest_eval_artifact(
             self.s3, bucket=self.bucket, prefix="regime",
@@ -690,7 +752,7 @@ class ArchiveManager:
         error). Used by the consolidated brief's regime-trend block;
         callers must tolerate an empty / short list.
         """
-        from alpha_engine_lib.eval_artifacts import list_eval_artifacts
+        from nousergon_lib.eval_artifacts import list_eval_artifacts
 
         try:
             return list_eval_artifacts(
@@ -879,6 +941,9 @@ class ArchiveManager:
         Missing → NULL (the agent_override column defaults to 0 in the
         schema, but we still pass through so a writer-side override is
         respected when PR 4 lights up the @tool get_factor_profile boundary).
+        override_team_id (v23 migration, config#750) carries which team's quant
+        agent reached outside its focus list for an override row; NULL for
+        focus-list members / non-override rows.
         """
         if not self.db_conn:
             return
@@ -891,9 +956,9 @@ class ArchiveManager:
                     price_vs_ma200, current_price, avg_volume_20d,
                     focus_score, focus_stance, focus_team_id,
                     focus_rank_in_team, focus_rank_in_sector,
-                    focus_list_passed, agent_override)
+                    focus_list_passed, agent_override, override_team_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("sector"),
                     e.get("tech_score"), e.get("scan_path"),
@@ -906,6 +971,7 @@ class ArchiveManager:
                     e.get("focus_team_id"), e.get("focus_rank_in_team"),
                     e.get("focus_rank_in_sector"),
                     e.get("focus_list_passed", 0), e.get("agent_override", 0),
+                    e.get("override_team_id"),
                 ),
             )
 

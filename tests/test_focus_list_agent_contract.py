@@ -295,6 +295,76 @@ class TestAuditLookupPR4Path:
         )
         assert result == {}
 
+    # ── config#750: per-team override attribution ────────────────────────
+
+    def test_override_team_id_attributes_override_to_its_team(
+        self, focus_list_state
+    ):
+        """config#750: each override ticker carries override_team_id naming the
+        team whose quant agent reached outside its focus list — not a NULL
+        anonymous group."""
+        from graph import research_graph as rg
+        result = rg._compute_focus_list_audit_lookup(
+            market_regime="bull",
+            sector_map={"NVDA": "Technology", "MSFT": "Technology"},
+            focus_list_by_team=focus_list_state,
+            override_tickers_by_team={
+                "technology": ["TSLA"],
+                "energy": ["XOM"],
+            },
+        )
+        assert result["TSLA"]["agent_override"] == 1
+        assert result["TSLA"]["override_team_id"] == "technology"
+        assert result["XOM"]["agent_override"] == 1
+        assert result["XOM"]["override_team_id"] == "energy"
+
+    def test_override_team_id_none_for_focus_members(self, focus_list_state):
+        """Focus-list members are not overrides → override_team_id is None."""
+        from graph import research_graph as rg
+        result = rg._compute_focus_list_audit_lookup(
+            market_regime="bull",
+            sector_map={"NVDA": "Technology", "MSFT": "Technology"},
+            focus_list_by_team=focus_list_state,
+            override_tickers_by_team={"technology": ["TSLA"]},
+        )
+        assert result["NVDA"]["override_team_id"] is None
+        assert result["MSFT"]["override_team_id"] is None
+
+    def test_override_attribution_deterministic_across_teams(
+        self, focus_list_state
+    ):
+        """Defensive: if the same ticker appears in two teams' override sets
+        (structurally impossible — sectors partition tickers — but guarded),
+        attribution is deterministic (sorted-first team wins), never
+        dict-order-dependent."""
+        from graph import research_graph as rg
+        result = rg._compute_focus_list_audit_lookup(
+            market_regime="bull",
+            sector_map={"NVDA": "Technology", "MSFT": "Technology"},
+            focus_list_by_team=focus_list_state,
+            override_tickers_by_team={
+                "materials": ["DUP"],
+                "energy": ["DUP"],
+            },
+        )
+        # sorted(["materials", "energy"]) == ["energy", "materials"] → energy wins
+        assert result["DUP"]["override_team_id"] == "energy"
+
+    def test_all_lookup_entries_carry_override_team_id_key(
+        self, focus_list_state
+    ):
+        """Every projected row exposes override_team_id so the writer's
+        e.get('override_team_id') never silently drops attribution."""
+        from graph import research_graph as rg
+        result = rg._compute_focus_list_audit_lookup(
+            market_regime="bull",
+            sector_map={"NVDA": "Technology"},
+            focus_list_by_team=focus_list_state,
+            override_tickers_by_team={"technology": ["TSLA"]},
+        )
+        for entry in result.values():
+            assert "override_team_id" in entry
+
     def test_legacy_fallback_when_state_absent(self):
         """When focus_list_by_team is None, fall back to recompute path —
         but only if FACTOR_BLEND_ENABLED. Otherwise return empty."""

@@ -45,8 +45,8 @@ import boto3
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.decision_capture import DecisionArtifact
+from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
@@ -75,7 +75,7 @@ def _new_judge_run_id() -> str:
     return new_eval_run_id()
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
-from agents.langchain_utils import raise_if_truncated
+from agents.langchain_utils import invoke_structured_with_validation_retry
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from evals.judge_models import TAG_BY_LOGICAL, request_model_for
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
@@ -124,11 +124,6 @@ Caps at 3 to bound worst-case latency (each retry is a full Haiku
 call ≈ 3-8s). Beyond 3 attempts the underlying issue is structural
 (rubric prompt too dense, model regressed, etc.) and surfaces as a
 loud failure for the operator to diagnose."""
-
-_RETRY_BACKOFF_BASE_SEC = 0.2
-"""Initial backoff between retry attempts. 200ms × 2^attempt =
-200ms / 400ms / 800ms — short enough to not blow Lambda budgets,
-long enough to ride out transient API hiccups."""
 
 
 # ── Agent → rubric mapping ────────────────────────────────────────────────
@@ -397,18 +392,15 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
         # when FMP is unavailable. ``bool(value)`` short-circuits both
         # ``None`` and empty containers; we want at least one field with
         # actual content.
+        #
+        # config#1821 Option B (2026-07-08): consensus_rating / mean_target
+        # / num_analysts / rating_changes were removed from
+        # fetch_analyst_consensus's returned shape (the FMP endpoints that
+        # populated them 402'd for every ticker on the current plan).
+        # earnings_surprises is the only field left to check.
         analyst_is_substantive = (
             isinstance(analyst, dict)
-            and any(
-                bool(analyst.get(k))
-                for k in (
-                    "consensus_rating",
-                    "mean_target",
-                    "num_analysts",
-                    "rating_changes",
-                    "earnings_surprises",
-                )
-            )
+            and bool(analyst.get("earnings_surprises"))
         )
         return not prior_summary and not news_articles and not analyst_is_substantive
 
@@ -511,7 +503,7 @@ def build_batch_request(
     this function is invoked (the skip artifact is persisted
     client-side without spending a batch slot).
     """
-    from alpha_engine_lib.anthropic_payload import build_batches_request_params
+    from nousergon_lib.anthropic_payload import build_batches_request_params
 
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
@@ -627,8 +619,6 @@ def evaluate_artifact(
         the underlying issue is structural (model regression, rubric
         too dense, etc.) and surfaces as a loud failure for diagnosis.
     """
-    import time
-
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
         raise ValueError(
@@ -708,15 +698,13 @@ def evaluate_artifact(
         callbacks=[get_cost_telemetry_callback()],
     )
     # ``include_raw=True`` returns ``{"raw": AIMessage, "parsed":
-    # RubricEvalLLMOutput | None, "parsing_error": Exception | None}``
-    # so we can log the raw tool-use payload on parse failures and
-    # retry the call rather than letting the parse error escape.
+    # RubricEvalLLMOutput | None, "parsing_error": Exception | None}`` so the
+    # shared chokepoint can inspect ``parsing_error`` and feed it back as
+    # correction context on retry.
     structured_llm = llm.with_structured_output(
         RubricEvalLLMOutput, include_raw=True,
     )
 
-    llm_output: Optional[RubricEvalLLMOutput] = None
-    last_err: Optional[BaseException] = None
     resolved_model: Optional[str] = None
 
     with track_llm_cost(
@@ -724,60 +712,54 @@ def evaluate_artifact(
         node_name="eval_judge_node",
         run_type="weekly_research",
         prompt=loaded_prompt,
+        rendered_prompt=rendered,
         model_name_fallback=judge_model,
         run_id=artifact.run_id,
     ):
-        for attempt in range(max_retries):
-            resp = structured_llm.invoke(
-                [HumanMessage(content=rendered)],
-                config={"metadata": loaded_prompt.langsmith_metadata()},
-            )
-            # Runtime truncation guard (config#1294): the judge invokes
-            # with_structured_output directly (not via the shared
-            # invoke_structured_with_validation_retry chokepoint), so it
-            # reuses that chokepoint's exported guard to fail at the root
-            # cause on a max_tokens-truncated response instead of letting the
-            # partial tool-call surface as a confusing Pydantic shape error.
-            raise_if_truncated(
-                resp, label=f"eval_judge:{artifact.agent_id}",
-                schema_name="RubricEvalLLMOutput",
-            )
-            parsed = resp.get("parsed")
-            parsing_error = resp.get("parsing_error")
-            if parsed is not None and parsing_error is None:
-                llm_output = parsed
-                # Record what Anthropic RESOLVED the request to (the
-                # response 'model' field) — the re-anchor trigger for
-                # L4578(a). Defensive: response_metadata shape is
-                # provider-controlled, so anything that isn't a dict with
-                # a 'model' key leaves it None rather than crashing the
-                # eval (the field is ``str | None``).
-                raw_meta = getattr(resp.get("raw"), "response_metadata", None)
-                resolved_model = (
-                    raw_meta.get("model") if isinstance(raw_meta, dict) else None
-                )
-                if attempt > 0:
-                    logger.info(
-                        "[eval_judge] parse succeeded on attempt %d/%d "
-                        "for agent_id=%s",
-                        attempt + 1, max_retries, artifact.agent_id,
-                    )
-                break
+        # SOTA structured-output recovery (config#2237): route through the
+        # shared ``invoke_structured_with_validation_retry`` chokepoint that
+        # every other narrative-rich extraction site uses (qual_analyst,
+        # sector_team held-thesis post-#402, ...) instead of the previous
+        # bespoke bare re-roll loop.
+        #
+        # WHY (2026-07-11 CRUS Saturday hard-fail): the old loop re-sent the
+        # IDENTICAL rendered prompt on every attempt with NO correction
+        # context. A DETERMINISTIC tool-XML leak — the model emitting a literal
+        # ``<parameter name="...">`` tag into a field value, captured by
+        # langchain as a ``str`` where a ``list``/typed field is required —
+        # therefore re-rolled identically every attempt and could never
+        # recover, hard-failing the whole eval the same way it hard-failed
+        # research. The chokepoint feeds the specific Pydantic ``ValidationError``
+        # (plus the model's own prior malformed output, as a paired
+        # ``tool_result``) back as correction context so the model corrects the
+        # offending field rather than repeating it. The MODEL, prompt, schema,
+        # and scoring are unchanged — only the retry mechanism (HOW it runs).
+        #
+        # Attempt budget preserved: the old loop did ``range(max_retries)`` =
+        # ``max_retries`` total attempts; the chokepoint does
+        # ``range(chokepoint_max_retries + 1)``, so pass ``max_retries - 1`` for
+        # the SAME total-attempt count. The config#1294 truncation guard is now
+        # applied INSIDE the chokepoint (``raise_if_truncated``), so the judge's
+        # duplicate call is removed as redundant.
+        resp = invoke_structured_with_validation_retry(
+            structured_llm,
+            [HumanMessage(content=rendered)],
+            label=f"eval_judge:{artifact.agent_id}",
+            ls_metadata=loaded_prompt.langsmith_metadata(),
+            max_retries=max(max_retries - 1, 0),
+        )
 
-            last_err = parsing_error
-            raw_head = str(resp.get("raw"))[:300] if resp.get("raw") else "(no raw)"
-            logger.warning(
-                "[eval_judge] parse attempt %d/%d failed for agent_id=%s "
-                "judge=%s: %s: %s; raw head=%r",
-                attempt + 1, max_retries, artifact.agent_id, judge_model,
-                type(parsing_error).__name__ if parsing_error else "Unknown",
-                str(parsing_error)[:200] if parsing_error else "(no error)",
-                raw_head,
-            )
-            if attempt + 1 < max_retries:
-                time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** attempt))
+    llm_output: Optional[RubricEvalLLMOutput] = resp.get("parsed")
+    parsing_error = resp.get("parsing_error")
 
-    if llm_output is None:
+    if llm_output is None or parsing_error is not None:
+        # FAIL-LOUD (unchanged): terminal parse failure raises — no
+        # carry-forward, no swallow. The underlying issue is structural (model
+        # regression, deterministic leak the correction retry couldn't fix,
+        # rubric too dense, ...) and surfaces loudly for diagnosis; the
+        # chokepoint has already logged each failed attempt's raw payload head
+        # at WARNING above.
+        last_err = parsing_error
         raise RuntimeError(
             f"[eval_judge] {max_retries} parse attempts failed for "
             f"agent_id={artifact.agent_id} judge={judge_model}. "
@@ -785,6 +767,14 @@ def evaluate_artifact(
             f"{last_err}. Underlying issue is structural — inspect raw "
             f"tool-use payloads in the WARNING logs above."
         )
+
+    # Record what Anthropic RESOLVED the request to (the response 'model'
+    # field) — the re-anchor trigger for L4578(a). Defensive: response_metadata
+    # shape is provider-controlled, so anything that isn't a dict with a 'model'
+    # key leaves it None rather than crashing the eval (the field is
+    # ``str | None``).
+    raw_meta = getattr(resp.get("raw"), "response_metadata", None)
+    resolved_model = raw_meta.get("model") if isinstance(raw_meta, dict) else None
 
     return RubricEvalArtifact(
         run_id=artifact.run_id,

@@ -48,13 +48,17 @@ Usage pattern (one ChatAnthropic instance, one agent decision)::
     llm = ChatAnthropic(model=PER_STOCK_MODEL, callbacks=[cb], ...)
 
     user_prompt = load_prompt("cio_decision")
+    rendered = user_prompt.format(**kwargs)
     with track_llm_cost(
         agent_id="ic_cio",
         node_name="cio_node",
         prompt=user_prompt,
+        rendered_prompt=rendered,  # config#1753: the string actually sent
         run_type="weekly_research",
     ):
-        result = llm.with_structured_output(CIORawOutput).invoke([msg])
+        result = llm.with_structured_output(CIORawOutput).invoke(
+            [HumanMessage(content=rendered)]
+        )
 
     # later in cio_node, _capture_if_enabled reads the populated metadata:
     metadata = pop_metadata_for("ic_cio")  # ModelMetadata, fully populated
@@ -102,7 +106,7 @@ from typing import Any, Iterator, Literal, Optional
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from alpha_engine_lib.cost import (
+from nousergon_lib.cost import (
     PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
@@ -112,7 +116,7 @@ from alpha_engine_lib.cost import (
     load_tool_fees,
     recompute_cost,
 )
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )
@@ -530,6 +534,21 @@ class _Frame:
     run_type: Optional[RunType]
     prompt: Optional[LoadedPrompt]
     run_id: Optional[str] = None
+    # config#1753: the actually-rendered user-prompt string (what was
+    # handed to ``HumanMessage(content=...)``), as opposed to ``prompt``
+    # above which is the raw pre-render ``LoadedPrompt`` template. Settable
+    # two ways: (1) passed as ``track_llm_cost(rendered_prompt=...)`` when
+    # the caller already has the rendered string before entering the
+    # scope (e.g. evals/judge.py); (2) assigned onto the yielded frame
+    # from inside the ``with`` block when rendering happens deeper in a
+    # called function that returns it (e.g. ``ic_cio.run_cio`` /
+    # ``macro_agent.run_macro_agent_with_reflection`` — see their
+    # ``"rendered_prompt"`` result-dict key and the research_graph.py
+    # call sites that copy it onto ``frame.rendered_prompt`` before the
+    # ``with`` block exits). Read at frame-exit to populate
+    # ``FullPromptContext.user_prompt``; falls back to ``prompt.text``
+    # when never set (see ``track_llm_cost`` docstring).
+    rendered_prompt: Optional[str] = None
 
     model_name: Optional[str] = None
     input_tokens: int = 0
@@ -1080,6 +1099,7 @@ def track_llm_cost(
     node_name: Optional[str] = None,
     run_type: Optional[RunType] = "weekly_research",
     prompt: Optional[LoadedPrompt] = None,
+    rendered_prompt: Optional[str] = None,
     model_name_fallback: Optional[str] = None,
     run_id: Optional[str] = None,
 ) -> Iterator[_Frame]:
@@ -1107,9 +1127,23 @@ def track_llm_cost(
         cost-telemetry workstream will populate the latter two.
     prompt
         ``LoadedPrompt`` for the user-facing prompt of this decision.
-        Stamps ``prompt_id`` + ``prompt_version`` on ``ModelMetadata``;
-        also flows into ``FullPromptContext.user_prompt`` and
-        ``prompt_version_hash``.
+        Stamps ``prompt_id`` + ``prompt_version`` on ``ModelMetadata`` and
+        ``prompt_version_hash`` on ``FullPromptContext`` — template-level
+        provenance metadata, independent of whether ``rendered_prompt``
+        is also supplied.
+    rendered_prompt
+        The actual rendered string handed to ``HumanMessage(content=...)``
+        for this decision — i.e. ``prompt.format(**kwargs)``'s return
+        value, not the raw ``LoadedPrompt`` template. Populates
+        ``FullPromptContext.user_prompt`` (config#1753: the artifact used
+        to contain unsubstituted ``{placeholder}`` template text because
+        ``user_prompt`` fell back to ``prompt.text`` — the pre-render
+        template body — instead of what the model actually saw). When
+        omitted, ``user_prompt`` falls back to ``prompt.text`` (backward
+        compatible with call sites that haven't been threaded yet, e.g.
+        multi-call ReAct scopes with no single canonical rendered string),
+        then to a ``"<user prompt ... not provided>"`` placeholder if
+        neither is available.
     model_name_fallback
         If the callback can't extract model_name from the response shape,
         use this. Should match what was passed to ``ChatAnthropic(model=...)``.
@@ -1146,6 +1180,7 @@ def track_llm_cost(
         run_type=run_type,
         prompt=prompt,
         run_id=run_id,
+        rendered_prompt=rendered_prompt,
     )
     stack = _frame_stack.get()
     new_stack = stack + [frame]
@@ -1274,15 +1309,29 @@ def track_llm_cost(
                 agent_id, exc,
             )
 
-    # FullPromptContext: capture rendered user_prompt text where we have
-    # it (via the LoadedPrompt). System prompts are agent-specific and
-    # not always loaded by name; downstream PR can plumb them.
+    # FullPromptContext: capture the RENDERED user_prompt text — what was
+    # actually handed to ``HumanMessage(content=...)`` — where the caller
+    # supplied it. ``rendered_prompt`` takes priority; ``prompt.text``
+    # (the raw, pre-render template body) is only a fallback so call
+    # sites that haven't been threaded through yet keep working, per
+    # config#1753: ``prompt.text`` alone leaves literal unsubstituted
+    # ``{placeholder}`` text in the captured artifact, breaking any
+    # judge/audit workflow that assumes ``user_prompt`` reflects what the
+    # model actually saw. System prompts are agent-specific and not
+    # always loaded by name; downstream PR can plumb them.
+    if frame.rendered_prompt is not None:
+        user_prompt = frame.rendered_prompt
+    elif prompt is not None:
+        user_prompt = prompt.text
+    else:
+        user_prompt = f"<user prompt for {agent_id} not provided>"
+
     prompt_context = FullPromptContext(
         system_prompt=(
             f"<system prompt for agent_id={agent_id!r} not yet plumbed; "
             f"see agents/ for the gitignored prompt template files>"
         ),
-        user_prompt=prompt.text if prompt else f"<user prompt for {agent_id} not provided>",
+        user_prompt=user_prompt,
         prompt_version_hash=prompt.hash if prompt else None,
     )
 

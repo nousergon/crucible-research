@@ -93,7 +93,9 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # freshness-SLA artifacts with a daily consumer — so no ARTIFACT_REGISTRY
     # row, just this per-file PUT pin.
     "graph/llm_cost_tracker.py": 2,
-    "health_status.py": 2,
+    # Single PUT site: dated data_manifest/{module}/{date}.json. Health
+    # enrichment writes moved to nousergon_lib.health (config#1727 Phase C).
+    "data_manifest.py": 1,
     "local/sync_db.py": 1,
     "scoring/factor_scoring.py": 2,
     # Full-universe scoreboard (scanner/universe/{date}/universe.json + latest).

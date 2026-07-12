@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -284,6 +284,14 @@ CREATE TABLE IF NOT EXISTS scanner_evaluations (
     focus_rank_in_sector    INTEGER,        -- 1-indexed rank within sector
     focus_list_passed       INTEGER NOT NULL DEFAULT 0,  -- 1 if in any team's top-N
     agent_override          INTEGER NOT NULL DEFAULT 0,  -- 1 if @tool get_factor_profile called on this non-focus ticker
+    -- Per-team override attribution (v23 migration, config#750). Which sector
+    -- team's quant agent reached outside its focus list to look up this ticker.
+    -- NULL when agent_override=0, or on override rows persisted before v23
+    -- (dashboards read a NULL override_team_id on an override row as the legacy
+    -- unattributed "—" group). Because sector teams partition tickers by sector
+    -- (each ticker belongs to one sector → one team), an override ticker is
+    -- overridden by at most one team, so this is unambiguous.
+    override_team_id        TEXT,
     UNIQUE(ticker, eval_date)
 );
 
@@ -572,6 +580,20 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # environment are well past that floor.
     22: ("Rename memory_episodes.outcome_10d to outcome_21d (config#1480)",
          "ALTER TABLE memory_episodes RENAME COLUMN outcome_10d TO outcome_21d"),
+    # Per-team override attribution (config#750). scanner_evaluations records
+    # agent_override=1 for a non-focus ticker the quant agent looked up via
+    # @tool get_factor_profile, but the OWNING team was lost — overrides were
+    # unioned across teams at archive_writer time and landed with
+    # focus_team_id=NULL, so the dashboard collapsed every team's overrides into
+    # one unattributed "—" row group. This adds override_team_id so the audit can
+    # show WHICH team's quant agent reaches outside its focus list most often and
+    # with what hit rate. Additive nullable column; NULL on override rows
+    # persisted before this migration and on all non-override rows — the
+    # dashboard weekly-summary COALESCEs focus_team_id/override_team_id to
+    # attribute each override to its team and treats a NULL as the legacy
+    # unattributed group.
+    23: ("Add override_team_id to scanner_evaluations (config#750 per-team override attribution)",
+         "ALTER TABLE scanner_evaluations ADD COLUMN override_team_id TEXT"),
 }
 
 

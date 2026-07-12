@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from graph.langsmith_pandas_patch import install as _install_ls_patch
 _install_ls_patch()
 
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -178,7 +178,7 @@ def handler(event, context):
     try:
         import boto3
 
-        from alpha_engine_lib.dates import now_dual
+        from nousergon_lib.dates import now_dual
         from scripts.build_agent_quality import build_agent_quality, write_agent_quality
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
@@ -219,7 +219,7 @@ def handler(event, context):
     try:
         import boto3
 
-        from alpha_engine_lib.dates import now_dual
+        from nousergon_lib.dates import now_dual
         from scoring.leaderboard_producers import build_producer_leaderboard
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")

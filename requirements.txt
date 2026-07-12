@@ -20,7 +20,13 @@ numpy~=1.26
 requests~=2.31
 feedparser~=6.0.11
 beautifulsoup4~=4.12
-lxml~=5.2
+# Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
+# resolution could read local files under the old resolve_entities=True
+# default; lxml 6.1.0 flips the default to resolve_entities='internal').
+# This repo only touches lxml indirectly as BeautifulSoup's parser backend
+# (data/fetchers/news_fetcher.py) — no direct lxml.etree/XML-parsing calls
+# of our own — so the 5->6 API surface change carries low local risk.
+lxml~=6.1
 
 # Config / storage
 pyyaml~=6.0.1
@@ -60,7 +66,11 @@ pydantic~=2.7
 # thinktank/client) are born correctly tagged and the distillation corpus reader
 # (scripts/corpus_stats.py) can segregate by (producer, task, teacher, source)
 # without blending replay-minted traces into live-accrued ones.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.83.0
+# Bumped 0.83.0 -> 0.86.0 (config#1727 Phase C): migrate health enrichment
+# writes to nousergon_lib.health (Deliverable + derive_status + write_health).
+# Cross-sectional 6-pillar attractiveness chokepoint (nousergon_lib.quant.attractiveness,
+# lib#164 / v0.88.0) — shared with Metron Holdings + universe_board backfill.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
@@ -86,7 +96,11 @@ pytz~=2024.1
 # Dev / testing
 pytest~=8.2
 pytest-asyncio~=0.23
-python-dotenv~=1.0.1
+# Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
+# followed symlinks when rewriting .env files (arbitrary local file
+# overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
+# same-major (1.x) patch/minor bump, no API changes used by this repo.
+python-dotenv~=1.2.2
 # moto: mocked S3 for decision_capture integration tests
 moto~=5.0
 

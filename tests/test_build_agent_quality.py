@@ -11,11 +11,16 @@ Locks down:
   rows dropped).
 - judge metrics computed over REAL evals only (skip-markers excluded).
 - Date split: signals key off --date (trading day), cost/eval off --run-date.
+- judge_outcome_ic wiring (old ROADMAP L480 re-scope): the block is NEVER
+  silently absent — "ok" end-to-end through the S3 research.db snapshot,
+  "insufficient" on absent history, "error" (+ WARN, siblings intact) on a
+  broken precondition.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date
 from typing import Iterable
 
@@ -298,3 +303,175 @@ class TestRetryStormAndLatency:
         art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
         assert "retry_storm_count" not in art
         assert "agent_latency_p95" not in art
+
+
+# ── judge_outcome_ic wiring (old ROADMAP L480 re-scope) ───────────────────────
+#
+# Statistics + attribution are unit-tested in tests/test_judge_outcome_ic.py;
+# this class locks the PRODUCER wiring: end-to-end through moto S3 (flat
+# canonical _eval/ layout + the research.db snapshot download), injected-conn
+# path, and the never-silently-absent isolation posture.
+
+_OUTCOMES_DDL = """
+CREATE TABLE score_performance_outcomes (
+    id             INTEGER PRIMARY KEY,
+    signal_id      TEXT NOT NULL,
+    symbol         TEXT NOT NULL,
+    score_date     TEXT NOT NULL,
+    horizon_days   INTEGER NOT NULL,
+    beat_spy       INTEGER,
+    stock_return   REAL,
+    spy_return     REAL,
+    log_alpha      REAL,
+    is_primary     INTEGER NOT NULL,
+    resolved_at    TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(signal_id, horizon_days)
+);
+"""
+
+# Saturday capture dates → the Friday trading days research stamped.
+_CAP1, _TD1 = "2026-06-06", "2026-06-05"
+_CAP2, _TD2 = "2026-06-13", "2026-06-12"
+
+
+def _thesis_eval(ticker, capture_date, score):
+    agent_id = f"thesis_update:technology:{ticker}"
+    y, m, d = capture_date.split("-")
+    return {
+        "schema_version": 2, "run_id": capture_date, "judge_run_id": "2606131230",
+        "timestamp": f"{capture_date}T13:00:00Z", "judged_agent_id": agent_id,
+        "judged_artifact_s3_key": f"decision_artifacts/{y}/{m}/{d}/run1/{agent_id}.json",
+        "rubric_id": "eval_rubric_thesis_update", "rubric_version": "1.0.0",
+        "judge_model": "claude-haiku-4-5",
+        "dimension_scores": [
+            {"dimension": "depth", "score": score, "reasoning": "r"},
+            {"dimension": "grounding", "score": score, "reasoning": "r"},
+        ],
+        "overall_reasoning": "ok", "judge_skip_reason": None,
+    }
+
+
+def _seed_judge_history(s3):
+    """Flat canonical _eval/ layout (config#793) — 2 dates x 3 tickers, judge
+    score monotone with realized alpha on date1, one inversion on date2."""
+    scores = {(_CAP1, "AAA"): 5, (_CAP1, "BBB"): 3, (_CAP1, "CCC"): 1,
+              (_CAP2, "AAA"): 5, (_CAP2, "BBB"): 4, (_CAP2, "CCC"): 1}
+    for (cap, ticker), score in scores.items():
+        doc = _thesis_eval(ticker, cap, score)
+        key = (f"decision_artifacts/_eval/2606131230_"
+               f"{doc['judged_agent_id']}.{cap}.claude-haiku-4-5.json")
+        _put_json(s3, key, doc)
+    # An unattributable slate-level eval + the latest.json sidecar (skipped).
+    cio = _eval([4, 4, 4])
+    _put_json(s3, "decision_artifacts/_eval/2606131230_ic_cio.x.claude-haiku-4-5.json", cio)
+    _put_json(s3, "decision_artifacts/_eval/latest.json", {"artifact_key": "x"})
+
+
+def _outcomes_db(path=":memory:"):
+    conn = sqlite3.connect(path)
+    conn.executescript(_OUTCOMES_DDL)
+    alphas = {("AAA", _TD1): 0.10, ("BBB", _TD1): 0.02, ("CCC", _TD1): -0.05,
+              ("AAA", _TD2): 0.01, ("BBB", _TD2): 0.03, ("CCC", _TD2): -0.02}
+    for i, ((sym, sd), alpha) in enumerate(alphas.items()):
+        conn.execute(
+            "INSERT INTO score_performance_outcomes (signal_id, symbol, score_date,"
+            " horizon_days, beat_spy, stock_return, spy_return, log_alpha,"
+            " is_primary, resolved_at) VALUES (?,?,?,21,?,0.01,0.005,?,1,'2026-07-06')",
+            (f"sig{i}", sym, sd, 1 if alpha > 0 else 0, alpha),
+        )
+    conn.commit()
+    return conn
+
+
+class TestJudgeOutcomeIC:
+    def test_ok_end_to_end_via_s3_db_snapshot(self, s3, tmp_path):
+        _seed_judge_history(s3)
+        db_path = tmp_path / "research.db"
+        _outcomes_db(str(db_path)).close()
+        s3.upload_file(str(db_path), _BUCKET, "research.db")
+
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        blk = art["judge_outcome_ic"]
+        assert blk["status"] == "ok"
+        assert blk["schema_version"] == 1
+        assert blk["horizon_days"] == 21
+        assert blk["overall"]["n_eval_dates"] == 2
+        assert blk["overall"]["n"] == 6
+        assert blk["overall"]["date_ic_mean"] == pytest.approx(0.75)
+        assert set(blk["by_dimension"]) == {"depth", "grounding"}
+        assert blk["n_unattributable"] == 1  # the ic_cio eval
+
+    def test_ok_via_injected_conn(self, s3):
+        _seed_judge_history(s3)
+        conn = _outcomes_db()
+        art = build_agent_quality(
+            s3, _BUCKET, _DATE, run_date=_RUN_DATE, outcomes_conn=conn,
+        )
+        assert art["judge_outcome_ic"]["status"] == "ok"
+        conn.execute("SELECT 1")  # injected conn is NOT closed by the block
+
+    def test_insufficient_on_absent_history(self, s3):
+        # No eval artifacts + an empty outcomes store → legitimate
+        # "insufficient", never an error and never silently absent.
+        conn = _outcomes_db()
+        conn.execute("DELETE FROM score_performance_outcomes")
+        art = build_agent_quality(
+            s3, _BUCKET, _DATE, run_date=_RUN_DATE, outcomes_conn=conn,
+        )
+        blk = art["judge_outcome_ic"]
+        assert blk["status"] == "insufficient"
+        assert blk["overall"]["n"] == 0
+
+    def test_error_isolation_on_broken_precondition(self, s3):
+        # Eval history exists but the research.db snapshot is MISSING from
+        # S3 — a broken precondition, surfaced as an explicit error status
+        # (+ WARN) while sibling components and the artifact write survive.
+        _full_run(s3)
+        _seed_judge_history(s3)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        blk = art["judge_outcome_ic"]
+        assert blk["status"] == "error"
+        assert "error" in blk
+        assert art["signal_volume_adequacy"]["value"] == 30  # siblings intact
+        key = write_agent_quality(s3, _BUCKET, art)
+        got = json.loads(s3.get_object(Bucket=_BUCKET, Key=key)["Body"].read())
+        assert got["judge_outcome_ic"]["status"] == "error"
+
+    def test_block_never_silently_absent(self, s3):
+        # Even a completely empty bucket run carries the block (error state:
+        # the research.db precondition is broken in this synthetic world).
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert "judge_outcome_ic" in art
+
+
+class TestFlatLayoutRegression:
+    """Regression: config#1840 — _load_evals must enumerate the flat _eval/
+    layout, not the legacy nested _eval/{run_date}/ partition (config#793 swap).
+    This test locks the fix so a future rename/reorganization can't silently
+    re-break the rubric blocks."""
+
+    def test_rubric_metrics_load_from_flat_layout(self, s3):
+        """Evals in the flat layout are loaded for rubric_pass_rate/distribution."""
+        # Seed: flat layout evals (NOT the old nested structure).
+        # We reuse the TestJudgeOutcomeIC fixture (_seed_judge_history) which
+        # already uses the canonical flat layout.
+        _seed_judge_history(s3)
+        # Also need signals for volume adequacy + one cost row.
+        _put_json(s3, f"signals/{_DATE.isoformat()}/signals.json", _signals(30))
+        _put_jsonl(s3, f"decision_artifacts/_cost_raw/{_RUN_DATE.isoformat()}/a/x.jsonl",
+                   [_cost_row(0.50)])
+
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        # The flat-layout evals are now loaded, so rubric blocks are populated.
+        assert "judge_rubric_pass_rate" in art, (
+            "judge_rubric_pass_rate missing — _load_evals did not load "
+            "from flat _eval/ layout"
+        )
+        assert art["judge_rubric_pass_rate"]["value"] > 0, (
+            "rubric metrics are zero — evals loaded but invalid structure"
+        )
+        assert art["judge_rubric_pass_rate"]["n"] == 7, (
+            "Expected 6 evals from flat layout (2 dates x 3 tickers + 1 slate-level unattributable)"
+        )
+        assert "judge_rubric_distribution" in art

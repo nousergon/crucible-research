@@ -33,8 +33,7 @@ from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    _is_rate_limit_error,
-    invoke_with_rate_limit_retry,
+    invoke_structured_with_validation_retry,
 )
 from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
 from agents.sector_teams.qual_analyst import run_qual_analyst
@@ -150,6 +149,13 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # Scope wraps the quant ReAct loop (multiple Anthropic calls incl. the
     # decoupled structured-output extraction + any empty-picks retry). The
     # user-prompt template stamps prompt_id/version onto ModelMetadata.
+    # config#1753 audit note: this scope is intentionally NOT threaded
+    # with ``rendered_prompt`` — a ReAct loop has no single canonical
+    # rendered user-prompt string (multiple tool-calling turns, each with
+    # its own message list); ``FullPromptContext.user_prompt`` falls back
+    # to the raw ``LoadedPrompt.text`` template here, same as before this
+    # fix. Only the single-shot batch-call sites (ic_cio, macro_economist,
+    # eval_judge) have one rendered string to thread.
     with track_llm_cost(
         agent_id=f"sector_quant:{team_id}",
         sector_team_id=team_id,
@@ -583,13 +589,19 @@ def _update_thesis_for_held_stock(
             base_news_summary=news_summary,
         )
 
+    # config#1821 Option B (2026-07-08): analyst consensus rating / price
+    # target / upside were removed from fetch_analyst_consensus's returned
+    # shape (the FMP endpoints that populated them 402'd for every ticker
+    # on the current plan). Earnings surprises remain a live field.
     analyst_summary = ""
     if analyst_data:
-        analyst_summary = (
-            f"Consensus: {analyst_data.get('consensus_rating', 'N/A')}, "
-            f"Target: ${analyst_data.get('mean_target', 'N/A')}, "
-            f"Upside: {analyst_data.get('upside_pct', 'N/A')}%"
-        )
+        surprises = analyst_data.get("earnings_surprises") or []
+        if surprises:
+            latest = surprises[0]
+            analyst_summary = (
+                f"Latest earnings surprise ({latest.get('date', 'N/A')}): "
+                f"{latest.get('surprise_pct', 'N/A')}%"
+            )
 
     loaded_prompt = load_prompt("sector_team_thesis_update")
     prompt = loaded_prompt.format(
@@ -625,10 +637,12 @@ def _update_thesis_for_held_stock(
     #     (1) 429s: ``invoke_with_rate_limit_retry`` retries persistently
     #         up to the ~75-min wall-clock deadline (long enough to ride
     #         out the org TPM window), then propagates.
-    #     (2) Transient tool-XML schema leaks (the 2026-05-16 `catalysts`
-    #         string-not-list nondeterminism): a small bounded
-    #         parse/validation retry (these recover on a re-roll), then
-    #         — if STILL malformed — RAISE. No prior-thesis carry-forward.
+    #     (2) Tool-XML schema leaks (the `catalysts` string-not-list
+    #         failure, deterministic OR nondeterministic): the shared
+    #         ``invoke_structured_with_validation_retry`` chokepoint re-prompts
+    #         with the Pydantic ``ValidationError`` fed back as correction
+    #         context (recovers deterministic leaks a bare re-roll cannot),
+    #         then — if STILL malformed — RAISE. No prior-thesis carry-forward.
     #
     #   The raise propagates through ``_run_sector_team`` →
     #   ``run_sector_team`` and surfaces as the team's ``error``, which
@@ -640,91 +654,82 @@ def _update_thesis_for_held_stock(
     structured_llm = llm.with_structured_output(
         HeldThesisUpdateLLMOutput, include_raw=True,
     )
-    # Bounded parse/validation re-roll for the transient tool-XML leak
-    # ONLY. This is NOT a 429 retry (429s are handled by the deadline-
-    # bounded wrapper inside the thunk) and NOT a degrade path — after
-    # the last attempt we RAISE.
-    _MAX_PARSE_ATTEMPTS = 3
-    last_error: Exception | None = None
-    for attempt in range(1, _MAX_PARSE_ATTEMPTS + 1):
-        try:
-            extract_resp = invoke_with_rate_limit_retry(
-                lambda: structured_llm.invoke(
-                    [HumanMessage(content=prompt)],
-                    config={"metadata": loaded_prompt.langsmith_metadata()},
-                ),
-                label=f"thesis_update:{team_id}:{ticker}",
-            )
-            update: HeldThesisUpdateLLMOutput | None = extract_resp.get("parsed")
-            parsing_error = extract_resp.get("parsing_error")
-            if parsing_error is not None or update is None:
-                raise parsing_error or ValueError(
-                    "structured-output returned no parsed model"
-                )
-            # Convert to dict + drop default-empty fields so they don't
-            # overwrite a populated prior_thesis value with the default
-            # (e.g. an empty bull_case shouldn't blank out a non-empty
-            # prior bull_case).
-            llm_update_clean = {
-                k: v for k, v in update.model_dump().items()
-                if v not in (None, "", [])
-            }
-            if prior_thesis:
-                result = {**prior_thesis, **llm_update_clean}
-            else:
-                result = llm_update_clean
-                result["score_failed"] = True
-            result["last_updated"] = run_date
-            result["triggers"] = triggers
-            result["stale_days"] = 0
-            if attempt > 1:
-                log.info(
-                    "[thesis_update:%s] recovered on parse-retry "
-                    "(attempt %d/%d)",
-                    ticker, attempt, _MAX_PARSE_ATTEMPTS,
-                )
-            return result
-        except Exception as e:
-            last_error = e
-            if _is_rate_limit_error(e):
-                # The deadline-bounded wrapper already exhausted the
-                # ~75-min 429 window. Re-rolling the prompt won't help
-                # an org TPM ceiling — fail fast (the run hard-fails).
-                log.error(
-                    "[thesis_update:%s] org 429 persisted past the "
-                    "retry deadline — failing the run per "
-                    "all-agents-strict (no prior-thesis carry-forward)",
-                    ticker,
-                )
-                raise
-            if attempt < _MAX_PARSE_ATTEMPTS:
-                log.warning(
-                    "[thesis_update:%s] parse/validation attempt %d/%d "
-                    "failed: %s — re-rolling (transient tool-XML leak)",
-                    ticker, attempt, _MAX_PARSE_ATTEMPTS, e,
-                )
-                continue
-            # Final attempt still malformed. ALL-AGENTS-STRICT: this
-            # agent did NOT produce real output, so the run must fail.
-            # NO carry-forward of the prior thesis (that was #193, now
-            # removed). Raise — surfaces as the team's hard error.
-            log.error(
-                "[thesis_update:%s] still malformed after %d parse "
-                "attempts (%s) — RAISING. Per the all-agents-strict "
-                "directive a held-thesis update that cannot produce "
-                "real output fails the whole run; the prior thesis is "
-                "NOT carried forward.",
-                ticker, _MAX_PARSE_ATTEMPTS, last_error,
-            )
-            raise RuntimeError(
-                f"held-thesis update for {ticker} ({team_id}) failed "
-                f"after {_MAX_PARSE_ATTEMPTS} attempts and cannot "
-                f"produce real output — all-agents-strict hard-fail "
-                f"(no prior-thesis carry-forward): {last_error}"
-            ) from last_error
-
-    # Unreachable — the loop either returns or raises.
-    raise AssertionError(  # pragma: no cover
-        f"held-thesis update for {ticker} exited retry loop without "
-        f"returning or raising"
+    # SOTA structured-output recovery: route through the shared
+    # ``invoke_structured_with_validation_retry`` chokepoint every other
+    # narrative-rich extraction site already uses (qual_analyst, macro,
+    # evals.judge) instead of a bespoke bare re-roll.
+    #
+    # WHY (2026-07-11 CRUS Saturday hard-fail): the previous loop re-sent the
+    # IDENTICAL prompt on every attempt with NO correction context. A
+    # DETERMINISTIC tool-XML leak — the model emitting a literal
+    # ``<parameter name="catalysts">`` tag into the field value, which
+    # langchain captures as a ``str`` where ``catalysts: list[str]`` is
+    # required — therefore re-rolls identically all 3 attempts and can never
+    # recover, hard-failing the whole weekly run. (Distinct from a
+    # ``max_tokens`` truncation, which the shared chokepoint's config#1294
+    # ``raise_if_truncated`` guard now also covers here, and from a
+    # NON-deterministic leak, which a bare re-roll happened to fix.)
+    #
+    # The chokepoint feeds the specific Pydantic ``ValidationError`` (plus the
+    # model's own prior malformed output) back as correction context on each
+    # retry — the industry-standard tool-use recovery that lets the model
+    # correct the offending field (list-not-string) rather than repeat it. The
+    # MODEL, prompt, and schema are unchanged, so nothing about WHAT the thesis
+    # concludes changes — the model simply gets the standard correction retry.
+    #
+    # ALL-AGENTS-STRICT is preserved end-to-end: on terminal failure the
+    # chokepoint returns with ``parsing_error`` set / ``parsed`` None and the
+    # fail-loud ``raise`` below fires — NO prior-thesis carry-forward (that was
+    # #193, removed 2026-05-16). A 429 still fails fast: the
+    # ``invoke_with_rate_limit_retry`` wrapper INSIDE the chokepoint propagates
+    # a post-deadline 429 unchanged (re-rolling can't fix an org TPM ceiling),
+    # so it surfaces here uncaught.
+    _MAX_PARSE_ATTEMPTS = 3  # total attempts = chokepoint max_retries (2) + 1
+    extract_resp = invoke_structured_with_validation_retry(
+        structured_llm,
+        [HumanMessage(content=prompt)],
+        label=f"thesis_update:{team_id}:{ticker}",
+        ls_metadata=loaded_prompt.langsmith_metadata(),
+        max_retries=_MAX_PARSE_ATTEMPTS - 1,
     )
+    update: HeldThesisUpdateLLMOutput | None = extract_resp.get("parsed")
+    parsing_error = extract_resp.get("parsing_error")
+    if parsing_error is not None or update is None:
+        # Still malformed after the correction-feedback retries.
+        # ALL-AGENTS-STRICT: this agent did NOT produce real output, so the run
+        # must fail. NO carry-forward of the prior thesis (that was #193, now
+        # removed). Raise — surfaces as the team's hard error.
+        last_error: Exception = parsing_error or ValueError(
+            "structured-output returned no parsed model"
+        )
+        log.error(
+            "[thesis_update:%s] still malformed after %d parse "
+            "attempts (%s) — RAISING. Per the all-agents-strict "
+            "directive a held-thesis update that cannot produce "
+            "real output fails the whole run; the prior thesis is "
+            "NOT carried forward.",
+            ticker, _MAX_PARSE_ATTEMPTS, last_error,
+        )
+        raise RuntimeError(
+            f"held-thesis update for {ticker} ({team_id}) failed "
+            f"after {_MAX_PARSE_ATTEMPTS} attempts and cannot "
+            f"produce real output — all-agents-strict hard-fail "
+            f"(no prior-thesis carry-forward): {last_error}"
+        ) from last_error
+
+    # Convert to dict + drop default-empty fields so they don't overwrite a
+    # populated prior_thesis value with the default (e.g. an empty bull_case
+    # shouldn't blank out a non-empty prior bull_case).
+    llm_update_clean = {
+        k: v for k, v in update.model_dump().items()
+        if v not in (None, "", [])
+    }
+    if prior_thesis:
+        result = {**prior_thesis, **llm_update_clean}
+    else:
+        result = llm_update_clean
+        result["score_failed"] = True
+    result["last_updated"] = run_date
+    result["triggers"] = triggers
+    result["stale_days"] = 0
+    return result

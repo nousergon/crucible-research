@@ -231,30 +231,12 @@ def create_quant_tools(context: dict) -> list:
                 results[t] = {"error": "no data available"}
         return json.dumps(results)
 
-    @tool
-    def get_analyst_consensus(tickers: list[str]) -> str:
-        """Get analyst ratings, price targets, earnings surprises for up to 5 tickers (FMP daily limit). Pass your top candidates only. Returns consensus_rating, num_analysts, mean_target, upside_pct."""
-        from data.fetchers.analyst_fetcher import fetch_analyst_consensus as _fetch
-
-        valid, errors = _validate_tickers(tickers, "get_analyst_consensus")
-        results: dict = dict(errors)
-        for t in valid[:5]:
-            try:
-                # Pass yfinance close price to avoid a separate FMP quote call
-                cp = None
-                df = price_data.get(t)
-                if df is not None and not df.empty and "Close" in df.columns:
-                    cp = float(df["Close"].iloc[-1])
-                data = _fetch(t, current_price=cp)
-                results[t] = {
-                    "consensus_rating": data.get("consensus_rating", "N/A"),
-                    "num_analysts": data.get("num_analysts", 0),
-                    "mean_target": data.get("mean_target"),
-                    "upside_pct": round(data.get("upside_pct", 0), 1) if data.get("upside_pct") else None,
-                }
-            except Exception as e:
-                results[t] = {"error": str(e)}
-        return json.dumps(results)
+    # get_analyst_consensus (analyst ratings / price targets) was removed
+    # config#1821 Option B (2026-07-08): it wrapped FMP's grades-consensus
+    # / price-target-consensus endpoints, which 402'd for every ticker on
+    # the current plan — the tool always returned "N/A"/0/None, burning an
+    # LLM tool-call for zero information (the same dead-tool-call pattern
+    # as config#1822). Not replaced: no other quant tool consumed this data.
 
     @tool
     def get_balance_sheet(tickers: list[str]) -> str:
@@ -399,7 +381,6 @@ def create_quant_tools(context: dict) -> list:
     return [
         screen_by_volume,
         get_technical_indicators,
-        get_analyst_consensus,
         get_balance_sheet,
         get_price_performance,
         get_options_flow,

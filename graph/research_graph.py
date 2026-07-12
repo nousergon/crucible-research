@@ -49,7 +49,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Annotated, Any, Callable, Optional, TypedDict
+from typing import Annotated, Any, Callable, NamedTuple, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -128,7 +128,7 @@ from scoring.focus_list import (
 from archive.manager import ArchiveManager
 from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
@@ -360,6 +360,19 @@ class ResearchState(TypedDict, total=False):
     # timeout). ``scanner_universe`` stays the FULL universe for the
     # exit_evaluator constituent whitelist.
     agent_input_set: Annotated[list[str], take_last]
+    # The scanner gate's per-ticker verdict detail (quant_filter_pass /
+    # filter_fail_reason / scan_path / liquidity_pass / volatility_pass),
+    # sourced from candidates.json::scanner_eval_log in fetch_data
+    # (cross-process safe: candidates.json is the S3 artifact the standalone
+    # Scanner SF state writes, already read here via am.load_candidates_json)
+    # rather than the in-process ``run_quant_filter._last_eval_log`` module
+    # stash. That stash is empty in THIS Lambda — Research no longer calls
+    # run_quant_filter itself post-L1995-Phase5; only the standalone Scanner
+    # SF state does, in its own process (config#1458: the stash read in
+    # archive_writer was always empty by construction, degrading
+    # quant_filter_pass to 0 for 100% of rows every cycle). Empty list when
+    # candidates.json carries none (absent field, or the dry-run-stub path).
+    scanner_eval_log: Annotated[list, take_last]
     sector_map: Annotated[dict[str, str], take_last]
     macro_data: Annotated[dict, take_last]
     current_population: Annotated[list[dict], take_last]
@@ -465,6 +478,23 @@ class ResearchState(TypedDict, total=False):
 
     # ── Dispatch metadata (for Send()) ───────────────────────────────────────
     team_id: Annotated[str, take_last]  # set by Send() per team
+
+    # ── Checkpoint-resume evidence (config#2263) ─────────────────────────────
+    # Populated ONLY on the resume-hit branch of the three checkpoint-capable
+    # nodes (sector_team_node, macro_economist_node, cio_node) — never on the
+    # fresh-compute path. Keyed so the trajectory validator (evals/trajectory.py)
+    # can tell, from final_state alone, whether this invocation used the S3
+    # checkpoint short-circuit at all (a non-empty dict here means at least
+    # one node was resumed rather than executed, which matters because a
+    # resumed run can finish before its child spans land in LangSmith — see
+    # the trajectory validator's final-state structural fallback).
+    # ``merge_typed_dicts`` (last-write-wins, dict union) rather than
+    # ``reject_on_conflict``: this is bookkeeping, not a correctness
+    # invariant like sector_team_outputs' disjoint keyspace, so a duplicate
+    # write here should never crash a run. sector_team_node's 6 concurrent
+    # Send() branches each own a distinct key (``sector_team_node:{team_id}``)
+    # so there is no legitimate overlap in practice either.
+    checkpoint_resumed_nodes: Annotated[dict[str, bool], merge_typed_dicts]
 
 
 # ── Pre-fetch helpers ─────────────────────────────────────────────────────────
@@ -604,12 +634,23 @@ def _read_institutional_substrate(
 
 # ── Node Functions ────────────────────────────────────────────────────────────
 
+class AgentInputSetResolution(NamedTuple):
+    """Return shape of :func:`_resolve_agent_input_set`.
+
+    ``scanner_eval_log`` rides along with ``agent_input_set`` because both
+    are sourced from the SAME ``am.load_candidates_json(run_date)`` call —
+    returning them together avoids a second S3 round-trip from ``fetch_data``.
+    """
+    agent_input_set: list[str]
+    scanner_eval_log: list[dict]
+
+
 def _resolve_agent_input_set(
     am: "ArchiveManager",
     run_date: str,
     scanner_universe: list[str],
     population_tickers: list[str],
-) -> list[str]:
+) -> AgentInputSetResolution:
     """Resolve the sector-team screening input (L1995 Phase 5 / L4464).
 
     The standalone Scanner SF state (run upstream of Research) writes
@@ -632,10 +673,17 @@ def _resolve_agent_input_set(
     The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the stub/offline
     installers) relaxes this to a full-universe fallback for wiring validation;
     production never sets it.
+
+    Also returns ``scanner_eval_log`` — ``candidates.json``'s per-ticker
+    scanner gate verdict (config#1458), read here (rather than a second call
+    to ``am.load_candidates_json``) since this function already loads the
+    artifact. Empty on the dry-run-stub fallback path (no real candidates.json
+    was read) or when the artifact predates this field.
     """
     import os as _os
     candidates = am.load_candidates_json(run_date)
     scanner_tickers = (candidates or {}).get("scanner_tickers") or []
+    scanner_eval_log = (candidates or {}).get("scanner_eval_log") or []
     if not scanner_tickers:
         if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() == "true":
             logger.warning(
@@ -644,6 +692,7 @@ def _resolve_agent_input_set(
                 "(NOT a real candidate selection)", run_date,
             )
             scanner_tickers = scanner_universe
+            scanner_eval_log = []
         else:
             raise RuntimeError(
                 f"[fetch_data] candidates.json missing or empty scanner_tickers "
@@ -658,7 +707,7 @@ def _resolve_agent_input_set(
         "(scanner %d ∪ held population %d)",
         len(agent_input_set), len(scanner_tickers), len(population_tickers),
     )
-    return agent_input_set
+    return AgentInputSetResolution(agent_input_set, scanner_eval_log)
 
 
 def fetch_data(state: ResearchState) -> dict:
@@ -677,7 +726,7 @@ def fetch_data(state: ResearchState) -> dict:
     # RAG availability check (early, so we know before agents start)
     rag_available = False
     try:
-        from alpha_engine_lib.rag import is_available as _rag_is_available
+        from nousergon_lib.rag import is_available as _rag_is_available
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats
@@ -685,6 +734,14 @@ def fetch_data(state: ResearchState) -> dict:
         reset_rag_stats()
     except Exception as e:
         logger.warning("[fetch_data] RAG availability check failed: %s", e)
+
+    # Reset the FMP 402 circuit breaker for this run (module-level state — see
+    # data/fetchers/analyst_fetcher.py). Without this, a container reused
+    # across Lambda invocations would keep an endpoint tripped from a prior
+    # run's 402 forever, silently starving a run where the plan issue may
+    # have since been fixed.
+    from data.fetchers.analyst_fetcher import reset_fmp_402_breaker
+    reset_fmp_402_breaker()
 
     # Load S&P 900 universe
     scanner_universe, wikipedia_sector_map = fetch_sp500_sp400_with_sectors()
@@ -702,7 +759,7 @@ def fetch_data(state: ResearchState) -> dict:
     all_tickers = list(set(population_tickers + scanner_universe))
 
     # ── L1995 Phase 5 cutover: sector-team screening input ───────────────────
-    agent_input_set = _resolve_agent_input_set(
+    agent_input_set, scanner_eval_log = _resolve_agent_input_set(
         am, run_date, scanner_universe, population_tickers,
     )
 
@@ -980,6 +1037,16 @@ def fetch_data(state: ResearchState) -> dict:
     news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
         _pre_fetch_held_enrichment(population_tickers)
     )
+
+    # Surface the FMP 402 circuit-breaker skip counts in the run summary log
+    # (config#1821). The breaker itself already logs one WARN per endpoint
+    # at trip time; this is the run-level counter so a known-dead endpoint
+    # shows up in the summary rather than as a silent data hole.
+    from data.fetchers.analyst_fetcher import fmp_402_skip_counts
+    _402_skips = fmp_402_skip_counts()
+    if _402_skips:
+        logger.info("[fetch_data] FMP 402 circuit breaker skips: %s", _402_skips)
+
     substrate_by_ticker: dict[str, dict] = {}
     import os as _os
     if _os.environ.get("INSTITUTIONAL_SUBSTRATE_ENABLED", "").lower() == "true":
@@ -1008,6 +1075,7 @@ def fetch_data(state: ResearchState) -> dict:
     return {
         "scanner_universe": scanner_universe,
         "agent_input_set": agent_input_set,
+        "scanner_eval_log": scanner_eval_log,
         "sector_map": sector_map,
         "price_data": price_data,
         "data_snapshot_id": data_snapshot_id,
@@ -1210,7 +1278,10 @@ def sector_team_node(state: ResearchState) -> dict:
                 team_id,
                 len(persisted.get("recommendations", []) or []),
             )
-            return {"sector_team_outputs": {team_id: persisted}}
+            return {
+                "sector_team_outputs": {team_id: persisted},
+                "checkpoint_resumed_nodes": {f"sector_team_node:{team_id}": True},
+            }
 
     # Stage D' Wire 1: extract intensity_z from the regime substrate
     # (loaded by load_regime_substrate_node upstream of macro). None
@@ -1349,13 +1420,15 @@ def sector_team_node(state: ResearchState) -> dict:
 
     # ── Persist on success (resumability) ─────────────────────────────────
     # Write this team's full output to S3 NOW — before any other team
-    # can fail and ERROR the overall run. A team is persisted iff it has
-    # no hard ``error`` (a partial/recursion-exhausted team is persisted
-    # too: re-running it would just re-burn budget for the same empty
-    # result, and the aggregator already tolerates partials). A team
-    # that errored is NOT persisted so a re-run gets a fresh attempt at
-    # it (the backoff / a TPM-window reset may let it succeed).
-    if _am is not None and not result.get("error"):
+    # can fail and ERROR the overall run. A team is persisted iff it is
+    # FULLY COMPLETE: no hard ``error`` AND not ``partial``. An errored or
+    # partial (e.g. qual step-budget-exhausted) team is NOT persisted, so a
+    # re-run gets a fresh attempt at it — the backoff / a TPM-window reset /
+    # the workload-sized ReAct budget (config#1822) may let it succeed.
+    # Persisting a partial team would poison every future rerun via the
+    # resume short-circuit (``load_sector_team_run``). ``save_sector_team_run``
+    # enforces the same guard defensively.
+    if _am is not None and not result.get("error") and not result.get("partial"):
         try:
             _am.save_sector_team_run(run_date, team_id, result)
         except Exception as e:  # pragma: no cover — saver is already safe
@@ -1401,7 +1474,10 @@ def macro_economist_node(state: ResearchState) -> dict:
                 "[macro] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"macro_economist_node": True},
+            }
 
     macro_data = state.get("macro_data", {})
     prior_report = state.get("prior_macro_report", "")
@@ -1428,7 +1504,7 @@ def macro_economist_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt("macro_agent"),
-    ):
+    ) as _macro_frame:
         result = run_macro_agent_with_reflection(
             prior_report=prior_report,
             prior_date=prior_date,
@@ -1447,6 +1523,11 @@ def macro_economist_node(state: ResearchState) -> dict:
             # template renders the placeholder as blank in that case.
             prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
         )
+        # config#1753: thread the actually-rendered primary-agent prompt
+        # (what was handed to HumanMessage(...) inside run_macro_agent)
+        # onto the frame so FullPromptContext.user_prompt captures the
+        # substituted text instead of the raw LoadedPrompt template.
+        _macro_frame.rendered_prompt = result.get("rendered_prompt")
 
     macro_state_update = {
         "macro_report": result.get("report_md", ""),
@@ -1482,6 +1563,25 @@ def macro_economist_node(state: ResearchState) -> dict:
             )
 
     return macro_state_update
+
+
+def _load_metron_supplemental_sectors(run_date: str, bucket: str | None = None) -> dict[str, str]:
+    """Metron-held/watchlisted tickers outside the S&P500+400 universe get their GICS
+    sector from the sidecar alpha-engine-data writes alongside its supplemental
+    factor-scoring snapshot (metron-ops#177). Optional and fail-soft — absent on any
+    run where that producer found nothing to add, or hasn't shipped yet; never blocks
+    ``compute_factor_profiles_node``."""
+    import boto3
+
+    bucket = bucket or os.environ.get("S3_BUCKET", "alpha-engine-research")
+    key = f"features/metron_supplemental/{run_date}/sectors.json"
+    try:
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj["Body"].read()).get("sectors", {})
+    except Exception as e:  # noqa: BLE001 - genuinely optional artifact, never raise
+        logger.info("[compute_factor_profiles] no Metron supplemental sectors for %s (%s)", run_date, e)
+        return {}
 
 
 def compute_factor_profiles_node(state: ResearchState) -> dict:
@@ -1535,6 +1635,11 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
             "(feedback_no_silent_fails) rather than letting focus-list + "
             "factor-blend silently degrade."
         )
+
+    # Additive only (never overrides an S&P500+400/population sector already in
+    # sector_map) — metron-ops#177.
+    supplemental_sectors = _load_metron_supplemental_sectors(run_date)
+    sector_map = {**sector_map, **{t: s for t, s in supplemental_sectors.items() if t not in sector_map}}
 
     try:
         s3_key = compute_and_write_factor_profiles(
@@ -2393,7 +2498,10 @@ def cio_node(state: ResearchState) -> dict:
                 "[cio] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", _run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"cio_node": True},
+            }
 
     # Collect all team recommendations as candidate list
     team_outputs = state.get("sector_team_outputs", {})
@@ -2486,7 +2594,7 @@ def cio_node(state: ResearchState) -> dict:
         run_type="weekly_research",
         run_id=derive_run_id(state),
         prompt=load_prompt(_cio_prompt_name),
-    ):
+    ) as _cio_frame:
         if CIO_CRITIC_ENABLED:
             cio_result, _cio_reflection_log = run_cio_with_reflection(
                 **_cio_call_kwargs
@@ -2501,6 +2609,11 @@ def cio_node(state: ResearchState) -> dict:
             )
         else:
             cio_result = run_cio(**_cio_call_kwargs)
+        # config#1753: thread the actually-rendered CIO prompt (what was
+        # handed to HumanMessage(...) inside run_cio) onto the frame so
+        # FullPromptContext.user_prompt captures the substituted text
+        # instead of the raw LoadedPrompt template.
+        _cio_frame.rendered_prompt = cio_result.get("rendered_prompt")
 
     # Schema validation on CIO output shapes (strict-by-default).
     for decision in cio_result.get("decisions", []):
@@ -3157,10 +3270,16 @@ def _compute_focus_list_audit_lookup(
 
     Returns ``{ticker: {focus_score, focus_stance, focus_team_id,
     focus_rank_in_team, focus_rank_in_sector, focus_list_passed,
-    agent_override}}`` for every ticker the factor substrate has a profile
-    for. ``focus_list_passed=1`` for top-N members. ``agent_override=1``
-    when the quant agent looked up this non-focus ticker via
-    @tool get_factor_profile during its team's run.
+    agent_override, override_team_id}}`` for every ticker the factor
+    substrate has a profile for. ``focus_list_passed=1`` for top-N members.
+    ``agent_override=1`` when the quant agent looked up this non-focus ticker
+    via @tool get_factor_profile during its team's run; ``override_team_id``
+    then names WHICH team's agent reached out (config#750 per-team override
+    attribution) — ``None`` for focus-list members and non-override rows.
+    Because sector teams partition tickers by sector, an override ticker is
+    overridden by at most one team; if the same ticker somehow appears in more
+    than one team's override set, attribution is deterministic (sorted-first
+    team wins).
 
     PR 4 path: when ``focus_list_by_team`` is provided (computed in
     ``compute_focus_list_node`` and threaded through state), this is a
@@ -3176,9 +3295,16 @@ def _compute_focus_list_audit_lookup(
     # PR 4 path — pure projection
     if focus_list_by_team is not None:
         lookup: dict[str, dict] = {}
-        all_overrides: set[str] = set()
-        for team_overrides in override_tickers_by_team.values():
-            all_overrides.update(team_overrides)
+        # Per-team override attribution (config#750): keep the OWNING team for
+        # each override ticker instead of unioning across teams into an
+        # anonymous set. Iterate teams in sorted order so that in the
+        # (structurally impossible — sectors partition tickers) event the same
+        # ticker appears in two teams' override sets, attribution is
+        # deterministic (sorted-first team wins) rather than dict-order-dependent.
+        override_team_by_ticker: dict[str, str] = {}
+        for team_id in sorted(override_tickers_by_team):
+            for ticker in override_tickers_by_team[team_id]:
+                override_team_by_ticker.setdefault(ticker, team_id)
 
         for team_id, entries in focus_list_by_team.items():
             for e in entries:
@@ -3191,15 +3317,16 @@ def _compute_focus_list_audit_lookup(
                     "focus_rank_in_sector": e["rank_in_sector"],
                     "focus_list_passed": 1,
                     "agent_override": 0,  # focus-list members aren't overrides
+                    "override_team_id": None,
                 }
 
         # Non-focus tickers the agent looked up via @tool get_factor_profile
-        # surface here with empty focus fields + agent_override=1. The
-        # dashboard reads (focus_list_passed=0 AND agent_override=1) as
-        # "agent reached outside the curated set" — the precision /
-        # recall / override-hit-rate audit primitives in §5.3 of the
-        # scanner plan doc.
-        for ticker in all_overrides:
+        # surface here with empty focus fields + agent_override=1 and the
+        # attributing team in override_team_id. The dashboard reads
+        # (focus_list_passed=0 AND agent_override=1) as "agent reached outside
+        # the curated set" — the precision / recall / override-hit-rate audit
+        # primitives in §5.3 of the scanner plan doc — now split per team.
+        for ticker, team_id in override_team_by_ticker.items():
             if ticker in lookup:
                 continue  # in focus list — not an override by definition
             lookup[ticker] = {
@@ -3210,6 +3337,7 @@ def _compute_focus_list_audit_lookup(
                 "focus_rank_in_sector": None,
                 "focus_list_passed": 0,
                 "agent_override": 1,
+                "override_team_id": team_id,
             }
         return lookup
 
@@ -3259,6 +3387,10 @@ def _compute_focus_list_audit_lookup(
                 "focus_rank_in_sector": e.rank_in_sector,
                 "focus_list_passed": 1,
                 "agent_override": 0,
+                # Legacy recompute path has no per-team override telemetry
+                # (overrides are only known from PR 4 state); attribution is
+                # None here — the projection path above is authoritative.
+                "override_team_id": None,
             }
 
     for ticker, entry in focus_scores.items():
@@ -3276,6 +3408,7 @@ def _compute_focus_list_audit_lookup(
             "focus_rank_in_sector": None,
             "focus_list_passed": 0,
             "agent_override": 0,
+            "override_team_id": None,
         }
 
     return lookup_legacy
@@ -3634,7 +3767,7 @@ def archive_writer(state: ResearchState) -> dict:
     # defense and will surface the gap there.
     universe_symbols: set[str] | None = None
     try:
-        from alpha_engine_lib.arcticdb import get_universe_symbols
+        from nousergon_lib.arcticdb import get_universe_symbols
         universe_symbols = get_universe_symbols(am.bucket)
     except Exception as e:
         logger.warning(
@@ -3837,20 +3970,28 @@ def archive_writer(state: ResearchState) -> dict:
 
     # The AUTHORITATIVE per-ticker scanner verdict (quant_filter_pass +
     # filter_fail_reason + scan_path + the liquidity/volatility gate flags) is
-    # computed by run_quant_filter and stashed on its _last_eval_log during the
-    # scanner stage of THIS graph run — the only place the funnel reason for each
-    # of the ~900 names exists. Join it in here rather than reconstructing
-    # placeholder rows (which dropped fail_reason → NULL and mis-set
-    # quant_filter_pass to agent team-picks). Same in-process stash the shadow
-    # candidate-gen specs already rely on (scanner_orchestrator).
-    from data.scanner import run_quant_filter
-
-    scanner_eval_log = getattr(run_quant_filter, "_last_eval_log", None) or []
+    # computed by run_quant_filter and travels here via candidates.json ::
+    # scanner_eval_log → ResearchState (set in fetch_data) — the only place
+    # the funnel reason for each of the ~900 names exists. Join it in here
+    # rather than reconstructing placeholder rows (which dropped fail_reason →
+    # NULL and mis-set quant_filter_pass to agent team-picks).
+    #
+    # NOTE: this is deliberately NOT ``run_quant_filter._last_eval_log`` (a
+    # process-local module-attribute stash). Research no longer calls
+    # run_quant_filter in this process post-L1995-Phase5 — only the
+    # standalone Scanner SF state does, in ITS OWN process — so that stash is
+    # always empty here (config#1458: the prior version of this code read the
+    # stash directly and silently degraded quant_filter_pass to 0 for 100% of
+    # rows, every cycle, since PR#344 merged). ``scanner_orchestrator.
+    # build_shadow_candidate_artifacts`` still reads the stash directly and
+    # correctly — it runs in the SAME process as the run_quant_filter call
+    # that populates it.
+    scanner_eval_log = state.get("scanner_eval_log") or []
     if not scanner_eval_log:
         logger.warning(
-            "[archive_writer] scanner eval log unavailable — scanner_evaluations "
-            "gate detail (filter_fail_reason / scan_path / true quant_filter_pass) "
-            "degrades to null/0 this cycle"
+            "[archive_writer] candidates.json carried no scanner_eval_log for "
+            "this cycle — scanner_evaluations gate detail (filter_fail_reason "
+            "/ scan_path / true quant_filter_pass) degrades to null/0 this cycle"
         )
     scanner_evals = _build_scanner_eval_rows(
         scanner_universe=scanner_universe,
@@ -4029,10 +4170,162 @@ def archive_writer(state: ResearchState) -> dict:
     return {}
 
 
+# ── Slim briefing email (config#856 Phase 2.5) ───────────────────────────────
+#
+# Mirrors the crucible-executor EOD-email conversion (executor/eod_emailer.py,
+# alpha-engine-config#856 "pull-for-state console page + push-on-transition
+# emails only", shipped as crucible-executor#276 / crucible-dashboard#237):
+# the full consolidated report is no longer rendered inline in the email.
+# It's already persisted verbatim by archive_writer
+# (ArchiveManager.save_consolidated_report — UNCHANGED by this conversion,
+# still written to consolidated/{run_date}/morning.md) and rendered by the
+# console's Research Briefing Archive page
+# (alpha-engine-dashboard views/17_Research_Briefing_Archive.py). The email
+# now carries only a compact at-a-glance summary + a deep-link there.
+#
+# Deep-link gap (flagged, not fixed here — this PR does not touch
+# crucible-dashboard): UNLIKE the executor's "eod-report" slug — pinned via
+# ``url_path=`` in the dashboard's app.py and guarded against drift by
+# tests/test_eod_report_page.py (see executor/eod_emailer.py
+# EOD_REPORT_SLUG) — the Research Briefing Archive page has NO pinned
+# url_path and no per-run query-param handling at all:
+#
+#   1. It's rendered as an unpinned sub-view TAB ("Briefing Archive") lazily
+#      hosted inside views/host_research_signals.py (itself also unpinned in
+#      app.py's navigation table), selected via shared/view_host.py's
+#      documented ``?tab=`` bookmark query param.
+#   2. Streamlit's default (filename-derived) url_path for that host page is
+#      "host_research_signals" — verified directly against the
+#      ``page_icon_and_name()`` slug algorithm in the dashboard's pinned
+#      ``streamlit>=1.40`` floor — but nothing in either repo guards that
+#      string the way "eod-report" is guarded, so a file rename would break
+#      this link silently.
+#   3. The page itself reads no ``?date=``/``?run=`` query param — "latest
+#      inline + prior ~2 weeks click-to-expand" is the whole UI (confirmed:
+#      no ``st.query_params`` usage in that view at all). So this is
+#      necessarily a link to the GENERAL archive (which shows today's
+#      just-persisted brief as "latest" for a same-day open), NOT a
+#      deep-link scoped to this specific run the way
+#      ``…/eod-report?date=YYYY-MM-DD`` is.
+#
+# (This repo's own scoring/attractiveness_trajectory.py already hand-rolled a
+# *different*, likely-stale link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"``
+# — into the analogous host_universe_scanner.py host tab, ignoring the
+# host/tab indirection entirely. That's the failure mode this link avoids by
+# using the real filename-derived slug plus the documented ``?tab=``
+# mechanism, but it's the same class of gap: a dashboard follow-up should
+# pin a url_path for this surface — and ideally add ``?date=`` support —
+# the way eod-report/director/model-zoo/analysis already do.)
+RESEARCH_BRIEFING_SLUG = "host_research_signals"
+RESEARCH_BRIEFING_TAB = "Briefing Archive"
+
+_SLIM_EMAIL_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<style>
+  body {{ font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.6;
+          color: #222; max-width: 700px; margin: 0 auto; padding: 20px; }}
+  h2   {{ font-size: 15px; border-bottom: 1px solid #999; padding-bottom: 4px; margin-top: 24px; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+  th, td {{ border: 1px solid #ccc; padding: 4px 10px; text-align: left; }}
+  th {{ background: #f0f0f0; }}
+  .cta  {{ display: inline-block; margin: 14px 0; padding: 10px 18px;
+           background: #0b5; color: #fff !important; text-decoration: none;
+           border-radius: 4px; font-weight: bold; }}
+  .foot {{ margin-top: 28px; font-size: 11px; color: #888;
+           border-top: 1px solid #ccc; padding-top: 8px; }}
+</style>
+</head>
+<body>
+{body}
+<div class="foot">Alpha Engine Research | {date}</div>
+</body>
+</html>
+"""
+
+
+def _research_briefing_url(console_base_url: str | None = None) -> str:
+    """Deep-link to the console's Research Briefing Archive tab.
+
+    General-archive link only — see the gap note above the
+    ``RESEARCH_BRIEFING_SLUG`` constant; the page has no per-run scoping to
+    deep-link into.
+    """
+    from urllib.parse import quote
+
+    from krepis.console import console_url
+
+    base_url = console_url(RESEARCH_BRIEFING_SLUG, base=console_base_url)
+    return f"{base_url}?tab={quote(RESEARCH_BRIEFING_TAB)}"
+
+
+def _build_slim_briefing_email(state: ResearchState) -> tuple[str, str]:
+    """Build the slim morning-briefing email body: ``(html_body, plain_body)``.
+
+    A compact summary (run date, regime, population headline counts) plus a
+    deep-link to the console archive — NOT the full consolidated report.
+    The full report is persisted separately and unconditionally by
+    ``archive_writer`` via ``ArchiveManager.save_consolidated_report``
+    (untouched by this function; see the module note above ``email_sender``).
+    """
+    run_date = state.get("run_date", "")
+    regime = (state.get("market_regime") or "neutral").upper()
+    new_pop = state.get("new_population", []) or []
+    current_pop = state.get("current_population", []) or []
+    exits = state.get("exits", []) or []
+
+    current_tickers = {p["ticker"] for p in current_pop if "ticker" in p}
+    new_tickers = {p["ticker"] for p in new_pop if "ticker" in p}
+    n_entrants = len(new_tickers - current_tickers)
+    n_pop = len(new_pop)
+    n_exits = len(exits)
+
+    url = _research_briefing_url()
+
+    html_parts = [
+        "<h2>Daily Research Brief</h2>",
+        "<table>",
+        "<tr><th>Metric</th><th>Value</th></tr>",
+        f"<tr><td>Run date</td><td>{run_date}</td></tr>",
+        f"<tr><td>Regime</td><td>{regime}</td></tr>",
+        "<tr><td>Population</td><td>"
+        f"{n_pop} stocks ({n_entrants} new, {n_pop - n_entrants} existing, "
+        f"{n_exits} exited)</td></tr>",
+        "</table>",
+        f'<a class="cta" href="{url}">View full research briefing on the console →</a>',
+        '<p style="font-size:11px;color:#888;">Sector allocation, per-ticker '
+        "ratings/rationale, regime trend, and risk posture are on the "
+        "console archive.</p>",
+    ]
+    html_body = _SLIM_EMAIL_HTML_TEMPLATE.format(
+        body="\n".join(html_parts), date=run_date,
+    )
+
+    plain_body = "\n".join([
+        f"Alpha Engine Research — {run_date}",
+        "=" * 40,
+        f"Regime:     {regime}",
+        f"Population: {n_pop} stocks ({n_entrants} new, "
+        f"{n_pop - n_entrants} existing, {n_exits} exited)",
+        "",
+        f"Full briefing: {url}",
+        "",
+    ])
+    return html_body, plain_body
+
+
 def email_sender(state: ResearchState) -> dict:
-    """Send the morning email with properly rendered HTML."""
+    """Send the slim morning-briefing email: summary + console deep-link.
+
+    As of 2026-07-03 (alpha-engine-config#856 Phase 2.5) this is a SLIM
+    link email — see the module note above ``RESEARCH_BRIEFING_SLUG`` for
+    the full rationale and the per-run deep-link gap. The full consolidated
+    report is unaffected: ``archive_writer`` still unconditionally persists
+    it verbatim via ``ArchiveManager.save_consolidated_report`` before this
+    node ever runs.
+    """
     from emailer.sender import send_email
-    from emailer.formatter import format_email
     from config import EMAIL_RECIPIENTS, EMAIL_SENDER
 
     logger.info("[email_sender] starting")
@@ -4042,7 +4335,7 @@ def email_sender(state: ResearchState) -> dict:
     if consolidated:
         try:
             subject = f"Alpha Engine Research — {run_date}"
-            html_body, plain_body = format_email(consolidated, run_date)
+            html_body, plain_body = _build_slim_briefing_email(state)
             send_email(
                 subject=subject,
                 html_body=html_body,

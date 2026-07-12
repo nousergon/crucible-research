@@ -111,6 +111,13 @@ from nousergon_lib.quant.transaction_cost import (
     TransactionCostModel,
     tradeability_percentiles,
 )
+from nousergon_lib.quant.attractiveness import (
+    DEFAULT_PILLAR_WEIGHTS,
+    PILLAR_ORDER as _PILLAR_ORDER,
+    attractiveness_from_factor_profiles as _attractiveness_from_factor_profiles,
+    compute_cross_sectional_attractiveness,
+    normalize_pillar_weights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +131,14 @@ UNIVERSE_BOARD_SCHEMA_VERSION = 3
 _DEFAULT_REFERENCE_NOTIONAL_USD = 100_000.0
 _TRADEABILITY_METHOD = "sqrt_impact_almgren_chriss_round_trip"
 
-# Winsorization clip for the per-pillar cross-sectional z-scores (institutional
-# convention; near-no-op on already-percentile inputs — see module docstring).
+# Winsorization clip lives in nousergon_lib.quant.attractiveness (re-exported via
+# compute_cross_sectional_attractiveness). Kept here only for doc cross-refs.
 _ZSCORE_CLIP = 3.0
 
 # Pillar → factor-profile field. Single source of truth lives in
 # scoring/composite.py::_PILLAR_TO_FACTOR_KEY; imported lazily in the builder so
 # this module has no import-time dependency on composite's config loading.
-_PILLAR_ORDER = ("quality", "value", "momentum", "growth", "stewardship", "defensiveness")
+# _PILLAR_ORDER imported from nousergon_lib.quant.attractiveness above.
 
 # DISPLAY metric contract: (feature_store_column, output_field, denorm_multiplier).
 #
@@ -177,102 +184,8 @@ def _bucket(bucket: str | None) -> str:
     return bucket or os.environ.get("S3_BUCKET", DEFAULT_BUCKET)
 
 
-def _mean_std(vals: list[float]) -> tuple[float, float]:
-    """Population mean + std of a non-empty list (std == 0.0 when n < 2 or all
-    values identical — the z-score helper treats that as 'no dispersion' → z=0)."""
-    n = len(vals)
-    mean = sum(vals) / n
-    if n < 2:
-        return mean, 0.0
-    var = sum((v - mean) ** 2 for v in vals) / n  # population variance
-    return mean, var ** 0.5
-
-
-def _avg_rank_pct(values: dict[str, float]) -> dict[str, float]:
-    """Cross-sectional percentile (0-100) via average-rank — matches pandas
-    ``rank(pct=True) * 100`` (ties share their mean rank). Empty → {}."""
-    import bisect
-
-    if not values:
-        return {}
-    arr = sorted(values.values())
-    n = len(arr)
-    out: dict[str, float] = {}
-    for k, x in values.items():
-        lo = bisect.bisect_left(arr, x)
-        hi = bisect.bisect_right(arr, x)
-        avg_rank = (lo + 1 + hi) / 2.0  # 1-indexed average rank
-        out[k] = round(avg_rank / n * 100, 2)
-    return out
-
-
-def _zscore(value: float, mean: float, std: float) -> float:
-    """Winsorized cross-sectional z-score. std == 0 → 0.0 (no dispersion)."""
-    if std <= 0:
-        return 0.0
-    z = (value - mean) / std
-    return max(-_ZSCORE_CLIP, min(_ZSCORE_CLIP, z))
-
-
-def compute_cross_sectional_attractiveness(
-    pillar_scores_by_ticker: dict[str, dict[str, Optional[float]]],
-    pillar_weights: dict[str, float],
-) -> dict[str, dict]:
-    """The SOTA attractiveness composite — the SINGLE SOURCE OF TRUTH.
-
-    Given ``{ticker: {pillar: 0-100 | None}}`` (already sector-neutral
-    within-sector percentile ranks) and NORMALIZED ``pillar_weights``, returns
-    ``{ticker: {"attractiveness_raw", "attractiveness_score",
-    "pillar_contributions"}}`` via: per-pillar cross-sectional winsorized
-    z-score → coverage-renormalized weighted blend → terminal cross-sectional
-    percentile (0-100). ``build_universe_board`` (live board) AND the history
-    backfill (``scoring/attractiveness_history.py``) both call this, so they
-    produce byte-identical numbers for the same inputs.
-
-    ``raw`` is the signed z-blend (dispersion preserved); ``score`` is its
-    cross-sectional percentile; ``pillar_contributions`` are the additive
-    ``w·z/Σw`` terms that sum to ``raw``. A ticker with no usable pillar gets
-    all-None / empty contributions.
-    """
-    # Pass 1 — per-pillar cross-section over names that HAVE each pillar.
-    pillar_values: dict[str, dict[str, float]] = {p: {} for p in _PILLAR_ORDER}
-    for ticker, scores in pillar_scores_by_ticker.items():
-        for p in _PILLAR_ORDER:
-            v = scores.get(p)
-            if v is not None:
-                pillar_values[p][ticker] = v
-    pillar_stats = {p: _mean_std(list(v.values())) for p, v in pillar_values.items() if v}
-
-    # Pass 2 — winsorized z-blend + additive contributions.
-    blends: dict[str, float] = {}
-    out: dict[str, dict] = {}
-    for ticker, scores in pillar_scores_by_ticker.items():
-        contribs: dict[str, tuple[float, float]] = {}
-        num = 0.0
-        wsum = 0.0
-        for p in _PILLAR_ORDER:
-            v = scores.get(p)
-            w = pillar_weights.get(p, 0.0)
-            if v is None or w <= 0 or p not in pillar_stats:
-                continue
-            mean, std = pillar_stats[p]
-            z = _zscore(v, mean, std)
-            num += w * z
-            wsum += w
-            contribs[p] = (w, z)
-        rec = {"attractiveness_raw": None, "attractiveness_score": None, "pillar_contributions": {}}
-        if wsum > 0:
-            blend = num / wsum
-            blends[ticker] = blend
-            rec["attractiveness_raw"] = round(blend, 4)
-            rec["pillar_contributions"] = {p: round(w * z / wsum, 4) for p, (w, z) in contribs.items()}
-        out[ticker] = rec
-
-    # Terminal cross-sectional percentile (restores full 0-100 dispersion).
-    pct = _avg_rank_pct(blends)
-    for ticker in out:
-        out[ticker]["attractiveness_score"] = pct.get(ticker)
-    return out
+def _equal_weights() -> dict[str, float]:
+    return dict(DEFAULT_PILLAR_WEIGHTS)
 
 
 def _reference_notional(tradeability_config: dict | None) -> float:
@@ -366,10 +279,6 @@ def _num(v: Any, multiplier: float = 1.0) -> Optional[float]:
     return round(f * multiplier, 6)
 
 
-def _equal_weights() -> dict[str, float]:
-    return {p: 1.0 / len(_PILLAR_ORDER) for p in _PILLAR_ORDER}
-
-
 def _load_pillar_weights(bucket: str | None, s3_client: Any) -> dict[str, float]:
     """Pillar weights for the z-blend, NORMALIZED to sum 1.0.
 
@@ -391,7 +300,7 @@ def _load_pillar_weights(bucket: str | None, s3_client: Any) -> dict[str, float]
         total = sum(parsed.values())
         if total <= 0:
             return _equal_weights()
-        normalized = {p: round(w / total, 6) for p, w in parsed.items()}
+        normalized = normalize_pillar_weights(parsed)
         logger.info("[universe_board] pillar weights from config/factor_attractiveness_weights.json: %s", normalized)
         return normalized
     except Exception:
@@ -692,24 +601,11 @@ def attractiveness_from_factor_profiles(
     pillar mapping + weight normalization EXACTLY (same chokepoint), so the feed
     ranks on byte-identical numbers to the console board. Pure/read-only.
     """
-    from scoring.composite import _PILLAR_TO_FACTOR_KEY
-
     if pillar_weights is None:
         pillar_weights = _load_pillar_weights(bucket, s3_client)
-    _wt_total = sum(max(0.0, (_num(w) or 0.0)) for w in pillar_weights.values()) or 1.0
-    pillar_weights = {
-        p: round(max(0.0, (_num(pillar_weights.get(p)) or 0.0)) / _wt_total, 6)
-        for p in _PILLAR_ORDER
-    }
-    pillar_scores_by_ticker = {
-        ticker: {
-            pillar: _num(profile.get(_PILLAR_TO_FACTOR_KEY[pillar]))
-            for pillar in _PILLAR_ORDER
-        }
-        for ticker, profile in (factor_profiles or {}).items()
-        if isinstance(profile, dict)
-    }
-    return compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
+    return _attractiveness_from_factor_profiles(
+        factor_profiles, pillar_weights=pillar_weights,
+    )
 
 
 # ── S3 I/O ──────────────────────────────────────────────────────────────────

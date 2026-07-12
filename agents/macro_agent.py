@@ -22,7 +22,7 @@ from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_with_rate_limit_retry,
+    invoke_anthropic_safe,
 )
 from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY, ALL_SECTORS, REGIME_GUARDRAILS, PRIOR_REPORT_MAX_CHARS
 from agents.token_guard import check_prompt_size
@@ -398,12 +398,11 @@ def run_macro_agent(
     # deadline the wrapper re-raises and the run hard-fails (no
     # synthetic macro substitute is promoted). Non-429 errors propagate
     # immediately to the include_raw / strict-mode path below unchanged.
-    response = invoke_with_rate_limit_retry(
-        lambda: structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
-        ),
+    response = invoke_anthropic_safe(
+        structured_llm,
+        [HumanMessage(content=prompt)],
         label="macro_economist",
+        config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
     )
 
     raw_message = response.get("raw")
@@ -483,6 +482,18 @@ def run_macro_agent(
         "sector_modifiers": macro_json.get("sector_modifiers", _DEFAULT_SECTOR_MODIFIERS.copy()),
         "sector_ratings": macro_json.get("sector_ratings", _derive_sector_ratings(_DEFAULT_SECTOR_MODIFIERS)),
         "material_changes": bool(macro_json.get("material_changes", False)),
+        # config#1753: the actually-rendered primary-agent prompt (post
+        # ``_PROMPT_TEMPLATE.format(...)``) — this is what was handed to
+        # ``HumanMessage(content=prompt)`` above, not the raw template.
+        # Threaded back up through ``run_macro_agent_with_reflection`` so
+        # ``research_graph.py``'s ``track_llm_cost`` scope can stamp it
+        # onto ``FullPromptContext.user_prompt`` instead of falling back
+        # to the unsubstituted ``LoadedPrompt.text`` template body. The
+        # critic prompt (``run_macro_critic``) is a refinement pass, not
+        # the canonical decision prompt, so it's intentionally excluded —
+        # mirrors the existing ModelMetadata prompt_id/version comment
+        # in research_graph.py's macro call site.
+        "rendered_prompt": prompt,
     }
 
 
@@ -608,12 +619,11 @@ def run_macro_critic(
         # if it persists past the deadline the wrapper re-raises and
         # (strict mode) the run hard-fails. Non-429 errors fall to the
         # existing strict/lax editorial-accept path unchanged.
-        verdict: MacroCriticOutput = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
-            ),
+        verdict: MacroCriticOutput = invoke_anthropic_safe(
+            structured_llm,
+            [HumanMessage(content=prompt)],
             label="macro_critic",
+            config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
         )
         result = {
             "action": verdict.action,

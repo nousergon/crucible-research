@@ -83,10 +83,13 @@ def _patch_llm(monkeypatch, verdict):
     # cost-telemetry callback factory is imported lazily inside run_cio_critic
     import graph.llm_cost_tracker as lct
     monkeypatch.setattr(lct, "get_cost_telemetry_callback", lambda: None)
-    # invoke_with_rate_limit_retry just calls the thunk in tests
+    # invoke_anthropic_safe (config#2255 send-time chokepoint) just forwards
+    # to the handle's .invoke in tests — the pairing repair is a no-op on the
+    # single-HumanMessage critic prompt.
     monkeypatch.setattr(
-        ic_cio, "invoke_with_rate_limit_retry",
-        lambda fn, label=None: fn(),
+        ic_cio, "invoke_anthropic_safe",
+        lambda handle, messages, *, label=None, deadline_seconds=None, **kw:
+            handle.invoke(messages, **kw),
     )
 
 
@@ -116,8 +119,8 @@ class TestRunCioCritic:
         # Failure at invoke time (the realistic LLM error path the try guards).
         _patch_llm(monkeypatch, CIOCriticOutput(action="accept"))
         monkeypatch.setattr(
-            ic_cio, "invoke_with_rate_limit_retry",
-            lambda fn, label=None: (_ for _ in ()).throw(RuntimeError("api down")),
+            ic_cio, "invoke_anthropic_safe",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")),
         )
         monkeypatch.setattr(ic_cio, "is_strict_validation_enabled", lambda: False)
         out = run_cio_critic(
@@ -130,8 +133,8 @@ class TestRunCioCritic:
     def test_strict_reraises_on_error(self, monkeypatch):
         _patch_llm(monkeypatch, CIOCriticOutput(action="accept"))
         monkeypatch.setattr(
-            ic_cio, "invoke_with_rate_limit_retry",
-            lambda fn, label=None: (_ for _ in ()).throw(RuntimeError("api down")),
+            ic_cio, "invoke_anthropic_safe",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")),
         )
         monkeypatch.setattr(ic_cio, "is_strict_validation_enabled", lambda: True)
         with pytest.raises(RuntimeError):

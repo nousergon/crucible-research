@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 from typing import Optional
 
 logger = logging.getLogger(__name__)
