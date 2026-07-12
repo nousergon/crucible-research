@@ -118,19 +118,48 @@ build_and_deploy_main() {
   PROMPTS_STAGED_FROM_CONFIG_REPO=0
   YAMLS_STAGED_FROM_CONFIG_REPO=()
 
+  # Resolve the research module config source: experiment-package FIRST, legacy
+  # top-level dir as fallback (config#1042 experiment-package adoption — matches
+  # the executor config_loader / backtester spot_backtest.sh precedent). The
+  # package copy is canonical; the legacy `research/` dir is being removed once
+  # every reader is package-aware — this was the last one. $ALPHA_ENGINE_EXPERIMENT_ID
+  # is not injected in the GitHub-Actions Lambda-deploy context, so it defaults
+  # to "reference" (the prod experiment). Fallback keeps this working through the
+  # cutover window (legacy still present) AND after the legacy dir is deleted.
+  EXPERIMENT_ID="${ALPHA_ENGINE_EXPERIMENT_ID:-reference}"
+  RESEARCH_CFG_DIR=""
+  for candidate in \
+    "$CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research" \
+    "$CONFIG_REPO_DIR/research"; do
+    if [ -d "$candidate" ]; then
+      RESEARCH_CFG_DIR="$candidate"
+      break
+    fi
+  done
+  if [ -z "$RESEARCH_CFG_DIR" ]; then
+    echo "ERROR: research config dir not found — tried (package-first):"
+    echo "  $CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research/ (experiment package)"
+    echo "  $CONFIG_REPO_DIR/research/ (legacy top-level)"
+    echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
+    echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+    echo "      (and optionally ALPHA_ENGINE_EXPERIMENT_ID; default: reference)"
+    exit 1
+  fi
+  echo "Research config source: $RESEARCH_CFG_DIR (experiment=$EXPERIMENT_ID)"
+
   # -- prompts -------------------------------------------------------------
   if [ -d "config/prompts" ] && ls config/prompts/*.txt &>/dev/null; then
     echo "Using existing config/prompts/ (local dev workflow)"
   else
-    if [ -d "$CONFIG_REPO_DIR/research/prompts" ]; then
-      echo "Staging research prompts from $CONFIG_REPO_DIR/research/prompts/..."
+    if [ -d "$RESEARCH_CFG_DIR/prompts" ]; then
+      echo "Staging research prompts from $RESEARCH_CFG_DIR/prompts/..."
       mkdir -p config/prompts
-      cp "$CONFIG_REPO_DIR/research/prompts/"*.txt config/prompts/
+      cp "$RESEARCH_CFG_DIR/prompts/"*.txt config/prompts/
       PROMPTS_STAGED_FROM_CONFIG_REPO=1
     else
       echo "ERROR: research prompts not found — tried:"
       echo "  config/prompts/ (local dev)"
-      echo "  $CONFIG_REPO_DIR/research/prompts/ (config repo sibling)"
+      echo "  $RESEARCH_CFG_DIR/prompts/ (config repo, experiment=$EXPERIMENT_ID)"
       echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
       echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
       exit 1
@@ -142,7 +171,7 @@ build_and_deploy_main() {
     if [ -f "config/$yaml" ]; then
       echo "Using existing config/$yaml (local dev workflow)"
     else
-      src="$CONFIG_REPO_DIR/research/$yaml"
+      src="$RESEARCH_CFG_DIR/$yaml"
       if [ -f "$src" ]; then
         echo "Staging config/$yaml from $src..."
         cp "$src" "config/$yaml"
@@ -150,7 +179,7 @@ build_and_deploy_main() {
       else
         echo "ERROR: config/$yaml not found — tried:"
         echo "  config/$yaml (local dev)"
-        echo "  $src (config repo sibling)"
+        echo "  $src (config repo, experiment=$EXPERIMENT_ID)"
         echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
         echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
         exit 1
