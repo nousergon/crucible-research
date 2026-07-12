@@ -542,6 +542,107 @@ def make_tool_use_repair_hook(*, label: str):
     return _hook
 
 
+# ── Single send-time tool_use/tool_result pairing chokepoint (config#2255) ────
+#
+# The "no orphan ``tool_use`` may reach the Anthropic Messages API" invariant
+# bit the fleet TWICE, ~1 month apart, at two DIFFERENT call sites — the
+# prebuilt ``create_react_agent`` ReAct loop (config#1065, fixed with the
+# ``pre_model_hook`` above) and the ``invoke_structured_with_validation_retry``
+# structured-retry chokepoint (config#2245, fixed with a per-site belt). Both
+# fixes were correct at their layer, but each was a PER-CALL-PATH application
+# of the same invariant: any new or existing message-assembling send path that
+# forgets to repair the pairing before ``.invoke()`` can reintroduce the exact
+# same 400. The SOTA response to the second occurrence of a class is to LIFT
+# the invariant to a single chokepoint rather than patch the next site.
+#
+# ``invoke_anthropic_safe`` is that chokepoint: it runs ``repair_tool_use_pairing``
+# IMMEDIATELY before delegating to the underlying ``.invoke()`` (composed with
+# ``invoke_with_rate_limit_retry`` for 429 backoff), so an orphan ``tool_use``
+# turn is structurally incapable of reaching the API regardless of which send
+# path assembled the history. Every Anthropic-backed multi-message ``.invoke()``
+# in the repo routes through it; the ReAct ``pre_model_hook`` stays (it is
+# contractually required by ``create_react_agent`` and shares the same
+# ``repair_tool_use_pairing`` primitive). A CI guard
+# (``tests/test_no_raw_anthropic_invoke.py``) proves a naive new call site that
+# bypasses the chokepoint is caught.
+
+
+def invoke_anthropic_safe(
+    handle,
+    messages: list,
+    *,
+    label: str,
+    deadline_seconds: float | None = None,
+    **invoke_kwargs,
+):
+    """Send ``messages`` through ``handle.invoke`` with the tool_use/tool_result
+    pairing invariant enforced AT SEND TIME (config#2255).
+
+    This is the SINGLE send-time chokepoint for every Anthropic-backed
+    multi-message ``.invoke()`` in crucible-research. It:
+
+      1. Runs ``repair_tool_use_pairing(messages)`` immediately before the
+         send — dropping any PRE-EXISTING orphan ``tool_use`` turn (an
+         assistant turn whose tool_call ids are not all answered by a
+         following ``ToolMessage``) so the Anthropic Messages API can never
+         reject the send with "``tool_use`` ids were found without
+         ``tool_result`` blocks immediately after" (config#1065 / config#2245).
+      2. Delegates to ``handle.invoke(repaired, **invoke_kwargs)`` wrapped in
+         ``invoke_with_rate_limit_retry`` — so 429 backoff composes exactly as
+         it did at the per-site call this replaces.
+
+    Fail-loud is preserved, deliberately and narrowly:
+
+      * The wrapper ONLY drops pre-existing orphan ``tool_use`` turns; it NEVER
+        fabricates a ``tool_result`` (a synthetic result would feed the model a
+        hallucinated observation — see ``repair_tool_use_pairing``). On a drop
+        it WARNs naming the dropped id(s), so the event is flow-doctor-visible.
+      * It does NOT inspect or swallow the RESULT: a structured-output parse
+        failure still comes back in the ``parsing_error`` field and a genuine
+        (non-429) exception still propagates unchanged to the caller's hard-fail
+        branch — ``invoke_with_rate_limit_retry`` only retries 429s.
+
+    This is a HOW-it-runs (plumbing) lift only: it changes nothing about WHAT
+    any agent concludes — a clean history (the normal path) routes through
+    byte-for-byte unchanged (``repair_tool_use_pairing`` is a no-op on a clean
+    list).
+
+    Args:
+        handle: an Anthropic-backed LLM handle exposing ``.invoke(messages,
+            **kw)`` — a ``ChatAnthropic`` or a ``with_structured_output(...)``
+            handle (the ``include_raw=True`` dict-returning shape is passed
+            through untouched).
+        messages: the message list to send (a single ``HumanMessage`` on the
+            normal path; a multi-turn ``[..., raw_tool_use, ToolMessage]``
+            history on a correction re-send).
+        label: log/metric label, forwarded to ``invoke_with_rate_limit_retry``.
+        deadline_seconds: optional override of the 429-retry wall-clock deadline
+            (e.g. a best-effort shadow challenger bounding itself tight).
+        **invoke_kwargs: forwarded verbatim to ``handle.invoke`` (typically
+            ``config={"metadata": ...}``).
+
+    Returns:
+        Whatever ``handle.invoke`` returns (an ``AIMessage`` for a bare LLM, or
+        the ``{'raw', 'parsed', 'parsing_error'}`` dict for an
+        ``include_raw=True`` structured handle).
+    """
+    repaired, dropped = repair_tool_use_pairing(messages)
+    if dropped:
+        log.warning(
+            "[anthropic_safe:%s] dropped %d PRE-EXISTING orphan tool_use "
+            "turn(s) (ids=%s) from the message list before send — the "
+            "send-time pairing chokepoint prevented an Anthropic 'tool_use "
+            "without tool_result' 400 (config#2255). No tool_result was "
+            "fabricated; a genuine parse/validation failure still propagates.",
+            label, len(dropped), dropped,
+        )
+    return invoke_with_rate_limit_retry(
+        lambda: handle.invoke(repaired, **invoke_kwargs),
+        label=label,
+        deadline_seconds=deadline_seconds,
+    )
+
+
 # ── Runtime structured-output truncation detection (config#1294) ──────────────
 #
 # Root-cause guard for the truncation-bug class. When an Anthropic tool-call
@@ -734,7 +835,7 @@ def invoke_structured_with_validation_retry(
         ``ValidationError`` and the caller's existing fail-loud branch
         (e.g., ``raise RuntimeError(...)``) fires as before.
     """
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, ToolMessage
 
     current_messages = list(messages)
     ls_metadata = ls_metadata or {}
@@ -743,12 +844,16 @@ def invoke_structured_with_validation_retry(
 
     for attempt in range(max_retries + 1):
         attempt_label = f"{label}:attempt={attempt + 1}/{max_retries + 1}"
-        final_resp = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                current_messages,
-                config={"metadata": ls_metadata},
-            ),
+        # Route through the shared send-time pairing chokepoint (config#2255):
+        # it repairs any orphan tool_use in ``current_messages`` immediately
+        # before the send (closing the gap that the OLD per-site belt below the
+        # loop left open on attempt 0 — the caller's own ``messages`` are now
+        # repaired on the very first send too) and composes with the 429 retry.
+        final_resp = invoke_anthropic_safe(
+            structured_llm,
+            current_messages,
             label=attempt_label,
+            config={"metadata": ls_metadata},
         )
         # Runtime truncation guard (config#1294): a max_tokens-truncated
         # response yields a PARTIAL tool-call that would otherwise surface as
@@ -767,7 +872,26 @@ def invoke_structured_with_validation_retry(
                 )
             return final_resp
 
-        # Parse failed; decide whether to retry.
+        # Parse failed. Log this attempt loudly with the raw payload head so a
+        # production tool-XML leak (the config#2237 class — a literal
+        # ``<parameter ...>`` tag captured as a str where a list is required) is
+        # diagnosable from the logs WITHOUT re-running the artifact. This is the
+        # per-attempt diagnostic evals/judge.py kept in its bespoke loop before
+        # it migrated onto this chokepoint (config#2237); centralising it here
+        # gives every caller the same diagnostics rather than duplicating it.
+        raw_head = (
+            str(final_resp.get("raw"))[:300]
+            if final_resp.get("raw") is not None
+            else "(no raw)"
+        )
+        log.warning(
+            "[%s] structured-output parse attempt %d/%d failed: %s: %s; "
+            "raw head=%r",
+            label, attempt + 1, max_retries + 1,
+            type(parsing_error).__name__, parsing_error, raw_head,
+        )
+
+        # Decide whether to retry.
         if attempt >= max_retries:
             log.warning(
                 "[%s] structured-output failed after %d validation-retry "
@@ -776,11 +900,11 @@ def invoke_structured_with_validation_retry(
             )
             return final_resp
 
-        # Build a correction message that names the specific schema violation
-        # so the LLM can fix the offending field directly. The raw AIMessage
-        # from the failed attempt is included so the model sees its own prior
-        # output in context (full conversation, not just a fresh prompt).
-        correction = HumanMessage(content=(
+        # Build a correction that names the specific schema violation so the
+        # LLM can fix the offending field directly. The failed ``raw`` AIMessage
+        # from the prior attempt is included so the model sees its own output in
+        # context (full conversation, not just a fresh prompt).
+        correction_text = (
             f"Your prior response failed schema validation:\n\n"
             f"{type(parsing_error).__name__}: {parsing_error}\n\n"
             f"Please re-submit your response with the schema corrections "
@@ -791,13 +915,46 @@ def invoke_structured_with_validation_retry(
             f"the exact type (string vs number vs boolean vs list). "
             f"Preserve all the substantive content from your prior "
             f"response — only fix the schema violation."
-        ))
+        )
 
         raw = final_resp.get("raw")
-        if raw is not None:
-            current_messages = list(messages) + [raw, correction]
+        # ``with_structured_output`` is FORCED TOOL-USE: on a validation failure
+        # the ``raw`` AIMessage carries a ``tool_use`` block. Anthropic requires
+        # the VERY NEXT message to be a ``tool_result`` answering that tool_use —
+        # appending a plain HumanMessage here orphans the tool_use and 400s with
+        # "`tool_use` ids were found without `tool_result` blocks immediately
+        # after" (config#2245: the 2026-07-11 Saturday Research failure, exposed
+        # once crucible-research#402 routed the held-thesis update through this
+        # chokepoint). The SOTA correction is to answer the failed tool_call with
+        # a ToolMessage/tool_result carrying the violation — this keeps the
+        # tool_use/tool_result pairing valid AND feeds the schema error back so
+        # the model re-emits a corrected tool call.
+        tool_call_ids = (
+            [tid for tid in _ai_tool_call_ids(raw) if tid] if raw is not None else []
+        )
+        if raw is not None and tool_call_ids:
+            # One tool_result per tool_use id in the failed turn (structured
+            # output emits a single call, but pair them all defensively — every
+            # tool_use MUST be answered or the 400 recurs).
+            correction_msgs = [
+                ToolMessage(content=correction_text, tool_call_id=tid)
+                for tid in tool_call_ids
+            ]
+            current_messages = list(messages) + [raw, *correction_msgs]
+        elif raw is not None:
+            # Plain-text structured output (no tool_use block in ``raw``) — a
+            # HumanMessage correction is already well-formed, no pairing needed.
+            current_messages = list(messages) + [
+                raw, HumanMessage(content=correction_text)
+            ]
         else:
-            current_messages = list(messages) + [correction]
+            current_messages = list(messages) + [HumanMessage(content=correction_text)]
+
+        # NOTE: no per-site pairing belt here anymore — the next iteration's
+        # send goes through ``invoke_anthropic_safe`` (config#2255), which runs
+        # ``repair_tool_use_pairing`` at send time. Repairing here as well would
+        # be redundant (and would only ever fire on a caller-supplied malformed
+        # history, which the chokepoint now handles on attempt 0 too).
 
         log.info(
             "[%s] structured-output parse failed on attempt %d/%d "

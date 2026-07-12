@@ -132,6 +132,106 @@ class TestRecovery:
         assert "schema validation" in second_args[0][1].content.lower()
 
 
+class TestForcedToolUseCorrectionPairing:
+    """Regression for config#2245 (2026-07-11 Saturday Research failure).
+
+    ``with_structured_output`` is forced tool-use: the failed ``raw`` AIMessage
+    carries a ``tool_use`` block. The pre-#402 correction appended a plain
+    HumanMessage right after it, orphaning the tool_use and producing the
+    Anthropic 400 ``messages.N: `tool_use` ids were found without `tool_result`
+    blocks immediately after``. These pin that the retry now answers the failed
+    tool_call with a ``tool_result`` (ToolMessage), keeping the pairing VALID.
+
+    The prior tests here mock ``raw`` as a bare ``MagicMock`` with no tool-call
+    structure, so they never exercised the forced-tool-use path — these use a
+    REAL ``AIMessage`` carrying ``tool_calls``.
+    """
+
+    def _ai_with_tool_call(self, tool_id="toolu_0142fi9rv7HCWLz7vY2m7AgT"):
+        from langchain_core.messages import AIMessage
+        return AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "SectorPick",
+                "args": {"confidence": "medium_high"},
+                "id": tool_id,
+                "type": "tool_call",
+            }],
+        )
+
+    def test_retry_turn_answers_tool_use_with_tool_result(self):
+        from langchain_core.messages import ToolMessage
+        from agents.langchain_utils import (
+            invoke_structured_with_validation_retry,
+            find_orphan_tool_use_ids,
+            validate_tool_use_pairing,
+        )
+
+        parsed_obj = object()
+        ve = _validation_error()
+        raw = self._ai_with_tool_call()
+        structured_llm = MagicMock()
+        structured_llm.invoke.side_effect = [
+            _resp(parsed=None, parsing_error=ve, raw=raw),
+            _resp(parsed=parsed_obj),
+        ]
+
+        resp = invoke_structured_with_validation_retry(
+            structured_llm, ["initial-msg"], label="test:forced-tool-use",
+        )
+
+        assert resp["parsed"] is parsed_obj
+        assert structured_llm.invoke.call_count == 2
+        second_args, _ = structured_llm.invoke.call_args_list[1]
+        sent = second_args[0]
+        # original + raw(tool_use) + tool_result answer
+        assert sent[0] == "initial-msg"
+        assert sent[1] is raw
+        answer = sent[2]
+        assert isinstance(answer, ToolMessage)
+        assert answer.tool_call_id == "toolu_0142fi9rv7HCWLz7vY2m7AgT"
+        # The correction feedback rides in the tool_result content.
+        assert "schema validation" in answer.content.lower()
+        assert "medium_high" in answer.content
+        # THE INVARIANT: the message list SENT to the API has no orphan
+        # tool_use — i.e. it can never trigger the config#2245 400.
+        assert find_orphan_tool_use_ids(sent) == []
+        validate_tool_use_pairing(sent)  # must not raise
+
+    def test_multiple_tool_calls_all_answered(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+        from agents.langchain_utils import (
+            invoke_structured_with_validation_retry,
+            find_orphan_tool_use_ids,
+        )
+
+        parsed_obj = object()
+        ve = _validation_error()
+        raw = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "SectorPick", "args": {}, "id": "toolu_A", "type": "tool_call"},
+                {"name": "SectorPick", "args": {}, "id": "toolu_B", "type": "tool_call"},
+            ],
+        )
+        structured_llm = MagicMock()
+        structured_llm.invoke.side_effect = [
+            _resp(parsed=None, parsing_error=ve, raw=raw),
+            _resp(parsed=parsed_obj),
+        ]
+
+        invoke_structured_with_validation_retry(
+            structured_llm, ["initial-msg"], label="test:multi-tool",
+        )
+        second_args, _ = structured_llm.invoke.call_args_list[1]
+        sent = second_args[0]
+        answered = {
+            m.tool_call_id for m in sent if isinstance(m, ToolMessage)
+        }
+        assert answered == {"toolu_A", "toolu_B"}
+        assert find_orphan_tool_use_ids(sent) == []
+
+
 class TestTerminalFailure:
     def test_all_retries_exhaust_returns_last_response_with_parsing_error(self, caplog):
         import logging

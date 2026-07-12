@@ -19,21 +19,40 @@ from langgraph.prebuilt import create_react_agent
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUANT_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
+from agents.sector_teams.react_budget import (
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    workload_derived_recursion_limit,
+)
 from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, MAX_TICKERS_IN_PROMPT
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
 log = logging.getLogger(__name__)
 
-# LangGraph state-transition budget. Each ReAct round = 1 LLM message + 1 tool
-# response = 2 transitions, so QUANT_MAX_ITERATIONS rounds need 2× that.
-# The +2 buffer is RETAINED defensively (was added 2026-05-02 to cover
-# response_format's extra extraction call inside the subgraph). After the
-# 2026-05-02 refactor that decouples the structured-output extraction from
-# the ReAct loop, the +2 is no longer load-bearing — but the cost is one
-# transition slot of headroom and removing it offers no benefit. Keep as
-# defensive margin.
-_QUANT_RECURSION_LIMIT = QUANT_MAX_ITERATIONS * 2 + 2
+# LangGraph ReAct step budget — DERIVED from the live workload, not a
+# hand-tuned constant (config#1822). The quant analyst screens its whole
+# sector universe, so its worst-case bounded workload is
+# ``len(sector_tickers) * len(tools)`` tool rounds; a fixed
+# ``QUANT_MAX_ITERATIONS`` ceiling silently under-budgets larger sectors —
+# which is exactly what cut the industrials team off at 40 legitimate,
+# non-repeating research calls on 2026-07-11 (partial → ALL-AGENTS-STRICT
+# hard-fail). Routes through the shared ``workload_derived_recursion_limit``
+# chokepoint so qual and quant share one provably-adequate, self-adjusting
+# rule (superstep math + rationale documented there). ``QUANT_MAX_ITERATIONS``
+# is kept as a configurable floor.
+
+
+def _quant_recursion_limit(n_tickers: int, n_tools: int) -> int:
+    """Workload-derived ReAct ``recursion_limit`` for the quant analyst.
+
+    Thin per-analyst binding over the shared
+    ``workload_derived_recursion_limit`` chokepoint: floors at the configured
+    ``QUANT_MAX_ITERATIONS`` rounds but grows to cover every tool on every
+    ticker in the screened sector universe plus a synthesis margin.
+    """
+    return workload_derived_recursion_limit(
+        n_tickers, n_tools, floor_iterations=QUANT_MAX_ITERATIONS
+    )
 
 
 def _emit_retry_telemetry_safely(
@@ -303,7 +322,14 @@ def run_quant_analyst(
         "user_prompt_hash": user_prompt.hash[:12],
     }
 
-    log.info("[quant:%s] starting ReAct agent with %d tickers", team_id, len(sector_tickers))
+    # Size the step budget to THIS invocation's workload (tickers × tools),
+    # not a fixed constant — see ``_quant_recursion_limit`` (config#1822).
+    recursion_limit = _quant_recursion_limit(len(sector_tickers), len(tools))
+    log.info(
+        "[quant:%s] starting ReAct agent with %d tickers, %d tools "
+        "(recursion_limit=%d)",
+        team_id, len(sector_tickers), len(tools), recursion_limit,
+    )
 
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
@@ -313,7 +339,7 @@ def run_quant_analyst(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config={
-                    "recursion_limit": _QUANT_RECURSION_LIMIT,
+                    "recursion_limit": recursion_limit,
                     "metadata": _ls_metadata,
                 },
             ),
@@ -376,12 +402,11 @@ def run_quant_analyst(
             "return an empty list.\n\n"
             f"--- ANALYST ANSWER ---\n{final_text}"
         ))
-        extract_resp = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [extract_msg],
-                config={"metadata": _ls_metadata},
-            ),
+        extract_resp = invoke_anthropic_safe(
+            structured_llm,
+            [extract_msg],
             label=f"quant:{team_id}:extract",
+            config={"metadata": _ls_metadata},
         )
         parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
@@ -412,7 +437,10 @@ def run_quant_analyst(
         # to tell these apart on the next run.
         if not picks:
             last_tool = tool_calls[-1].get("tool") if tool_calls else "<none>"
-            recursion_limit_hit = len(tool_calls) >= QUANT_MAX_ITERATIONS * 2 - 1
+            # Near-ceiling heuristic against THIS invocation's derived budget
+            # (recursion_limit = iterations*2+2 supersteps ≈ 2 per tool round).
+            rounds_budget = (recursion_limit - 2) // 2
+            recursion_limit_hit = len(tool_calls) >= rounds_budget - 1
             text_tail = (final_text[-500:] if final_text else "<empty>").replace("\n", " ")
             log.warning(
                 "[quant:%s] produced 0 picks — tool_calls=%d "
@@ -446,22 +474,22 @@ def run_quant_analyst(
         # Treat as a degraded-but-non-fatal outcome: this team contributes
         # zero picks but doesn't crash the SF — score_aggregator will see
         # ``partial=True`` and accept the empty contribution with a WARN.
-        # The +2 budget bump should already prevent the ``response_format``
-        # extraction call from blowing the budget on its own; if we still
-        # hit this, the agent legitimately needs more than 8 ReAct rounds
-        # for this sector + run, which is a tunable observation, not a
-        # crash-the-pipeline emergency.
+        # The budget is now sized to this invocation's workload
+        # (``_quant_recursion_limit``); hitting it means the agent
+        # legitimately needed more than the bounded ticker×tool worst case
+        # for this sector — a loop the langgraph sentinel is catching, not a
+        # tuning shortfall — so degrade LOUDLY (partial), never crash.
         log.warning(
             "[quant:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 picks). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, _QUANT_RECURSION_LIMIT,
+            team_id, recursion_limit,
         )
         return {
             "team_id": team_id,
             "ranked_picks": [],
             "tool_calls": [],
-            "iterations": _QUANT_RECURSION_LIMIT,
+            "iterations": recursion_limit,
             "error": None,
             "partial": True,
             "partial_reason": "recursion_limit_exhausted",
@@ -651,8 +679,8 @@ from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+    invoke_anthropic_safe,
     invoke_react_with_recovery,
-    invoke_with_rate_limit_retry,
     is_step_budget_exhausted_sentinel,
     make_tool_use_repair_hook,
 )

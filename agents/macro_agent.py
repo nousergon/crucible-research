@@ -22,7 +22,7 @@ from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_with_rate_limit_retry,
+    invoke_anthropic_safe,
 )
 from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY, ALL_SECTORS, REGIME_GUARDRAILS, PRIOR_REPORT_MAX_CHARS
 from agents.token_guard import check_prompt_size
@@ -398,12 +398,11 @@ def run_macro_agent(
     # deadline the wrapper re-raises and the run hard-fails (no
     # synthetic macro substitute is promoted). Non-429 errors propagate
     # immediately to the include_raw / strict-mode path below unchanged.
-    response = invoke_with_rate_limit_retry(
-        lambda: structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
-        ),
+    response = invoke_anthropic_safe(
+        structured_llm,
+        [HumanMessage(content=prompt)],
         label="macro_economist",
+        config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
     )
 
     raw_message = response.get("raw")
@@ -620,12 +619,11 @@ def run_macro_critic(
         # if it persists past the deadline the wrapper re-raises and
         # (strict mode) the run hard-fails. Non-429 errors fall to the
         # existing strict/lax editorial-accept path unchanged.
-        verdict: MacroCriticOutput = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
-            ),
+        verdict: MacroCriticOutput = invoke_anthropic_safe(
+            structured_llm,
+            [HumanMessage(content=prompt)],
             label="macro_critic",
+            config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
         )
         result = {
             "action": verdict.action,

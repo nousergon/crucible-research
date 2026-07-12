@@ -1,0 +1,96 @@
+# pip-audit ignore list (nousergon/alpha-engine-config#2342)
+# Every entry below MUST carry a dated rationale comment directly above it.
+# No blanket suppression — each accepted advisory is named individually.
+# Format:
+#   # <rationale> — accepted 2026-07-12, revisit <YYYY-MM-DD or "when a fix is released">
+#   <VULN-ID>
+
+# langchain 0.3.30 -> fix requires langchain 1.3.9. The fix version is on
+# the langchain "1.0" line, an ecosystem-wide rename/rewrite (langchain,
+# langchain-openai, langchain-text-splitters, langgraph, langgraph-checkpoint,
+# langgraph-sdk all did coordinated 0.x -> 1.x major bumps together).
+# langchain here is a transitive dep of agentevals (via requirements.txt's
+# agentevals~=0.0), not a direct import of ours. Verified locally: forcing
+# langgraph==1.0.10 alone drags in langchain-core 1.4.9, which breaks the
+# langchain-anthropic~=0.3 pin this repo's production research pipeline
+# depends on (langchain-anthropic 0.3.22 requires langchain-core<1.0.0).
+# Adopting the fix means validating the whole langchain-1.0 migration
+# (breaking message/tool-call API changes) across graph/, thinktank/, and
+# evals/ — too large to safely land in this pip-audit-blocking PR.
+# Path-confinement issue (file-search agent middleware, prompt/config
+# loaders); this repo doesn't use langchain's file-search agent middleware
+# or path-taking config loaders.
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0 migration ticket.
+CVE-2026-55443
+
+# langchain-openai 0.3.35 -> fix requires 1.1.14 (same langchain-1.0 line,
+# see CVE-2026-55443 above; transitive via agentevals). SSRF/TOCTOU issue is
+# in _url_to_size() image-token-counting helper; this repo doesn't pass
+# untrusted image URLs through langchain-openai's token counting.
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0 migration ticket.
+PYSEC-2026-76
+
+# langchain-text-splitters 0.3.11 -> fix requires 1.1.2 (same langchain-1.0
+# line; transitive via both langchain and voyageai). SSRF-via-redirect issue
+# is in HTMLHeaderTextSplitter.split_text_from_url(), which this repo does
+# not call (no URL-fetching text splitter usage found).
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0 migration ticket.
+PYSEC-2026-77
+
+# langgraph 0.6.11 -> fix requires 1.0.10 (major bump off the pinned
+# langgraph~=0.2 range; confirmed pulls langchain-core 1.x which breaks
+# langchain-anthropic~=0.3, see CVE-2026-55443 above for the full
+# cross-package dependency proof). Unsafe checkpoint deserialization is a
+# defense-in-depth issue requiring an attacker to already have write access
+# to the checkpoint backing store (post-exploitation scenario) — not
+# remotely exploitable on its own.
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0/langgraph-1.0
+# migration ticket.
+PYSEC-2026-83
+
+# langgraph-checkpoint 3.0.1 -> fix requires 4.0.0 (transitive from
+# langgraph~=0.2; same migration blocker as PYSEC-2026-83 above). RCE via
+# pickle_fallback in BaseCache requires the application to explicitly
+# enable a langgraph cache backend with CachePolicy — this repo does not
+# use langgraph's caching layer (no `cache=` passed to StateGraph).
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0/langgraph-1.0
+# migration ticket.
+CVE-2026-27794
+
+# langgraph-checkpoint 3.0.1 -> fix requires 4.1.1 (transitive from
+# langgraph~=0.2; same migration blocker as PYSEC-2026-83/CVE-2026-27794
+# above). JsonPlusSerializer object reconstruction is defense-in-depth,
+# reachable only if checkpoint bytes at rest are already attacker-modified
+# (implies a prior serious compromise of the backing store).
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0/langgraph-1.0
+# migration ticket.
+CVE-2026-48775
+
+# langgraph-sdk 0.2.15 -> fix requires 0.3.15 (transitive from
+# langgraph~=0.2; same migration blocker as above). URL-path-injection via
+# unsanitized identifiers affects the langgraph-sdk HTTP client talking to
+# a LangGraph Platform deployment; this repo does not use langgraph-sdk's
+# client against an untrusted/multi-tenant LangGraph Platform deployment.
+# accepted 2026-07-12, revisit when nousergon/alpha-engine-config#2342's
+# fleet sweep is followed by a dedicated langchain-1.0/langgraph-1.0
+# migration ticket.
+CVE-2026-48776
+
+# pytest 8.4.2 -> fix requires 9.0.3, which is a major bump off the pinned
+# pytest~=8.2 range. Verified locally: pytest 9.x forces pytest-asyncio to
+# also jump 0.x -> 1.x (pytest-asyncio 0.26.0, our current resolved
+# version, requires pytest<9; only pytest-asyncio>=1.0.0 supports pytest 9),
+# compounding into a second breaking bump. The vulnerability itself
+# (PYSEC-2026-1845) is a local-only /tmp/pytest-of-{user} directory-naming
+# DoS/privilege issue requiring a malicious co-tenant on the same
+# multi-user host — not applicable to GitHub Actions' single-tenant runners
+# or CI's threat model.
+# accepted 2026-07-12, revisit when a pytest-asyncio 1.x migration is
+# planned separately (dev-only dependency, not shipped to production).
+PYSEC-2026-1845

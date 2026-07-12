@@ -28,6 +28,10 @@ from config import (
 )
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
+from agents.sector_teams.react_budget import (
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    workload_derived_recursion_limit,
+)
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
@@ -65,10 +69,27 @@ class _QualPillarBatch(BaseModel):
 
 log = logging.getLogger(__name__)
 
-# +2 retained as defensive margin (was load-bearing for response_format's
-# extra call inside the LangGraph subgraph; after the 2026-05-02 refactor
-# the extraction is decoupled and the +2 is unused). See quant_analyst.py.
-_QUAL_RECURSION_LIMIT = QUAL_MAX_ITERATIONS * 2 + 2
+# LangGraph ReAct step budget — DERIVED from the live workload, not a
+# hand-tuned constant (config#1822). The superstep math and the rationale
+# for making this a shared chokepoint live in
+# ``agents.sector_teams.react_budget``; qual and quant both route through it
+# so the invariant is enforced in ONE place. ``_REACT_SYNTHESIS_MARGIN_ROUNDS``
+# is re-exported from that module (imported above) for the guard tests.
+
+
+def _qual_recursion_limit(n_picks: int, n_tools: int) -> int:
+    """Workload-derived ReAct ``recursion_limit`` for the qual analyst.
+
+    Thin per-analyst binding over the shared
+    ``workload_derived_recursion_limit`` chokepoint: floors at the
+    configured ``QUAL_MAX_ITERATIONS`` rounds but grows to cover
+    ``n_picks * n_tools`` tool rounds plus a synthesis margin, so the agent
+    can research every pick with every tool AND still synthesize its
+    assessment.
+    """
+    return workload_derived_recursion_limit(
+        n_picks, n_tools, floor_iterations=QUAL_MAX_ITERATIONS
+    )
 
 
 def run_qual_analyst(
@@ -181,7 +202,14 @@ def run_qual_analyst(
         "user_prompt_hash": user_prompt.hash[:12],
     }
 
-    log.info("[qual:%s] starting ReAct agent with %d picks", team_id, len(quant_top5))
+    # Size the step budget to THIS invocation's workload (picks × tools),
+    # not a fixed constant — see ``_qual_recursion_limit`` (config#1822).
+    recursion_limit = _qual_recursion_limit(len(quant_top5), len(tools))
+    log.info(
+        "[qual:%s] starting ReAct agent with %d picks, %d tools "
+        "(recursion_limit=%d)",
+        team_id, len(quant_top5), len(tools), recursion_limit,
+    )
 
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
@@ -191,7 +219,7 @@ def run_qual_analyst(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config={
-                    "recursion_limit": _QUAL_RECURSION_LIMIT,
+                    "recursion_limit": recursion_limit,
                     "metadata": _ls_metadata,
                 },
             ),
@@ -329,14 +357,14 @@ def run_qual_analyst(
             "[qual:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 assessments). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, _QUAL_RECURSION_LIMIT,
+            team_id, recursion_limit,
         )
         return {
             "team_id": team_id,
             "assessments": [],
             "additional_candidate": None,
             "tool_calls": [],
-            "iterations": _QUAL_RECURSION_LIMIT,
+            "iterations": recursion_limit,
             "error": None,
             "partial": True,
             "partial_reason": "recursion_limit_exhausted",

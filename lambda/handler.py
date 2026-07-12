@@ -682,6 +682,7 @@ def handler(event, context):
             from evals.trajectory import validate_trajectory
             _trajectory_result = validate_trajectory(
                 project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
+                final_state=final_state,
             )
             if _trajectory_result and not _trajectory_result["passed"]:
                 import logging as _logging
