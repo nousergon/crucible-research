@@ -45,8 +45,14 @@ def _load_fmp_counter() -> int:
         data = _json.loads(obj["Body"].read())
         if data.get("date") == str(date.today()):
             return data.get("count", 0)
-    except Exception:
-        pass
+    except Exception as e:
+        # S3 errors (transient failures, access issues) → WARN and degrade
+        # conservatively to avoid un-throttling the budget mid-day. Treating a
+        # failed load as "at limit" is conservative: we skip calls that may have
+        # already been made today, but never silently un-throttle on a transient
+        # failure (which would cause duplicate calls if the error was temporary).
+        logger.warning("Failed to load FMP counter from S3: %s — treating as at/near limit", e)
+        return _FMP_DAILY_LIMIT
     return 0
 
 
