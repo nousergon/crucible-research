@@ -108,7 +108,7 @@ def _connect_arctic() -> object:
     ``PriceFetchError`` semantics (a research-specific exception type)
     are preserved on the failure path.
     """
-    from alpha_engine_lib.arcticdb import open_universe_lib
+    from nousergon_lib.arcticdb import open_universe_lib
     try:
         return open_universe_lib(_S3_BUCKET)
     except Exception as exc:

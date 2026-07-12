@@ -64,7 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # Structured logging + flow-doctor singleton from alpha-engine-lib.
 # See lambda/handler.py for the full rationale. flow-doctor.yaml ships
 # in the Lambda task root (Dockerfile.alerts COPY).
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(

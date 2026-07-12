@@ -66,7 +66,7 @@ _ALLOWLIST: dict[str, set[int]] = {
     # ``run_macro_agent``'s return dict grew a ``"rendered_prompt"`` key
     # (+ explanatory comment, 12 lines total) above the critic function;
     # net +12. Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {579},
+    "agents/macro_agent.py": {578},
 }
 
 

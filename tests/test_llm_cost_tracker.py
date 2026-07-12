@@ -34,8 +34,8 @@ import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from alpha_engine_lib.cost import PriceCard, PriceTable
-from alpha_engine_lib.decision_capture import FullPromptContext, ModelMetadata
+from nousergon_lib.cost import PriceCard, PriceTable
+from nousergon_lib.decision_capture import FullPromptContext, ModelMetadata
 
 
 # ── Test fixtures ─────────────────────────────────────────────────────────

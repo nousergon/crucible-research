@@ -18,7 +18,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
@@ -65,7 +65,7 @@ def _make_capture_dict(
             input_data_snapshot = {
                 "prior_thesis": {"thesis_summary": "real thesis text"},
                 "news_data": {"articles": [{"headline": "h"}]},
-                "analyst_data": {"consensus_rating": "buy"},
+                "analyst_data": {"earnings_surprises": [{"date": "2026-06-15", "surprise_pct": 3.2}]},
             }
         else:
             input_data_snapshot = {"k": "v"}

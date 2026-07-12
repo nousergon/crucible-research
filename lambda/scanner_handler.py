@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from graph.langsmith_pandas_patch import install as _install_ls_patch
 _install_ls_patch()
 
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -146,7 +146,7 @@ def handler(event, context):
     # trading-day axis (lib chokepoint), preserving on-or-before semantics so an
     # explicit operator backfill date is normalized too.
     import datetime as _dt
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     _cal = _dt.date.fromisoformat(run_date[:10])
     _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
     _trading_day = _td.isoformat()

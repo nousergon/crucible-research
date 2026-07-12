@@ -82,6 +82,69 @@ def _dims(agent_id: str) -> list[dict]:
     return [{"Name": "agent_id", "Value": agent_id}, {"Name": "env", "Value": _env_label()}]
 
 
+def _emit_telemetry_dropped(*, agent_id: str, cw: Any) -> None:
+    """Emit a loud TelemetryDropped counter when put_metric_data fails.
+
+    This is the fail-loud recording surface for dropped telemetry — a silent
+    drop class can never run for months again (per config#2251 motivation).
+    Uses a best-effort fallback path: if even this emission fails, we log
+    at ERROR but do not recurse (avoiding cascade failure).
+    """
+    metric_data = [
+        {"MetricName": "TelemetryDropped", "Dimensions": _dims(agent_id),
+         "Value": 1.0, "Unit": "Count"},
+    ]
+    if cw is None:
+        try:
+            import boto3
+            cw = boto3.client("cloudwatch", region_name="us-east-1")
+        except Exception as exc:
+            logger.error(
+                "[agent_telemetry] could not create boto3 client for drop metric: %s",
+                exc,
+            )
+            return
+
+    try:
+        cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
+    except Exception as exc:
+        # Best-effort: if this fallback also fails, log at ERROR and stop
+        # (do not recurse). The primary telemetry already failed; a cascade
+        # here is not actionable.
+        logger.error(
+            "[agent_telemetry] could not emit TelemetryDropped for agent_id=%s: %s",
+            agent_id, exc,
+        )
+
+
+def _emit_tripwire_dropped(*, cw: Any) -> None:
+    """Emit a loud TelemetryDropped counter for the new-entrant tripwire.
+
+    Tripwire is dimensioned differently (no agent_id); uses a separate
+    namespace-level TelemetryDropped metric.
+    """
+    metric_data = [
+        {"MetricName": "TelemetryDropped", "Value": 1.0, "Unit": "Count"},
+    ]
+    if cw is None:
+        try:
+            import boto3
+            cw = boto3.client("cloudwatch", region_name="us-east-1")
+        except Exception as exc:
+            logger.error(
+                "[agent_telemetry] could not create boto3 client for tripwire drop metric: %s",
+                exc,
+            )
+            return
+
+    try:
+        cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
+    except Exception as exc:
+        logger.error(
+            "[agent_telemetry] could not emit tripwire TelemetryDropped: %s", exc,
+        )
+
+
 def _is_telemetry_enabled() -> bool:
     """Default ON — production emits, tests can disable via env.
 
@@ -157,10 +220,12 @@ def emit_agent_completion(
     try:
         cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[agent_telemetry] put_metric_data failed for agent_id=%s: %s",
             agent_id, exc,
         )
+        # Emit a loud TelemetryDropped counter via best-effort fallback path
+        _emit_telemetry_dropped(agent_id=agent_id, cw=cw)
 
 
 def emit_agent_retry(
@@ -215,10 +280,12 @@ def emit_agent_retry(
     try:
         cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[agent_telemetry] retry emission failed for agent_id=%s: %s",
             agent_id, exc,
         )
+        # Emit a loud TelemetryDropped counter via best-effort fallback path
+        _emit_telemetry_dropped(agent_id=agent_id, cw=cw)
 
 
 def emit_new_entrant_tripwire(
@@ -269,6 +336,8 @@ def emit_new_entrant_tripwire(
     try:
         cw.put_metric_data(Namespace=NAMESPACE, MetricData=metric_data)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[agent_telemetry] new-entrant tripwire emission failed: %s", exc,
         )
+        # Emit a loud TelemetryDropped counter with special tripwire marker
+        _emit_tripwire_dropped(cw=cw)

@@ -317,10 +317,12 @@ class TestTeamAccuracyParity:
             _old_fetch_team_outcomes(history_db, "2026-04-01", "2026-06-01"),
             key=lambda r: r["team_id"],
         )
-        new = sorted(
-            _fetch_team_outcomes(history_db, "2026-04-01", "2026-06-01"),
-            key=lambda r: r["team_id"],
+        # config#1844: _fetch_team_outcomes now returns (rows, n_advance_picks)
+        # so the envelope can carry the window's input-side count.
+        new_rows, _n_advance = _fetch_team_outcomes(
+            history_db, "2026-04-01", "2026-06-01"
         )
+        new = sorted(new_rows, key=lambda r: r["team_id"])
         # `new` uses the long-store's `beat_spy` field name (config#1530
         # burn-down guard renamed the internal dict key off the retired
         # wide-column literal `beat_spy_21d`, which `old` still spells).
@@ -331,15 +333,18 @@ class TestTeamAccuracyParity:
 
     def test_analyze_team_performance_matches_manual_wide_computation(self, history_db):
         result = analyze_team_performance(history_db, as_of_date=date(2026, 6, 2), lookback_weeks=8)
+        # config#1844: per-team payload now lives under the envelope's
+        # `teams` key; the values themselves must stay wide-parity-identical.
+        teams = result["teams"]
         # technology: AAPL(beat=1,ADVANCE) + MSFT(beat=0,ADVANCE) + NVDA(beat=1,ADVANCE)
         # GOOG excluded (REJECT), TSLA excluded (unresolved) -> 2/3
-        assert result["technology"] == {"accuracy": pytest.approx(2 / 3), "n_obs": 3}
+        assert teams["technology"] == {"accuracy": pytest.approx(2 / 3), "n_obs": 3}
         # healthcare: JNJ(beat=1) + PFE(beat=0) -> 1/2
-        assert result["healthcare"] == {"accuracy": pytest.approx(1 / 2), "n_obs": 2}
+        assert teams["healthcare"] == {"accuracy": pytest.approx(1 / 2), "n_obs": 2}
         # consumer: KO(beat=0) -> 0/1
-        assert result["consumer"] == {"accuracy": 0.0, "n_obs": 1}
+        assert teams["consumer"] == {"accuracy": 0.0, "n_obs": 1}
         # no team for XOM (null team_id) -> no 'energy'/None key at all
-        assert None not in result
+        assert None not in teams
 
 
 class TestEpisodicParity:

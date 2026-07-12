@@ -42,7 +42,7 @@ from typing import Any, Optional
 
 import boto3
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
+from nousergon_lib.decision_capture import DecisionArtifact
 
 from agents.prompt_loader import load_prompt
 from evals.judge import (
