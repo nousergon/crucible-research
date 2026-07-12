@@ -214,3 +214,191 @@ class TestNoFalseFailureOnEmailSenderRegression:
             f"validator must wait for email_sender_node to flush rather than "
             f"reporting it as missing on the first fetch. Got: {result['failures']}"
         )
+
+
+def _full_structural_final_state(*, n_teams: int = 6, include_email_sent: bool = True) -> dict:
+    """A final_state dict with complete structural evidence for all 11
+    REQUIRED_NODES, as if produced by a real ``graph.invoke()`` call where
+    every checkpointable node was resumed from S3."""
+    state = {
+        "run_date": "2026-07-11",
+        "checkpoint_resumed_nodes": {
+            **{f"sector_team_node:team_{i}": True for i in range(n_teams)},
+            "macro_economist_node": True,
+            "cio_node": True,
+        },
+        # fetch_data
+        "scanner_universe": ["AAPL", "MSFT"],
+        "price_data": {"AAPL": {}},
+        "data_snapshot_id": "snap-1",
+        # sector_team_node
+        "sector_team_outputs": {f"team_{i}": {"recommendations": []} for i in range(n_teams)},
+        # macro_economist_node
+        "market_regime": "neutral",
+        # exit_evaluator_node
+        "remaining_population": [],
+        "exits": [],
+        "open_slots": 2,
+        # merge_results
+        "team_slot_allocation": {"team_0": 1},
+        # score_aggregator
+        "investment_theses": {},
+        # cio_node
+        "ic_decisions": [],
+        # population_entry_handler
+        "new_population": [],
+        "population_rotation_events": [],
+        # consolidator_node
+        "consolidated_report": "report text",
+    }
+    if include_email_sent:
+        # email_sender_node (also the transitive archive_writer signal)
+        state["email_sent"] = True
+    return state
+
+
+class TestResumeAwareFinalStateFallback:
+    """config#2263 — checkpoint-resumed runs must not page on trace-based
+    'missing node' / 'sector_team_count: 0' false positives. See the
+    2026-07-11 watch-rerun-6 incident: 5/6 sector teams short-circuited
+    from S3 checkpoints (intended #404 behavior), the LangSmith trace for
+    THIS invocation hadn't flushed yet, and the validator paged ERROR
+    immediately before a successful health-status write."""
+
+    def test_resumed_run_with_full_structural_evidence_passes_despite_empty_trace(
+        self, monkeypatch,
+    ):
+        """Simulates the exact incident: trace shows ZERO child spans (the
+        flush race, worse-cased), but final_state has checkpoint_resumed_nodes
+        non-empty and full structural evidence for all 11 nodes including
+        6/6 sector_team_outputs. Must pass with no ERROR."""
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+        client_mock = MagicMock()
+        client_mock.list_runs.side_effect = lambda **kwargs: (
+            [_stub_run()] if kwargs.get("is_root") else []  # no child spans at all
+        )
+
+        final_state = _full_structural_final_state()
+
+        with patch("langsmith.Client", return_value=client_mock), \
+             patch("evals.trajectory.time.sleep") as sleep_mock:
+            result = validate_trajectory(
+                completeness_timeout_seconds=30, final_state=final_state,
+            )
+
+        assert result is not None
+        assert result["passed"] is True, (
+            f"resumed run with full structural evidence must not page; "
+            f"got failures: {result.get('failures')}"
+        )
+        assert result["node_counts"].get("sector_team_node") == 6
+        # Resumed-run path must not block waiting on trace completeness —
+        # the whole point is to avoid re-racing the flush.
+        assert sleep_mock.call_count == 0
+
+    def test_resumed_run_missing_one_sector_team_still_fails(self, monkeypatch):
+        """Only 5 of 6 sector_team_outputs entries present — a genuine
+        drop, not a trace-lag artifact. Resume-awareness must not mask
+        this: the run should still fail."""
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+        client_mock = MagicMock()
+        client_mock.list_runs.side_effect = lambda **kwargs: (
+            [_stub_run()] if kwargs.get("is_root") else []
+        )
+
+        final_state = _full_structural_final_state(n_teams=5)
+
+        with patch("langsmith.Client", return_value=client_mock), \
+             patch("evals.trajectory.time.sleep"):
+            result = validate_trajectory(
+                completeness_timeout_seconds=30, final_state=final_state,
+            )
+
+        assert result is not None
+        assert result["passed"] is False
+        assert any(
+            f.startswith("sector_team_count: expected 6, got 5")
+            for f in result["failures"]
+        )
+
+    def test_resumed_run_missing_email_sent_key_still_fails(self, monkeypatch):
+        """email_sent key entirely absent from final_state — genuinely
+        missing evidence for BOTH email_sender_node and (transitively)
+        archive_writer. Must still fail even though this run used
+        checkpoint-resume."""
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+        client_mock = MagicMock()
+        client_mock.list_runs.side_effect = lambda **kwargs: (
+            [_stub_run()] if kwargs.get("is_root") else []
+        )
+
+        final_state = _full_structural_final_state(include_email_sent=False)
+
+        with patch("langsmith.Client", return_value=client_mock), \
+             patch("evals.trajectory.time.sleep"):
+            result = validate_trajectory(
+                completeness_timeout_seconds=30, final_state=final_state,
+            )
+
+        assert result is not None
+        assert result["passed"] is False
+        assert any(f.startswith("missing_node: email_sender_node") for f in result["failures"])
+        assert any(f.startswith("missing_node: archive_writer") for f in result["failures"])
+
+    def test_fresh_run_with_final_state_but_no_resume_evidence_uses_strict_path(
+        self, monkeypatch,
+    ):
+        """final_state IS provided (handler always passes it now), but
+        checkpoint_resumed_nodes is empty — a fully-fresh run. Must fall
+        through to the exact strict trace-only logic: an empty trace means
+        every required node is reported missing, matching pre-#2263
+        behavior byte-for-byte."""
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+        client_mock = MagicMock()
+        client_mock.list_runs.side_effect = lambda **kwargs: (
+            [_stub_run()] if kwargs.get("is_root") else []
+        )
+
+        final_state = _full_structural_final_state()
+        final_state["checkpoint_resumed_nodes"] = {}  # nothing resumed
+
+        with patch("langsmith.Client", return_value=client_mock), \
+             patch("evals.trajectory.time.sleep"):
+            result = validate_trajectory(
+                completeness_timeout_seconds=1, final_state=final_state,
+            )
+
+        assert result is not None
+        assert result["passed"] is False
+        # Strict path: every REQUIRED_NODE missing from the (empty) trace,
+        # regardless of the rich structural evidence sitting in final_state.
+        assert len(result["failures"]) >= len(REQUIRED_NODES)
+        assert any(f.startswith("sector_team_count: expected 6, got 0") for f in result["failures"])
+
+    def test_resumed_run_ordering_check_is_best_effort_not_fatal(self, monkeypatch):
+        """On a resumed run, if the (possibly-empty) trace doesn't have
+        both timestamps for an ordering pair, that must never by itself
+        fail validation — ordering is best-effort only when resumed."""
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+        # Trace has no child spans — no ordering data available at all.
+        client_mock = MagicMock()
+        client_mock.list_runs.side_effect = lambda **kwargs: (
+            [_stub_run()] if kwargs.get("is_root") else []
+        )
+
+        final_state = _full_structural_final_state()
+
+        with patch("langsmith.Client", return_value=client_mock), \
+             patch("evals.trajectory.time.sleep"):
+            result = validate_trajectory(
+                completeness_timeout_seconds=30, final_state=final_state,
+            )
+
+        assert result is not None
+        assert result["passed"] is True
+        assert not any(f.startswith("ordering_violation") for f in result["failures"])
