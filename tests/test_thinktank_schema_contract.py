@@ -76,6 +76,7 @@ _FROZEN_FIELDS = {
         "theses_written", "sweep_tickers", "events_flagged",
         "event_updates_written", "themes_reconciled", "theme_updates_written",
         "ratings_rows", "context_sources_present", "usage_by_tier", "total_cost_usd",
+        "coverage_gap",
         "budget_month_spent_usd", "budget_month_limit_usd", "errors",
     },
     MonthlyCostLedger: {"schema_version", "month", "spent_usd", "updated_at", "runs"},
