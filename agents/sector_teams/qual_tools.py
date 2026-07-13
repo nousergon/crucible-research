@@ -54,6 +54,20 @@ def _load_alternative_from_s3(ticker: str) -> dict | None:
     except Exception:
         return None
 
+
+def _opt_float(v) -> float | None:
+    """Return float or None for nullable numeric fields (NaN, None, empty)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        if f != f:  # NaN check
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
 # ── RAG usage metrics (module-level, reset per pipeline run) ─────────────────
 _rag_stats = {"attempted": 0, "succeeded": 0, "failed": 0}
 
@@ -261,8 +275,9 @@ def create_qual_tools(context: dict) -> list:
 
     @tool
     def get_institutional_activity(ticker: str) -> str:
-        """Get 13F institutional accumulation signals. Shows if large funds are building positions."""
-        # S3-first
+        """Get 13F institutional ownership signals: fund count, QoQ share/value changes,
+        top-fund concentration. Shows if large funds are building or reducing positions."""
+        # S3-first: pre-collected alternative data (legacy path)
         s3_data = _load_alternative_from_s3(ticker)
         if s3_data and s3_data.get("institutional"):
             inst = s3_data["institutional"]
@@ -273,27 +288,37 @@ def create_qual_tools(context: dict) -> list:
                 "total_new_shares": 0,
             })
 
-        # config#1822: `fetch_institutional_activity` has never existed in
-        # data.fetchers.institutional_fetcher (same drift class as
-        # get_news_articles/get_sec_filings above). The real entry point
-        # is `fetch_institutional_accumulation`, which takes a LIST of
-        # tickers and returns {ticker: {...}} — batch-shaped because the
-        # underlying 13F EDGAR lookups are the expensive part. Call it
-        # with a single-ticker list and unwrap.
-        from data.fetchers.institutional_fetcher import (
-            fetch_institutional_accumulation as _fetch,
-        )
-
+        # inst_ownership derived table (built from SEC quarterly bulk Form 13F data)
         try:
-            data = _fetch([ticker]).get(ticker, {})
-            return json.dumps({
-                "ticker": ticker,
-                "n_funds_accumulating": data.get("n_funds_accumulating", 0),
-                "accumulation_signal": data.get("accumulation_signal", False),
-                "total_new_shares": data.get("total_new_shares", 0),
-            })
+            import boto3 as _boto3
+            from data.substrate.reader import read_inst_ownership
+
+            s3 = _boto3.client("s3")
+            df = read_inst_ownership(s3_client=s3, bucket=_S3_BUCKET)
+            if df is not None and len(df) > 0 and "ticker" in df.columns:
+                row = df[df["ticker"] == ticker.upper()]
+                if len(row) > 0:
+                    r = row.iloc[0]
+                    return json.dumps({
+                        "ticker": ticker.upper(),
+                        "n_funds_holding": int(r.get("n_funds_holding", 0)),
+                        "total_shares_held": float(r.get("total_shares_held", 0)),
+                        "shares_qoq_change": _opt_float(r.get("shares_qoq_change")),
+                        "value_qoq_change": _opt_float(r.get("value_qoq_change")),
+                        "top5_concentration_pct": _opt_float(r.get("top5_concentration_pct")),
+                        "n_funds_increasing": int(r.get("n_funds_increasing", 0)),
+                        "n_funds_decreasing": int(r.get("n_funds_decreasing", 0)),
+                        "n_funds_new": int(r.get("n_funds_new", 0)),
+                        "n_funds_exited": int(r.get("n_funds_exited", 0)),
+                        "source": "sec_13f_bulk",
+                    })
         except Exception as e:
-            return json.dumps({"ticker": ticker, "error": str(e)})
+            log.debug("inst_ownership read failed for %s: %s", ticker, e)
+
+        return json.dumps({
+            "ticker": ticker,
+            "error": "institutional ownership data unavailable (no 13F data for this ticker)",
+        })
 
     @tool
     def query_filings(ticker: str, query: str, doc_types: str = "10-K,10-Q,earnings_transcript") -> str:

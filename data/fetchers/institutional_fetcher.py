@@ -1,16 +1,19 @@
 """
-data/fetchers/institutional_fetcher.py — 13F institutional accumulation signal (Task 7A).
+data/fetchers/institutional_fetcher.py — DEPRECATED 2026-07-13 (archived).
 
-Uses edgartools to detect quarter-over-quarter position increases by major
-institutional holders via 13F-HR filings. When 3+ funds are accumulating
-(increasing positions), this is a medium-term conviction signal.
+Replaced by ``alpha-engine-data/data/derived/inst_ownership.py``, which
+builds a per-ticker institutional-ownership snapshot from SEC quarterly
+bulk Form 13F data (authoritative, free, no vendor dependency).
 
-Note: 13F data is 45 days delayed (SEC filing deadline). Best used as a
-medium-term (6-12 month) conviction signal, not for short-term timing.
+Why deprecated:
+- ``Company(ticker).get_filings(form="13F-HR")`` queries by the STOCK's
+  CIK, but 13F-HR is filed by the FUND MANAGER's CIK — always empty for
+  normal operating companies (alpha-engine-config-I2428).
+- The ``inst_ownership`` derived table resolves CUSIP→ticker from SEC
+  bulk INFOTABLE data, producing real QoQ share/value deltas.
 
-Requires:
-  - edgartools>=2.0.0 in requirements.txt
-  - EDGAR_IDENTITY env var (format: "Name email@domain.com")
+All consumers should use ``data.substrate.reader.read_inst_ownership()``
+instead. This module kept as a stub for backward compatibility.
 """
 
 from __future__ import annotations
