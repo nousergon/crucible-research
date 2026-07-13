@@ -64,6 +64,7 @@ DEFAULT_S3_BUCKET = "alpha-engine-research"
 NEWS_AGGREGATES_PREFIX = "data/news_aggregates"
 INSIDER_TRANSACTIONS_PREFIX = "data/insider_transactions"
 ANALYST_REVISIONS_PREFIX = "data/analyst_revisions"
+INST_OWNERSHIP_PREFIX = "data/inst_ownership"
 
 
 # ── Per-ticker snapshot shape ─────────────────────────────────────────
@@ -200,6 +201,19 @@ def read_analyst_revisions(
 ) -> pd.DataFrame:
     """Read analyst-revisions via the canonical ``latest.json`` sidecar.
     Same shape as :func:`read_news_aggregates`."""
+    df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
+    return df if df is not None else pd.DataFrame()
+
+
+def read_inst_ownership(
+    *,
+    s3_client: Any,
+    bucket: str = DEFAULT_S3_BUCKET,
+    prefix: str = INST_OWNERSHIP_PREFIX,
+) -> pd.DataFrame:
+    """Read institutional-ownership (13F) via the canonical ``latest.json``
+    sidecar. Returns per-ticker QoQ delta rows from the most recent
+    quarter. Same shape as :func:`read_analyst_revisions`."""
     df = _read_via_latest(s3_client, bucket=bucket, prefix=prefix)
     return df if df is not None else pd.DataFrame()
 

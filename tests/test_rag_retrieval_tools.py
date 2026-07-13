@@ -137,8 +137,10 @@ class TestSearchFilings:
         fake_retrieve = MagicMock(return_value=[])
         search_filings_impl("AAPL", "x", retrieve_fn=fake_retrieve)
         doc_types = fake_retrieve.call_args.kwargs["doc_types"]
-        # Pin the canonical set
-        for form in ("10-K", "10-Q", "8-K", "14A", "S-1", "13F"):
+        # Pin the canonical set (13F removed 2026-07-13 — structured data,
+        # not text; no RAG producer; the get_institutional_activity tool
+        # reads from the inst_ownership derived table instead)
+        for form in ("10-K", "10-Q", "8-K", "14A", "S-1"):
             assert form in doc_types
 
     def test_forms_arg_narrows_query(self):

@@ -88,6 +88,15 @@ def build_thesis(
     news = ctx.news_by_ticker.get(ticker)
     if news:
         sources.append("news_aggregates")
+    insider = ctx.insider_by_ticker.get(ticker)
+    if insider:
+        sources.append("insider_transactions")
+    analyst = ctx.analyst_by_ticker.get(ticker)
+    if analyst:
+        sources.append("analyst_revisions")
+    inst_own = ctx.inst_ownership_by_ticker.get(ticker)
+    if inst_own:
+        sources.append("inst_ownership")
     if board_row:
         sources.append("universe_board")
     signals_entry = ((ctx.signals or {}).get("signals") or {}).get(ticker)
@@ -105,6 +114,9 @@ def build_thesis(
         board_row=json.dumps(_facts_board_row(board_row), default=str),
         weekly_signal=json.dumps(signals_entry or {}, default=str),
         news_aggregate=json.dumps(news or {}, default=str),
+        insider_transactions=json.dumps(insider or {}, default=str),
+        analyst_revisions=json.dumps(analyst or {}, default=str),
+        inst_ownership=json.dumps(inst_own or {}, default=str),
         filings_excerpts="\n---\n".join(filings) or "(no filings context available)",
         macro_theme=themes.macro_summary(),
         sector_theme=themes.sector_summary(sector),
@@ -163,6 +175,9 @@ def build_thesis(
             "board_row": _facts_board_row(board_row),
             "weekly_signal": signals_entry or {},
             "news_aggregate": news or {},
+            "insider_transactions": insider or {},
+            "analyst_revisions": analyst or {},
+            "inst_ownership": inst_own or {},
             "filings_excerpts": filings,
             "macro_theme": themes.macro_summary(),
             "sector_theme": themes.sector_summary(sector),
