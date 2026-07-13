@@ -83,7 +83,7 @@ def reset_rag_retrieval_stats() -> None:
 # corpus before the hybrid retriever scores — significantly faster
 # than scoring across the whole corpus.
 DEFAULT_FILINGS_DOC_TYPES = (
-    "10-K", "10-Q", "8-K", "14A", "S-1", "S-4", "13D", "13G", "13F",
+    "10-K", "10-Q", "8-K", "14A", "S-1", "S-4", "13D", "13G",
 )
 
 
