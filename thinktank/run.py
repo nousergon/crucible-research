@@ -9,7 +9,14 @@ Order of operations (one ``--daily`` invocation):
 5. thesis builds for the intake set
 6. events sweep over all covered names → thesis updates where flagged
 7. churn-gated daily macro-theme update from sweep-surfaced developments
-8. persist ledger, events, manifest, month cost ledger; flush SFT rows
+8. persist ledger, ratings board, challenger selection, events, manifest,
+   month cost ledger; flush SFT rows
+
+New S3 keys (epic alpha-engine-config-I2515, champion/challenger
+leaderboard — Think Tank is the CHALLENGER arm):
+    ``thinktank/challenger_selection/{trading_day}.json`` + ``latest.json``
+    — see ``thinktank.challenger_selection`` for the producer and
+    ``thinktank.schemas.ChallengerSelection`` for the artifact contract.
 
 ``--dry-run`` exercises 1–4 read-only and prints the plan (no LLM calls, no
 writes) — the boot-validation mode.
@@ -43,6 +50,7 @@ from nousergon_lib.dates import now_dual
 
 from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
 from thinktank.analyst import build_thesis, sweep
+from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import load_context
 from thinktank.costs import BudgetGuard
@@ -272,6 +280,18 @@ def run_daily(
         store, ledger, theses_written, trading_day=trading_day
     )
     manifest.ratings_rows = len(board.rows)
+    write_challenger_selection(
+        store,
+        ledger,
+        board,
+        run_id=run_id,
+        mode=manifest.mode,
+        trading_day=trading_day,
+        calendar_date=calendar_date,
+        board_date=(ctx.board or {}).get("as_of"),
+        coverage_gap=manifest.coverage_gap or {},
+    )
+    manifest.challenger_selection_written = True
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
