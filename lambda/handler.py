@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from nousergon_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -201,6 +201,37 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
             "Scorecard emission failed (shadow mode — non-fatal): %s",
             sce,
             exc_info=True,
+        )
+
+
+def _emit_flow_doctor_heartbeat() -> None:
+    """Write flow-doctor's end-of-run status snapshot (config#646).
+
+    Option A dedicated call site: at the tail of a successful research
+    run we ask the flow-doctor singleton to persist its ``status()``
+    snapshot to
+    ``s3://alpha-engine-research/_flow_doctor/heartbeat/research/{date}.json``.
+    The console System Health consumer reads these heartbeats from the
+    **research** bucket, so the write MUST target ``alpha-engine-research``
+    (the same bucket every other artifact in this handler writes to via
+    the ``RESEARCH_BUCKET`` env override).
+
+    ``emit_heartbeat`` soft-fails internally (returns None, never raises),
+    and this helper no-ops cleanly when flow-doctor is inactive (local dev
+    / disabled) so it is safe to call unconditionally on the success path.
+
+    The ``hasattr`` guard makes the wire-up forward/backward-compatible
+    across the phased flow-doctor lib rollout: ``emit_heartbeat`` only
+    exists in flow-doctor >=0.6.2, and the 5 producing repos deploy
+    independently, so a version-skewed image pinning an older lib
+    (the #646 arc historically pinned 0.6.0rc3) would otherwise
+    AttributeError at end-of-run. Missing method -> silent no-op, never a
+    crashed production run — mirroring flow-doctor's own soft-fail posture.
+    """
+    fd = get_flow_doctor()
+    if fd and hasattr(fd, "emit_heartbeat"):
+        fd.emit_heartbeat(
+            bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         )
 
 
@@ -788,6 +819,13 @@ def handler(event, context):
                 )
 
         logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
+
+        # End-of-run flow-doctor heartbeat (config#646). Persist the flow's
+        # status() snapshot to the research bucket so the console System
+        # Health panel can confirm the daily research producer ran to
+        # completion. Soft-fails internally; no-ops when flow-doctor is off.
+        _emit_flow_doctor_heartbeat()
+
         return {
             "status": "OK",
             "date": run_date,
