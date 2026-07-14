@@ -96,6 +96,7 @@ def handler(event, context):
         write_candidates_artifact,
         build_shadow_candidate_artifacts,
         write_shadow_candidates_artifact,
+        write_universe_board_for_scanner_run,
         ScannerOrchestratorError,
     )
 
@@ -223,6 +224,38 @@ def handler(event, context):
         )
         shadow_error = str(exc)
 
+    # ── Universe scoreboard (alpha-engine-config-I2515) ──────────────────────
+    # Standalone Scanner path becomes a universe-board producer, completing
+    # ROADMAP L1995 Phase 5's producer side (the Research graph's
+    # archive_writer has been the SOLE producer of scanner/universe/ until
+    # now). DUAL-WRITE TRANSITION STATE: the Research graph KEEPS writing
+    # this board until the SF cutover retires its internal scanner (S3
+    # contract safety — both producers coexist); a same-day overwrite by
+    # whichever producer runs last is expected + idempotent-ish, though the
+    # two producers' rows can differ on agent-audit fields (focus_*/
+    # agent_override) since only the Research graph has a real agent run
+    # backing those. See alpha-engine-config-I2515 + write_universe_board_
+    # for_scanner_run's docstring for the factor-profiles ordering
+    # resolution. WHOLLY fail-soft — the live candidates.json above is the
+    # primary deliverable and is already written; a board failure is
+    # recorded (WARN + response field) but NEVER downgrades the OK status
+    # (no-silent-fails: the recording surface is the WARN log + this field).
+    universe_board_key: str | None = None
+    universe_board_error: str | None = None
+    try:
+        universe_board_key = write_universe_board_for_scanner_run(
+            artifact, market_regime=market_regime, s3_client=s3_client, bucket=bucket,
+        )
+        logger.info(
+            "[scanner_handler] universe scoreboard written → %s", universe_board_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[scanner_handler] universe scoreboard write failed (non-fatal, "
+            "dashboard visibility only — candidates.json unaffected): %s", exc,
+        )
+        universe_board_error = str(exc)
+
     # ── Champion/challenger leaderboard SCORER (config#1221) ─────────────────
     # Same trigger point + S3 access as the shadow emission above, and the moment
     # the fresh candidates_shadow/ for this cohort exists. The shared scorer
@@ -264,9 +297,15 @@ def handler(event, context):
             "status": leaderboard_status.get("status"),
             "key": leaderboard_status.get("key"),
         },
+        "universe_board": {
+            "status": "OK" if universe_board_key else "error",
+            "key": universe_board_key,
+        },
     }
     if shadow_error:
         summary["shadow_error"] = shadow_error
+    if universe_board_error:
+        summary["universe_board_error"] = universe_board_error
 
     logger.info(
         "[scanner_handler] done run_date=%s scanner_tickers=%d "
