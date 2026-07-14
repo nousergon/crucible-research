@@ -1,14 +1,23 @@
-"""Lambda entry point — daily research think-tank run (config#1579 P1).
+"""Lambda entry point — research think-tank run (config#1579 P1).
 
 Shares the main runner's ECR image with a CMD override to
 ``thinktank_handler.handler`` (the established image-share pattern —
-eval_judge / scanner / rationale_clustering). Invoked by the EventBridge
-rule ``alpha-research-thinktank-daily`` (14:30 UTC, 7 days/week —
-after the weekday SF's RunDailyNews state lands the day's news
-aggregates, and after the Saturday SF's fresh weekly artifacts so the
-themes layer reconciles the same day). Weekend/holiday runs are
-by-design: captures + events partition to the last trading day
-(thinktank/capture.py), so they accrue into Friday's partition.
+eval_judge / scanner / rationale_clustering). Two invocation sources,
+split 2026-07-14 (alpha-engine-config-I2487 incident + SOTA follow-up):
+
+1. EventBridge rule ``alpha-research-thinktank-maintenance`` (14:30 UTC,
+   Mon/Wed/Fri — after the weekday SF's RunDailyNews state lands the
+   day's news aggregates). Plain event (no ``mode``), so it uses
+   ``research/thinktank.yaml``'s base ``daily_new_names: 0`` — theme
+   reconciliation + events sweep on already-covered names ONLY, never
+   intake. (Weekend/holiday non-fire days: captures + events partition
+   to the last trading day via thinktank/capture.py regardless.)
+2. The Saturday weekly SF's ``ThinkTankCoverage`` state, ``mode=sf_cover``
+   — owns ALL coverage growth + staleness refresh (target/ceiling =
+   rank_ceiling=150), since the universe board it ranks against
+   (scanner/universe/latest.json) is itself only produced on Saturday
+   (Scanner runs immediately before this state in the same SF branch) —
+   a weekday intake pass would have zero new ranking data to act on.
 
 Failure contract — RAISE, never return an ERROR dict. The SF-invoked
 handlers in this repo return ``{"status": "ERROR"}`` for their SF Catch

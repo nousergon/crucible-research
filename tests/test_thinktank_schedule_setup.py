@@ -1,12 +1,14 @@
-"""Lock the think-tank daily schedule + failure alarm against drift
-(config#1579 P1).
+"""Lock the think-tank MAINTENANCE schedule + failure alarm against drift
+(config#1579 P1; cadence split 2026-07-14 — alpha-engine-config-I2487
+incident + SOTA follow-up: coverage growth moved to the Saturday SF's
+ThinkTankCoverage sf_cover step, this rule now covers theme
+reconciliation + events sweep only).
 
-The daily cadence only works if four things stay in sync:
+The maintenance cadence only works if four things stay in sync:
 
   1. ``infrastructure/setup-thinktank-schedule.sh`` schedules the rule at
-     14:30 UTC daily — AFTER the weekday SF's RunDailyNews (~13:15-13:30
-     UTC) so the events sweep sees same-day news, and after the Saturday
-     SF's fresh weekly artifacts so themes reconcile the same day.
+     14:30 UTC Mon/Wed/Fri — AFTER the weekday SF's RunDailyNews
+     (~13:15-13:30 UTC) so the events sweep sees same-day news.
   2. The rule targets the ``live`` alias (deploy.sh publishes a version +
      moves ``live`` on every merge), so an alias revert governs the
      schedule immediately.
@@ -17,8 +19,8 @@ The daily cadence only works if four things stay in sync:
   4. The alarm threshold is 3/day — it pages on "the run failed after
      all retries", not on self-healed transient blips.
 
-If any drifts, the daily run silently stops or silently fails — the
-bug classes these pins exist to prevent.
+If any drifts, the maintenance run silently stops or silently fails —
+the bug classes these pins exist to prevent.
 """
 
 from __future__ import annotations
@@ -39,10 +41,12 @@ def test_setup_script_exists():
     assert _SCRIPT.is_file()
 
 
-def test_schedule_is_1430_utc_daily_seven_days():
-    """cron(30 14 * * ? *) — 14:30 UTC every day, no day-of-week filter.
-    Weekend runs are by-design (trading-day partitioning absorbs them)."""
-    assert "cron(30 14 * * ? *)" in _script_text()
+def test_schedule_is_1430_utc_mon_wed_fri():
+    """cron(30 14 ? * MON,WED,FRI *) — 14:30 UTC, 3x/week. Coverage growth
+    lives in the Saturday SF's sf_cover step (bumped to rank_ceiling=150
+    2026-07-14); this rule is maintenance-only (theme reconciliation +
+    events sweep), so it doesn't need to fire on Saturday or 7d/wk."""
+    assert "cron(30 14 ? * MON,WED,FRI *)" in _script_text()
 
 
 def test_rule_targets_live_alias():
@@ -65,7 +69,7 @@ def test_alarm_threshold_is_all_retries_exhausted():
 def test_alarm_uses_shared_sns_topic():
     text = _script_text()
     assert "alpha-engine-alerts" in text
-    assert "alpha-engine-thinktank-daily-run-failed" in text
+    assert "alpha-engine-thinktank-maintenance-run-failed" in text
 
 
 def test_deploy_sh_ships_the_thinktank_target():
