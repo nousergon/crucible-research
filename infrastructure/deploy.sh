@@ -28,6 +28,7 @@ FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
+FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -797,6 +798,21 @@ deploy_thinktank() {
   _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
 }
 
+# Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B. Shared
+# image with the main runner; CMD override sets the entry to
+# signals_envelope_handler.handler. Invoked ONLY by the weekly SF's
+# SignalsEnvelope state (arn:aws:states:::lambda:invoke, synchronous),
+# placed immediately AFTER RegimeSubstrate so the regime read this producer
+# takes is same-day fresh (config#1580's no-week-old-data invariant) — never
+# triggered by EventBridge directly. Timeout 300s is generous: the envelope
+# is a read-two-artifacts-write-one job (scanner universe board + regime
+# substrate in, signals.json out), no LLM/LangGraph, pure quant transform.
+# Memory 1024MB matches the main runner's headroom for the pandas/boto3
+# working set the board read pulls in.
+deploy_signals_envelope() {
+  _deploy_image_shared_lambda "$FUNCTION_SIGNALS_ENVELOPE" "signals_envelope_handler" 300 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -809,9 +825,10 @@ case "$TARGET" in
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
   thinktank)             deploy_thinktank ;;
+  signals_envelope)      deploy_signals_envelope ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|both|all]"; exit 1 ;;
 esac
 
 echo ""
