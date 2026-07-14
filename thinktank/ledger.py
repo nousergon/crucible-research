@@ -56,12 +56,19 @@ def select_intake(
     *,
     daily_new_names: int,
     rank_ceiling: int,
+    skip_stale_refill: bool = False,
 ) -> tuple[list[dict], list[str]]:
     """Pick today's work: (new_names_with_board_rows, refresh_tickers).
 
     ``new`` = top uncovered by attractiveness with rank <= rank_ceiling (rank
     is 1-based position in the attractiveness-sorted universe). ``refresh``
-    fills any remaining slots with the stalest covered names.
+    fills any remaining slots with the stalest covered names — UNLESS
+    ``skip_stale_refill``, which returns new-name intake ONLY (used by the
+    Saturday SF's gap-fill mode: shoring up newly-uncovered top-N names is a
+    different job from staleness refresh, which the daily cadence already
+    handles gradually; a weekly run padding its budget with stale-refill
+    picks would do daily's job for it and lose the "only what actually
+    changed this week" sizing gap_fill_only relies on).
     """
     ranked = ranked_universe(board)
     covered = ledger.covered()
@@ -81,13 +88,14 @@ def select_intake(
         if len(new_rows) >= daily_new_names:
             break
 
-    slots_left = daily_new_names - len(new_rows)
     refresh: list[str] = []
-    if slots_left > 0 and ledger.entries:
-        stalest = sorted(
-            ledger.entries.values(), key=lambda e: e.thesis_updated_on
-        )
-        refresh = [e.ticker for e in stalest[:slots_left]]
+    if not skip_stale_refill:
+        slots_left = daily_new_names - len(new_rows)
+        if slots_left > 0 and ledger.entries:
+            stalest = sorted(
+                ledger.entries.values(), key=lambda e: e.thesis_updated_on
+            )
+            refresh = [e.ticker for e in stalest[:slots_left]]
     return new_rows, refresh
 
 

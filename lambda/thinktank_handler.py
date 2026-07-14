@@ -1,33 +1,50 @@
-"""Lambda entry point — daily research think-tank run (config#1579 P1).
+"""Lambda entry point — research think-tank run (config#1579 P1).
 
 Shares the main runner's ECR image with a CMD override to
 ``thinktank_handler.handler`` (the established image-share pattern —
-eval_judge / scanner / rationale_clustering). Invoked by the EventBridge
-rule ``alpha-research-thinktank-daily`` (14:30 UTC, 7 days/week —
-after the weekday SF's RunDailyNews state lands the day's news
-aggregates, and after the Saturday SF's fresh weekly artifacts so the
-themes layer reconciles the same day). Weekend/holiday runs are
-by-design: captures + events partition to the last trading day
-(thinktank/capture.py), so they accrue into Friday's partition.
+eval_judge / scanner / rationale_clustering). Two invocation sources
+(2026-07-14 cadence design):
 
-Failure contract — RAISE, never return an ERROR dict. The SF-invoked
-handlers in this repo return ``{"status": "ERROR"}`` for their SF Catch
-states; this Lambda has no SF above it. For an EventBridge async invoke
-an ERROR-dict return is a *successful* invocation — the AWS/Lambda
-Errors metric stays flat, no retry fires, and the failure is silent
-(exactly the no-silent-fails failure mode). Raising instead (a) drives
-the Errors metric that ``infrastructure/setup-thinktank-schedule.sh``'s
-alarm watches, and (b) engages EventBridge's two built-in async retries,
-so a transient provider blip self-heals. A retried run re-selects intake
+1. EventBridge rule ``alpha-research-thinktank-daily`` (14:30 UTC, 7
+   days/week — after the weekday SF's RunDailyNews state lands the
+   day's news aggregates, and after the Saturday SF's fresh weekly
+   artifacts so the themes layer reconciles the same day). Plain event
+   (no ``mode``) — grows coverage toward the full ``rank_ceiling=150``
+   universe at ``daily_new_names``/day and handles staleness refresh
+   gradually. Weekend/holiday runs are by-design: captures + events
+   partition to the last trading day (thinktank/capture.py), so they
+   accrue into Friday's partition.
+2. The Saturday weekly SF's ``ThinkTankCoverage`` state, ``mode=gap_fill``
+   — a narrow, reactive top-up: once the fresh weekly scan lands, shore
+   up whatever of the CURRENT top-60 the daily cadence hasn't caught up
+   to yet. Sized to the exact measured gap (see ``thinktank/run.py``'s
+   ``GAP_FILL_TOP_N``/``gap_fill_only``), never a fixed constant, never
+   padded with stale-refill — kept small and bounded regardless of how
+   large the full-universe backlog gets.
+
+Failure contract — RAISE, never return an ERROR dict, for BOTH
+invocation sources. For the EventBridge async invoke, an ERROR-dict
+return is a *successful* invocation — the AWS/Lambda Errors metric stays
+flat, no retry fires, and the failure is silent (exactly the
+no-silent-fails failure mode); raising instead drives the Errors metric
+that ``infrastructure/setup-thinktank-schedule.sh``'s alarm watches and
+engages EventBridge's two built-in async retries. For the SF's
+``arn:aws:states:::lambda:invoke`` Task, the Catch only triggers on an
+actual raised Lambda error — a normal return value (even an error-shaped
+dict) is a *successful* Task completion and would never route through
+the non-blocking Catch. Either way, a retried run re-selects intake
 against the ledger written so far; the worst case is a duplicate thesis
-version (never a silent skip), and the SSM budget guard caps spend.
+version (never a silent skip, since the coverage ledger only persists
+once at the end of a run — a mid-run failure never partially commits),
+and the SSM budget guard caps spend.
 
 Event shape (all fields optional):
 
     {
       "dry_run_llm": true,        # shell-run smoke: boot + imports only, no S3
       "dry_run": true,            # plan-only: intake selection, no LLM/writes
-      "refresh_tickers": ["X"]    # operator refresh of covered names only
+      "refresh_tickers": ["X"],   # operator refresh of covered names only
+      "mode": "gap_fill"          # Saturday SF: top-60 gap-fill (see above)
     }
 
 Returns ``{"status": "OK", "manifest": {...}}`` on success (or the
@@ -110,10 +127,7 @@ def handler(event, context):
 
     _ensure_init()
 
-    from dataclasses import replace as _replace_settings
-
     from thinktank.run import run_daily
-    from thinktank.settings import load_settings
 
     plan_only = bool(event.get("dry_run")) if isinstance(event, dict) else False
     # Operator refresh: {"refresh_tickers": ["MNST", ...]} re-underwrites
@@ -121,20 +135,16 @@ def handler(event, context):
     # re-underwrite / rating-backfill knob. Absent on scheduled events.
     refresh = event.get("refresh_tickers") if isinstance(event, dict) else None
 
-    # Saturday SF coverage mode: overrides intake to fill ALL uncovered
-    # top-N names (ignoring the daily_new_names cap set for the daily
-    # EventBridge run). Runs observe-only — writes to thinktank/ S3
+    # Saturday SF gap-fill mode: shores up whatever of the CURRENT top-60
+    # the daily cadence hasn't caught up to yet, sized to the exact
+    # measured gap (thinktank/run.py's GAP_FILL_TOP_N/gap_fill_only) —
+    # never a fixed constant, never padded with stale-refill (that's the
+    # daily job's role). Runs observe-only — writes to thinktank/ S3
     # prefix for validation tracking; does NOT gate the Predictor.
-    if isinstance(event, dict) and event.get("mode") == "sf_cover":
-        settings = load_settings()
-        sf_settings = _replace_settings(
-            settings,
-            daily_new_names=event.get("sf_cover_target", 60),
-            rank_ceiling=event.get("sf_cover_ceiling", 60),
-        )
-        manifest = run_daily(settings=sf_settings, dry_run=plan_only)
-    else:
-        manifest = run_daily(dry_run=plan_only, refresh_tickers=refresh)
+    gap_fill_only = isinstance(event, dict) and event.get("mode") == "gap_fill"
+    manifest = run_daily(
+        dry_run=plan_only, refresh_tickers=refresh, gap_fill_only=gap_fill_only
+    )
 
     logger.info(
         "[thinktank_handler] done run_id=%s mode=%s trading_day=%s "

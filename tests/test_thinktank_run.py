@@ -231,6 +231,38 @@ def test_dry_run_writes_nothing(tt_config):
         assert listing.get("KeyCount", 0) == 0
 
 
+def test_gap_fill_mode_sizes_intake_to_measured_gap_only(tt_config):
+    """The Saturday SF's gap-fill mode (2026-07-14 cadence design): sized to
+    the EXACT measured coverage_gap, never daily_new_names, and never
+    padded with stale-refill — a re-run with a zero gap adds nothing."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # RUN 1 — normal daily mode covers T0-T2 (daily_new_names=3 in tt_config)
+        manifest, store = _run(tt_config, backend, s3)
+        assert manifest.mode == "daily"
+        assert manifest.names_added == ["T0", "T1", "T2"]
+
+        # RUN 2 — gap_fill_only: the board has 8 tickers, 3 already covered,
+        # so the measured gap is 5 (T3-T7) — ALL of them get covered in one
+        # pass, ignoring tt_config's daily_new_names=3 cap entirely.
+        manifest2, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest2.mode == "gap_fill"
+        assert manifest2.names_added == ["T3", "T4", "T5", "T6", "T7"]
+        assert manifest2.names_refreshed == []
+        assert manifest2.coverage_gap["uncovered_count"] == 5
+
+        # RUN 3 — fully covered now; gap_fill_only must add NOTHING, and must
+        # NOT fall back to stale-refill even though covered names exist.
+        manifest3, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest3.mode == "gap_fill"
+        assert manifest3.names_added == []
+        assert manifest3.names_refreshed == []
+        assert manifest3.coverage_gap["uncovered_count"] == 0
+
+
 def test_budget_breach_refuses_run(tt_config, monkeypatch):
     monkeypatch.setenv("THINKTANK_MONTHLY_BUDGET_USD", "0.0")
     with mock_aws():

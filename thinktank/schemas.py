@@ -278,7 +278,7 @@ class RunManifest(_Artifact):
     """``thinktank/runs/{trading_day}/manifest_{run_id}.json`` — one per run."""
 
     run_id: str
-    mode: Literal["daily", "reconcile", "dry_run", "operator_refresh"]
+    mode: Literal["daily", "reconcile", "dry_run", "operator_refresh", "gap_fill"]
     trading_day: str
     calendar_date: str
     started_at: str
