@@ -110,14 +110,31 @@ def handler(event, context):
 
     _ensure_init()
 
+    from dataclasses import replace as _replace_settings
+
     from thinktank.run import run_daily
+    from thinktank.settings import load_settings
 
     plan_only = bool(event.get("dry_run")) if isinstance(event, dict) else False
     # Operator refresh: {"refresh_tickers": ["MNST", ...]} re-underwrites
     # ONLY those covered names (no intake/sweep/themes) — the ad-hoc
     # re-underwrite / rating-backfill knob. Absent on scheduled events.
     refresh = event.get("refresh_tickers") if isinstance(event, dict) else None
-    manifest = run_daily(dry_run=plan_only, refresh_tickers=refresh)
+
+    # Saturday SF coverage mode: overrides intake to fill ALL uncovered
+    # top-N names (ignoring the daily_new_names cap set for the daily
+    # EventBridge run). Runs observe-only — writes to thinktank/ S3
+    # prefix for validation tracking; does NOT gate the Predictor.
+    if isinstance(event, dict) and event.get("mode") == "sf_cover":
+        settings = load_settings()
+        sf_settings = _replace_settings(
+            settings,
+            daily_new_names=event.get("sf_cover_target", 60),
+            rank_ceiling=event.get("sf_cover_ceiling", 60),
+        )
+        manifest = run_daily(settings=sf_settings, dry_run=plan_only)
+    else:
+        manifest = run_daily(dry_run=plan_only, refresh_tickers=refresh)
 
     logger.info(
         "[thinktank_handler] done run_id=%s mode=%s trading_day=%s "
