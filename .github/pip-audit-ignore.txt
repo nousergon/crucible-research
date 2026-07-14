@@ -94,3 +94,17 @@ CVE-2026-48776
 # accepted 2026-07-12, revisit when a pytest-asyncio 1.x migration is
 # planned separately (dev-only dependency, not shipped to production).
 PYSEC-2026-1845
+
+# langchain-core 0.3.86 -> fix requires 1.2.22 (same langchain-1.0 line as
+# CVE-2026-55443 above; langchain-core is transitive via langchain-anthropic~=0.3
+# + agentevals~=0.0, not a direct dep). Adopting 1.2.22 pulls langchain-core onto
+# the 1.x line, which breaks the langchain-anthropic~=0.3 pin this repo's research
+# pipeline depends on (langchain-anthropic 0.3.22 requires langchain-core<1.0.0) —
+# the identical migration blocker proven under CVE-2026-55443. The advisory itself
+# is a directory-traversal in langchain_core.prompts.loading.load_prompt() /
+# load_prompt_from_config() when passed user-influenced prompt configs; this repo
+# does not use that surface — its own agents.prompt_loader.load_prompt(name) takes
+# fixed prompt names, and there is no langchain_core.prompts.loading import.
+# accepted 2026-07-13, revisit when nousergon/alpha-engine-config#2342's fleet
+# sweep is followed by a dedicated langchain-1.0 migration ticket.
+PYSEC-2026-2193
