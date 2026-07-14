@@ -189,18 +189,15 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh scanner
 
-      # Think-tank Lambda — config#1579 P1. Same image-share pattern,
+      # Daily think-tank Lambda — config#1579 P1. Same image-share pattern,
       # CMD override sets the entry to thinktank_handler.handler. Invoked
-      # ONLY by the Saturday weekly SF's ThinkTankCoverage state
-      # (mode=sf_cover) — the prior standalone EventBridge schedule is
-      # retired (2026-07-14 cadence consolidation, alpha-engine-config-I2487);
-      # infrastructure/setup-thinktank-alarm.sh manages just the failure
-      # alarm now. Auto-deployed on every push so thinktank/ logic changes
-      # AND config-repo prompt/yaml changes (via the config-changed
-      # repository_dispatch) propagate without a manual step — per the
-      # standing always-wire-auto-deploy rule. The ci-deploy-guard test
-      # (tests/test_deploy_targets_invoked_by_workflow.py) enforces this
-      # step's existence.
+      # daily by the EventBridge rule alpha-research-thinktank-daily
+      # (infrastructure/setup-thinktank-schedule.sh); auto-deployed on every
+      # push so thinktank/ logic changes AND config-repo prompt/yaml changes
+      # (via the config-changed repository_dispatch) propagate without a
+      # manual step — per the standing always-wire-auto-deploy rule. The
+      # ci-deploy-guard test (tests/test_deploy_targets_invoked_by_workflow.py)
+      # enforces this step's existence.
       - name: Deploy thinktank Lambda (alpha-engine-research-thinktank)
         working-directory: alpha-engine-research
         env:
