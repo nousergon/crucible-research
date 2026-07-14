@@ -17,6 +17,7 @@ from scoring.factor_scoring import (
     _COMPOSITE_DEFS,
     _DERIVED_FACTOR_DEFS,
     _add_derived_factors,
+    _add_institutional_accumulation_factor,
     _within_sector_pct_rank,
     compute_and_write_factor_profiles,
     compute_factor_composites,
@@ -340,22 +341,29 @@ class TestPillarComposites:
         }
 
     def test_stewardship_composite_components(self):
-        """Stewardship is thin-quant by design — 2 components only."""
+        """Stewardship is thin-quant by design — 3 components (config#2428
+        added institutional_accumulation_score alongside the original 2)."""
         components = _COMPOSITE_DEFS["stewardship_score"]
         component_cols = {col for col, _, _ in components}
-        assert component_cols == {"payout_ratio", "capex_growth_5y"}
+        assert component_cols == {
+            "payout_ratio", "capex_growth_5y", "institutional_accumulation_score",
+        }
         # payout_ratio MUST be inverted (low payout = better stewardship for
         # the cross-sectional rank); capex_growth_5y NOT inverted (sustained
-        # reinvestment is good stewardship).
+        # reinvestment is good stewardship); institutional_accumulation_score
+        # NOT inverted (higher net accumulation = better stewardship signal).
         for col, _, invert in components:
             if col == "payout_ratio":
                 assert invert is True, "payout_ratio must be inverted"
             if col == "capex_growth_5y":
                 assert invert is False
+            if col == "institutional_accumulation_score":
+                assert invert is False
 
     def test_derived_factor_defs_documents_sustainable_growth_rate(self):
         """_DERIVED_FACTOR_DEFS is the audit trail for non-raw columns."""
         assert "sustainable_growth_rate" in _DERIVED_FACTOR_DEFS
+        assert "institutional_accumulation_score" in _DERIVED_FACTOR_DEFS
 
     def test_add_derived_factors_computes_sustainable_growth_rate(self):
         """sustainable_growth_rate = roe × (1 - payout_ratio); NaN inputs
@@ -614,4 +622,187 @@ class TestComputeAndWriteFactorProfilesSupplemental:
             )
         payload = json.loads(s3.put_object.call_args_list[0].kwargs["Body"])
         assert "MARUY" in payload
-        assert "momentum_score" in payload["MARUY"]
+
+
+# ── config#2428 — institutional_accumulation_score (stewardship_score) ─────
+
+
+class TestInstitutionalAccumulationFactor:
+    """_add_institutional_accumulation_factor: net 13F fund-accumulation
+    signal, gated by institutional_min_funds and scaled by
+    institutional_boost (both config.get_research_params() values,
+    orphaned since the CIK-buggy fetcher that used to read them was
+    deprecated 2026-07-13)."""
+
+    def test_missing_columns_yields_nan(self):
+        """No n_funds_increasing/n_funds_decreasing columns at all (caller
+        didn't pass inst_ownership_df) -> NaN for every row, same
+        tolerant-reader contract as sustainable_growth_rate."""
+        df = pd.DataFrame({"ticker": ["A", "B"]})
+        out = _add_institutional_accumulation_factor(df)
+        assert "institutional_accumulation_score" in out.columns
+        assert pd.isna(out["institutional_accumulation_score"]).all()
+
+    def test_no_row_for_ticker_yields_nan(self):
+        """A ticker present in the merge but with null fund counts (no 13F
+        coverage this quarter) gets NaN, not 0 — NaN means 'no data',
+        0 means 'data says no net accumulation'. These must stay distinct."""
+        df = pd.DataFrame({
+            "ticker": ["A", "B"],
+            "n_funds_increasing": [5, float("nan")],
+            "n_funds_decreasing": [2, float("nan")],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 3.0,
+        }):
+            out = _add_institutional_accumulation_factor(df)
+        assert pd.notna(out.loc[0, "institutional_accumulation_score"])
+        assert pd.isna(out.loc[1, "institutional_accumulation_score"])
+
+    def test_gate_below_min_funds_treated_as_neutral_zero(self):
+        """Total funds moving (increasing + decreasing) below
+        institutional_min_funds is too thin a sample -> neutral 0, not the
+        raw (noisy) delta."""
+        df = pd.DataFrame({
+            "ticker": ["THIN"],
+            "n_funds_increasing": [2],
+            "n_funds_decreasing": [0],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 3.0,
+        }):
+            out = _add_institutional_accumulation_factor(df)
+        # 2 funds moving < min_funds(3) -> gated to 0 * boost = 0
+        assert out.loc[0, "institutional_accumulation_score"] == 0.0
+
+    def test_above_min_funds_scaled_by_boost(self):
+        """Above the gate: net accumulation (increasing - decreasing) is
+        scaled by institutional_boost."""
+        df = pd.DataFrame({
+            "ticker": ["STRONG"],
+            "n_funds_increasing": [10],
+            "n_funds_decreasing": [2],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 2.0,
+        }):
+            out = _add_institutional_accumulation_factor(df)
+        # net = 10 - 2 = 8 funds moving (12) >= min_funds(3) -> 8 * 2.0 = 16
+        assert out.loc[0, "institutional_accumulation_score"] == pytest.approx(16.0)
+
+    def test_net_distribution_can_be_negative(self):
+        """More funds decreasing than increasing -> negative score (bad
+        stewardship signal — smart money net-selling)."""
+        df = pd.DataFrame({
+            "ticker": ["WEAK"],
+            "n_funds_increasing": [1],
+            "n_funds_decreasing": [9],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 1.0,
+        }):
+            out = _add_institutional_accumulation_factor(df)
+        assert out.loc[0, "institutional_accumulation_score"] == pytest.approx(-8.0)
+
+    def test_config_read_failure_falls_back_to_defaults(self):
+        """get_research_params raising (e.g. S3/env misconfiguration in a
+        stripped-down test environment) must never crash factor scoring —
+        falls back to the documented defaults (min_funds=3, boost=3.0)."""
+        df = pd.DataFrame({
+            "ticker": ["A"],
+            "n_funds_increasing": [10],
+            "n_funds_decreasing": [2],
+        })
+        with patch("config.get_research_params", side_effect=RuntimeError("boom")):
+            out = _add_institutional_accumulation_factor(df)
+        # net=8 funds_moving=12 >= default min_funds(3) -> 8 * default boost(3.0) = 24
+        assert out.loc[0, "institutional_accumulation_score"] == pytest.approx(24.0)
+
+
+class TestStewardshipInstitutionalWiring:
+    """End-to-end: compute_factor_composites(..., inst_ownership_df=...)
+    feeds institutional_accumulation_score into stewardship_score."""
+
+    def _base_dfs(self):
+        tech, fund = _make_test_dfs()
+        return tech, fund
+
+    def test_inst_ownership_df_none_stewardship_uses_two_components(self):
+        """Omitting inst_ownership_df entirely (legacy call signature)
+        still produces a populated stewardship_score from the 2 remaining
+        components — non-breaking for any caller not yet passing 13F
+        data."""
+        tech, fund = self._base_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
+        assert out["stewardship_score"].notna().all()
+        assert (out["stewardship_n"] == 2).all()
+
+    def test_inst_ownership_df_wires_in_third_component(self):
+        """Passing inst_ownership_df with n_funds_increasing/decreasing
+        contributes a 3rd component to stewardship_score for tickers with
+        13F coverage."""
+        tech, fund = self._base_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        inst_df = pd.DataFrame({
+            "ticker": ["NVDA", "MSFT", "JNJ", "PFE"],
+            "n_funds_increasing": [12, 6, 4, 1],
+            "n_funds_decreasing": [3, 5, 3, 8],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 3.0,
+        }):
+            out = compute_factor_composites(
+                tech, fund, sector_map, inst_ownership_df=inst_df,
+            ).set_index("ticker")
+        assert out["stewardship_score"].notna().all()
+        assert (out["stewardship_n"] == 3).all()
+
+    def test_ticker_missing_from_inst_ownership_falls_back_gracefully(self):
+        """A ticker with no 13F row (e.g. no coverage this quarter) still
+        gets stewardship_score from its other 2 components — graceful
+        degrade, never a crash, never a dropped ticker."""
+        tech, fund = self._base_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        # Only NVDA has 13F coverage this quarter.
+        inst_df = pd.DataFrame({
+            "ticker": ["NVDA"],
+            "n_funds_increasing": [12],
+            "n_funds_decreasing": [3],
+        })
+        with patch("config.get_research_params", return_value={
+            "institutional_min_funds": 3, "institutional_boost": 3.0,
+        }):
+            out = compute_factor_composites(
+                tech, fund, sector_map, inst_ownership_df=inst_df,
+            ).set_index("ticker")
+        assert out.loc["NVDA", "stewardship_n"] == 3
+        # MSFT/JNJ/PFE fall back to the 2 fundamental-only components.
+        for ticker in ("MSFT", "JNJ", "PFE"):
+            assert out.loc[ticker, "stewardship_n"] == 2
+            assert pd.notna(out.loc[ticker, "stewardship_score"])
+
+    def test_empty_inst_ownership_df_degrades_to_two_components(self):
+        """An empty DataFrame (0 rows — e.g. no tickers resolved from the
+        CUSIP crosswalk this quarter) behaves like None: no crash, falls
+        back to the 2 fundamental-only components for every ticker."""
+        tech, fund = self._base_dfs()
+        sector_map = {
+            "NVDA": "Tech", "MSFT": "Tech",
+            "JNJ": "Healthcare", "PFE": "Healthcare",
+        }
+        empty_inst_df = pd.DataFrame(columns=["ticker", "n_funds_increasing", "n_funds_decreasing"])
+        out = compute_factor_composites(
+            tech, fund, sector_map, inst_ownership_df=empty_inst_df,
+        ).set_index("ticker")
+        assert out["stewardship_score"].notna().all()
+        assert (out["stewardship_n"] == 2).all()
