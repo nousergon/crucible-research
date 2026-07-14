@@ -156,6 +156,59 @@ class RatingsBoard(_Artifact):
     rows: dict[str, RatingRow] = Field(default_factory=dict)
 
 
+# ── Challenger selection (champion/challenger leaderboard) ──────────────────
+
+
+class ChallengerSelectionRow(BaseModel):
+    """One name in Think Tank's challenger-arm selection.
+
+    Sourced from the ratings board row for the ticker (independent rating +
+    stance/conviction/thesis_version); ``attractiveness_rank`` rides along
+    as metadata only — the ranking itself is by ``rating``, never by this.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    rating: int = Field(ge=0, le=100)
+    stance: str
+    conviction: int | None = None
+    thesis_version: int = Field(ge=1)
+    attractiveness_rank: int | None = None
+
+
+class ChallengerSelection(_Artifact):
+    """``thinktank/challenger_selection/{trading_day}.json`` + ``latest.json``
+    — Think Tank's CHALLENGER-arm submission to the champion/challenger
+    leaderboard (epic alpha-engine-config-I2515; champion = scanner→
+    predictor direct, already live).
+
+    Written at the tail of every non-dry ``run_daily`` (see
+    ``thinktank.challenger_selection.write_challenger_selection``). ALWAYS
+    emitted for observability, but ``coverage_complete`` is the validity
+    flag downstream consumers must gate on — Brian's ruling (config#1580):
+    the selection only counts once the ENTIRE current-scan top-N coverage
+    window (``thinktank.run.GAP_FILL_TOP_N``) is covered. ``selections`` is
+    ranked by Think Tank's OWN independent rating — never scanner
+    attractiveness (independence is the point, see ``ratings.py``).
+
+    ``board_date`` is the universe board's ``as_of`` at ranking time —
+    carried for consumers to verify same-day-ness themselves; the daily
+    cadence legitimately reads a stale (e.g. Saturday's) board all week, so
+    this module never hard-fails on staleness (Brian, 2026-07-14, config#1580).
+    """
+
+    arm: Literal["thinktank_coverage"] = "thinktank_coverage"
+    trading_day: str
+    calendar_date: str
+    run_id: str
+    mode: Literal["daily", "gap_fill", "operator_refresh"]
+    board_date: str | None = None
+    coverage_complete: bool
+    uncovered_count: int
+    selections: list[ChallengerSelectionRow] = Field(default_factory=list)
+
+
 # ── Theme theses (macro + sector) ────────────────────────────────────────────
 
 
@@ -298,6 +351,7 @@ class RunManifest(_Artifact):
         "uncovered counts. Emitted at end of every daily run.",
     )
     ratings_rows: int = 0
+    challenger_selection_written: bool = False
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
     total_cost_usd: float = 0.0
     budget_month_spent_usd: float = 0.0

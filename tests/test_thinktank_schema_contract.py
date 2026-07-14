@@ -8,6 +8,8 @@ migration. New fields are appended to the frozen sets when added.
 from __future__ import annotations
 
 from thinktank.schemas import (
+    ChallengerSelection,
+    ChallengerSelectionRow,
     CompanyThesis,
     CompanyThesisLLM,
     CompanyThesisRatedLLM,
@@ -50,6 +52,15 @@ _FROZEN_FIELDS = {
         "rating_minus_attractiveness",
     },
     RatingsBoard: {"schema_version", "trading_day", "updated_at", "rows"},
+    ChallengerSelectionRow: {
+        "ticker", "rating", "stance", "conviction", "thesis_version",
+        "attractiveness_rank",
+    },
+    ChallengerSelection: {
+        "schema_version", "arm", "trading_day", "calendar_date", "run_id",
+        "mode", "board_date", "coverage_complete", "uncovered_count",
+        "selections",
+    },
     ThemeThesis: {
         "schema_version", "kind", "key", "version", "trading_day",
         "calendar_date", "update_reason", "theme", "weekly_anchor_date",
@@ -75,7 +86,8 @@ _FROZEN_FIELDS = {
         "started_at", "finished_at", "names_added", "names_refreshed",
         "theses_written", "sweep_tickers", "events_flagged",
         "event_updates_written", "themes_reconciled", "theme_updates_written",
-        "ratings_rows", "context_sources_present", "usage_by_tier", "total_cost_usd",
+        "ratings_rows", "challenger_selection_written", "context_sources_present",
+        "usage_by_tier", "total_cost_usd",
         "coverage_gap",
         "budget_month_spent_usd", "budget_month_limit_usd", "errors",
     },
@@ -101,7 +113,7 @@ def test_frozen_field_sets_are_superset_stable():
 
 def test_schema_version_stamped_on_artifacts():
     for model in (CompanyThesis, ThemeThesis, EventRecord, CoverageLedger,
-                  RunManifest, MonthlyCostLedger):
+                  RunManifest, MonthlyCostLedger, ChallengerSelection):
         assert "schema_version" in model.model_fields
         assert model.model_fields["schema_version"].default == 1
 
