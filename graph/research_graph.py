@@ -479,6 +479,23 @@ class ResearchState(TypedDict, total=False):
     # ── Dispatch metadata (for Send()) ───────────────────────────────────────
     team_id: Annotated[str, take_last]  # set by Send() per team
 
+    # ── Checkpoint-resume evidence (config#2263) ─────────────────────────────
+    # Populated ONLY on the resume-hit branch of the three checkpoint-capable
+    # nodes (sector_team_node, macro_economist_node, cio_node) — never on the
+    # fresh-compute path. Keyed so the trajectory validator (evals/trajectory.py)
+    # can tell, from final_state alone, whether this invocation used the S3
+    # checkpoint short-circuit at all (a non-empty dict here means at least
+    # one node was resumed rather than executed, which matters because a
+    # resumed run can finish before its child spans land in LangSmith — see
+    # the trajectory validator's final-state structural fallback).
+    # ``merge_typed_dicts`` (last-write-wins, dict union) rather than
+    # ``reject_on_conflict``: this is bookkeeping, not a correctness
+    # invariant like sector_team_outputs' disjoint keyspace, so a duplicate
+    # write here should never crash a run. sector_team_node's 6 concurrent
+    # Send() branches each own a distinct key (``sector_team_node:{team_id}``)
+    # so there is no legitimate overlap in practice either.
+    checkpoint_resumed_nodes: Annotated[dict[str, bool], merge_typed_dicts]
+
 
 # ── Pre-fetch helpers ─────────────────────────────────────────────────────────
 
@@ -1261,7 +1278,10 @@ def sector_team_node(state: ResearchState) -> dict:
                 team_id,
                 len(persisted.get("recommendations", []) or []),
             )
-            return {"sector_team_outputs": {team_id: persisted}}
+            return {
+                "sector_team_outputs": {team_id: persisted},
+                "checkpoint_resumed_nodes": {f"sector_team_node:{team_id}": True},
+            }
 
     # Stage D' Wire 1: extract intensity_z from the regime substrate
     # (loaded by load_regime_substrate_node upstream of macro). None
@@ -1454,7 +1474,10 @@ def macro_economist_node(state: ResearchState) -> dict:
                 "[macro] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"macro_economist_node": True},
+            }
 
     macro_data = state.get("macro_data", {})
     prior_report = state.get("prior_macro_report", "")
@@ -2475,7 +2498,10 @@ def cio_node(state: ResearchState) -> dict:
                 "[cio] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", _run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"cio_node": True},
+            }
 
     # Collect all team recommendations as candidate list
     team_outputs = state.get("sector_team_outputs", {})

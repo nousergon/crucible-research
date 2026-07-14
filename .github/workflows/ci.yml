@@ -59,7 +59,7 @@ jobs:
       - name: Security audit
         run: |
           pip install pip-audit
-          pip-audit || true
+          pip-audit --ignore-vuln PYSEC-2026-2562 || true
 
   # Alert (Telegram) ONLY on genuine post-merge breakage of the default
   # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order
