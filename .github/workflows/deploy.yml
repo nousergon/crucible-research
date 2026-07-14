@@ -87,7 +87,7 @@ jobs:
       # crucible-evaluator hit exactly this gap as a hard `ModuleNotFoundError`
       # on 2026-07-01. Pin matches requirements.txt's `krepis>=0.7.0` floor.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
