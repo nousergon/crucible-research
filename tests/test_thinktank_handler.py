@@ -1,16 +1,17 @@
-"""Unit tests for the daily think-tank Lambda handler (config#1579 P1).
+"""Unit tests for the think-tank Lambda handler (config#1579 P1).
 
 Pins the handler's three load-bearing contracts:
 
 1. **Dry paths** — ``dry_run_llm`` (shell-run smoke) returns before secrets
    hydration / any S3 access; ``dry_run`` routes to the plan-only mode.
 2. **Raise-on-failure** — the handler must PROPAGATE exceptions, never
-   convert them to an ERROR-dict return. This Lambda is invoked async by
-   EventBridge (no SF Catch above it): an ERROR-dict return counts as a
-   *successful* invocation, so the AWS/Lambda Errors metric stays flat,
-   no async retry fires, and the daily run fails silently — the exact
-   bug class the setup-thinktank-schedule.sh alarm (Errors >= 3/day)
-   exists to page on.
+   convert them to an ERROR-dict return. Invoked by the Saturday SF's
+   ``ThinkTankCoverage`` Task (``arn:aws:states:::lambda:invoke``): the
+   SF Catch only triggers on an actual raised Lambda error — a normal
+   return value (even an error-shaped dict) is a *successful* Task
+   completion, so the non-blocking Catch would never fire and the run
+   would fail silently — the exact bug class the
+   setup-thinktank-alarm.sh alarm (Errors >= 2/day) exists to page on.
 3. **Cold-start hydration** — RAG_DATABASE_URL + VOYAGE_API_KEY are BOTH
    hydrated from the get_secret chokepoint (the 2026-07-02 first-run
    gotcha: the RAG availability probe passes on DB URL alone while every

@@ -2,34 +2,41 @@
 
 Shares the main runner's ECR image with a CMD override to
 ``thinktank_handler.handler`` (the established image-share pattern —
-eval_judge / scanner / rationale_clustering). Two invocation sources,
-split 2026-07-14 (alpha-engine-config-I2487 incident + SOTA follow-up):
+eval_judge / scanner / rationale_clustering).
 
-1. EventBridge rule ``alpha-research-thinktank-maintenance`` (14:30 UTC,
-   Mon/Wed/Fri — after the weekday SF's RunDailyNews state lands the
-   day's news aggregates). Plain event (no ``mode``), so it uses
-   ``research/thinktank.yaml``'s base ``daily_new_names: 0`` — theme
-   reconciliation + events sweep on already-covered names ONLY, never
-   intake. (Weekend/holiday non-fire days: captures + events partition
-   to the last trading day via thinktank/capture.py regardless.)
-2. The Saturday weekly SF's ``ThinkTankCoverage`` state, ``mode=sf_cover``
-   — owns ALL coverage growth + staleness refresh (target/ceiling =
-   rank_ceiling=150), since the universe board it ranks against
-   (scanner/universe/latest.json) is itself only produced on Saturday
-   (Scanner runs immediately before this state in the same SF branch) —
-   a weekday intake pass would have zero new ranking data to act on.
+Invocation, consolidated 2026-07-14 (alpha-engine-config-I2487 incident +
+SOTA follow-up): invoked ONLY by the Saturday weekly SF's
+``ThinkTankCoverage`` state, ``mode=sf_cover``. The prior standalone
+EventBridge rule (``alpha-research-thinktank-daily``, 7 days/week, then
+briefly ``alpha-research-thinktank-maintenance`` at Mon/Wed/Fri) is
+retired entirely — it was pure duplicated work: ``sf_cover`` mode's
+``run_daily()`` already performs theme reconciliation + a full events
+sweep over every covered name unconditionally (the mode only overrides
+intake sizing — ``sf_cover_target``/``sf_cover_ceiling``, now
+``rank_ceiling=150``, the full universe), and the universe board this
+Lambda's intake ranks against (``scanner/universe/latest.json``) is
+itself only produced on Saturday (Scanner runs immediately before this
+state in the same SF branch) — a weekday invocation never had new
+ranking data to act on.
 
-Failure contract — RAISE, never return an ERROR dict. The SF-invoked
-handlers in this repo return ``{"status": "ERROR"}`` for their SF Catch
-states; this Lambda has no SF above it. For an EventBridge async invoke
-an ERROR-dict return is a *successful* invocation — the AWS/Lambda
-Errors metric stays flat, no retry fires, and the failure is silent
-(exactly the no-silent-fails failure mode). Raising instead (a) drives
-the Errors metric that ``infrastructure/setup-thinktank-schedule.sh``'s
-alarm watches, and (b) engages EventBridge's two built-in async retries,
-so a transient provider blip self-heals. A retried run re-selects intake
-against the ledger written so far; the worst case is a duplicate thesis
-version (never a silent skip), and the SSM budget guard caps spend.
+Failure contract — RAISE, never return an ERROR dict. Unlike this repo's
+other SF-invoked handlers (which return ``{"status": "ERROR"}`` for
+their SF Catch states to inspect via ``ResultPath``), the SF's
+``arn:aws:states:::lambda:invoke`` Task integration only triggers its
+``Catch`` on an actual Lambda function error (a raised/unhandled
+exception) — a normal return value, even one shaped like an error dict,
+is treated as a *successful* Task completion and would NOT route through
+``ThinkTankCoverage``'s Catch (silent failure, worse than before: the
+non-blocking Catch exists precisely to keep the SF branch clean on a
+think-tank failure). Raising instead drives the AWS/Lambda Errors metric
+(watched by ``infrastructure/setup-thinktank-alarm.sh``'s alarm) and lets
+the SF state's own Retry (mirroring the sibling ``Research`` state's
+bridge — States.Timeout/Lambda.Unknown, 1 retry) self-heal a transient
+blip. A retried run re-selects intake against the ledger written so far;
+the worst case is a duplicate thesis version (never a silent skip,
+since the coverage ledger is only persisted once at the very end of a
+run — a mid-run timeout does not partially commit), and the SSM budget
+guard caps spend.
 
 Event shape (all fields optional):
 
@@ -130,16 +137,19 @@ def handler(event, context):
     # re-underwrite / rating-backfill knob. Absent on scheduled events.
     refresh = event.get("refresh_tickers") if isinstance(event, dict) else None
 
-    # Saturday SF coverage mode: overrides intake to fill ALL uncovered
-    # top-N names (ignoring the daily_new_names cap set for the daily
-    # EventBridge run). Runs observe-only — writes to thinktank/ S3
-    # prefix for validation tracking; does NOT gate the Predictor.
+    # Saturday SF coverage mode — the ONLY scheduled invocation path
+    # (2026-07-14 consolidation): overrides intake to fill ALL uncovered
+    # top-N names (ignoring research/thinktank.yaml's base
+    # daily_new_names — that base value is a fallback for ad-hoc manual
+    # invokes without mode=sf_cover only). Runs observe-only — writes to
+    # thinktank/ S3 prefix for validation tracking; does NOT gate the
+    # Predictor.
     if isinstance(event, dict) and event.get("mode") == "sf_cover":
         settings = load_settings()
         sf_settings = _replace_settings(
             settings,
-            daily_new_names=event.get("sf_cover_target", 60),
-            rank_ceiling=event.get("sf_cover_ceiling", 60),
+            daily_new_names=event.get("sf_cover_target", 150),
+            rank_ceiling=event.get("sf_cover_ceiling", 150),
         )
         manifest = run_daily(settings=sf_settings, dry_run=plan_only)
     else:

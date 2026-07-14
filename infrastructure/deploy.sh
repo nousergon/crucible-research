@@ -783,16 +783,19 @@ deploy_scanner() {
 
 # Daily think-tank Lambda — config#1579 P1. Shared image with the main
 # runner; CMD override sets the entry to thinktank_handler.handler.
-# Timeout 900s (Lambda max) matches the EPIC's runner decision
-# ("EventBridge->Lambda first; move to the EC2-spot pattern if a run
-# breaches ~12 min") — a steady-state run is a few minutes (5 thesis
-# builds + chunked sweep + churn-gated themes), but a theme re-seed day
-# stacks ~12 extra tier calls. Memory 1024MB matches the main runner
-# (pandas substrate reader + boto3 working set). Secrets (OpenRouter key,
-# RAG DB URL, Voyage key) resolve at runtime from SSM via the get_secret
-# chokepoint — no function-level env var config needed. The EventBridge
-# schedule + Errors alarm live in infrastructure/setup-thinktank-schedule.sh
-# (idempotent, run once after first deploy creates the function).
+# Timeout 900s (Lambda max), matching the SF ThinkTankCoverage state's own
+# TimeoutSeconds. Invoked ONLY by the Saturday weekly SF (mode=sf_cover,
+# 2026-07-14 cadence consolidation — the prior standalone EventBridge
+# schedule is retired, alpha-engine-config-I2487); a full-universe weekly
+# run (rank_ceiling=150) can approach the ceiling, which is why the SF
+# state carries a Retry mirroring the sibling Research state's timeout
+# bridge rather than a Lambda-side headroom lever (none left at 900s).
+# Memory 1024MB matches the main runner (pandas substrate reader + boto3
+# working set). Secrets (OpenRouter key, RAG DB URL, Voyage key) resolve
+# at runtime from SSM via the get_secret chokepoint — no function-level
+# env var config needed. The Errors alarm lives in
+# infrastructure/setup-thinktank-alarm.sh (idempotent, run once after
+# first deploy creates the function).
 deploy_thinktank() {
   _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
 }
