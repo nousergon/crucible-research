@@ -280,6 +280,11 @@ def run_daily(
         store, ledger, theses_written, trading_day=trading_day
     )
     manifest.ratings_rows = len(board.rows)
+    # coverage_complete must reflect the ledger AFTER this run's thesis
+    # writes, not the start-of-run manifest.coverage_gap — otherwise the
+    # run that fills the last gap (Saturday's gap_fill) self-labels its
+    # own selection incomplete and the leaderboard shadow view slips to
+    # the NEXT run. manifest.coverage_gap keeps its pre-run convention.
     write_challenger_selection(
         store,
         ledger,
@@ -289,7 +294,7 @@ def run_daily(
         trading_day=trading_day,
         calendar_date=calendar_date,
         board_date=(ctx.board or {}).get("as_of"),
-        coverage_gap=manifest.coverage_gap or {},
+        coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
     )
     manifest.challenger_selection_written = True
     if event_rows:

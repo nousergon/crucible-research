@@ -89,8 +89,12 @@ def write_challenger_selection(
     coverage_gap: dict,
 ) -> ChallengerSelection:
     """Upsert this run's top-``CHALLENGER_TOP_N`` rated names and persist
-    dated + latest. ``coverage_gap`` is the manifest's already-computed
-    ``_compute_coverage_gap`` dict (same GAP_FILL_TOP_N window)."""
+    dated + latest. ``coverage_gap`` must be a ``_compute_coverage_gap``
+    dict (same GAP_FILL_TOP_N window) computed AFTER this run's ledger
+    writes — the run that fills the last gap must self-report complete, or
+    the leaderboard shadow view slips to the next run (the caller in
+    ``run.py`` recomputes it post-write; ``manifest.coverage_gap`` keeps
+    its separate pre-run convention)."""
     covered = ledger.covered()
     if covered and not ratings_board.rows:
         # Fleet rule: a missing/empty ratings board when the ledger is

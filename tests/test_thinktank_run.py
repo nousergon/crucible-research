@@ -395,22 +395,21 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
     complete.
 
     NOTE on ``coverage_gap``/``coverage_complete`` timing: ``manifest.
-    coverage_gap`` (and therefore this artifact's ``uncovered_count``) is
-    computed against the ledger as it stood at the START of the run (before
-    this run's own intake lands) — an existing, established convention
-    (``_compute_coverage_gap`` runs before ``select_intake``). This artifact
-    reuses that same field rather than re-deriving a post-run figure.
+    coverage_gap`` keeps its pre-run convention (computed before
+    ``select_intake``), but this artifact's ``uncovered_count``/
+    ``coverage_complete`` are recomputed at the call site AFTER this run's
+    thesis writes — the run that fills the last gap (Saturday's gap_fill)
+    must self-report complete, or the leaderboard shadow view slips to the
+    NEXT run.
 
-    - RUN 1 (daily): adds T0-T2 against an empty ledger → pre-run gap is the
-      full 8, coverage_complete False; selections ranked by TT's OWN rating
-      (not attractiveness); shadow signals NOT written (incomplete).
-    - RUN 2 (gap_fill): adds T3-T7 against a 3/8-covered ledger → pre-run
-      gap is 5, still coverage_complete False; selections now include all
-      8 covered names (the ratings board reflects this run's own writes);
-      shadow signals still NOT written.
-    - RUN 3 (gap_fill, no-op): ledger is fully covered (8/8) BEFORE this run
-      starts → pre-run gap is 0, coverage_complete True; conforming shadow
-      signals ARE written this time.
+    - RUN 1 (daily): adds T0-T2 against an empty ledger → post-run gap is
+      5 of 8, coverage_complete False; selections ranked by TT's OWN
+      rating (not attractiveness); shadow signals NOT written (incomplete).
+    - RUN 2 (gap_fill): adds T3-T7 (the whole remaining gap) → post-run
+      gap is 0, coverage_complete True on the SAME run that completed
+      coverage; conforming shadow signals ARE written.
+    - RUN 3 (gap_fill, no-op): still fully covered → complete stays True,
+      shadow refreshed.
     """
     backend = _FakeBackend()
     with mock_aws():
@@ -438,8 +437,8 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert sel["run_id"] == manifest.run_id
         assert sel["trading_day"] == manifest.trading_day
         assert sel["board_date"] == "2026-07-11"
-        # pre-run ledger was empty → pre-run gap is the full 8
-        assert sel["uncovered_count"] == 8
+        # post-run: 3 of 8 covered by this run's intake → 5 uncovered
+        assert sel["uncovered_count"] == 5
         assert sel["coverage_complete"] is False
         # ranked by RATING desc, not by attractiveness_score/rank
         assert [row["ticker"] for row in sel["selections"]] == ["T1", "T2", "T0"]
@@ -467,25 +466,23 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
 
         sel2 = store.get_json("thinktank/challenger_selection/latest.json")
         assert sel2["mode"] == "gap_fill"
-        # pre-run ledger had 3/8 covered → pre-run gap is 5 (matches the
-        # existing test_gap_fill_mode_sizes_intake_to_measured_gap_only)
-        assert sel2["uncovered_count"] == 5
-        assert sel2["coverage_complete"] is False
-        # the ratings board reflects THIS run's own writes, so all 8 names
-        # are already selectable even though coverage_complete lags a run
+        # post-run: this run filled the whole remaining gap → complete on
+        # the SAME run that completed coverage (the Saturday-gap_fill case)
+        assert sel2["uncovered_count"] == 0
+        assert sel2["coverage_complete"] is True
         assert [row["ticker"] for row in sel2["selections"]] == [
             "T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6",
         ]
         assert [row["rating"] for row in sel2["selections"]] == [
             95, 90, 85, 75, 70, 60, 50, 40,
         ]
+        # conforming shadow view written on the completing run itself
         assert store.get_json(
             f"signals_shadow/thinktank_coverage/{manifest2.trading_day}/signals.json"
-        ) is None
+        ) is not None
 
-        # RUN 3 — gap_fill_only no-op (full coverage already, per the
-        # existing lifecycle test's RUN 3): pre-run gap is now 0 →
-        # coverage_complete True, and the shadow signals ARE written.
+        # RUN 3 — gap_fill_only no-op: still fully covered → complete stays
+        # True, shadow refreshed.
         manifest3, store = _run(tt_config, backend, s3, gap_fill_only=True)
         assert manifest3.mode == "gap_fill"
         assert manifest3.names_added == []
