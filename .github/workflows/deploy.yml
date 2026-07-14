@@ -204,6 +204,23 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh thinktank
 
+      # Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B.
+      # Same image-share pattern, CMD override sets the entry to
+      # signals_envelope_handler.handler. Invoked ONLY by the weekly SF's
+      # SignalsEnvelope state (arn:aws:states:::lambda:invoke), sequenced
+      # immediately after RegimeSubstrate — never an EventBridge-scheduled
+      # state. Auto-deployed on every push so scoring/signals_envelope.py
+      # changes propagate without a manual step, matching every other
+      # shared-image Lambda's precedent (the class of bug this guards
+      # against: config#993 / the eval_rolling_mean 5-week-rot incident).
+      # The ci-deploy-guard test (tests/test_deploy_targets_invoked_by_
+      # workflow.py) enforces this step's existence.
+      - name: Deploy signals-envelope Lambda (alpha-engine-research-signals-envelope)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh signals_envelope
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
