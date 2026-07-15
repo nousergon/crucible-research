@@ -43,7 +43,7 @@ lxml~=6.1
 # Config / storage
 pyyaml~=6.0.1
 boto3~=1.34
-pydantic~=2.7
+pydantic~=2.13
 # alpha-engine-lib provides setup_logging, BasePreflight, and (since v0.3.0)
 # the rag submodule consolidating db/embeddings/retrieval/schema previously
 # duplicated in this repo's rag/ folder.
