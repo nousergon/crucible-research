@@ -523,8 +523,18 @@ def _update_thesis_for_held_stock(
     run_date: str,
     team_id: str,
     api_key: str | None = None,
+    *,
+    temperature: float | None = None,
 ) -> dict:
-    """Update thesis for a held stock with material triggers (single Haiku call)."""
+    """Update thesis for a held stock with material triggers (single Haiku call).
+
+    ``temperature`` is an optional passthrough to ``ChatAnthropic`` — the
+    default ``None`` preserves production behavior exactly (the library's
+    own default, unset). The scenario-replay harness
+    (``scripts/replay_harness.py``, L4567 sub-item 2b / #781) passes an
+    explicit value so a counterfactual can be run N times at temp>0 and
+    produce an outcome *distribution* rather than one deterministic point.
+    """
     # Defer-import to avoid module-init cycle (sector_team is imported by
     # research_graph during cost-tracker setup).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
@@ -553,6 +563,11 @@ def _update_thesis_for_held_stock(
     # off. Cost-neutral: Anthropic bills emitted tokens, not the cap.
     # The schema_max_tokens_audit row for this site is corrected in
     # lockstep so the static guard would now catch a regression to 800.
+    # NOTE: keep default_request_timeout as a literal kwarg here (not folded
+    # into a **kwargs dict) — tests/test_llm_request_timeout.py statically
+    # AST-scans every ChatAnthropic(...) call site in agents/ for a literal
+    # default_request_timeout/timeout keyword (config#687 regression guard);
+    # a **kwargs-constructed call would be invisible to that walk.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
@@ -560,6 +575,12 @@ def _update_thesis_for_held_stock(
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
+        # ChatAnthropic's own default is temperature=None (no override sent
+        # to the API, server defaults to 1.0) — passing None through here
+        # reproduces that exactly, so the harness-only ``temperature`` param
+        # is a true no-op at its default and changes nothing for the live
+        # production call path.
+        temperature=temperature,
     )
 
     prior_text = ""
