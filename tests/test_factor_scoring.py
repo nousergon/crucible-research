@@ -340,17 +340,29 @@ class TestPillarComposites:
         }
 
     def test_stewardship_composite_components(self):
-        """Stewardship is thin-quant by design — 2 components only."""
+        """Stewardship rebalanced 2 -> 3 components (alpha-engine-config#2428):
+        the package-pinned config already shipped a 13F institutional-
+        accumulation signal; the derived-column computation for
+        institutional_accumulation_score itself lands in a follow-up
+        crucible-research PR. Until then this composite gracefully
+        rank-NaNs the missing component and reallocates weight across the
+        other two — the same partial-coverage handling every other
+        composite here already relies on (see growth_score). Component
+        weights are tuned config, not asserted here — see
+        alpha-engine-config's own scoring.yaml for the live values."""
         components = _COMPOSITE_DEFS["stewardship_score"]
         component_cols = {col for col, _, _ in components}
-        assert component_cols == {"payout_ratio", "capex_growth_5y"}
+        assert component_cols == {
+            "payout_ratio", "capex_growth_5y", "institutional_accumulation_score",
+        }
         # payout_ratio MUST be inverted (low payout = better stewardship for
-        # the cross-sectional rank); capex_growth_5y NOT inverted (sustained
-        # reinvestment is good stewardship).
+        # the cross-sectional rank); capex_growth_5y and
+        # institutional_accumulation_score NOT inverted (sustained
+        # reinvestment / net institutional buying are both good stewardship).
         for col, _, invert in components:
             if col == "payout_ratio":
                 assert invert is True, "payout_ratio must be inverted"
-            if col == "capex_growth_5y":
+            if col in ("capex_growth_5y", "institutional_accumulation_score"):
                 assert invert is False
 
     def test_derived_factor_defs_documents_sustainable_growth_rate(self):
