@@ -41,36 +41,25 @@ ID and appending a date returns HTTP 404 — so it cannot be pinned at
 request time; its drift is caught post-hoc via the resolved-model record
 instead. This asymmetry is why pinning is a per-spec property, not a
 blanket "append a date suffix" rule.
+
+**config#1675 / config#2575 lift (2026-07-15):** the registry TYPE
+(``JudgeModelSpec``) and the resolution MECHANICS (``resolve()`` /
+``request_model_for()``) now delegate to ``krepis.judge`` — this module
+keeps ownership of the actual Haiku/Sonnet roster (the closed, audited
+set of judge models THIS pipeline runs) and re-exports the same
+zero-argument call shape existing callers already use, so
+``evals.judge_models.resolve("claude-haiku-4-5")`` behaves identically
+to before the lift. ``krepis.judge.resolve``/``request_model_for`` take
+the registry (``specs``) as an explicit parameter rather than owning a
+global one, since the judge-model roster is a per-consumer decision —
+this module is where that roster lives for crucible-research.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class JudgeModelSpec:
-    """One judge model's three identities (see module docstring)."""
-
-    logical_key: str
-    """Stable identity — S3 path / CloudWatch dimension / custom_id tag.
-    Never changes on a snapshot pin."""
-
-    request_model: str
-    """Exact string sent to the Anthropic API. A dated snapshot when one
-    exists (``pinned=True``), otherwise the alias (``pinned=False``)."""
-
-    tag: str
-    """Compact custom_id tag (keeps the Batches API custom_id under its
-    64-char ceiling)."""
-
-    pinned: bool
-    """True iff ``request_model`` is an immutable dated snapshot. False
-    means no snapshot is published and the alias is the canonical ID."""
-
-    pin_note: str
-    """Why this spec is (or isn't) pinned — auditable rationale."""
-
+from krepis.judge import JudgeModelSpec
+from krepis.judge import request_model_for as _lib_request_model_for
+from krepis.judge import resolve as _lib_resolve
 
 HAIKU = JudgeModelSpec(
     logical_key="claude-haiku-4-5",
@@ -100,8 +89,6 @@ SONNET = JudgeModelSpec(
 
 _SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET)
 _BY_LOGICAL: dict[str, JudgeModelSpec] = {s.logical_key: s for s in _SPECS}
-_BY_REQUEST: dict[str, JudgeModelSpec] = {s.request_model: s for s in _SPECS}
-_BY_TAG: dict[str, JudgeModelSpec] = {s.tag: s for s in _SPECS}
 
 TAG_BY_LOGICAL: dict[str, str] = {s.logical_key: s.tag for s in _SPECS}
 """Logical-key → custom_id tag. Single source for judge.py's custom_id
@@ -119,20 +106,21 @@ def resolve(model: str) -> JudgeModelSpec:
     audited set, so an unrecognized string is a bug (a typo or an
     un-registered model), not something to paper over with a soft
     fallback. Fail loud per the no-silent-fails rule.
+
+    Delegates to ``krepis.judge.resolve`` against this module's
+    Haiku/Sonnet registry (config#2575 lift) — the error message is
+    re-raised with this module's own known-keys list so it still points
+    callers at ``evals/judge_models.py`` rather than the lib.
     """
-    spec = (
-        _BY_LOGICAL.get(model)
-        or _BY_REQUEST.get(model)
-        or _BY_TAG.get(model)
-    )
-    if spec is None:
+    try:
+        return _lib_resolve(model, _SPECS)
+    except KeyError:
         raise KeyError(
             f"Unknown judge model {model!r}; register it in "
             f"evals/judge_models.py (known logical keys: "
             f"{sorted(_BY_LOGICAL)}). Judge models are a closed, audited "
             f"set — an unrecognized id is a bug, not a fallback."
-        )
-    return spec
+        ) from None
 
 
 def request_model_for(logical_key: str) -> str:
@@ -142,4 +130,4 @@ def request_model_for(logical_key: str) -> str:
     and the Batches API ``build_batch_request``) route through so the
     pinned snapshot is applied in exactly one place.
     """
-    return resolve(logical_key).request_model
+    return _lib_request_model_for(logical_key, _SPECS)
