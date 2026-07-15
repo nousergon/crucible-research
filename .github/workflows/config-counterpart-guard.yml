@@ -16,6 +16,8 @@ name: Config counterpart guard
 on:
   pull_request:
 
+permissions: {}
+
 jobs:
   config-counterpart-merged:
     uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@main

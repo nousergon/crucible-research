@@ -32,6 +32,8 @@ on:
       - ".github/workflows/judge-perturbation-smoke.yml"
       - "requirements.txt"
 
+permissions: {}
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
