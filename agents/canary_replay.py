@@ -1,5 +1,6 @@
 """
 Saturday-replay canary — research-repo probes for alpha-engine-config#2246.
+(Live end-to-end per-PR gate verification, 2026-07-15 — no functional change.)
 
 Every Saturday weekly-SF failure of 2026-07-11 lived in a code path the
 Friday dry-preflight structurally cannot reach (``dry_run_llm=true`` only
