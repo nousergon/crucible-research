@@ -28,6 +28,7 @@ FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
+FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -118,19 +119,48 @@ build_and_deploy_main() {
   PROMPTS_STAGED_FROM_CONFIG_REPO=0
   YAMLS_STAGED_FROM_CONFIG_REPO=()
 
+  # Resolve the research module config source: experiment-package FIRST, legacy
+  # top-level dir as fallback (config#1042 experiment-package adoption — matches
+  # the executor config_loader / backtester spot_backtest.sh precedent). The
+  # package copy is canonical; the legacy `research/` dir is being removed once
+  # every reader is package-aware — this was the last one. $ALPHA_ENGINE_EXPERIMENT_ID
+  # is not injected in the GitHub-Actions Lambda-deploy context, so it defaults
+  # to "reference" (the prod experiment). Fallback keeps this working through the
+  # cutover window (legacy still present) AND after the legacy dir is deleted.
+  EXPERIMENT_ID="${ALPHA_ENGINE_EXPERIMENT_ID:-reference}"
+  RESEARCH_CFG_DIR=""
+  for candidate in \
+    "$CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research" \
+    "$CONFIG_REPO_DIR/research"; do
+    if [ -d "$candidate" ]; then
+      RESEARCH_CFG_DIR="$candidate"
+      break
+    fi
+  done
+  if [ -z "$RESEARCH_CFG_DIR" ]; then
+    echo "ERROR: research config dir not found — tried (package-first):"
+    echo "  $CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research/ (experiment package)"
+    echo "  $CONFIG_REPO_DIR/research/ (legacy top-level)"
+    echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
+    echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+    echo "      (and optionally ALPHA_ENGINE_EXPERIMENT_ID; default: reference)"
+    exit 1
+  fi
+  echo "Research config source: $RESEARCH_CFG_DIR (experiment=$EXPERIMENT_ID)"
+
   # -- prompts -------------------------------------------------------------
   if [ -d "config/prompts" ] && ls config/prompts/*.txt &>/dev/null; then
     echo "Using existing config/prompts/ (local dev workflow)"
   else
-    if [ -d "$CONFIG_REPO_DIR/research/prompts" ]; then
-      echo "Staging research prompts from $CONFIG_REPO_DIR/research/prompts/..."
+    if [ -d "$RESEARCH_CFG_DIR/prompts" ]; then
+      echo "Staging research prompts from $RESEARCH_CFG_DIR/prompts/..."
       mkdir -p config/prompts
-      cp "$CONFIG_REPO_DIR/research/prompts/"*.txt config/prompts/
+      cp "$RESEARCH_CFG_DIR/prompts/"*.txt config/prompts/
       PROMPTS_STAGED_FROM_CONFIG_REPO=1
     else
       echo "ERROR: research prompts not found — tried:"
       echo "  config/prompts/ (local dev)"
-      echo "  $CONFIG_REPO_DIR/research/prompts/ (config repo sibling)"
+      echo "  $RESEARCH_CFG_DIR/prompts/ (config repo, experiment=$EXPERIMENT_ID)"
       echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
       echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
       exit 1
@@ -142,7 +172,7 @@ build_and_deploy_main() {
     if [ -f "config/$yaml" ]; then
       echo "Using existing config/$yaml (local dev workflow)"
     else
-      src="$CONFIG_REPO_DIR/research/$yaml"
+      src="$RESEARCH_CFG_DIR/$yaml"
       if [ -f "$src" ]; then
         echo "Staging config/$yaml from $src..."
         cp "$src" "config/$yaml"
@@ -150,7 +180,7 @@ build_and_deploy_main() {
       else
         echo "ERROR: config/$yaml not found — tried:"
         echo "  config/$yaml (local dev)"
-        echo "  $src (config repo sibling)"
+        echo "  $src (config repo, experiment=$EXPERIMENT_ID)"
         echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
         echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
         exit 1
@@ -768,6 +798,21 @@ deploy_thinktank() {
   _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
 }
 
+# Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B. Shared
+# image with the main runner; CMD override sets the entry to
+# signals_envelope_handler.handler. Invoked ONLY by the weekly SF's
+# SignalsEnvelope state (arn:aws:states:::lambda:invoke, synchronous),
+# placed immediately AFTER RegimeSubstrate so the regime read this producer
+# takes is same-day fresh (config#1580's no-week-old-data invariant) — never
+# triggered by EventBridge directly. Timeout 300s is generous: the envelope
+# is a read-two-artifacts-write-one job (scanner universe board + regime
+# substrate in, signals.json out), no LLM/LangGraph, pure quant transform.
+# Memory 1024MB matches the main runner's headroom for the pandas/boto3
+# working set the board read pulls in.
+deploy_signals_envelope() {
+  _deploy_image_shared_lambda "$FUNCTION_SIGNALS_ENVELOPE" "signals_envelope_handler" 300 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -780,9 +825,10 @@ case "$TARGET" in
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
   thinktank)             deploy_thinktank ;;
+  signals_envelope)      deploy_signals_envelope ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|both|all]"; exit 1 ;;
 esac
 
 echo ""

@@ -18,6 +18,7 @@ from scoring.factor_scoring import (
     _DERIVED_FACTOR_DEFS,
     _add_derived_factors,
     _within_sector_pct_rank,
+    compute_and_write_factor_profiles,
     compute_factor_composites,
     read_factor_profiles_from_s3,
     write_factor_profiles_to_s3,
@@ -339,17 +340,29 @@ class TestPillarComposites:
         }
 
     def test_stewardship_composite_components(self):
-        """Stewardship is thin-quant by design — 2 components only."""
+        """Stewardship rebalanced 2 -> 3 components (alpha-engine-config#2428):
+        the package-pinned config already shipped a 13F institutional-
+        accumulation signal; the derived-column computation for
+        institutional_accumulation_score itself lands in a follow-up
+        crucible-research PR. Until then this composite gracefully
+        rank-NaNs the missing component and reallocates weight across the
+        other two — the same partial-coverage handling every other
+        composite here already relies on (see growth_score). Component
+        weights are tuned config, not asserted here — see
+        alpha-engine-config's own scoring.yaml for the live values."""
         components = _COMPOSITE_DEFS["stewardship_score"]
         component_cols = {col for col, _, _ in components}
-        assert component_cols == {"payout_ratio", "capex_growth_5y"}
+        assert component_cols == {
+            "payout_ratio", "capex_growth_5y", "institutional_accumulation_score",
+        }
         # payout_ratio MUST be inverted (low payout = better stewardship for
-        # the cross-sectional rank); capex_growth_5y NOT inverted (sustained
-        # reinvestment is good stewardship).
+        # the cross-sectional rank); capex_growth_5y and
+        # institutional_accumulation_score NOT inverted (sustained
+        # reinvestment / net institutional buying are both good stewardship).
         for col, _, invert in components:
             if col == "payout_ratio":
                 assert invert is True, "payout_ratio must be inverted"
-            if col == "capex_growth_5y":
+            if col in ("capex_growth_5y", "institutional_accumulation_score"):
                 assert invert is False
 
     def test_derived_factor_defs_documents_sustainable_growth_rate(self):
@@ -518,3 +531,99 @@ class TestPillarComposites:
         # is also NaN because payout_ratio is missing.
         assert out["growth_score"].notna().all()
         assert (out["growth_n"] == 1).all()
+
+
+# ── compute_and_write_factor_profiles: optional Metron supplemental source
+# (metron-ops#177) ────────────────────────────────────────────────────────────
+
+class TestComputeAndWriteFactorProfilesSupplemental:
+    """A second, additive parquet source at
+    features/metron_supplemental/{date}/{technical,fundamental}.parquet
+    (written by alpha-engine-data for Metron-held tickers outside the
+    S&P500+400 universe) gets concatenated in before composites are computed
+    — when absent, behavior is unchanged (core parquets only)."""
+
+    _CORE_TECHNICAL = pd.DataFrame({
+        "ticker": ["AAPL"], "momentum_20d": [0.10], "return_60d": [0.20],
+        "return_120d": [0.30], "dist_from_52w_high": [-0.05], "momentum_5d": [0.02],
+        "realized_vol_20d": [0.15], "vol_ratio_10_60": [1.0], "atr_14_pct": [1.5],
+    })
+    _CORE_FUNDAMENTAL = pd.DataFrame({
+        "ticker": ["AAPL"], "roe": [0.30], "debt_to_equity": [0.50],
+        "gross_margin": [0.40], "current_ratio": [1.5],
+        "pe_ratio": [25.0], "pb_ratio": [4.0], "fcf_yield": [0.04],
+    })
+    _SUPP_TECHNICAL = pd.DataFrame({
+        "ticker": ["MARUY"], "momentum_20d": [0.05], "return_60d": [0.10],
+        "return_120d": [0.15], "dist_from_52w_high": [-0.10], "momentum_5d": [0.01],
+        "realized_vol_20d": [0.20], "vol_ratio_10_60": [1.1], "atr_14_pct": [2.0],
+    })
+    _SUPP_FUNDAMENTAL = pd.DataFrame({
+        "ticker": ["MARUY"], "roe": [0.10], "debt_to_equity": [0.80],
+        "gross_margin": [0.20], "current_ratio": [1.2],
+        "pe_ratio": [10.0], "pb_ratio": [1.0], "fcf_yield": [0.08],
+    })
+
+    @staticmethod
+    def _parquet_bytes(df: pd.DataFrame) -> bytes:
+        import io
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False, engine="pyarrow")
+        return buf.getvalue()
+
+    def _mock_s3(self, *, supp_technical=None, supp_fundamental=None):
+        s3 = MagicMock()
+        parquets = {
+            "features/2026-07-12/technical.parquet": self._CORE_TECHNICAL,
+            "features/2026-07-12/fundamental.parquet": self._CORE_FUNDAMENTAL,
+        }
+        if supp_technical is not None:
+            parquets["features/metron_supplemental/2026-07-12/technical.parquet"] = supp_technical
+        if supp_fundamental is not None:
+            parquets["features/metron_supplemental/2026-07-12/fundamental.parquet"] = supp_fundamental
+
+        def _get(Bucket, Key):
+            if Key not in parquets:
+                raise Exception("NoSuchKey")
+            body = MagicMock()
+            body.read.return_value = self._parquet_bytes(parquets[Key])
+            return {"Body": body}
+
+        s3.get_object.side_effect = _get
+        return s3
+
+    def test_supplemental_absent_scores_only_core_universe(self):
+        s3 = self._mock_s3()
+        with patch("boto3.client", return_value=s3):
+            compute_and_write_factor_profiles(
+                run_date="2026-07-12", sector_map={"AAPL": "Information Technology"}, bucket="test-bucket",
+            )
+        payload = json.loads(s3.put_object.call_args_list[0].kwargs["Body"])
+        assert set(payload.keys()) == {"AAPL"}
+
+    def test_supplemental_present_adds_extra_ticker_to_profiles(self):
+        s3 = self._mock_s3(supp_technical=self._SUPP_TECHNICAL, supp_fundamental=self._SUPP_FUNDAMENTAL)
+        with patch("boto3.client", return_value=s3):
+            compute_and_write_factor_profiles(
+                run_date="2026-07-12",
+                sector_map={"AAPL": "Information Technology", "MARUY": "Industrials"},
+                bucket="test-bucket",
+            )
+        payload = json.loads(s3.put_object.call_args_list[0].kwargs["Body"])
+        assert set(payload.keys()) == {"AAPL", "MARUY"}
+        assert payload["MARUY"]["sector"] == "Industrials"
+
+    def test_supplemental_technical_only_still_merges_via_outer_join(self):
+        """A supplemental ticker with technical but no fundamental data still
+        gets partial composites (momentum/low_vol) via the existing
+        outer-join partial-coverage handling — same as any core ticker."""
+        s3 = self._mock_s3(supp_technical=self._SUPP_TECHNICAL)
+        with patch("boto3.client", return_value=s3):
+            compute_and_write_factor_profiles(
+                run_date="2026-07-12",
+                sector_map={"AAPL": "Information Technology", "MARUY": "Industrials"},
+                bucket="test-bucket",
+            )
+        payload = json.loads(s3.put_object.call_args_list[0].kwargs["Body"])
+        assert "MARUY" in payload
+        assert "momentum_score" in payload["MARUY"]

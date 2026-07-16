@@ -554,3 +554,110 @@ class TestScopeCapTruncation:
         #228's DEFAULT_MAX_ARTIFACTS_PER_AGENT=500)."""
         from evals.rationale_clustering import DEFAULT_MAX_RATIONALES_PER_AGENT
         assert DEFAULT_MAX_RATIONALES_PER_AGENT == 500
+
+
+class TestKeyLevelScopeCap:
+    """Pin the pre-fetch key-level cap + parallel-load behavior
+    (config#1650 item 3).
+
+    The 2026-07-03 weekly timed out in the SERIAL S3 load loop (~33k
+    keys) before clustering ever ran, at 240MB/1024MB used — the fix is
+    (1) bound the number of get_object calls per agent BEFORE fetching,
+    keeping only the most-recent keys, and (2) fetch in parallel.
+    """
+
+    def _artifacts_across_days(self, n_per_day: int, days: list[str]) -> dict:
+        artifacts = {}
+        for day in days:
+            for i in range(n_per_day):
+                key = f"decision_artifacts/2026/05/{day}/sector_quant/run-{day}-{i:03d}.json"
+                artifacts[key] = {
+                    "agent_id": "sector_quant",
+                    "agent_output": {
+                        "ranked_picks": [
+                            {"ticker": f"T{i}", "rationale": f"rationale day{day} n{i}"}
+                        ]
+                    },
+                }
+        return artifacts
+
+    def test_key_cap_bounds_get_object_calls_to_most_recent(self):
+        from evals.rationale_clustering import compute_and_emit
+
+        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        # 6 artifacts/day over 2 days = 12 keys; cap at 6 → only the
+        # 6 most-recent keys (all of 05/09) may be fetched.
+        artifacts = self._artifacts_across_days(6, ["08", "09"])
+        s3 = _build_s3_stub_with_artifacts(artifacts)
+        summary = compute_and_emit(
+            end_time=end,
+            window_days=2,
+            s3_client=s3,
+            cloudwatch_client=MagicMock(),
+            max_rationales_per_agent=6,
+        )
+        fetched_keys = {c.kwargs["Key"] for c in s3.get_object.call_args_list}
+        assert len(fetched_keys) == 6
+        assert all("/2026/05/09/" in k for k in fetched_keys), (
+            "cap must keep the MOST-RECENT keys, not the oldest"
+        )
+        assert summary["artifacts_fetched"] == 6
+        capped = summary["agents_key_capped"]
+        assert len(capped) == 1
+        assert capped[0]["agent_id"] == "sector_quant"
+        assert capped[0]["discovered_keys"] == 12
+        assert capped[0]["fetched_keys"] == 6
+        # All 12 keys were still DISCOVERED (listing is uncapped).
+        assert summary["artifacts_discovered"] == 12
+
+    def test_no_key_cap_when_below_bound(self):
+        from evals.rationale_clustering import compute_and_emit
+
+        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        artifacts = self._artifacts_across_days(4, ["08", "09"])  # 8 keys
+        s3 = _build_s3_stub_with_artifacts(artifacts)
+        summary = compute_and_emit(
+            end_time=end,
+            window_days=2,
+            s3_client=s3,
+            cloudwatch_client=MagicMock(),
+            max_rationales_per_agent=500,
+        )
+        assert summary["agents_key_capped"] == []
+        assert summary["artifacts_fetched"] == 8
+        assert s3.get_object.call_count == 8
+
+    def test_post_load_cap_keeps_most_recent_rationales(self):
+        """With chronological per-agent key ordering, the post-load
+        ``[-max:]`` slice genuinely keeps the newest rationales."""
+        from evals.rationale_clustering import compute_and_emit
+
+        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        # 6/day over 2 days; rationale cap 6 → the 6 kept rationales
+        # must all be day-09 (one rationale per artifact here).
+        artifacts = self._artifacts_across_days(6, ["08", "09"])
+        s3 = _build_s3_stub_with_artifacts(artifacts)
+        captured = {}
+        real_put = s3.put_object
+
+        def capture_put(*, Bucket, Key, **kw):
+            captured[Key] = kw.get("Body")
+            return real_put(Bucket=Bucket, Key=Key, **kw)
+
+        s3.put_object = MagicMock(side_effect=capture_put)
+        summary = compute_and_emit(
+            end_time=end,
+            window_days=2,
+            s3_client=s3,
+            cloudwatch_client=MagicMock(),
+            max_rationales_per_agent=6,
+        )
+        per_agent = summary["per_agent"]
+        assert len(per_agent) == 1
+        assert per_agent[0]["n_rationales"] == 6
+        analysis = json.loads(captured[per_agent[0]["analysis_key"]])
+        reps = [r for c in analysis["clusters"] for r in c["representatives"]]
+        assert all("day09" in r for r in reps), (
+            "post-load cap kept oldest rationales — chronological "
+            "ordering regressed"
+        )

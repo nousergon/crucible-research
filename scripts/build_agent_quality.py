@@ -19,6 +19,15 @@ value):
 - ``judge_rubric_pass_rate``    % of real judge evals with every rubric dim >= pass
 - ``judge_rubric_distribution`` modal-score concentration across all rubric dims
                                 (higher = rubric collapse)
+- ``judge_outcome_ic``          judge-score → realized-outcome validation (old
+                                ROADMAP L480 re-scope): date-clustered Spearman
+                                rank-IC of per-ticker judge rubric scores vs
+                                realized canonical-horizon (21d) log-alpha.
+                                FROZEN cross-repo schema — see
+                                ``evals/judge_outcome_ic.py``. Observability
+                                only; anti-Goodhart stance preserved (judge
+                                scores stay OUT of the agent-facing scorecard,
+                                per evals/last_week_scorecard.py).
 
 Not emitted by this increment (need CloudWatch queries or new instrumentation —
 tracked on #1149): ``agent_validation_failure_rate``, ``retry_storm_count``,
@@ -42,6 +51,7 @@ import argparse
 import io
 import json
 import logging
+import os
 import sys
 from collections import Counter
 from datetime import date as date_type
@@ -242,18 +252,28 @@ def _load_signals(s3: Any, bucket: str, date_str: str) -> Optional[dict]:
 
 
 def _load_evals(s3: Any, bucket: str, run_date: date_type) -> list[dict]:
-    """All RubricEvalArtifact JSONs under ``_eval/{run_date}/`` (any subdir)."""
-    prefix = f"{_EVAL_PREFIX}/{run_date.isoformat()}/"
-    artifacts: list[dict] = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []) or []:
-            key = obj["Key"]
-            if not key.endswith(".json"):
-                continue
-            doc = _get_json(s3, bucket, key)
-            if doc is not None:
-                artifacts.append(doc)
+    """All RubricEvalArtifact JSONs under ``_eval/`` in the flat layout
+    (config#793 — prior nested layout is no longer emitted).
+
+    Reuses the loader from evals/judge_outcome_ic to maintain consistency
+    across the rubric + judge_outcome_ic components. The rubric metrics
+    report over all evals in the flat prefix; filtering by run_date is no
+    longer applicable with the flat layout since execution date is not
+    encoded in the S3 partition (the date semantics are now in each artifact's
+    timestamps / capture keys). This is correct for the Saturday reporting
+    use case (one research run per Saturday writes all weekly evals)."""
+    from evals.judge_outcome_ic import load_eval_artifacts
+
+    artifacts = load_eval_artifacts(s3, bucket)
+
+    if not artifacts:
+        logger.warning(
+            "[build_agent_quality] zero evals found in the flat _eval/ prefix "
+            "(run_date=%s) — this is expected only on the first run after a "
+            "research reset; otherwise check that the judge layer is emitting",
+            run_date,
+        )
+
     return artifacts
 
 
@@ -264,12 +284,15 @@ def build_agent_quality(
     *,
     run_date: Optional[date_type] = None,
     cw: Any = None,
+    outcomes_conn: Any = None,
 ) -> dict:
     """Compute the agent-quality artifact for one research run.
 
     ``target_date`` is the trading day (output path + signals); ``run_date``
     (default = ``target_date``) is the calendar day keying the cost + eval
-    partitions.
+    partitions. ``outcomes_conn`` is an optional open research.db connection
+    for the ``judge_outcome_ic`` block (injected in tests / ``--db``); when
+    None the block pulls the ``research.db`` S3 snapshot itself.
     """
     run_date = run_date or target_date
     date_str = target_date.isoformat()
@@ -312,6 +335,36 @@ def build_agent_quality(
                 "value": round(modal_concentration, 4),
                 "n": n_eval,
             }
+
+    # judge_outcome_ic — judge-score → realized-outcome validation (old ROADMAP
+    # L480 re-scope; evals/judge_outcome_ic.py). Unlike the blocks above this
+    # one is NEVER silently absent: absent history is an explicit
+    # status="insufficient" from the module, and a genuine failure (broken
+    # precondition — S3 listing error, missing research.db snapshot) surfaces
+    # as status="error" + the exception string, WARNed with traceback, per the
+    # per-block isolation pattern below (mirrors the CW blocks: the failure is
+    # recorded on a named surface — block status + WARN — while the sibling
+    # components and the artifact write survive; raising here would sink the
+    # PRIMARY deliverable for a secondary-observability block, and the
+    # rolling-mean handler's own fail-soft wrapper would then hide those too).
+    # Consumers treat any status != "ok" as not-gradeable. Fleet fail-hard
+    # doctrine (config#1684) is honored inside the module: broken
+    # preconditions RAISE out of build_judge_outcome_ic_block rather than
+    # degrade into a fabricated "insufficient".
+    try:
+        from evals.judge_outcome_ic import build_judge_outcome_ic_block
+
+        result["judge_outcome_ic"] = build_judge_outcome_ic_block(
+            s3, bucket, conn=outcomes_conn,
+        )
+    except Exception as exc:  # noqa: BLE001 — per-block isolation, see above
+        logger.warning(
+            "[agent_quality] judge_outcome_ic failed (recorded as "
+            "status=error, other components unaffected): %s", exc, exc_info=True,
+        )
+        result["judge_outcome_ic"] = {
+            "schema_version": 1, "status": "error", "error": str(exc),
+        }
 
     # Agent runtime metrics from the AlphaEngine/Agents prod telemetry
     # (config#1154/#1149): validation-failure rate (fleet), retry-storm count +
@@ -361,13 +414,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="Trading day (keys output path + signals/).")
     parser.add_argument("--run-date", default=None, type=_parse_date,
                         help="Calendar run day (keys _cost_raw/ + _eval/). Default: --date.")
+    parser.add_argument("--db", default=None,
+                        help="Local research.db path for the judge_outcome_ic "
+                             "outcome join. Default: pull the S3 snapshot.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Compute + print the artifact but do NOT write to S3.")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    outcomes_conn = None
+    if args.db:
+        import sqlite3
+
+        if not os.path.exists(args.db):
+            parser.error(f"--db path not found: {args.db}")
+        outcomes_conn = sqlite3.connect(args.db)
+
     s3 = boto3.client("s3")
-    artifact = build_agent_quality(s3, args.bucket, args.date, run_date=args.run_date)
+    artifact = build_agent_quality(
+        s3, args.bucket, args.date, run_date=args.run_date,
+        outcomes_conn=outcomes_conn,
+    )
     graded = [k for k in artifact if isinstance(artifact[k], dict) and "value" in artifact[k]]
     logger.info("[agent_quality] %d component(s) computed: %s", len(graded), ", ".join(graded) or "(none)")
     json.dump(artifact, sys.stdout, indent=2)

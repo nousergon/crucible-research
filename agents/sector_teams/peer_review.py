@@ -20,7 +20,7 @@ from graph.llm_cost_tracker import get_cost_telemetry_callback
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_with_rate_limit_retry,
+    invoke_anthropic_safe,
 )
 
 from config import (
@@ -272,12 +272,11 @@ def _quant_reviews_addition(
 
     structured_llm = llm.with_structured_output(QuantAcceptanceVerdict)
     try:
-        verdict: QuantAcceptanceVerdict = invoke_with_rate_limit_retry(
-            lambda: structured_llm.invoke(
-                [HumanMessage(content=prompt)],
-                config={"metadata": loaded_prompt.langsmith_metadata()},
-            ),
+        verdict: QuantAcceptanceVerdict = invoke_anthropic_safe(
+            structured_llm,
+            [HumanMessage(content=prompt)],
             label=f"peer_review:{team_id}:quant_addition",
+            config={"metadata": loaded_prompt.langsmith_metadata()},
         )
         log.info(
             "[peer_review:%s] quant %s qual's addition %s: %s",
@@ -423,12 +422,11 @@ def _joint_finalization(
     selection_structured = finalization_llm.with_structured_output(JointSelectionOutput)
     selection: Optional[JointSelectionOutput] = None
     try:
-        selection = invoke_with_rate_limit_retry(
-            lambda: selection_structured.invoke(
-                [HumanMessage(content=p1_text)],
-                config={"metadata": selection_prompt.langsmith_metadata()},
-            ),
+        selection = invoke_anthropic_safe(
+            selection_structured,
+            [HumanMessage(content=p1_text)],
             label=f"peer_review:{team_id}:selection",
+            config={"metadata": selection_prompt.langsmith_metadata()},
         )
     except Exception as e:
         if is_strict_validation_enabled():
@@ -491,12 +489,11 @@ def _joint_finalization(
             team_rationale=selection.team_rationale,
         )
         try:
-            decision: JointFinalizationDecision = invoke_with_rate_limit_retry(
-                lambda: rationale_structured.invoke(
-                    [HumanMessage(content=p2_text)],
-                    config={"metadata": rationale_prompt.langsmith_metadata()},
-                ),
+            decision: JointFinalizationDecision = invoke_anthropic_safe(
+                rationale_structured,
+                [HumanMessage(content=p2_text)],
                 label=f"peer_review:{team_id}:rationale:{ticker}",
+                config={"metadata": rationale_prompt.langsmith_metadata()},
             )
             rationale_by_ticker[ticker] = decision.rationale
         except Exception as e:

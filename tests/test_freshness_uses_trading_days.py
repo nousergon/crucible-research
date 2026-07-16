@@ -97,7 +97,7 @@ def test_no_calendar_days_in_freshness_functions():
 
     assert not all_violations, (
         "Calendar-day arithmetic found in freshness-named functions. Use "
-        "alpha_engine_lib.dates.{trading_days_stale, is_fresh_in_trading_days} "
+        "nousergon_lib.dates.{trading_days_stale, is_fresh_in_trading_days} "
         "instead, or add `# noqa: trading-day` with a comment explaining "
         "why calendar days are correct at that site.\n"
         + "\n".join(all_violations)

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -130,6 +130,13 @@ CREATE TABLE IF NOT EXISTS score_performance (
     price_on_date   REAL,
     price_10d       REAL,
     price_30d       REAL,
+    -- WIDE OUTCOME COLUMNS — WRITES RETIRED (config#1550, EPIC config#1483
+    -- Phase 4). return_/spy_*_return/beat_spy_ (10d/30d here; 5d/21d added in
+    -- migrations 11/18) are no longer written by the producer — the canonical
+    -- outcome store is score_performance_outcomes below. Columns are NOT
+    -- dropped (SQLite; dead columns are harmless, legacy rows keep their
+    -- historical values). price_{h}d / eval_date_{h}d are NOT outcome columns
+    -- and are still written.
     spy_10d_return  REAL,
     spy_30d_return  REAL,
     return_10d      REAL,
@@ -284,6 +291,14 @@ CREATE TABLE IF NOT EXISTS scanner_evaluations (
     focus_rank_in_sector    INTEGER,        -- 1-indexed rank within sector
     focus_list_passed       INTEGER NOT NULL DEFAULT 0,  -- 1 if in any team's top-N
     agent_override          INTEGER NOT NULL DEFAULT 0,  -- 1 if @tool get_factor_profile called on this non-focus ticker
+    -- Per-team override attribution (v23 migration, config#750). Which sector
+    -- team's quant agent reached outside its focus list to look up this ticker.
+    -- NULL when agent_override=0, or on override rows persisted before v23
+    -- (dashboards read a NULL override_team_id on an override row as the legacy
+    -- unattributed "—" group). Because sector teams partition tickers by sector
+    -- (each ticker belongs to one sector → one team), an override ticker is
+    -- overridden by at most one team, so this is unambiguous.
+    override_team_id        TEXT,
     UNIQUE(ticker, eval_date)
 );
 
@@ -346,10 +361,11 @@ CREATE TABLE IF NOT EXISTS cio_evaluations (
 -- nousergon_lib.quant.horizons.OutcomeColumns. Returns/spy stored as DECIMALS
 -- (matching the universe_returns source + log_alpha), NOT the legacy percent
 -- quirk of the wide columns. Producer = alpha-engine-data
--- signal_returns._backfill_outcome_records (config#1483 Phase 2, dual-write);
--- this DDL is byte-identical to that producer's self-creating _ensure so
--- whichever side creates the table first, both agree. Authoritative-schema
--- home; consumer reads land in Phase 3 (soak-gated).
+-- signal_returns._backfill_outcome_records; this DDL is byte-identical to that
+-- producer's self-creating _ensure so whichever side creates the table first,
+-- both agree. Authoritative-schema home. As of Phase 4 (config#1550) this is
+-- the PRIMARY outcome write (producer fail-loud) that every consumer reads —
+-- the wide-column dual-write soak is retired.
 CREATE TABLE IF NOT EXISTS score_performance_outcomes (
     id             INTEGER PRIMARY KEY,
     signal_id      TEXT NOT NULL,
@@ -514,13 +530,12 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # parity columns (price/return/spy/beat/eval_date_21d) plus the
     # canonical log-domain market-relative alpha (log_alpha_21d =
     # log_return_21d - log_spy_return_21d) the predictor trains on.
-    # Producer = alpha-engine-data signal_returns._backfill_score_returns,
-    # sourced from universe_returns' 21d columns (alpha-engine-data #197).
-    # Powers the judge outcome-IC validation (ROADMAP L480 re-scope) — the
-    # judge's quality scores correlated against realized canonical alpha.
-    # NULL on rows persisted before this migration / before the 21d
-    # forward window closes; backtester consumers treat NULL as
-    # "outcome not yet realized".
+    # OUTCOME-COLUMN WRITES RETIRED at Phase 4 (config#1550, EPIC config#1483):
+    # return_21d / spy_21d_return / beat_spy_21d / log_alpha_21d are no longer
+    # written — the canonical outcome (incl. the 21d log-alpha the judge
+    # outcome-IC correlates against) is now read from score_performance_outcomes
+    # (horizon_days=21). The migration stays (never reorder/renumber; SQLite
+    # dead columns are harmless); price_21d / eval_date_21d writes are kept.
     18: ("Add canonical 21d returns + log-alpha to score_performance",
          """
          ALTER TABLE score_performance ADD COLUMN price_21d REAL;
@@ -572,6 +587,20 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # environment are well past that floor.
     22: ("Rename memory_episodes.outcome_10d to outcome_21d (config#1480)",
          "ALTER TABLE memory_episodes RENAME COLUMN outcome_10d TO outcome_21d"),
+    # Per-team override attribution (config#750). scanner_evaluations records
+    # agent_override=1 for a non-focus ticker the quant agent looked up via
+    # @tool get_factor_profile, but the OWNING team was lost — overrides were
+    # unioned across teams at archive_writer time and landed with
+    # focus_team_id=NULL, so the dashboard collapsed every team's overrides into
+    # one unattributed "—" row group. This adds override_team_id so the audit can
+    # show WHICH team's quant agent reaches outside its focus list most often and
+    # with what hit rate. Additive nullable column; NULL on override rows
+    # persisted before this migration and on all non-override rows — the
+    # dashboard weekly-summary COALESCEs focus_team_id/override_team_id to
+    # attribute each override to its team and treats a NULL as the legacy
+    # unattributed group.
+    23: ("Add override_team_id to scanner_evaluations (config#750 per-team override attribution)",
+         "ALTER TABLE scanner_evaluations ADD COLUMN override_team_id TEXT"),
 }
 
 

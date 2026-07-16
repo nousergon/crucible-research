@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 contracts = pytest.importorskip(
-    "alpha_engine_lib.contracts",
+    "nousergon_lib.contracts",
     reason="needs alpha-engine-lib[contracts] >= 0.59.1",
 )
 

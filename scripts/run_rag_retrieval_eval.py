@@ -335,7 +335,7 @@ def main() -> int:
 
     # Live retrieve_fn — defer the lib import to runtime so the harness
     # is importable for unit tests without RAG_DATABASE_URL set.
-    from alpha_engine_lib.rag import retrieve as live_retrieve
+    from nousergon_lib.rag import retrieve as live_retrieve
 
     if queries:
         log.info("Running %d queries × %d conditions = %d retrievals",

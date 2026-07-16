@@ -13,7 +13,7 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # v0.1.0 — but moving the alerts pin in lockstep avoids two-track lib
 # state across this repo's Lambda images.
 COPY requirements-alerts.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[flow_doctor] @ git+https://github.com/nousergon/nousergon-lib@v0.82.0" && \
+RUN pip install --no-cache-dir "nousergon-lib[flow_doctor] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0" && \
     pip install --no-cache-dir -r requirements-alerts.txt && \
     rm -rf /root/.cache/pip
 

@@ -30,7 +30,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     DecisionCaptureWriteError,
     capture_decision,
@@ -94,7 +94,7 @@ def fake_ctx():
             "AAPL": {"articles": [{"headline": "x"}]},
             "MSFT": {"articles": []},
         },
-        analyst_data_by_ticker={"AAPL": {"consensus_rating": "Buy"}},
+        analyst_data_by_ticker={"AAPL": {"earnings_surprises": [{"date": "2026-04-15", "surprise_pct": 4.0}]}},
         insider_data_by_ticker={},
         prior_sector_ratings={},
         current_sector_ratings={"Technology": {"rating": "overweight"}},
@@ -279,7 +279,7 @@ class TestThesisUpdatePayloadBuilder:
         assert snapshot["ticker"] == "AAPL"
         assert snapshot["prior_thesis"] == {"final_score": 65, "rating": "BUY"}
         assert snapshot["news_data"] == {"articles": [{"headline": "x"}]}
-        assert snapshot["analyst_data"] == {"consensus_rating": "Buy"}
+        assert snapshot["analyst_data"] == {"earnings_surprises": [{"date": "2026-04-15", "surprise_pct": 4.0}]}
 
     def test_missing_per_ticker_inputs(self, fake_ctx):
         # Held ticker may have no news/analyst data — capture should
@@ -500,7 +500,7 @@ class TestCaptureHardFailsOnS3Error:
         # capture_decision (in alpha_engine_lib.decision_capture) calls
         # boto3.client("s3") at write time. Patch the lib-side import so
         # the stub takes effect across this whole call.
-        with patch("alpha_engine_lib.decision_capture.boto3.client", return_value=fake_s3):
+        with patch("nousergon_lib.decision_capture.boto3.client", return_value=fake_s3):
             from graph.research_graph import _capture_if_enabled
 
             with pytest.raises(DecisionCaptureWriteError):

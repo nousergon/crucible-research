@@ -86,7 +86,7 @@ class TestDryPaths:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({"dry_run": True}, None)
-        run.assert_called_once_with(dry_run=True, refresh_tickers=None)
+        run.assert_called_once_with(dry_run=True, refresh_tickers=None, gap_fill_only=False)
         assert result["status"] == "OK"
 
 
@@ -96,7 +96,7 @@ class TestSuccessPath:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({}, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
         assert result == {
             "status": "OK",
             "manifest": {"run_id": "abc123def456", "mode": "daily"},
@@ -109,8 +109,30 @@ class TestSuccessPath:
         with patch.object(handler_mod, "_ensure_init"), \
              patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler(None, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
         assert result["status"] == "OK"
+
+    def test_mode_gap_fill_routes_gap_fill_only_true(self, handler_mod):
+        """The Saturday SF's {"mode": "gap_fill"} event must set
+        gap_fill_only=True — the only signal run_daily uses to size intake
+        off the measured coverage gap instead of daily_new_names."""
+        manifest = _manifest_mock()
+        manifest.mode = "gap_fill"
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("thinktank.run.run_daily", return_value=manifest) as run:
+            result = handler_mod.handler({"mode": "gap_fill"}, None)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=True)
+        assert result["status"] == "OK"
+
+    def test_unrecognized_mode_does_not_gap_fill(self, handler_mod):
+        """Only the exact string "gap_fill" triggers gap-fill mode — a typo
+        or unrelated mode value must fall through to the normal daily path,
+        never silently."""
+        manifest = _manifest_mock()
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("thinktank.run.run_daily", return_value=manifest) as run:
+            handler_mod.handler({"mode": "sf_cover"}, None)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
 
 
 class TestRaiseOnFailure:
@@ -137,7 +159,7 @@ class TestColdStartHydration:
     ):
         secrets = {"RAG_DATABASE_URL": "postgres://x", "VOYAGE_API_KEY": "vk"}
         with patch(
-            "alpha_engine_lib.secrets.get_secret", side_effect=secrets.__getitem__
+            "nousergon_lib.secrets.get_secret", side_effect=secrets.__getitem__
         ) as get_secret:
             handler_mod._ensure_init()
         assert {c.args[0] for c in get_secret.call_args_list} == set(secrets)
@@ -150,13 +172,13 @@ class TestColdStartHydration:
     def test_existing_env_values_not_refetched(self, handler_mod, monkeypatch):
         monkeypatch.setenv("RAG_DATABASE_URL", "postgres://already")
         monkeypatch.setenv("VOYAGE_API_KEY", "already")
-        with patch("alpha_engine_lib.secrets.get_secret") as get_secret:
+        with patch("nousergon_lib.secrets.get_secret") as get_secret:
             handler_mod._ensure_init()
         get_secret.assert_not_called()
 
     def test_init_runs_once(self, handler_mod):
         with patch(
-            "alpha_engine_lib.secrets.get_secret", return_value="v"
+            "nousergon_lib.secrets.get_secret", return_value="v"
         ) as get_secret:
             handler_mod._ensure_init()
             handler_mod._ensure_init()

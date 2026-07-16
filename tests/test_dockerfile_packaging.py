@@ -1,8 +1,8 @@
 """Packaging guard: every LOCAL module the Lambda image can import — directly
 or transitively from any entrypoint COPY'd into the image — must itself be
-COPY'd (config#1403, config#1683).
+COPY'd (config#1403, config#1683, config#2132).
 
-The bug class this prevents (twice-realized):
+The bug class this prevents (repeatedly realized):
 - 2026-06: `producers/` was wired into lambda/handler.py but never COPY'd —
   `from producers.runner import run_challengers` ModuleNotFound'd every
   Saturday, silently swallowed, and signals_shadow/ stayed empty for weeks.
@@ -20,6 +20,15 @@ The v2 guard closes both blind spots structurally:
 - local single-file root modules (`<name>.py` at repo root) are first-class
   alongside packages.
 
+config#2132: this repo builds TWO separate Lambda images from TWO
+Dockerfiles — `Dockerfile` (main image, 10 shared handlers) and
+`Dockerfile.alerts` (standalone `lambda/alerts_handler.py` surveillance
+Lambda). The v1/v2 guard only ever read `Dockerfile`, leaving
+`Dockerfile.alerts` with zero packaging coverage — the exact blind spot
+crucible-predictor PR #352 closed for the predictor's single-Dockerfile
+image. The guard is now parametrized over every Dockerfile in the repo so
+new images are covered without another rewrite.
+
 Note: gitignored-but-local files (private prompts/scoring) may exist in a dev
 checkout and not in CI — the walk simply covers whatever is present, so the
 local run checks a superset of CI. Both catch this bug class.
@@ -31,11 +40,18 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parent.parent
 
+# Every Dockerfile that builds a Lambda image, each independently subject to
+# the "every local import reachable from a COPY'd entrypoint must itself be
+# COPY'd" packaging guard.
+_DOCKERFILES = ["Dockerfile", "Dockerfile.alerts"]
 
-def _dockerfile() -> str:
-    return (_REPO / "Dockerfile").read_text()
+
+def _dockerfile(name: str = "Dockerfile") -> str:
+    return (_REPO / name).read_text()
 
 
 def _image_entrypoints(dockerfile: str) -> list[Path]:
@@ -102,8 +118,9 @@ def _copied(name: str, dockerfile: str) -> bool:
     return f"COPY {name}.py" in dockerfile
 
 
-def test_dockerfile_copies_transitive_local_imports():
-    dockerfile = _dockerfile()
+@pytest.mark.parametrize("dockerfile_name", _DOCKERFILES)
+def test_dockerfile_copies_transitive_local_imports(dockerfile_name: str):
+    dockerfile = _dockerfile(dockerfile_name)
     entrypoints = _image_entrypoints(dockerfile)
     missing = sorted(
         name
@@ -111,12 +128,13 @@ def test_dockerfile_copies_transitive_local_imports():
         if not _copied(name, dockerfile)
     )
     assert not missing, (
-        "Dockerfile is missing COPY for local module(s)/package(s) reachable "
-        f"from the image's Lambda entrypoints: {missing}. Add `COPY {missing[0]}"
-        f"{'/' if (_REPO / missing[0]).is_dir() else '.py'} "
+        f"{dockerfile_name} is missing COPY for local module(s)/package(s) "
+        f"reachable from the image's Lambda entrypoints: {missing}. Add "
+        f"`COPY {missing[0]}{'/' if (_REPO / missing[0]).is_dir() else '.py'} "
         "${LAMBDA_TASK_ROOT}/...` — an un-COPY'd import ModuleNotFounds at "
         "runtime (config#1403: producers/ direct-import miss; config#1683: "
-        "observe_alerts.py transitive single-file miss)."
+        "observe_alerts.py transitive single-file miss; config#2132: "
+        "Dockerfile.alerts coverage)."
     )
 
 
@@ -147,4 +165,71 @@ def test_guard_catches_the_1683_shape():
     assert "observe_alerts" in names, (
         "walk failed to reach observe_alerts transitively via producers/ — "
         "the config#1683 blind spot has been re-introduced"
+    )
+
+
+def test_dockerfile_alerts_entrypoint_is_discovered():
+    """Explicit pin for config#2132: the alerts image's sole handler must be
+    picked up by the same `COPY lambda/<x>.py` entrypoint-discovery regex
+    used for the main image, so it rides the shared guard above."""
+    entrypoints = _image_entrypoints(_dockerfile("Dockerfile.alerts"))
+    assert [p.name for p in entrypoints] == ["alerts_handler.py"], (
+        "Dockerfile.alerts entrypoint discovery drifted — expected exactly "
+        "lambda/alerts_handler.py"
+    )
+
+
+def test_dockerfile_alerts_copies_its_local_imports():
+    """Explicit pin for config#2132: lambda/alerts_handler.py's local imports
+    (config, preflight, ops_alerts as of writing) must all be COPY'd into
+    Dockerfile.alerts. This is the same assertion the parametrized guard
+    above makes generically; kept explicit so a future regression names the
+    exact modules involved, mirroring test_producers_package_is_copied /
+    test_observe_alerts_module_is_copied for the main image."""
+    dockerfile = _dockerfile("Dockerfile.alerts")
+    names = _transitive_local_imports(_image_entrypoints(dockerfile))
+    assert {"config", "preflight", "ops_alerts"} <= names, (
+        "walk failed to reach the expected local imports from "
+        "lambda/alerts_handler.py — entrypoint or import graph changed"
+    )
+    missing = sorted(n for n in names if not _copied(n, dockerfile))
+    assert not missing, (
+        f"Dockerfile.alerts is missing COPY for: {missing} — an un-COPY'd "
+        "import ModuleNotFounds at runtime (config#2132, same class as "
+        "config#1403/#1683 but previously unguarded for the alerts image)."
+    )
+
+
+def test_every_shared_lambda_cmd_module_is_copied_into_the_image():
+    """Every CMD-override module deploy.sh ships MUST have a Dockerfile COPY.
+
+    The existing guards above derive their entrypoint list FROM the
+    Dockerfile's ``COPY lambda/<x>.py`` lines — so a handler that deploy.sh
+    references but the Dockerfile never copies is INVISIBLE to them: unit
+    tests pass from the repo, the function deploys, and the first real
+    invocation cold-starts into ImportModuleError. Fourth known instance of
+    the class (producers/ config#1403; data/dates.py; predictor/monitoring
+    config#2132; signals_envelope_handler caught in review, I2515). This
+    test closes it structurally: cross-check deploy.sh's
+    ``_deploy_image_shared_lambda "<fn>" "<module>"`` call sites against the
+    Dockerfile's copied handler set.
+    """
+    deploy_sh = (_REPO / "infrastructure" / "deploy.sh").read_text()
+    cmd_modules = set(
+        re.findall(
+            r'_deploy_image_shared_lambda\s+"\$\w+"\s+"(\w+)"', deploy_sh
+        )
+    )
+    assert cmd_modules, "no _deploy_image_shared_lambda call sites found — deploy.sh moved?"
+    copied = {
+        m.group(1).removesuffix(".py")
+        for m in re.finditer(r"^COPY lambda/(\w+\.py)\s", _dockerfile(), re.M)
+    }
+    # handler.py is the image's default CMD, copied as handler.py — count it.
+    missing = cmd_modules - copied - {"handler"}
+    assert not missing, (
+        f"deploy.sh ships CMD module(s) {sorted(missing)} that the Dockerfile "
+        "never COPYs into the image — the function would deploy and then "
+        "ImportModuleError on first invocation. Add `COPY lambda/<module>.py "
+        "${LAMBDA_TASK_ROOT}/<module>.py` to the Dockerfile."
     )

@@ -54,6 +54,20 @@ def _load_alternative_from_s3(ticker: str) -> dict | None:
     except Exception:
         return None
 
+
+def _opt_float(v) -> float | None:
+    """Return float or None for nullable numeric fields (NaN, None, empty)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        if f != f:  # NaN check
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
 # ── RAG usage metrics (module-level, reset per pipeline run) ─────────────────
 _rag_stats = {"attempted": 0, "succeeded": 0, "failed": 0}
 
@@ -101,13 +115,25 @@ def create_qual_tools(context: dict) -> list:
                 ]
                 return json.dumps({"ticker": ticker, "article_count": len(articles), "articles": trimmed})
 
-        from data.fetchers.news_fetcher import fetch_news_for_ticker
+        # config#1822: this used to import a `fetch_news_for_ticker` symbol
+        # that has never existed in data.fetchers.news_fetcher (drifted
+        # since the 2026-03-22 sector-team-agents commit, 22cad19b — the
+        # real entry point is `fetch_all_news`, which returns
+        # {"yahoo": [...], "edgar_8k": [...]}). The deferred import meant
+        # this ImportError only fired at tool-call time (never at module
+        # load / deploy), so it went undetected for ~3 months: every
+        # qual-analyst call to this tool silently errored, burning tool-
+        # call budget for zero information and contributing to the
+        # 90-102-tool-call/0-assessment pattern in config#1822.
+        from data.fetchers.news_fetcher import fetch_all_news
 
         try:
-            articles = fetch_news_for_ticker(ticker, lookback_days=days)
+            news = fetch_all_news(ticker, hours=days * 24)
+            articles = news.get("yahoo", []) + news.get("edgar_8k", [])
             trimmed = [
-                {"headline": a.get("headline", ""), "source": a.get("source", ""),
-                 "published": a.get("published_utc", ""),
+                {"headline": a.get("headline", "") or a.get("title", ""),
+                 "source": a.get("source", ""),
+                 "published": a.get("published_utc", "") or a.get("date", ""),
                  "excerpt": (a.get("article_excerpt", "") or "")[:300]}
                 for a in articles[:10]
             ]
@@ -132,6 +158,13 @@ def create_qual_tools(context: dict) -> list:
                 "earnings_surprises": ac.get("earnings_surprises", [])[:4],
             })
 
+        # config#1821 Option B (2026-07-08): fetch_analyst_consensus no
+        # longer sources consensus_rating / mean_target / num_analysts /
+        # rating_changes — those came from FMP's grades-consensus /
+        # price-target-consensus endpoints, which 402'd for every ticker
+        # on the current plan and were removed from the feature contract.
+        # Only earnings_surprises (a different, still-live v3 endpoint)
+        # remains in this fallback path.
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus
 
         try:
@@ -142,11 +175,6 @@ def create_qual_tools(context: dict) -> list:
             data = fetch_analyst_consensus(ticker, current_price=cp)
             return json.dumps({
                 "ticker": ticker,
-                "consensus_rating": data.get("consensus_rating", "N/A"),
-                "num_analysts": data.get("num_analysts", 0),
-                "mean_target": data.get("mean_target"),
-                "upside_pct": round(data.get("upside_pct", 0), 1) if data.get("upside_pct") else None,
-                "rating_changes": data.get("rating_changes", [])[:5],
                 "earnings_surprises": data.get("earnings_surprises", [])[:4],
             })
         except Exception as e:
@@ -185,11 +213,18 @@ def create_qual_tools(context: dict) -> list:
 
     @tool
     def get_sec_filings(ticker: str) -> str:
-        """Get recent SEC filings (8-K, 10-K, 10-Q) for corporate actions and disclosures."""
-        from data.fetchers.news_fetcher import fetch_sec_filings
+        """Get recent SEC filings (8-K) for corporate actions and disclosures."""
+        # config#1822: `fetch_sec_filings` has never existed in
+        # data.fetchers.news_fetcher (see get_news_articles above for the
+        # same drift). The module's only SEC-filings fetcher is
+        # `fetch_edgar_8k` (8-K only — there is no 10-K/10-Q fetcher in
+        # this module; deep filing text is covered separately by the
+        # query_filings/search_filings RAG tools below). Narrowing the
+        # docstring to match what this tool actually returns.
+        from data.fetchers.news_fetcher import fetch_edgar_8k
 
         try:
-            filings = fetch_sec_filings(ticker)
+            filings = fetch_edgar_8k(ticker, days=90)
             trimmed = [{"title": f.get("title", ""), "date": f.get("date", ""),
                         "form_type": f.get("form_type", "")} for f in filings[:5]]
             return json.dumps({"ticker": ticker, "filings": trimmed})
@@ -240,8 +275,9 @@ def create_qual_tools(context: dict) -> list:
 
     @tool
     def get_institutional_activity(ticker: str) -> str:
-        """Get 13F institutional accumulation signals. Shows if large funds are building positions."""
-        # S3-first
+        """Get 13F institutional ownership signals: fund count, QoQ share/value changes,
+        top-fund concentration. Shows if large funds are building or reducing positions."""
+        # S3-first: pre-collected alternative data (legacy path)
         s3_data = _load_alternative_from_s3(ticker)
         if s3_data and s3_data.get("institutional"):
             inst = s3_data["institutional"]
@@ -252,18 +288,37 @@ def create_qual_tools(context: dict) -> list:
                 "total_new_shares": 0,
             })
 
-        from data.fetchers.institutional_fetcher import fetch_institutional_activity as _fetch
-
+        # inst_ownership derived table (built from SEC quarterly bulk Form 13F data)
         try:
-            data = _fetch(ticker)
-            return json.dumps({
-                "ticker": ticker,
-                "n_funds_accumulating": data.get("n_funds_accumulating", 0),
-                "accumulation_signal": data.get("accumulation_signal", False),
-                "total_new_shares": data.get("total_new_shares", 0),
-            })
+            import boto3 as _boto3
+            from data.substrate.reader import read_inst_ownership
+
+            s3 = _boto3.client("s3")
+            df = read_inst_ownership(s3_client=s3, bucket=_S3_BUCKET)
+            if df is not None and len(df) > 0 and "ticker" in df.columns:
+                row = df[df["ticker"] == ticker.upper()]
+                if len(row) > 0:
+                    r = row.iloc[0]
+                    return json.dumps({
+                        "ticker": ticker.upper(),
+                        "n_funds_holding": int(r.get("n_funds_holding", 0)),
+                        "total_shares_held": float(r.get("total_shares_held", 0)),
+                        "shares_qoq_change": _opt_float(r.get("shares_qoq_change")),
+                        "value_qoq_change": _opt_float(r.get("value_qoq_change")),
+                        "top5_concentration_pct": _opt_float(r.get("top5_concentration_pct")),
+                        "n_funds_increasing": int(r.get("n_funds_increasing", 0)),
+                        "n_funds_decreasing": int(r.get("n_funds_decreasing", 0)),
+                        "n_funds_new": int(r.get("n_funds_new", 0)),
+                        "n_funds_exited": int(r.get("n_funds_exited", 0)),
+                        "source": "sec_13f_bulk",
+                    })
         except Exception as e:
-            return json.dumps({"ticker": ticker, "error": str(e)})
+            log.debug("inst_ownership read failed for %s: %s", ticker, e)
+
+        return json.dumps({
+            "ticker": ticker,
+            "error": "institutional ownership data unavailable (no 13F data for this ticker)",
+        })
 
     @tool
     def query_filings(ticker: str, query: str, doc_types: str = "10-K,10-Q,earnings_transcript") -> str:
@@ -279,7 +334,7 @@ def create_qual_tools(context: dict) -> list:
             doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
         """
         try:
-            from alpha_engine_lib.rag import retrieve
+            from nousergon_lib.rag import retrieve
             from datetime import date, timedelta
 
             _rag_stats["attempted"] += 1

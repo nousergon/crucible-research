@@ -30,8 +30,13 @@ class _FakeAM:
 
 
 def _resolve(am, run_date, universe, population):
+    """Returns just the agent_input_set list (the tests in this file predate
+    the ``scanner_eval_log`` field on the ``AgentInputSetResolution``
+    NamedTuple return — config#1458). See
+    ``test_resolve_agent_input_set_also_returns_scanner_eval_log`` below for
+    the eval-log half of the return shape."""
     from graph.research_graph import _resolve_agent_input_set
-    return _resolve_agent_input_set(am, run_date, universe, population)
+    return _resolve_agent_input_set(am, run_date, universe, population).agent_input_set
 
 
 def test_union_of_scanner_tickers_and_population():
@@ -81,6 +86,53 @@ def test_dry_run_sentinel_falls_back_to_full_universe(monkeypatch):
     am = _FakeAM(None)
     out = _resolve(am, "2026-05-30", ["ACM", "INGR", "TTEK"], population=["AAPL"])
     assert set(out) == {"ACM", "INGR", "TTEK", "AAPL"}
+
+
+# ── scanner_eval_log passthrough (config#1458) ───────────────────────────────
+#
+# Root cause: candidates.json is built in a SEPARATE process (the standalone
+# Scanner SF state / lambda/scanner_handler.py) from the one that reads it
+# (this Research Lambda). run_quant_filter._last_eval_log is a module-level
+# stash local to whichever process called run_quant_filter — so reading it
+# here would always be empty. The eval log must instead ride through
+# candidates.json itself (the artifact that already crosses the process
+# boundary) and then through ResearchState, exactly like agent_input_set.
+
+def test_resolve_agent_input_set_also_returns_scanner_eval_log():
+    from graph.research_graph import _resolve_agent_input_set
+
+    eval_log = [
+        {"ticker": "ACM", "quant_filter_pass": 1, "scan_path": "momentum"},
+        {"ticker": "ZZZ", "quant_filter_pass": 0, "filter_fail_reason": "liquidity"},
+    ]
+    am = _FakeAM({"scanner_tickers": ["ACM", "INGR"], "scanner_eval_log": eval_log})
+    result = _resolve_agent_input_set(
+        am, "2026-05-30", ["ACM", "INGR", "ZZZ"], ["AAPL"],
+    )
+    assert set(result.agent_input_set) == {"ACM", "INGR", "AAPL"}
+    assert result.scanner_eval_log == eval_log
+
+
+def test_resolve_agent_input_set_scanner_eval_log_defaults_empty_when_absent():
+    """candidates.json predating this field (or produced with an empty
+    eval log) must degrade to [] rather than raising — same fail-soft
+    posture as the archive_writer WARN path that consumes this."""
+    from graph.research_graph import _resolve_agent_input_set
+
+    am = _FakeAM({"scanner_tickers": ["ACM"]})  # no scanner_eval_log key
+    result = _resolve_agent_input_set(am, "2026-05-30", ["ACM"], [])
+    assert result.scanner_eval_log == []
+
+
+def test_resolve_agent_input_set_scanner_eval_log_empty_on_dry_run_fallback(monkeypatch):
+    """The dry-run-stub full-universe fallback doesn't read a real
+    candidates.json, so it must not fabricate an eval log either."""
+    from graph.research_graph import _resolve_agent_input_set
+
+    monkeypatch.setenv("ALPHA_ENGINE_DRY_RUN_STUB", "true")
+    am = _FakeAM(None)
+    result = _resolve_agent_input_set(am, "2026-05-30", ["ACM", "INGR"], ["AAPL"])
+    assert result.scanner_eval_log == []
 
 
 # ── ArchiveManager.load_candidates_json ─────────────────────────────────────

@@ -1,4 +1,4 @@
-# version: 0.2.0
+# version: 0.3.0
 Write (or re-underwrite) the investment thesis for {ticker} (sector: {sector}).
 
 Update reason: {update_reason}
@@ -20,6 +20,15 @@ WEEKLY RESEARCH SIGNAL (the weekly pipeline's current stance on this name, may b
 
 NEWS AGGREGATE (recent article counts, LM sentiment, event severity):
 {news_aggregate}
+
+INSIDER TRANSACTIONS (90-day trailing rollup of Form 4 filings — net dollar flow positive = insiders buying more than selling):
+{insider_transactions}
+
+ANALYST REVISIONS (consensus price-target and rating changes over 7/30 day windows):
+{analyst_revisions}
+
+INSTITUTIONAL OWNERSHIP (13F quarterly — QoQ share/value changes, top-fund concentration; 45-day delayed):
+{inst_ownership}
 
 FILINGS EXCERPTS (retrieved from 10-K/10-Q/8-K/earnings transcripts):
 {filings_excerpts}

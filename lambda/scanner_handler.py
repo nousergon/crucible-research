@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from graph.langsmith_pandas_patch import install as _install_ls_patch
 _install_ls_patch()
 
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -96,6 +96,7 @@ def handler(event, context):
         write_candidates_artifact,
         build_shadow_candidate_artifacts,
         write_shadow_candidates_artifact,
+        write_universe_board_for_scanner_run,
         ScannerOrchestratorError,
     )
 
@@ -146,7 +147,7 @@ def handler(event, context):
     # trading-day axis (lib chokepoint), preserving on-or-before semantics so an
     # explicit operator backfill date is normalized too.
     import datetime as _dt
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     _cal = _dt.date.fromisoformat(run_date[:10])
     _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
     _trading_day = _td.isoformat()
@@ -223,6 +224,38 @@ def handler(event, context):
         )
         shadow_error = str(exc)
 
+    # ── Universe scoreboard (alpha-engine-config-I2515) ──────────────────────
+    # Standalone Scanner path becomes a universe-board producer, completing
+    # ROADMAP L1995 Phase 5's producer side (the Research graph's
+    # archive_writer has been the SOLE producer of scanner/universe/ until
+    # now). DUAL-WRITE TRANSITION STATE: the Research graph KEEPS writing
+    # this board until the SF cutover retires its internal scanner (S3
+    # contract safety — both producers coexist); a same-day overwrite by
+    # whichever producer runs last is expected + idempotent-ish, though the
+    # two producers' rows can differ on agent-audit fields (focus_*/
+    # agent_override) since only the Research graph has a real agent run
+    # backing those. See alpha-engine-config-I2515 + write_universe_board_
+    # for_scanner_run's docstring for the factor-profiles ordering
+    # resolution. WHOLLY fail-soft — the live candidates.json above is the
+    # primary deliverable and is already written; a board failure is
+    # recorded (WARN + response field) but NEVER downgrades the OK status
+    # (no-silent-fails: the recording surface is the WARN log + this field).
+    universe_board_key: str | None = None
+    universe_board_error: str | None = None
+    try:
+        universe_board_key = write_universe_board_for_scanner_run(
+            artifact, market_regime=market_regime, s3_client=s3_client, bucket=bucket,
+        )
+        logger.info(
+            "[scanner_handler] universe scoreboard written → %s", universe_board_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[scanner_handler] universe scoreboard write failed (non-fatal, "
+            "dashboard visibility only — candidates.json unaffected): %s", exc,
+        )
+        universe_board_error = str(exc)
+
     # ── Champion/challenger leaderboard SCORER (config#1221) ─────────────────
     # Same trigger point + S3 access as the shadow emission above, and the moment
     # the fresh candidates_shadow/ for this cohort exists. The shared scorer
@@ -264,9 +297,15 @@ def handler(event, context):
             "status": leaderboard_status.get("status"),
             "key": leaderboard_status.get("key"),
         },
+        "universe_board": {
+            "status": "OK" if universe_board_key else "error",
+            "key": universe_board_key,
+        },
     }
     if shadow_error:
         summary["shadow_error"] = shadow_error
+    if universe_board_error:
+        summary["universe_board_error"] = universe_board_error
 
     logger.info(
         "[scanner_handler] done run_date=%s scanner_tickers=%d "

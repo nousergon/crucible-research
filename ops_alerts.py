@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 
-from alpha_engine_lib.logging import get_flow_doctor
+from nousergon_lib.logging import get_flow_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def _format_rollup(findings: list[str], *, header: str | None = None) -> str:
 
 
 # Matches flow-doctor.yaml + fleet_telegram_forum_topics_ops.md — no lib
-# flow_doctor_fleet import until research lib-pin catches up (v0.82.0+).
+# flow_doctor_fleet import until research lib-pin catches up (v0.83.0+).
 _OPS_HEALTH_THREAD_ENV = "FLOW_DOCTOR_TELEGRAM_THREAD_OPS_HEALTH"
 
 

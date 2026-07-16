@@ -1,13 +1,25 @@
 # Core
+# setuptools floor for PYSEC-2026-3447 (newly disclosed; CI's pip-audit gate
+# started failing 2026-07-14 against the default 79.0.1 bundled by the
+# GH Actions Python 3.11 image). Not a build-backend requirement here — direct
+# pin exists solely to satisfy the security-audit gate.
+setuptools>=83.0.0
 anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
-langsmith~=0.7
+# Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
+# TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
+# `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
+# Dependabot's manifest scan flag the range as covering vulnerable <0.8.18
+# builds even though a fresh resolve already picked a newer version; `~=0.8.18`
+# hard-excludes every pre-fix release while staying within the 0.8.x line
+# (minimum version movement that clears the advisory).
+langsmith~=0.8.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=1.60
+openai>=2.45.0
 
 # Evals
 agentevals~=0.0
@@ -20,12 +32,18 @@ numpy~=1.26
 requests~=2.31
 feedparser~=6.0.11
 beautifulsoup4~=4.12
-lxml~=5.2
+# Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
+# resolution could read local files under the old resolve_entities=True
+# default; lxml 6.1.0 flips the default to resolve_entities='internal').
+# This repo only touches lxml indirectly as BeautifulSoup's parser backend
+# (data/fetchers/news_fetcher.py) — no direct lxml.etree/XML-parsing calls
+# of our own — so the 5->6 API surface change carries low local risk.
+lxml~=6.1
 
 # Config / storage
-pyyaml~=6.0.1
+pyyaml~=6.0.3
 boto3~=1.34
-pydantic~=2.7
+pydantic~=2.13
 # alpha-engine-lib provides setup_logging, BasePreflight, and (since v0.3.0)
 # the rag submodule consolidating db/embeddings/retrieval/schema previously
 # duplicated in this repo's rag/ folder.
@@ -60,7 +78,11 @@ pydantic~=2.7
 # thinktank/client) are born correctly tagged and the distillation corpus reader
 # (scripts/corpus_stats.py) can segregate by (producer, task, teacher, source)
 # without blending replay-minted traces into live-accrued ones.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.82.0
+# Bumped 0.83.0 -> 0.86.0 (config#1727 Phase C): migrate health enrichment
+# writes to nousergon_lib.health (Deliverable + derive_status + write_health).
+# Cross-sectional 6-pillar attractiveness chokepoint (nousergon_lib.quant.attractiveness,
+# lib#164 / v0.88.0) — shared with Metron Holdings + universe_board backfill.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
@@ -74,7 +96,15 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # throttle-retry helper. The invoke is now LOAD-BEARING (not best-effort like
 # the alerts call), so krepis must be importable in the deploy environment —
 # this floor makes it a hard runtime/deploy dependency.
-krepis>=0.7.0
+#
+# Bumped to >=0.13.0 (config#1675 / config#2575): evals/judge.py +
+# evals/judge_models.py now delegate their transport/mechanics layer
+# (rubric rendering, structured-output tool spec + batch-result parse,
+# custom_id codec, judge-model registry) to krepis.judge, which ships
+# starting 0.13.0. BLOCKED until nousergon/krepis#27 merges + PyPI
+# publish completes — see that PR + this repo's companion PR for the
+# gate:dependency linkage.
+krepis>=0.13.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5
@@ -86,7 +116,11 @@ pytz~=2024.1
 # Dev / testing
 pytest~=8.2
 pytest-asyncio~=0.23
-python-dotenv~=1.0.1
+# Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
+# followed symlinks when rewriting .env files (arbitrary local file
+# overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
+# same-major (1.x) patch/minor bump, no API changes used by this repo.
+python-dotenv~=1.2.2
 # moto: mocked S3 for decision_capture integration tests
 moto~=5.0
 
@@ -95,4 +129,4 @@ edgartools~=2.0
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
-voyageai~=0.3
+voyageai~=0.5

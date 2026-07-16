@@ -55,7 +55,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from alpha_engine_lib.logging import monitor_handler, setup_logging
+from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -140,10 +140,17 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
             s3_client=boto3.client("s3"),
             bucket=bucket,
         )
+        # team_accuracy is the schema_version-1 envelope (config#1844) —
+        # analyze_team_performance already WARNs with the full counts when
+        # status="insufficient".
         logger.info(
-            "team_accuracy emitted: %d teams with resolved observations (%s)",
-            len(team_accuracy),
-            {tid: v["n_obs"] for tid, v in team_accuracy.items()},
+            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d "
+            "n_resolved_outcomes=%d (%s)",
+            team_accuracy["status"],
+            team_accuracy["n_teams"],
+            team_accuracy["n_advance_picks"],
+            team_accuracy["n_resolved_outcomes"],
+            {tid: v["n_obs"] for tid, v in team_accuracy["teams"].items()},
         )
     except Exception as tae:
         # §61 pre-persistence carve-out: this producer runs BEFORE the
@@ -219,6 +226,37 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
         )
 
 
+def _emit_flow_doctor_heartbeat() -> None:
+    """Write flow-doctor's end-of-run status snapshot (config#646).
+
+    Option A dedicated call site: at the tail of a successful research
+    run we ask the flow-doctor singleton to persist its ``status()``
+    snapshot to
+    ``s3://alpha-engine-research/_flow_doctor/heartbeat/research/{date}.json``.
+    The console System Health consumer reads these heartbeats from the
+    **research** bucket, so the write MUST target ``alpha-engine-research``
+    (the same bucket every other artifact in this handler writes to via
+    the ``RESEARCH_BUCKET`` env override).
+
+    ``emit_heartbeat`` soft-fails internally (returns None, never raises),
+    and this helper no-ops cleanly when flow-doctor is inactive (local dev
+    / disabled) so it is safe to call unconditionally on the success path.
+
+    The ``hasattr`` guard makes the wire-up forward/backward-compatible
+    across the phased flow-doctor lib rollout: ``emit_heartbeat`` only
+    exists in flow-doctor >=0.6.2, and the 5 producing repos deploy
+    independently, so a version-skewed image pinning an older lib
+    (the #646 arc historically pinned 0.6.0rc3) would otherwise
+    AttributeError at end-of-run. Missing method -> silent no-op, never a
+    crashed production run — mirroring flow-doctor's own soft-fail posture.
+    """
+    fd = get_flow_doctor()
+    if fd and hasattr(fd, "emit_heartbeat"):
+        fd.emit_heartbeat(
+            bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        )
+
+
 def is_trading_day(date: datetime.date | None = None) -> bool:
     """Return True if date (default: today) is an NYSE trading day.
 
@@ -227,7 +265,7 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     lib, and two calendar sources in one repo is the drift class that
     produced the 2026-05-30 calendar-vs-trading-day recovery failure.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return _tc.is_trading_day(d)
 
@@ -258,7 +296,7 @@ def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
     resolver, a second calendar source of truth that could silently
     drift from the lib the scanner resolves through.
     """
-    from alpha_engine_lib import trading_calendar as _tc
+    from nousergon_lib import trading_calendar as _tc
     d = date or datetime.date.today()
     return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
 
@@ -676,6 +714,7 @@ def handler(event, context):
             from evals.trajectory import validate_trajectory
             _trajectory_result = validate_trajectory(
                 project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
+                final_state=final_state,
             )
             if _trajectory_result and not _trajectory_result["passed"]:
                 import logging as _logging
@@ -703,13 +742,20 @@ def handler(event, context):
 
         # Write health status on success
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             _population = final_state.get("new_population", [])
             _rotations = final_state.get("population_rotation_events", [])
+            _email_sent = final_state.get("email_sent", False)
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="ok",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=True),
+                    Deliverable(
+                        name="research_email",
+                        required=False,
+                        produced=_email_sent,
+                    ),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 summary={
@@ -717,13 +763,14 @@ def handler(event, context):
                     "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
                     "market_regime": final_state.get("market_regime", "unknown"),
                 },
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)
 
         # Write data manifest
         try:
-            from health_status import write_data_manifest
+            from data_manifest import write_data_manifest
             write_data_manifest(
                 bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
@@ -818,6 +865,13 @@ def handler(event, context):
                 )
 
         logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
+
+        # End-of-run flow-doctor heartbeat (config#646). Persist the flow's
+        # status() snapshot to the research bucket so the console System
+        # Health panel can confirm the daily research producer ran to
+        # completion. Soft-fails internally; no-ops when flow-doctor is off.
+        _emit_flow_doctor_heartbeat()
+
         return {
             "status": "OK",
             "date": run_date,
@@ -835,14 +889,16 @@ def handler(event, context):
 
         # Write health status on failure
         try:
-            from health_status import write_health
+            from nousergon_lib.health import Deliverable, write_health
             write_health(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
-                status="failed",
+                deliverables=[
+                    Deliverable(name="signals", required=True, produced=False),
+                ],
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 error=str(e),
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
             )
         except Exception as he:
             logger.warning("health status write failed: %s", he)

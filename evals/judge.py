@@ -42,11 +42,17 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import boto3
+from krepis.judge import ToolResultNotFoundError as _LibToolResultNotFoundError
+from krepis.judge import build_structured_tool_spec as _lib_build_tool_spec
+from krepis.judge import decode_custom_id as _lib_decode_custom_id
+from krepis.judge import encode_custom_id as _lib_encode_custom_id
+from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
+from krepis.judge import render_rubric as _lib_render_rubric
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from alpha_engine_lib.decision_capture import DecisionArtifact
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.decision_capture import DecisionArtifact
+from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
@@ -75,7 +81,7 @@ def _new_judge_run_id() -> str:
     return new_eval_run_id()
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
-from agents.langchain_utils import raise_if_truncated
+from agents.langchain_utils import invoke_structured_with_validation_retry
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from evals.judge_models import TAG_BY_LOGICAL, request_model_for
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
@@ -124,11 +130,6 @@ Caps at 3 to bound worst-case latency (each retry is a full Haiku
 call ≈ 3-8s). Beyond 3 attempts the underlying issue is structural
 (rubric prompt too dense, model regressed, etc.) and surfaces as a
 loud failure for the operator to diagnose."""
-
-_RETRY_BACKOFF_BASE_SEC = 0.2
-"""Initial backoff between retry attempts. 200ms × 2^attempt =
-200ms / 400ms / 800ms — short enough to not blow Lambda budgets,
-long enough to ride out transient API hiccups."""
 
 
 # ── Agent → rubric mapping ────────────────────────────────────────────────
@@ -191,18 +192,26 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
 # would have written. Encoding is round-trippable so we don't depend
 # on the in-flight plan manifest for correctness — the manifest is a
 # convenience for ops visibility, not a load-bearing dependency.
+#
+# config#1675 / config#2575 lift (2026-07-15): the codec MECHANICS now
+# live in ``krepis.judge.encode_custom_id`` / ``decode_custom_id``
+# (generalized ``subject_id`` naming since the lib is agent-pipeline
+# agnostic). This module keeps the ``judged_agent_id``-named wrapper
+# functions so existing call sites are unchanged, and keeps
+# ``_CUSTOM_ID_PATTERN`` / ``_JUDGE_MODEL_TAG`` as module-level names
+# other tests inspect directly.
 
 
 _CUSTOM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-"""Anthropic batch custom_id regex (per Message Batches API docs)."""
+"""Anthropic batch custom_id regex (per Message Batches API docs). Mirrors
+``krepis.judge._CUSTOM_ID_PATTERN`` — kept here too since
+``test_eval_judge_batch.py`` imports this name directly."""
 
 _JUDGE_MODEL_TAG = TAG_BY_LOGICAL
 """Compact tags for the judge models, keyed by logical key. Sourced from
 ``judge_models.TAG_BY_LOGICAL`` so the tag map can't drift from the
 registry. Keeps custom_id under the 64-char limit even when
 judged_agent_id is long (e.g. ``thesis_update:technology:AAPL``)."""
-
-_JUDGE_MODEL_TAG_REVERSE = {v: k for k, v in _JUDGE_MODEL_TAG.items()}
 
 
 def encode_custom_id(
@@ -214,25 +223,13 @@ def encode_custom_id(
     custom_id charset only allows alphanumerics, ``-``, and ``_``.
     Truncates the agent_id segment if needed so the final string fits
     the 64-char ceiling. Round-trippable via ``decode_custom_id``.
+
+    Delegates to ``krepis.judge.encode_custom_id`` (config#2575 lift).
     """
-    tag = _JUDGE_MODEL_TAG.get(judge_model)
-    if tag is None:
-        # Unknown judge model — fall back to a hash-stable suffix.
-        tag = f"x{abs(hash(judge_model)) % 10_000:04d}"
-    safe_agent = re.sub(r"[^a-zA-Z0-9_-]", "-", judged_agent_id)
-    safe_run = re.sub(r"[^a-zA-Z0-9_-]", "-", run_id)
-    # Reserve 4 chars for "__" separators + 3-char model tag.
-    fixed_overhead = len(safe_run) + len(tag) + 4
-    max_agent = max(8, 64 - fixed_overhead)
-    if len(safe_agent) > max_agent:
-        safe_agent = safe_agent[:max_agent]
-    cid = f"{safe_agent}__{safe_run}__{tag}"
-    if not _CUSTOM_ID_PATTERN.match(cid):
-        # Last-ditch sanitize — strip anything that snuck through and
-        # trim to the cap. The decode side just needs the model tag at
-        # the tail; agent_id round-trip is best-effort once truncated.
-        cid = re.sub(r"[^a-zA-Z0-9_-]", "-", cid)[:64]
-    return cid
+    return _lib_encode_custom_id(
+        subject_id=judged_agent_id, run_id=run_id, judge_model=judge_model,
+        tag_by_logical=_JUDGE_MODEL_TAG,
+    )
 
 
 def decode_custom_id(custom_id: str) -> tuple[str, str, str]:
@@ -247,16 +244,10 @@ def decode_custom_id(custom_id: str) -> tuple[str, str, str]:
     Raises ``ValueError`` if the custom_id doesn't match the expected
     triple-segment shape (defensive — should not happen in production
     since we control both sides of the codec).
+
+    Delegates to ``krepis.judge.decode_custom_id`` (config#2575 lift).
     """
-    parts = custom_id.split("__")
-    if len(parts) != 3:
-        raise ValueError(
-            f"Cannot decode batch custom_id={custom_id!r}: expected "
-            f"three '__'-separated segments, got {len(parts)}."
-        )
-    safe_agent, safe_run, tag = parts
-    judge_model = _JUDGE_MODEL_TAG_REVERSE.get(tag, tag)
-    return safe_agent, safe_run, judge_model
+    return _lib_decode_custom_id(custom_id, tag_by_logical=_JUDGE_MODEL_TAG)
 
 
 # ── Render + parse helpers ────────────────────────────────────────────────
@@ -272,14 +263,17 @@ def _render_rubric(
     Shared by the sync and batch paths so rubric rendering is
     semantically identical regardless of which transport delivers
     the call.
+
+    Delegates to ``krepis.judge.render_rubric`` (config#2575 lift) —
+    ``loaded_prompt.format`` is a plain ``str.format`` wrapper
+    (``agents/prompt_loader.py::LoadedPrompt.format``), so
+    ``loaded_prompt.text`` is the equivalent plain-string template the
+    lib function expects.
     """
-    return loaded_prompt.format(
-        agent_input=json.dumps(
-            artifact.input_data_snapshot, indent=2, default=str,
-        ),
-        agent_output=json.dumps(
-            artifact.agent_output, indent=2, default=str,
-        ),
+    return _lib_render_rubric(
+        loaded_prompt.text,
+        agent_input=artifact.input_data_snapshot,
+        agent_output=artifact.agent_output,
     )
 
 
@@ -397,18 +391,15 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
         # when FMP is unavailable. ``bool(value)`` short-circuits both
         # ``None`` and empty containers; we want at least one field with
         # actual content.
+        #
+        # config#1821 Option B (2026-07-08): consensus_rating / mean_target
+        # / num_analysts / rating_changes were removed from
+        # fetch_analyst_consensus's returned shape (the FMP endpoints that
+        # populated them 402'd for every ticker on the current plan).
+        # earnings_surprises is the only field left to check.
         analyst_is_substantive = (
             isinstance(analyst, dict)
-            and any(
-                bool(analyst.get(k))
-                for k in (
-                    "consensus_rating",
-                    "mean_target",
-                    "num_analysts",
-                    "rating_changes",
-                    "earnings_surprises",
-                )
-            )
+            and bool(analyst.get("earnings_surprises"))
         )
         return not prior_summary and not news_articles and not analyst_is_substantive
 
@@ -471,13 +462,16 @@ def _build_rubric_tool_spec() -> dict[str, Any]:
     Pinning the input_schema to ``RubricEvalLLMOutput.model_json_schema()``
     means the schema-bump path is single-source-of-truth: edit the
     Pydantic model and both transports pick it up.
+
+    Delegates to ``krepis.judge.build_structured_tool_spec`` (config#2575
+    lift) — schema-agnostic in the lib (accepts any Pydantic model), so
+    this wrapper is the one place that pins it to ``RubricEvalLLMOutput``.
     """
-    schema = RubricEvalLLMOutput.model_json_schema()
-    return {
-        "name": _RUBRIC_TOOL_NAME,
-        "description": _RUBRIC_TOOL_DESCRIPTION,
-        "input_schema": schema,
-    }
+    return _lib_build_tool_spec(
+        RubricEvalLLMOutput,
+        tool_name=_RUBRIC_TOOL_NAME,
+        description=_RUBRIC_TOOL_DESCRIPTION,
+    )
 
 
 def build_batch_request(
@@ -511,7 +505,7 @@ def build_batch_request(
     this function is invoked (the skip artifact is persisted
     client-side without spending a batch slot).
     """
-    from alpha_engine_lib.anthropic_payload import build_batches_request_params
+    from nousergon_lib.anthropic_payload import build_batches_request_params
 
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
@@ -559,32 +553,30 @@ def parse_batch_message(
     ``failed`` list — the batch result is preserved on Anthropic's
     side (29-day retention) so the operator can re-pull and diagnose
     without re-paying for the call.
+
+    Delegates to ``krepis.judge.parse_batch_tool_result`` (config#2575
+    lift). Only the lib's ``ToolResultNotFoundError`` (tool never
+    called) is re-raised with this module's Anthropic-retention-window
+    detail — a ``pydantic.ValidationError`` (tool called, input failed
+    schema validation) is a DIFFERENT failure mode and propagates
+    unwrapped so callers/tests can still distinguish the two (both are
+    ``ValueError`` subclasses, so catching bare ``ValueError`` here
+    would incorrectly conflate them).
     """
-    content = (
-        message_payload["content"]
-        if isinstance(message_payload, dict)
-        else message_payload.content
-    )
-    for block in content:
-        block_type = (
-            block.get("type") if isinstance(block, dict) else block.type
+    try:
+        return _lib_parse_batch_tool_result(
+            message_payload,
+            tool_name=_RUBRIC_TOOL_NAME,
+            schema=RubricEvalLLMOutput,
         )
-        block_name = (
-            block.get("name") if isinstance(block, dict)
-            else getattr(block, "name", None)
-        )
-        if block_type == "tool_use" and block_name == _RUBRIC_TOOL_NAME:
-            tool_input = (
-                block["input"] if isinstance(block, dict) else block.input
-            )
-            return RubricEvalLLMOutput.model_validate(tool_input)
-    raise ValueError(
-        "No tool_use block named "
-        f"{_RUBRIC_TOOL_NAME!r} found in batch result message; the "
-        "judge LLM did not emit the rubric eval via the structured "
-        "tool — inspect the raw batch result on Anthropic's side "
-        "(retained 29 days)."
-    )
+    except _LibToolResultNotFoundError:
+        raise ValueError(
+            "No tool_use block named "
+            f"{_RUBRIC_TOOL_NAME!r} found in batch result message; the "
+            "judge LLM did not emit the rubric eval via the structured "
+            "tool — inspect the raw batch result on Anthropic's side "
+            "(retained 29 days)."
+        ) from None
 
 
 # ── Judge call ────────────────────────────────────────────────────────────
@@ -627,8 +619,6 @@ def evaluate_artifact(
         the underlying issue is structural (model regression, rubric
         too dense, etc.) and surfaces as a loud failure for diagnosis.
     """
-    import time
-
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
         raise ValueError(
@@ -708,15 +698,13 @@ def evaluate_artifact(
         callbacks=[get_cost_telemetry_callback()],
     )
     # ``include_raw=True`` returns ``{"raw": AIMessage, "parsed":
-    # RubricEvalLLMOutput | None, "parsing_error": Exception | None}``
-    # so we can log the raw tool-use payload on parse failures and
-    # retry the call rather than letting the parse error escape.
+    # RubricEvalLLMOutput | None, "parsing_error": Exception | None}`` so the
+    # shared chokepoint can inspect ``parsing_error`` and feed it back as
+    # correction context on retry.
     structured_llm = llm.with_structured_output(
         RubricEvalLLMOutput, include_raw=True,
     )
 
-    llm_output: Optional[RubricEvalLLMOutput] = None
-    last_err: Optional[BaseException] = None
     resolved_model: Optional[str] = None
 
     with track_llm_cost(
@@ -724,60 +712,54 @@ def evaluate_artifact(
         node_name="eval_judge_node",
         run_type="weekly_research",
         prompt=loaded_prompt,
+        rendered_prompt=rendered,
         model_name_fallback=judge_model,
         run_id=artifact.run_id,
     ):
-        for attempt in range(max_retries):
-            resp = structured_llm.invoke(
-                [HumanMessage(content=rendered)],
-                config={"metadata": loaded_prompt.langsmith_metadata()},
-            )
-            # Runtime truncation guard (config#1294): the judge invokes
-            # with_structured_output directly (not via the shared
-            # invoke_structured_with_validation_retry chokepoint), so it
-            # reuses that chokepoint's exported guard to fail at the root
-            # cause on a max_tokens-truncated response instead of letting the
-            # partial tool-call surface as a confusing Pydantic shape error.
-            raise_if_truncated(
-                resp, label=f"eval_judge:{artifact.agent_id}",
-                schema_name="RubricEvalLLMOutput",
-            )
-            parsed = resp.get("parsed")
-            parsing_error = resp.get("parsing_error")
-            if parsed is not None and parsing_error is None:
-                llm_output = parsed
-                # Record what Anthropic RESOLVED the request to (the
-                # response 'model' field) — the re-anchor trigger for
-                # L4578(a). Defensive: response_metadata shape is
-                # provider-controlled, so anything that isn't a dict with
-                # a 'model' key leaves it None rather than crashing the
-                # eval (the field is ``str | None``).
-                raw_meta = getattr(resp.get("raw"), "response_metadata", None)
-                resolved_model = (
-                    raw_meta.get("model") if isinstance(raw_meta, dict) else None
-                )
-                if attempt > 0:
-                    logger.info(
-                        "[eval_judge] parse succeeded on attempt %d/%d "
-                        "for agent_id=%s",
-                        attempt + 1, max_retries, artifact.agent_id,
-                    )
-                break
+        # SOTA structured-output recovery (config#2237): route through the
+        # shared ``invoke_structured_with_validation_retry`` chokepoint that
+        # every other narrative-rich extraction site uses (qual_analyst,
+        # sector_team held-thesis post-#402, ...) instead of the previous
+        # bespoke bare re-roll loop.
+        #
+        # WHY (2026-07-11 CRUS Saturday hard-fail): the old loop re-sent the
+        # IDENTICAL rendered prompt on every attempt with NO correction
+        # context. A DETERMINISTIC tool-XML leak — the model emitting a literal
+        # ``<parameter name="...">`` tag into a field value, captured by
+        # langchain as a ``str`` where a ``list``/typed field is required —
+        # therefore re-rolled identically every attempt and could never
+        # recover, hard-failing the whole eval the same way it hard-failed
+        # research. The chokepoint feeds the specific Pydantic ``ValidationError``
+        # (plus the model's own prior malformed output, as a paired
+        # ``tool_result``) back as correction context so the model corrects the
+        # offending field rather than repeating it. The MODEL, prompt, schema,
+        # and scoring are unchanged — only the retry mechanism (HOW it runs).
+        #
+        # Attempt budget preserved: the old loop did ``range(max_retries)`` =
+        # ``max_retries`` total attempts; the chokepoint does
+        # ``range(chokepoint_max_retries + 1)``, so pass ``max_retries - 1`` for
+        # the SAME total-attempt count. The config#1294 truncation guard is now
+        # applied INSIDE the chokepoint (``raise_if_truncated``), so the judge's
+        # duplicate call is removed as redundant.
+        resp = invoke_structured_with_validation_retry(
+            structured_llm,
+            [HumanMessage(content=rendered)],
+            label=f"eval_judge:{artifact.agent_id}",
+            ls_metadata=loaded_prompt.langsmith_metadata(),
+            max_retries=max(max_retries - 1, 0),
+        )
 
-            last_err = parsing_error
-            raw_head = str(resp.get("raw"))[:300] if resp.get("raw") else "(no raw)"
-            logger.warning(
-                "[eval_judge] parse attempt %d/%d failed for agent_id=%s "
-                "judge=%s: %s: %s; raw head=%r",
-                attempt + 1, max_retries, artifact.agent_id, judge_model,
-                type(parsing_error).__name__ if parsing_error else "Unknown",
-                str(parsing_error)[:200] if parsing_error else "(no error)",
-                raw_head,
-            )
-            if attempt + 1 < max_retries:
-                time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** attempt))
+    llm_output: Optional[RubricEvalLLMOutput] = resp.get("parsed")
+    parsing_error = resp.get("parsing_error")
 
-    if llm_output is None:
+    if llm_output is None or parsing_error is not None:
+        # FAIL-LOUD (unchanged): terminal parse failure raises — no
+        # carry-forward, no swallow. The underlying issue is structural (model
+        # regression, deterministic leak the correction retry couldn't fix,
+        # rubric too dense, ...) and surfaces loudly for diagnosis; the
+        # chokepoint has already logged each failed attempt's raw payload head
+        # at WARNING above.
+        last_err = parsing_error
         raise RuntimeError(
             f"[eval_judge] {max_retries} parse attempts failed for "
             f"agent_id={artifact.agent_id} judge={judge_model}. "
@@ -785,6 +767,14 @@ def evaluate_artifact(
             f"{last_err}. Underlying issue is structural — inspect raw "
             f"tool-use payloads in the WARNING logs above."
         )
+
+    # Record what Anthropic RESOLVED the request to (the response 'model'
+    # field) — the re-anchor trigger for L4578(a). Defensive: response_metadata
+    # shape is provider-controlled, so anything that isn't a dict with a 'model'
+    # key leaves it None rather than crashing the eval (the field is
+    # ``str | None``).
+    raw_meta = getattr(resp.get("raw"), "response_metadata", None)
+    resolved_model = raw_meta.get("model") if isinstance(raw_meta, dict) else None
 
     return RubricEvalArtifact(
         run_id=artifact.run_id,

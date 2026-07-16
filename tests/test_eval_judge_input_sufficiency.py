@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
@@ -60,18 +60,16 @@ class TestThesisUpdateDegenerate:
         assert _is_degenerate_input(_artifact("thesis_update:tech:MCK", snap))
 
     def test_empty_prior_empty_news_empty_analyst_dict_is_degenerate(self):
-        """``fetch_analyst_consensus`` returns a skeleton dict with all
-        None values when FMP budget is exhausted — should still be
-        degenerate."""
+        """``fetch_analyst_consensus`` returns a skeleton dict (config#1821
+        Option B, 2026-07-08: only ticker/current_price/earnings_surprises
+        remain in the shape) when FMP budget is exhausted — should still
+        be degenerate."""
         snap = {
             "prior_thesis": {"thesis_summary": ""},
             "news_data": {"articles": []},
             "analyst_data": {
                 "ticker": "MCK",
-                "consensus_rating": None,
-                "mean_target": None,
-                "num_analysts": None,
-                "rating_changes": [],
+                "current_price": None,
                 "earnings_surprises": [],
             },
         }
@@ -99,10 +97,18 @@ class TestThesisUpdateDegenerate:
         assert not _is_degenerate_input(_artifact("thesis_update:tech:X", snap))
 
     def test_substantive_analyst_data_is_not_degenerate(self):
+        """config#1821 Option B (2026-07-08): earnings_surprises is the
+        only analyst_data field left that counts as substantive —
+        consensus_rating/mean_target/num_analysts/rating_changes were
+        removed from fetch_analyst_consensus's returned shape."""
         snap = {
             "prior_thesis": {"thesis_summary": ""},
             "news_data": {"articles": []},
-            "analyst_data": {"consensus_rating": "buy", "num_analysts": 12},
+            "analyst_data": {
+                "earnings_surprises": [
+                    {"date": "2026-06-15", "actual": 1.2, "estimated": 1.1, "surprise_pct": 9.1},
+                ],
+            },
         }
         assert not _is_degenerate_input(_artifact("thesis_update:tech:X", snap))
 

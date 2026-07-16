@@ -208,7 +208,7 @@ def main() -> int:
 
     _load_env()
     # Defer lib import until env is loaded.
-    from alpha_engine_lib.rag import retrieve
+    from nousergon_lib.rag import retrieve
 
     todos = [
         (i, q) for i, q in enumerate(data["queries"])

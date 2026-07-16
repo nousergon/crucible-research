@@ -177,7 +177,7 @@ def assess_candidates(
     from agents.prompt_loader import load_prompt
     from agents.langchain_utils import (
         SECTOR_TEAM_LLM_MAX_RETRIES,
-        invoke_with_rate_limit_retry,
+        invoke_anthropic_safe,
     )
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
@@ -193,16 +193,15 @@ def assess_candidates(
         callbacks=[get_cost_telemetry_callback()],
     )
     structured_llm = llm.with_structured_output(RankingProducerOutput)
-    raw: RankingProducerOutput = invoke_with_rate_limit_retry(
-        lambda: structured_llm.invoke(
-            [HumanMessage(content=prompt)],
-            config={"metadata": loaded.langsmith_metadata()},
-        ),
+    raw: RankingProducerOutput = invoke_anthropic_safe(
+        structured_llm,
+        [HumanMessage(content=prompt)],
         label="single_agent_producer",
         # SHADOW challenger: bound tightly so a rate-limit storm fails this
         # best-effort call FAST rather than holding the champion's Lambda open
         # for the global 75-min deadline. A missed shadow week is fine.
         deadline_seconds=180.0,
+        config={"metadata": loaded.langsmith_metadata()},
     )
     return [a.model_dump() for a in raw.assessments]
 

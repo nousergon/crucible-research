@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from alpha_engine_lib.pillars import QualitativePillarAssessment
+from nousergon_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
@@ -28,6 +28,10 @@ from config import (
 )
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
+from agents.sector_teams.react_budget import (
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    workload_derived_recursion_limit,
+)
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
@@ -65,10 +69,27 @@ class _QualPillarBatch(BaseModel):
 
 log = logging.getLogger(__name__)
 
-# +2 retained as defensive margin (was load-bearing for response_format's
-# extra call inside the LangGraph subgraph; after the 2026-05-02 refactor
-# the extraction is decoupled and the +2 is unused). See quant_analyst.py.
-_QUAL_RECURSION_LIMIT = QUAL_MAX_ITERATIONS * 2 + 2
+# LangGraph ReAct step budget — DERIVED from the live workload, not a
+# hand-tuned constant (config#1822). The superstep math and the rationale
+# for making this a shared chokepoint live in
+# ``agents.sector_teams.react_budget``; qual and quant both route through it
+# so the invariant is enforced in ONE place. ``_REACT_SYNTHESIS_MARGIN_ROUNDS``
+# is re-exported from that module (imported above) for the guard tests.
+
+
+def _qual_recursion_limit(n_picks: int, n_tools: int) -> int:
+    """Workload-derived ReAct ``recursion_limit`` for the qual analyst.
+
+    Thin per-analyst binding over the shared
+    ``workload_derived_recursion_limit`` chokepoint: floors at the
+    configured ``QUAL_MAX_ITERATIONS`` rounds but grows to cover
+    ``n_picks * n_tools`` tool rounds plus a synthesis margin, so the agent
+    can research every pick with every tool AND still synthesize its
+    assessment.
+    """
+    return workload_derived_recursion_limit(
+        n_picks, n_tools, floor_iterations=QUAL_MAX_ITERATIONS
+    )
 
 
 def run_qual_analyst(
@@ -181,7 +202,14 @@ def run_qual_analyst(
         "user_prompt_hash": user_prompt.hash[:12],
     }
 
-    log.info("[qual:%s] starting ReAct agent with %d picks", team_id, len(quant_top5))
+    # Size the step budget to THIS invocation's workload (picks × tools),
+    # not a fixed constant — see ``_qual_recursion_limit`` (config#1822).
+    recursion_limit = _qual_recursion_limit(len(quant_top5), len(tools))
+    log.info(
+        "[qual:%s] starting ReAct agent with %d picks, %d tools "
+        "(recursion_limit=%d)",
+        team_id, len(quant_top5), len(tools), recursion_limit,
+    )
 
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
@@ -191,7 +219,7 @@ def run_qual_analyst(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config={
-                    "recursion_limit": _QUAL_RECURSION_LIMIT,
+                    "recursion_limit": recursion_limit,
                     "metadata": _ls_metadata,
                 },
             ),
@@ -201,6 +229,40 @@ def run_qual_analyst(
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
         final_text = _get_final_text(messages)
+
+        # config#1822: the 2026-07-03 weekly's defensives/financials/
+        # consumer qual teams each burned 90-102 tool calls and produced 0
+        # assessments with error=None, partial=False — invisible to
+        # score_aggregator's ALL-AGENTS-STRICT gate. Root cause: the
+        # prebuilt ReAct executor's internal step-budget guard
+        # (langgraph.prebuilt.chat_agent_executor's remaining_steps check)
+        # fires BEFORE the graph-level recursion_limit would raise
+        # GraphRecursionError — it swaps in a fixed bailout AIMessage and
+        # returns normally instead of raising. That message is a non-empty
+        # final_text, so it sails past the empty-text guard below and the
+        # structured-output extraction correctly-but-uselessly finds zero
+        # assessments in it. Treat it exactly like the GraphRecursionError
+        # case: a degraded-but-non-fatal partial result, loudly tagged so
+        # it surfaces in the run summary + the decision-artifact capture
+        # (which persists this whole dict).
+        if is_step_budget_exhausted_sentinel(final_text):
+            log.warning(
+                "[qual:%s] ReAct loop hit the internal step-budget "
+                "sentinel ('%s') after %d tool calls — treating as "
+                "recursion-limit exhaustion (partial, not error).",
+                team_id, final_text.strip(), len(tool_calls),
+            )
+            return {
+                "team_id": team_id,
+                "assessments": [],
+                "additional_candidate": None,
+                "tool_calls": tool_calls,
+                "iterations": len(tool_calls),
+                "error": None,
+                "partial": True,
+                "partial_reason": "remaining_steps_exhausted",
+                "pillar_assessments": {},
+            }
 
         # ── Decoupled structured-output extraction ──────────────────────
         # Mirrors quant_analyst + macro_agent / peer_review / ic_cio. The
@@ -295,14 +357,14 @@ def run_qual_analyst(
             "[qual:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 assessments). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, _QUAL_RECURSION_LIMIT,
+            team_id, recursion_limit,
         )
         return {
             "team_id": team_id,
             "assessments": [],
             "additional_candidate": None,
             "tool_calls": [],
-            "iterations": _QUAL_RECURSION_LIMIT,
+            "iterations": recursion_limit,
             "error": None,
             "partial": True,
             "partial_reason": "recursion_limit_exhausted",
@@ -429,6 +491,7 @@ from agents.langchain_utils import (
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_react_with_recovery,
     invoke_structured_with_validation_retry,
+    is_step_budget_exhausted_sentinel,
     make_tool_use_repair_hook,
 )
 

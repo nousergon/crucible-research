@@ -22,7 +22,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 from typing import Optional
 from xml.etree import ElementTree
 
