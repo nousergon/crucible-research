@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 8
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Eval rubric prompts are gitignored here; load_prompt() resolves
       # them from $GITHUB_WORKSPACE/alpha-engine-config/research/prompts/.
