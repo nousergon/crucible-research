@@ -341,8 +341,12 @@ class TestPillarComposites:
         }
 
     def test_stewardship_composite_components(self):
-        """Stewardship is thin-quant by design — 3 components (config#2428
-        added institutional_accumulation_score alongside the original 2)."""
+        """Stewardship rebalanced 2 -> 3 components (alpha-engine-config#2428):
+        institutional_accumulation_score (13F net fund accumulation) now
+        joins the original payout_ratio + capex_growth_5y. The derived-column
+        computation (_add_institutional_accumulation_factor) and the
+        package-pinned config both land together in this PR — see
+        alpha-engine-config's scoring.yaml for the live weight values."""
         components = _COMPOSITE_DEFS["stewardship_score"]
         component_cols = {col for col, _, _ in components}
         assert component_cols == {
@@ -355,7 +359,7 @@ class TestPillarComposites:
         for col, _, invert in components:
             if col == "payout_ratio":
                 assert invert is True, "payout_ratio must be inverted"
-            if col == "capex_growth_5y":
+            if col in ("capex_growth_5y", "institutional_accumulation_score"):
                 assert invert is False
             if col == "institutional_accumulation_score":
                 assert invert is False
