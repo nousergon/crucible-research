@@ -28,6 +28,8 @@ on:
       - ".github/workflows/live-langchain-anthropic-smoke.yml"
       - "requirements.txt"
 
+permissions: {}
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
