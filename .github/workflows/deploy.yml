@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: alpha-engine-research
 
@@ -56,7 +56,7 @@ jobs:
       # private so we need a fine-grained PAT with read-only Contents access.
       # The token is stored as the ALPHA_ENGINE_CONFIG_TOKEN repository secret.
       - name: Checkout alpha-engine-config
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: nousergon/alpha-engine-config
           path: alpha-engine-config
