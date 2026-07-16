@@ -121,4 +121,4 @@ edgartools~=2.0
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
-voyageai~=0.3
+voyageai~=0.5
