@@ -96,7 +96,15 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # throttle-retry helper. The invoke is now LOAD-BEARING (not best-effort like
 # the alerts call), so krepis must be importable in the deploy environment —
 # this floor makes it a hard runtime/deploy dependency.
-krepis>=0.7.0
+#
+# Bumped to >=0.13.0 (config#1675 / config#2575): evals/judge.py +
+# evals/judge_models.py now delegate their transport/mechanics layer
+# (rubric rendering, structured-output tool spec + batch-result parse,
+# custom_id codec, judge-model registry) to krepis.judge, which ships
+# starting 0.13.0. BLOCKED until nousergon/krepis#27 merges + PyPI
+# publish completes — see that PR + this repo's companion PR for the
+# gate:dependency linkage.
+krepis>=0.13.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5
