@@ -1,13 +1,25 @@
 # Core
+# setuptools floor for PYSEC-2026-3447 (newly disclosed; CI's pip-audit gate
+# started failing 2026-07-14 against the default 79.0.1 bundled by the
+# GH Actions Python 3.11 image). Not a build-backend requirement here — direct
+# pin exists solely to satisfy the security-audit gate.
+setuptools>=83.0.0
 anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
-langsmith~=0.7
+# Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
+# TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
+# `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
+# Dependabot's manifest scan flag the range as covering vulnerable <0.8.18
+# builds even though a fresh resolve already picked a newer version; `~=0.8.18`
+# hard-excludes every pre-fix release while staying within the 0.8.x line
+# (minimum version movement that clears the advisory).
+langsmith~=0.8.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=1.60
+openai>=2.45.0
 
 # Evals
 agentevals~=0.0
@@ -29,9 +41,9 @@ beautifulsoup4~=4.12
 lxml~=6.1
 
 # Config / storage
-pyyaml~=6.0.1
+pyyaml~=6.0.3
 boto3~=1.34
-pydantic~=2.7
+pydantic~=2.13
 # alpha-engine-lib provides setup_logging, BasePreflight, and (since v0.3.0)
 # the rag submodule consolidating db/embeddings/retrieval/schema previously
 # duplicated in this repo's rag/ folder.
@@ -109,4 +121,4 @@ edgartools~=2.0
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
-voyageai~=0.3
+voyageai~=0.5

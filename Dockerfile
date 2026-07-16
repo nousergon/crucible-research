@@ -151,4 +151,10 @@ COPY lambda/scanner_handler.py ${LAMBDA_TASK_ROOT}/scanner_handler.py
 # EC2-spot if a run breaches ~12 min" runner decision).
 COPY lambda/thinktank_handler.py ${LAMBDA_TASK_ROOT}/thinktank_handler.py
 
+# Signals-envelope Lambda (alpha-engine-config-I2515) — same shared-image
+# pattern, deploy.sh sets CMD ["signals_envelope_handler.handler"]. Thin
+# no-agent producer of the executor-facing signals.json (universe board +
+# regime substrate), invoked by the weekly SF's SignalsEnvelope state.
+COPY lambda/signals_envelope_handler.py ${LAMBDA_TASK_ROOT}/signals_envelope_handler.py
+
 CMD ["handler.handler"]

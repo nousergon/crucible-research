@@ -169,6 +169,14 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # pin only; ARTIFACT_REGISTRY rows deferred until the artifacts become
     # load-bearing (register-with-or-after-producer precedent, config#1393).
     "thinktank/storage.py": 1,
+    # Thin no-agent signals envelope (alpha-engine-config-I2515 D2). One PUT
+    # chokepoint writes either the shadow keys (signals_envelope/*, observe
+    # phase — no registry row until load-bearing, config#1393 precedent) or,
+    # post-SF-cutover with the explicit production flags, the real signals/*
+    # keys — which are ALREADY covered by the existing research_signals
+    # ARTIFACT_REGISTRY row (severity: critical); this producer is a second
+    # implementation of that same registered artifact, not a new one.
+    "scoring/signals_envelope.py": 1,
 }
 
 
