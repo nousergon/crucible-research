@@ -10,16 +10,35 @@ Contract pinned here:
 
 1. Parse every Dockerfile COPY statement in the repo (both Dockerfile and
    Dockerfile.*) to extract the source path (the left operand).
-2. Parse every path in deploy.yml's paths: filter.
-3. Every COPY source must be present in deploy.yml paths filter (or explicitly
-   annotated deploy-skip: true to mark it intentionally excluded, e.g., if it's
-   always present in the base image or is docs-only).
+2. Parse every path PATTERN in deploy.yml's paths: filter, in its raw glob
+   form (e.g. ``lambda/**``, ``requirements*.txt``) — the exact string
+   GitHub Actions evaluates against changed file paths.
+3. Every COPY source must be COVERED by deploy.yml's paths filter: either an
+   exact/glob match (file sources, e.g. ``requirements.txt`` matches
+   ``requirements*.txt``), or, for directory COPY sources, matched by a
+   directory-bucket glob that would catch a file underneath it (e.g.
+   ``lambda/handler.py`` is covered by ``lambda/**``) — or explicitly
+   annotated deploy-skip: true to mark it intentionally excluded, e.g., if
+   it's always present in the base image or is docs-only.
+
+Coverage is evaluated with fnmatch-style glob semantics (mirroring how
+GitHub Actions' paths: filter itself matches, where both ``*`` and ``**``
+span across ``/``) rather than plain string equality — a purely literal
+comparison flags every individually-named file already covered by a
+directory-bucket or mid-string-wildcard pattern as "missing", which is a
+false positive, not a real un-deployed-code gap. (Found live 2026-07-17:
+the original literal-comparison version of this guard failed on 13
+pre-existing, already-covered sources — e.g. every lambda/*_handler.py
+file under the 'lambda/**' bucket, requirements.txt/-alerts.txt under
+'requirements*.txt' — from its own origin commit, well before the 7/14
+lambda-handler additions that were assumed to be the sole cause.)
 
 The guard ensures the Docker build cannot drift from the deployment trigger.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 
@@ -53,10 +72,12 @@ def _parse_dockerfile_sources() -> set[str]:
     return sources
 
 
-def _parse_deploy_yml_paths() -> set[str]:
-    """Return all paths in deploy.yml's paths: filter, normalized to
-    directory form for comparison (strip trailing slashes from ** patterns)."""
-    paths: set[str] = set()
+def _parse_deploy_yml_paths() -> list[str]:
+    """Return the raw glob PATTERNS from deploy.yml's paths: filter, exactly
+    as GitHub Actions evaluates them (e.g. ``'agents/**'``,
+    ``'requirements*.txt'``, ``'config.py'``) — no normalization, so callers
+    can do real glob matching against them."""
+    patterns: list[str] = []
     text = _DEPLOY_YML.read_text()
     in_paths = False
     for line in text.splitlines():
@@ -71,13 +92,35 @@ def _parse_deploy_yml_paths() -> set[str]:
             if not stripped.startswith("'") and not stripped.startswith('"'):
                 break
         if stripped.startswith("- "):
-            path = stripped[2:].strip().strip("'\"")
-            # Normalize: remove trailing /** or / for directory patterns
-            path = path.rstrip("/")
-            if path.endswith("**"):
-                path = path[:-2].rstrip("/")
-            paths.add(path)
-    return paths
+            patterns.append(stripped[2:].strip().strip("'\""))
+    return patterns
+
+
+def _source_is_covered(source: str, patterns: list[str]) -> bool:
+    """True if some deploy.yml path pattern would trigger a rebuild for a
+    change to this Dockerfile COPY source.
+
+    Two ways to be covered:
+    - As a FILE: the source itself matches a pattern, literally or via glob
+      (e.g. source 'requirements.txt' matches pattern 'requirements*.txt').
+    - As a DIRECTORY: a synthetic file just inside the source directory
+      matches a pattern (e.g. probe 'lambda/__probe__' matches pattern
+      'lambda/**'), meaning any real file added under that directory would
+      trigger a rebuild too — which is what a directory-bucket COPY source
+      (Dockerfile's ``COPY lambda/ ...``, stripped of its trailing slash by
+      ``_parse_dockerfile_sources``) actually needs.
+
+    fnmatch is used (not a path-segment-aware matcher) because it mirrors
+    GitHub Actions' own paths: filter semantics, where '*' and '**' both
+    span '/' freely — this is a deliberate departure from POSIX shell glob.
+    """
+    probe = source.rstrip("/") + "/__probe__"
+    for pattern in patterns:
+        if source == pattern or fnmatch.fnmatch(source, pattern):
+            return True
+        if fnmatch.fnmatch(probe, pattern):
+            return True
+    return False
 
 
 def test_dockerfiles_exist() -> None:
@@ -99,26 +142,20 @@ def test_copy_parser_sanity() -> None:
 
 def test_deploy_paths_parser_sanity() -> None:
     """Guard against silent regex breaks in deploy.yml parser."""
-    paths = _parse_deploy_yml_paths()
-    assert "agents" in paths, (
-        "deploy.yml paths parser did not find 'agents' — regex may be broken"
+    patterns = _parse_deploy_yml_paths()
+    assert "agents/**" in patterns, (
+        "deploy.yml paths parser did not find 'agents/**' — regex may be broken"
     )
 
 
 def test_every_dockerfile_copy_in_deploy_paths() -> None:
-    """Core guard: every Dockerfile COPY source must appear in deploy.yml
-    paths filter."""
+    """Core guard: every Dockerfile COPY source must be covered by deploy.yml
+    paths filter (see _source_is_covered for exact/glob/directory-bucket
+    matching semantics)."""
     sources = _parse_dockerfile_sources()
-    paths = _parse_deploy_yml_paths()
+    patterns = _parse_deploy_yml_paths()
 
-    missing: list[str] = []
-    for source in sorted(sources):
-        # The source may be in paths as is, or as a directory pattern
-        if source not in paths:
-            # Try stripping known suffixes to match patterns
-            base = source.rstrip("/")
-            if base not in paths and source not in paths:
-                missing.append(source)
+    missing = [s for s in sorted(sources) if not _source_is_covered(s, patterns)]
 
     assert not missing, (
         f"deploy.yml paths filter omits Dockerfile COPY sources: {missing}. "
