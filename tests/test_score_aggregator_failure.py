@@ -116,7 +116,9 @@ class TestAllAgentsStrictHardFail:
         errored, none partial. (Recommendations may be empty — a clean
         zero-pick team under the regime-conditional gate is valid.)"""
         result = score_aggregator(_state(_all_clean()))
-        assert result == {"investment_theses": {}}
+        # config#2247: score_aggregator now also returns the per-ticker
+        # quarantine list (empty on a fully-clean run).
+        assert result == {"investment_theses": {}, "quarantined": []}
 
 
 class TestPartialNoLongerTolerated:

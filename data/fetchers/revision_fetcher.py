@@ -160,8 +160,12 @@ def _load_revision_streaks(
                     snapshots.append((check_date, data))
                     break
                 except Exception:
+                    # Revision fetch failed for this checkpoint — try the next one
+                    # (recorded: S3 list/read failures, JSON decode errors, truncated archives).
                     continue
     except Exception:
+        # Outer fetch failed entirely (e.g., S3 list permissions) — empty result set
+        # (recorded: boto3 auth, S3 prefix scan failures).
         pass
     snapshots.sort(key=lambda x: x[0])
     return snapshots

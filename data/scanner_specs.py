@@ -156,10 +156,13 @@ def build_shadow_artifacts(
 ) -> dict[str, dict]:
     """Build shadow candidate artifacts for every CHALLENGER spec.
 
-    Fail-soft PER SPEC: a challenger that raises is logged at WARNING (the
-    failure is recorded, per the no-silent-fails rule) and omitted — the live
-    artifact and the other shadows are unaffected. Returns ``{spec_name:
-    artifact}``.
+    Fail-soft PER SPEC (§61 alarmed carve-out, config#1684): the shadow build
+    runs in the scanner Lambda alongside the live candidates artifact; a single
+    challenger spec that raises must not take out the live champion or the other
+    shadows, so it is omitted PER SPEC — but the failure now lands on an ALARMED
+    surface with a consumer (observe_alerts → SNS + flow-doctor forum), not a
+    bare WARN that let the empty-``candidates_shadow/`` class hide for weeks
+    (config#1403). Returns ``{spec_name: artifact}``.
     """
     n_eligible = sum(1 for r in eval_log if r.get("liquidity_pass") == 1)
     out: dict[str, dict] = {}
@@ -174,4 +177,17 @@ def build_shadow_artifacts(
                 "[scanner_specs] shadow spec %s failed (non-fatal, live "
                 "unaffected): %s", spec.name, exc,
             )
+            try:
+                from observe_alerts import publish_observe_alert
+                publish_observe_alert(
+                    f"scanner shadow spec {spec.name} FAILED to emit "
+                    f"(non-fatal, live candidates unaffected): {exc}",
+                    source=f"scanner:shadow_spec:{spec.name}",
+                    dedup_key=f"scanner_shadow_spec_fail:{spec.name}",
+                )
+            except Exception:  # noqa: BLE001 — alerting is secondary; WARN above is the backstop
+                logger.warning(
+                    "[scanner_specs] observe_alert publish unavailable for %s "
+                    "(WARN log is the backstop)", spec.name,
+                )
     return out
