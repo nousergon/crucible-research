@@ -131,14 +131,21 @@ _PRIOR = {
 
 def test_malformed_catalysts_raises_after_reroll(monkeypatch):
     """REWRITTEN from test_malformed_catalysts_degrades_to_prior_thesis.
-    Old (#193): carry prior thesis forward, no raise. New: RAISE."""
+    Old (#193): carry prior thesis forward, no raise. New: RAISE.
+
+    config#2247: the deterministic per-ticker failure now raises a
+    ``QuarantinableThesisError`` (a RuntimeError subclass) rather than a bare
+    RuntimeError — ``_update_thesis_for_held_stock`` STILL raises; the caller
+    (``run_sector_team``) catches it to quarantine the single ticker instead of
+    killing the whole run. No prior-thesis carry-forward either way."""
     from agents.sector_teams import sector_team
+    from agents.sector_teams.sector_team import QuarantinableThesisError
 
     structured = _FakeStructuredLLM([_validation_error_response()] * 3)
     fake_llm = _FakeLLM(structured)
     _patch_call_site(monkeypatch, fake_llm)
 
-    with pytest.raises(RuntimeError, match="all-agents-strict hard-fail"):
+    with pytest.raises(QuarantinableThesisError, match="per-ticker quarantine"):
         sector_team._update_thesis_for_held_stock(
             ticker="LMT",
             triggers=["earnings"],
@@ -220,14 +227,17 @@ def test_validation_error_DOES_propagate(monkeypatch):
 
 def test_no_prior_thesis_still_raises(monkeypatch):
     """REWRITTEN from test_no_prior_thesis_isolation_marks_score_failed.
-    No isolation fallback at all — raises regardless of prior thesis."""
+    No isolation fallback at all — raises regardless of prior thesis.
+    config#2247: the raise is now a quarantine-eligible QuarantinableThesisError
+    (caught upstream to quarantine), never a carry-forward."""
     from agents.sector_teams import sector_team
+    from agents.sector_teams.sector_team import QuarantinableThesisError
 
     structured = _FakeStructuredLLM([_validation_error_response()] * 3)
     fake_llm = _FakeLLM(structured)
     _patch_call_site(monkeypatch, fake_llm)
 
-    with pytest.raises(RuntimeError, match="all-agents-strict"):
+    with pytest.raises(QuarantinableThesisError, match="per-ticker quarantine"):
         sector_team._update_thesis_for_held_stock(
             ticker="NEW",
             triggers=["earnings"],
