@@ -26,7 +26,11 @@ Boundaries (plan: alpha-engine-config/private-docs/research-thinktank-plan-26070
 
 __version__ = "0.1.0"
 
-SCHEMA_VERSION = 1
+# config#2678: bumped 1 -> 2 for CompanyThesis.pillar_assessment +
+# RatingRow.raw_llm_rating (M0 contract-discipline: schema_version bumps on
+# any shape change, per this module's own docstring). Additive-only — old
+# artifacts (schema_version=1) still parse under both new fields' defaults.
+SCHEMA_VERSION = 2
 
 # S3 namespace (single source of truth for key templates)
 LEDGER_KEY = "thinktank/coverage_ledger.json"
@@ -50,4 +54,10 @@ CHALLENGER_SELECTION_LATEST_KEY = "thinktank/challenger_selection/latest.json"
 CHALLENGER_SHADOW_SIGNALS_KEY_TMPL = "signals_shadow/thinktank_coverage/{trading_day}/signals.json"
 MANIFEST_KEY_TMPL = "thinktank/runs/{trading_day}/manifest_{run_id}.json"
 COSTS_KEY_TMPL = "thinktank/costs/{month}.json"
+# config#2678: per-ticker moat-assessment time series, INSIDE the
+# thinktank/ namespace — Think Tank's own equivalent of the legacy
+# archive/manager.py::save_moat_profile (archive/universe/{ticker}/...),
+# which had no live producer since the qual/CIO graph left the weekly SF
+# (config#1580). See thinktank/archive.py.
+MOAT_PROFILE_KEY_TMPL = "thinktank/moat_profile/{ticker}.json"
 SFT_PRODUCER = "crucible_thinktank"

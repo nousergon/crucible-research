@@ -15,6 +15,12 @@ composite — see ``analyst._facts_board_row``) minus the scanner's
 ``attractiveness_score`` at thesis-write time. Large gaps in either
 direction are the interesting cohort for the config#1580 restructure
 evidence.
+
+Since config#2678, ``rating`` is the OPERATIVE value — the raw LLM rating
+blended with the pillar composite via ``thinktank.pillars.blend_rating``
+(still fully scanner-independent; the pillar extraction is scanner-blind
+too, see ``analyst.build_thesis``). ``raw_llm_rating`` preserves the
+pre-blend value for audit/divergence display.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from datetime import datetime, timezone
 
 from thinktank import RATINGS_KEY_TMPL, RATINGS_LATEST_KEY
 from thinktank.analyst import load_latest_thesis
+from thinktank.pillars import blend_rating
 from thinktank.schemas import CompanyThesis, CoverageLedger, RatingRow, RatingsBoard
 from thinktank.storage import ThinktankStore
 
@@ -32,13 +39,20 @@ logger = logging.getLogger(__name__)
 
 def _row_from_thesis(thesis: CompanyThesis) -> RatingRow:
     llm = thesis.thesis
+    raw_rating = llm.rating
+    rating = (
+        blend_rating(raw_rating, thesis.pillar_assessment)
+        if raw_rating is not None
+        else None
+    )
     delta: float | None = None
-    if llm.rating is not None and thesis.attractiveness_score is not None:
-        delta = round(float(llm.rating) - float(thesis.attractiveness_score), 2)
+    if rating is not None and thesis.attractiveness_score is not None:
+        delta = round(float(rating) - float(thesis.attractiveness_score), 2)
     return RatingRow(
         ticker=thesis.ticker,
         sector=thesis.sector,
-        rating=llm.rating,
+        rating=rating,
+        raw_llm_rating=raw_rating,
         rating_rationale=llm.rating_rationale,
         stance=llm.stance,
         conviction=llm.conviction,

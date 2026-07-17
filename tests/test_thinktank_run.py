@@ -67,6 +67,30 @@ class _FakeBackend:
                 "rating": self.ratings.get(ticker, 72),
                 "rating_rationale": "evidence-driven number",
             }
+        elif name == "QualitativePillarAssessment":
+            m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
+            ticker = m_ticker.group(1) if m_ticker else None
+            score = self.ratings.get(ticker, 72)
+
+            def _sub(pillar: str) -> dict:
+                return {
+                    "pillar": pillar, "score": score, "confidence": "medium",
+                    "evidence": ["e1"],
+                }
+
+            body = {
+                "quality": _sub("quality"),
+                "quality_moat": {
+                    "primary_type": "none", "secondary_types": [], "width": "none",
+                    "durability_years": 0, "trend": "stable", "evidence": [],
+                },
+                "value": _sub("value"),
+                "momentum": _sub("momentum"),
+                "growth": _sub("growth"),
+                "stewardship": _sub("stewardship"),
+                "defensiveness": _sub("defensiveness"),
+                "catalyst_horizon_modulation": 0,
+            }
         elif name == "SweepBatchLLM":
             m = re.search(r"batch: (.+)", user)
             tickers = [t.strip() for t in m.group(1).splitlines()[0].split(",")]
@@ -110,7 +134,7 @@ def tt_config(tmp_path, monkeypatch):
                         "price_in_per_m": 1.0, "price_out_per_m": 2.0,
                         "structured_outputs": True,
                     }
-                    for t in ("sweep", "themes", "thesis")
+                    for t in ("sweep", "themes", "thesis", "pillar")
                 },
             },
         }
@@ -299,6 +323,11 @@ def test_ratings_board_and_prompt_independence(tt_config):
     2. The thesis prompt NEVER contains the scanner's opinion — no
        attractiveness/focus/tech composite, no pillar sub-scores. This is
        what makes the rating independent rather than an echo.
+    3. (config#2678) The pillar-extraction prompt is held to the SAME
+       scanner-blind standard, and the operative ``rating`` is the
+       pillar-blended value while ``raw_llm_rating`` preserves the
+       pre-blend one — the fake's pillar scores equal the raw rating, so
+       the blend is a no-op here and the pre-2678 assertions still hold.
     """
     backend = _FakeBackend()
     with mock_aws():
@@ -311,6 +340,7 @@ def test_ratings_board_and_prompt_independence(tt_config):
         assert manifest.ratings_rows == 3
         row = board["rows"]["T0"]
         assert row["rating"] == 72
+        assert row["raw_llm_rating"] == 72
         assert row["rating_rationale"] == "evidence-driven number"
         assert row["stance"] == "attractive" and row["conviction"] == 70
         # scanner composite rides as metadata; T0 seeded with score 100
@@ -323,13 +353,17 @@ def test_ratings_board_and_prompt_independence(tt_config):
         )
         assert dated["rows"].keys() == board["rows"].keys()
 
-        # the anchoring pin: no scanner-opinion JSON keys in any thesis prompt
-        thesis_prompts = [u for n, u in backend.users if n == "CompanyThesisRatedLLM"]
-        assert thesis_prompts, "no thesis calls captured"
-        for user in thesis_prompts:
+        # the anchoring pin: no scanner-opinion JSON keys in any thesis OR
+        # pillar-extraction prompt (config#2678 must not reverse this)
+        opinion_prompts = [
+            u for n, u in backend.users
+            if n in ("CompanyThesisRatedLLM", "QualitativePillarAssessment")
+        ]
+        assert opinion_prompts, "no thesis/pillar calls captured"
+        for user in opinion_prompts:
             for banned in ('"attractiveness_score"', '"pillars"', '"focus_score"', '"tech_score"'):
                 assert banned not in user, (
-                    f"scanner opinion {banned} leaked into the thesis prompt — "
+                    f"scanner opinion {banned} leaked into the analyst prompt — "
                     "the independent rating must not see the house composite "
                     "(analyst._facts_board_row)"
                 )
@@ -339,6 +373,12 @@ def test_ratings_board_and_prompt_independence(tt_config):
         # test below via a hand-written pre-rating artifact)
         t0 = store.get_json("thinktank/theses/T0/latest.json")
         assert t0["thesis"]["rating"] == 72
+        assert t0["pillar_assessment"]["quality"]["score"] == 72
+
+        # config#2678 deliverable 1: moat profile gets a live producer again
+        moat = store.get_json("thinktank/moat_profile/T0.json")
+        assert moat and moat[-1]["run_date"] == manifest.trading_day
+        assert moat[-1]["primary_type"] == "none"
 
 
 def test_operator_refresh_mode(tt_config):
@@ -431,7 +471,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert manifest.challenger_selection_written is True
 
         sel = store.get_json("thinktank/challenger_selection/latest.json")
-        assert sel["schema_version"] == 1
+        assert sel["schema_version"] == 2  # config#2678 bump — see thinktank/__init__.py
         assert sel["arm"] == "thinktank_coverage"
         assert sel["mode"] == "daily"
         assert sel["run_id"] == manifest.run_id
