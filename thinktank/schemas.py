@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from nousergon_lib.pillars import QualitativePillarAssessment
 from pydantic import BaseModel, ConfigDict, Field
 
 from thinktank import SCHEMA_VERSION
@@ -119,6 +120,15 @@ class CompanyThesis(_Artifact):
     tier: str = ""
     prompt_version: str = ""
     cost_usd: float = 0.0
+    # config#2678: second, decoupled structured extraction over the SAME
+    # scanner-blind evidence bundle (mirrors agents/sector_teams/qual_analyst.py's
+    # pattern) — the qualitative 6-pillar/moat decomposition. None on
+    # pre-port artifacts (add-only S3 contract); new generations always
+    # populate it (thinktank.client.complete fails loud on parse failure,
+    # no lax-mode empty path). Feeds thinktank.pillars.blend_rating — never
+    # the scanner composite (thinktank/analyst.py::_facts_board_row still
+    # withholds attractiveness_score/pillars from every prompt).
+    pillar_assessment: QualitativePillarAssessment | None = None
 
 
 # ── Ratings board (console/eval rollup) ──────────────────────────────────────
@@ -131,7 +141,13 @@ class RatingRow(BaseModel):
 
     ticker: str
     sector: str | None = None
-    rating: int | None = None  # None = thesis predates the rating field
+    # The OPERATIVE rating — what challenger_selection ranks by and the
+    # leaderboard shadow view scores with. Since config#2678 this is the
+    # analyst's raw rating blended with the pillar composite via
+    # thinktank.pillars.blend_rating (still fully scanner-independent —
+    # the pillar extraction is scanner-blind too); pre-2678 this equaled
+    # raw_llm_rating exactly. None = thesis predates the rating field.
+    rating: int | None = None
     rating_rationale: str = ""
     stance: str = ""
     conviction: int | None = None
@@ -144,6 +160,10 @@ class RatingRow(BaseModel):
     attractiveness_score: float | None = None
     attractiveness_rank: int | None = None
     rating_minus_attractiveness: float | None = None
+    # config#2678: the analyst's own rating BEFORE the pillar-composite
+    # blend — audit/divergence display so the blend's effect is visible.
+    # None only when ``rating`` itself is None (thesis predates rating).
+    raw_llm_rating: int | None = None
 
 
 class RatingsBoard(_Artifact):

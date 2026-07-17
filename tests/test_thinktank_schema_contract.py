@@ -32,7 +32,7 @@ _FROZEN_FIELDS = {
         "update_reason", "thesis", "sector", "attractiveness_score",
         "attractiveness_rank", "macro_theme_version", "sector_theme_version",
         "sources_used", "event_context", "model", "tier", "prompt_version",
-        "cost_usd",
+        "cost_usd", "pillar_assessment",
     },
     CompanyThesisLLM: {
         "business_summary", "moat", "filings_review", "news_sentiment",
@@ -49,7 +49,7 @@ _FROZEN_FIELDS = {
         "ticker", "sector", "rating", "rating_rationale", "stance",
         "conviction", "summary", "thesis_version", "thesis_trading_day",
         "update_reason", "attractiveness_score", "attractiveness_rank",
-        "rating_minus_attractiveness",
+        "rating_minus_attractiveness", "raw_llm_rating",
     },
     RatingsBoard: {"schema_version", "trading_day", "updated_at", "rows"},
     ChallengerSelectionRow: {
@@ -112,10 +112,14 @@ def test_frozen_field_sets_are_superset_stable():
 
 
 def test_schema_version_stamped_on_artifacts():
+    # config#2678: bumped 1 -> 2 (CompanyThesis.pillar_assessment +
+    # RatingRow.raw_llm_rating) — SCHEMA_VERSION is one shared constant
+    # across every thinktank/ artifact (thinktank/__init__.py), not
+    # per-model, so the bump shows up on all of them.
     for model in (CompanyThesis, ThemeThesis, EventRecord, CoverageLedger,
                   RunManifest, MonthlyCostLedger, ChallengerSelection):
         assert "schema_version" in model.model_fields
-        assert model.model_fields["schema_version"].default == 1
+        assert model.model_fields["schema_version"].default == 2
 
 
 def test_llm_outputs_forbid_extra_fields():
