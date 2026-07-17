@@ -232,7 +232,18 @@ def _read_price_returns(tickers: list[str], window_weeks: int) -> tuple[dict, di
         frames = fetch_price_data(sorted(set(tickers)) + SECTOR_ETFS,
                                   period=_fetch_period_for(window_weeks))
     except Exception as e:
+        # §61 pre-persistence carve-out (config#1684): this runs BEFORE the
+        # trajectory artifact is written, so it cannot raise without losing the
+        # whole signal — degrades to rising-only. Non-fatal, but the failure now
+        # lands on an ALARMED surface with a consumer, not a bare WARN.
         logger.warning("[trajectory] price read failed — signal degrades to rising-only: %s", e)
+        from observe_alerts import publish_observe_alert
+        publish_observe_alert(
+            f"attractiveness_trajectory price read FAILED (non-fatal, signal "
+            f"degrades to rising-only): {e}",
+            source="research-runner:trajectory_price_read",
+            dedup_key="trajectory_price_read_fail",
+        )
         return {}, {}
     price_ret = {}
     for t in tickers:
@@ -288,7 +299,18 @@ def compute_and_write_trajectory(
         try:
             _send_digest(artifact, run_date)
         except Exception as e:
+            # §61 (config#1684): the trajectory artifact is already persisted
+            # above, so a digest-email failure is a secondary-notification
+            # miss — non-fatal, but loud on an alarmed surface, not a silent
+            # WARN.
             logger.warning("[trajectory] digest email failed (non-fatal): %s", e)
+            from observe_alerts import publish_observe_alert
+            publish_observe_alert(
+                f"attractiveness_trajectory digest email FAILED for {run_date} "
+                f"(non-fatal, trajectory artifact already persisted): {e}",
+                source="research-runner:trajectory_digest_email",
+                dedup_key=f"trajectory_digest_email_fail:{run_date}",
+            )
     return dated_key
 
 
