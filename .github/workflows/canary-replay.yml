@@ -1,12 +1,29 @@
 name: Canary Replay
 
-# Per-PR gate for alpha-engine-config#2246 (Saturday-replay canary). Gated
-# on the `canary:replay` label (auto-applied by label-canary-replay.yml on
-# weekly-critical paths). Thin GHA shim on this PUBLIC repo (free/unmetered
-# hosted runner) — the actual probe workload runs on EC2 spot, dispatched
-# via alpha-engine-canary-replay-dispatcher (nousergon-data). Brian's
-# binding ruling: the canary ALWAYS runs all 3 probes together regardless
-# of which repo's PR triggered it, so this shim supplies ITS OWN branch as
+# Per-PR gate for alpha-engine-config#2246 (Saturday-replay canary). Single
+# workflow with two jobs — `label` decides (via path filter) whether this
+# PR touches weekly-critical paths and applies the `canary:replay` label;
+# `canary` dispatches the actual probe run, gated on `label`'s own output
+# OR a pre-existing label (e.g. applied manually by a human on an earlier
+# run). This used to be two separate workflow files connected by a
+# `labeled` trigger: label-canary-replay.yml applied the label with the
+# default GITHUB_TOKEN, and canary-replay.yml re-triggered on `labeled` to
+# see it. GitHub Actions' anti-recursion protection means a `labeled` event
+# caused by the default GITHUB_TOKEN never starts a new workflow run, so
+# that second run never fired — a PR opened once (no follow-up push) would
+# never get gated (alpha-engine-config#2691). Consuming the label job's
+# output directly, in the same run, makes that cross-workflow-trigger
+# dependency structurally impossible.
+#
+# Path list MUST stay in lockstep with agents/canary_replay.py's own
+# probes: a change to any of these could regress what the Saturday
+# weekly-SF actually executes.
+#
+# Thin GHA shim on this PUBLIC repo (free/unmetered hosted runner) — the
+# actual probe workload runs on EC2 spot, dispatched via
+# alpha-engine-canary-replay-dispatcher (nousergon-data). Brian's binding
+# ruling: the canary ALWAYS runs all 3 probes together regardless of which
+# repo's PR triggered it, so this shim supplies ITS OWN branch as
 # research_ref and lets data_ref default to main on the dispatcher side.
 #
 # Fork PRs have no OIDC trust to this account — configure-aws-credentials
@@ -31,17 +48,52 @@ concurrency:
 permissions:
   id-token: write
   contents: read
+  pull-requests: write
 
 jobs:
+  label:
+    # The `labeled` trigger type fires for ANY label added to the PR, not
+    # just `canary:replay` — without this guard, an unrelated label (e.g.
+    # a triage bot applying `source:groom` moments after pushing the PR's
+    # head commit) fires a SECOND, near-simultaneous workflow run for the
+    # same SHA alongside the `synchronize`-triggered run already in
+    # flight. Both reach the `canary` job and race the dispatcher's
+    # per-run-token dedupe, so one of them gets declined with
+    # `concurrent_skip` and (pre-fix) hard-failed the check even though
+    # the other run's dispatch was legitimate (alpha-engine-config#2570).
+    if: github.event.action != 'labeled' || github.event.label.name == 'canary:replay'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      weekly_critical: ${{ steps.filter.outputs.weekly_critical }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+        id: filter
+        with:
+          filters: |
+            weekly_critical:
+              - 'agents/sector_teams/**'
+              - 'agents/langchain_utils.py'
+              - 'agents/canary_replay.py'
+              - 'lambda/handler.py'
+              - '.github/workflows/canary-replay.yml'
+      - name: Apply canary:replay label
+        if: steps.filter.outputs.weekly_critical == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr edit "${{ github.event.pull_request.number }}" --add-label canary:replay
+
   canary:
-    if: contains(github.event.pull_request.labels.*.name, 'canary:replay')
+    needs: label
+    if: needs.label.outputs.weekly_critical == 'true' || contains(github.event.pull_request.labels.*.name, 'canary:replay')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Configure AWS credentials
         id: aws_creds
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4
         with:
           role-to-assume: arn:aws:iam::711398986525:role/github-actions-canary-replay-dispatch
           aws-region: us-east-1
@@ -80,9 +132,20 @@ jobs:
           cat "$RESP"
 
           LAUNCHED=$(jq -r '.launched' "$RESP")
+          REASON=$(jq -r '.reason' "$RESP")
           if [ "$LAUNCHED" != "true" ]; then
-            echo "::error::canary-replay-dispatcher declined to launch: $(cat "$RESP")"
-            exit 1
+            if [ "$REASON" = "concurrent_skip" ]; then
+              # Another dispatch for this exact PR+SHA is already in flight
+              # (e.g. a duplicate/near-simultaneous webhook delivery) — the
+              # dispatcher's own dedupe is authoritative that a run WILL
+              # produce this run_token's marker, so poll for it below
+              # instead of hard-failing a check the other run is already
+              # servicing.
+              echo "canary already in flight for this PR+SHA (reason=concurrent_skip) — polling its marker instead of failing"
+            else
+              echo "::error::canary-replay-dispatcher declined to launch: $(cat "$RESP")"
+              exit 1
+            fi
           fi
           MARKER_KEY=$(jq -r '.marker_key' "$RESP")
           # `// 0` degrades safely if the dispatcher Lambda hasn't been
