@@ -46,6 +46,7 @@ def sector_label_for_team(team_id: str) -> str:
         if sectors:
             return sectors[0]
     except Exception:
+        # Sector lookup failed — return team_id as fallback (recorded: KeyError, None-deref).
         pass
     return team_id
 
