@@ -171,6 +171,23 @@ def test_s3_error_swallowed_no_raise_no_mutation():
     assert payload == payload_before
 
 
+def test_s3_error_fires_observe_alert():
+    """§61 (config#1684): a swallowed shadow failure must land on the ALARMED
+    surface (observe_alerts.publish_observe_alert), not just a WARN log."""
+    from unittest.mock import patch
+
+    payload, loadings = _synthetic_cross_section(n=30)
+    am = _RaisingAM()
+    with patch("observe_alerts.publish_observe_alert") as mock_alert:
+        result = run_neutralization_shadow(am, "2026-06-22", payload, loadings)
+
+    assert result is None
+    assert mock_alert.called, "shadow failure must fire an observe alert (§61)"
+    kwargs = mock_alert.call_args.kwargs
+    assert "neutralization_shadow" in kwargs.get("source", "")
+    assert "simulated S3 error" in mock_alert.call_args.args[0]
+
+
 def test_empty_signals_returns_none():
     am = _FakeAM()
     _, loadings = _synthetic_cross_section(n=30)

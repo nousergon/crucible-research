@@ -198,3 +198,38 @@ def test_dockerfile_alerts_copies_its_local_imports():
         "import ModuleNotFounds at runtime (config#2132, same class as "
         "config#1403/#1683 but previously unguarded for the alerts image)."
     )
+
+
+def test_every_shared_lambda_cmd_module_is_copied_into_the_image():
+    """Every CMD-override module deploy.sh ships MUST have a Dockerfile COPY.
+
+    The existing guards above derive their entrypoint list FROM the
+    Dockerfile's ``COPY lambda/<x>.py`` lines — so a handler that deploy.sh
+    references but the Dockerfile never copies is INVISIBLE to them: unit
+    tests pass from the repo, the function deploys, and the first real
+    invocation cold-starts into ImportModuleError. Fourth known instance of
+    the class (producers/ config#1403; data/dates.py; predictor/monitoring
+    config#2132; signals_envelope_handler caught in review, I2515). This
+    test closes it structurally: cross-check deploy.sh's
+    ``_deploy_image_shared_lambda "<fn>" "<module>"`` call sites against the
+    Dockerfile's copied handler set.
+    """
+    deploy_sh = (_REPO / "infrastructure" / "deploy.sh").read_text()
+    cmd_modules = set(
+        re.findall(
+            r'_deploy_image_shared_lambda\s+"\$\w+"\s+"(\w+)"', deploy_sh
+        )
+    )
+    assert cmd_modules, "no _deploy_image_shared_lambda call sites found — deploy.sh moved?"
+    copied = {
+        m.group(1).removesuffix(".py")
+        for m in re.finditer(r"^COPY lambda/(\w+\.py)\s", _dockerfile(), re.M)
+    }
+    # handler.py is the image's default CMD, copied as handler.py — count it.
+    missing = cmd_modules - copied - {"handler"}
+    assert not missing, (
+        f"deploy.sh ships CMD module(s) {sorted(missing)} that the Dockerfile "
+        "never COPYs into the image — the function would deploy and then "
+        "ImportModuleError on first invocation. Add `COPY lambda/<module>.py "
+        "${LAMBDA_TASK_ROOT}/<module>.py` to the Dockerfile."
+    )

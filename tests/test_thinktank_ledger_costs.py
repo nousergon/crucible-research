@@ -78,6 +78,34 @@ def test_rank_ceiling_bounds_intake_and_stalest_refresh_fills_slots():
     assert refresh == ["T0", "T2"]
 
 
+def test_skip_stale_refill_returns_new_only_even_with_slots_left():
+    """Gap-fill mode (Saturday SF): staleness refresh is the daily job's
+    role. skip_stale_refill=True must return an EMPTY refresh list even
+    when there's remaining budget and stale covered names exist — padding
+    with stale-refill picks would silently do daily's job for it."""
+    ledger = CoverageLedger()
+    record_thesis_write(ledger, ticker="T0", trading_day="2026-06-01", thesis_version=1)
+    new_rows, refresh = select_intake(
+        ledger, _board(), daily_new_names=5, rank_ceiling=150, skip_stale_refill=True
+    )
+    assert [r["ticker"] for r in new_rows] == ["T1", "T2", "T3", "T4", "T5"]
+    assert refresh == []
+
+
+def test_skip_stale_refill_zero_gap_returns_nothing():
+    """The gap-fill caller sizes daily_new_names to the EXACT measured gap
+    (coverage_gap.uncovered_count) — when that's 0 (fully covered), no new
+    names should be selected at all."""
+    ledger = CoverageLedger()
+    for i in range(10):
+        record_thesis_write(ledger, ticker=f"T{i}", trading_day="2026-07-01", thesis_version=1)
+    new_rows, refresh = select_intake(
+        ledger, _board(), daily_new_names=0, rank_ceiling=150, skip_stale_refill=True
+    )
+    assert new_rows == []
+    assert refresh == []
+
+
 def test_record_thesis_write_updates_existing_entry():
     ledger = CoverageLedger()
     record_thesis_write(

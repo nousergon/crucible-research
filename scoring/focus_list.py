@@ -237,6 +237,130 @@ def build_focus_list(
     return result
 
 
+def build_focus_list_audit_lookup(
+    focus_scores: dict[str, dict],
+    focus_list: dict[str, list[FocusListEntry]],
+    sector_team_map: dict[str, str],
+) -> dict[str, dict]:
+    """Flatten ``focus_scores`` (every ticker with a computed factor
+    subscore) + ``focus_list`` (the per-team top-N cut of those scores)
+    into the ``scanner_evaluations`` per-ticker audit-lookup shape:
+    ``{ticker: {focus_score, focus_stance, focus_team_id, focus_rank_in_team,
+    focus_rank_in_sector, focus_list_passed, agent_override, override_team_id}}``.
+
+    Top-N members get ``focus_list_passed=1`` + their rank; scored-but-cut
+    ("near miss") tickers get ``focus_list_passed=0`` + null ranks. Every
+    entry gets ``agent_override=0`` / ``override_team_id=None`` — this
+    projection has no agent run backing it (pure quant focus-list
+    membership only), so there is no "the agent looked this ticker up
+    outside its focus list" signal to attribute.
+
+    Shared by TWO callers so the projection logic lives in exactly one
+    place: ``graph.research_graph._compute_focus_list_audit_lookup``'s
+    legacy (agent-state-absent) fallback branch, and the standalone
+    Scanner path (``data.scanner_orchestrator.build_pure_quant_focus_lookup``)
+    where this IS the only audit path — there is no agent/graph run at
+    all in that Lambda. See alpha-engine-config-I2515.
+    """
+    lookup: dict[str, dict] = {}
+    passed_tickers: set[str] = set()
+    for team_id, entries in focus_list.items():
+        for e in entries:
+            passed_tickers.add(e.ticker)
+            lookup[e.ticker] = {
+                "focus_score": e.focus_score,
+                "focus_stance": e.stance,
+                "focus_team_id": team_id,
+                "focus_rank_in_team": e.rank_in_team,
+                "focus_rank_in_sector": e.rank_in_sector,
+                "focus_list_passed": 1,
+                "agent_override": 0,
+                "override_team_id": None,
+            }
+
+    for ticker, entry in focus_scores.items():
+        if ticker in passed_tickers:
+            continue
+        team_id = sector_team_map.get(entry.get("sector"))
+        if team_id is None:
+            continue
+        lookup[ticker] = {
+            "focus_score": entry["focus_score"],
+            "focus_stance": entry["stance"],
+            "focus_team_id": team_id,
+            "focus_rank_in_team": None,
+            "focus_rank_in_sector": None,
+            "focus_list_passed": 0,
+            "agent_override": 0,
+            "override_team_id": None,
+        }
+    return lookup
+
+
+def build_pure_quant_focus_lookup(
+    *,
+    market_regime: str | None,
+    run_date: str | None = None,
+    bucket: str | None = None,
+) -> dict[str, dict]:
+    """Standalone, no-agent-state focus-list audit lookup for the Scanner
+    path (``data.scanner_orchestrator`` / ``lambda/scanner_handler.py``,
+    alpha-engine-config-I2515 — completes L1995 Phase 5's producer side).
+
+    This is the SAME pure-quant computation as
+    ``graph.research_graph._compute_focus_list_audit_lookup``'s legacy
+    (agent-state-absent) fallback branch — factor profiles → regime blend
+    → per-team top-N — reused here via :func:`build_focus_list_audit_lookup`
+    so the two call sites can't drift. Unlike the graph's fallback (which
+    only fires when ``focus_list_by_team`` is unexpectedly absent from
+    state), this IS the only path available in the Scanner Lambda: there is
+    no agent run, so ``agent_override``/``override_team_id`` are always
+    ``0``/``None`` here — never fabricated.
+
+    Fail-soft: returns ``{}`` when ``config.FACTOR_BLEND_ENABLED`` is False,
+    the factor-profile substrate is unreadable, or no ticker's blend yields
+    a score. An empty lookup degrades every board row's ``focus_score`` /
+    ``focus_stance`` to null — a tolerance ``scoring/universe_board.py``'s
+    row-shape contract already documents — rather than raising and
+    jeopardizing the board write (a secondary observability artifact).
+    """
+    from config import FACTOR_BLEND_ENABLED, get_factor_blend_regime_weights
+    from agents.sector_teams.team_config import SECTOR_TEAM_MAP
+    from scoring.factor_scoring import read_factor_profiles_from_s3
+
+    if not FACTOR_BLEND_ENABLED:
+        logger.info(
+            "[focus_list] factor blend disabled — pure-quant focus lookup skipped"
+        )
+        return {}
+
+    factor_profiles = read_factor_profiles_from_s3(run_date, bucket)
+    if not factor_profiles:
+        logger.warning(
+            "[focus_list] factor profile artifact missing for run_date=%s — "
+            "pure-quant focus lookup skipped", run_date,
+        )
+        return {}
+
+    focus_scores = compute_focus_scores(
+        factor_profiles, market_regime, get_factor_blend_regime_weights(),
+    )
+    if not focus_scores:
+        logger.warning(
+            "[focus_list] no factor scores computed for regime=%s — "
+            "pure-quant focus lookup skipped", market_regime,
+        )
+        return {}
+
+    focus_list = build_focus_list(focus_scores, SECTOR_TEAM_MAP)
+    summary = summarize_focus_list(focus_list)
+    logger.info(
+        "[focus_list] pure-quant lookup: regime=%s, %d teams, summary=%s",
+        market_regime, len(focus_list), summary,
+    )
+    return build_focus_list_audit_lookup(focus_scores, focus_list, SECTOR_TEAM_MAP)
+
+
 def summarize_focus_list(focus_list: dict[str, list[FocusListEntry]]) -> dict:
     """Compact summary for telemetry / logging.
 

@@ -17,7 +17,9 @@ Design contract (per the observe-mode discipline + no-silent-fails carve-out):
   * The whole sidecar is fail-soft: any failure (missing loadings, S3 error,
     neutralize edge case) logs a WARN and is swallowed. This hangs off the
     PRIMARY research path AFTER signals.json is already persisted, so a shadow
-    failure cannot fail the run — the recording surface is the WARN log.
+    failure cannot fail the run — the recording surface is an ALARMED alert
+    (SNS + flow-doctor forum via ``observe_alerts.publish_observe_alert``),
+    not a bare WARN log (ARCHITECTURE.md §61 / config#1684).
 """
 
 from __future__ import annotations
@@ -118,9 +120,10 @@ def run_neutralization_shadow(
     """Compute + persist the OBSERVE neutralization shadow (fail-soft).
 
     Hung off the PRIMARY research path AFTER signals.json is already written.
-    Any failure is swallowed with a WARN — the research run's primary deliverable
-    must be unaffected (no-silent-fails secondary-observability carve-out: the
-    recording surface is the WARN log).
+    Any failure is swallowed (WARN + an alarmed alert) — the research run's
+    primary deliverable must be unaffected (no-silent-fails secondary-
+    observability carve-out: the recording surface is
+    ``observe_alerts.publish_observe_alert``, not a bare WARN log).
 
     Returns the artifact dict (for tests / callers) or ``None`` if nothing was
     written (no loadings, no scores, or a swallowed failure).
@@ -163,9 +166,20 @@ def run_neutralization_shadow(
         )
         return artifact
     except Exception as e:  # fail-soft: shadow must never break the research run
+        # §61 alarmed carve-out (config#1684): non-fatal because a shadow
+        # failure must never sink the already-persisted signals.json — but the
+        # failure now lands on an ALARMED surface with a consumer (SNS +
+        # flow-doctor forum), not a bare WARN nobody reads (config#1403).
         logger.warning(
             "[neutralization_shadow] failed for %s (%s) — swallowed; "
             "signals.json is already persisted and unaffected.",
             run_date, e,
+        )
+        from observe_alerts import publish_observe_alert
+        publish_observe_alert(
+            f"neutralization_shadow producer emission FAILED for {run_date} "
+            f"(non-fatal, live signals.json unaffected): {e}",
+            source="research-runner:neutralization_shadow",
+            dedup_key=f"neutralization_shadow_fail:{run_date}",
         )
         return None
