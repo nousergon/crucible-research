@@ -123,6 +123,7 @@ from scoring.factor_scoring import (
 )
 from scoring.focus_list import (
     build_focus_list,
+    build_focus_list_audit_lookup,
     compute_focus_scores,
     summarize_focus_list,
 )
@@ -487,6 +488,23 @@ class ResearchState(TypedDict, total=False):
 
     # ── Dispatch metadata (for Send()) ───────────────────────────────────────
     team_id: Annotated[str, take_last]  # set by Send() per team
+
+    # ── Checkpoint-resume evidence (config#2263) ─────────────────────────────
+    # Populated ONLY on the resume-hit branch of the three checkpoint-capable
+    # nodes (sector_team_node, macro_economist_node, cio_node) — never on the
+    # fresh-compute path. Keyed so the trajectory validator (evals/trajectory.py)
+    # can tell, from final_state alone, whether this invocation used the S3
+    # checkpoint short-circuit at all (a non-empty dict here means at least
+    # one node was resumed rather than executed, which matters because a
+    # resumed run can finish before its child spans land in LangSmith — see
+    # the trajectory validator's final-state structural fallback).
+    # ``merge_typed_dicts`` (last-write-wins, dict union) rather than
+    # ``reject_on_conflict``: this is bookkeeping, not a correctness
+    # invariant like sector_team_outputs' disjoint keyspace, so a duplicate
+    # write here should never crash a run. sector_team_node's 6 concurrent
+    # Send() branches each own a distinct key (``sector_team_node:{team_id}``)
+    # so there is no legitimate overlap in practice either.
+    checkpoint_resumed_nodes: Annotated[dict[str, bool], merge_typed_dicts]
 
 
 # ── Pre-fetch helpers ─────────────────────────────────────────────────────────
@@ -1270,7 +1288,10 @@ def sector_team_node(state: ResearchState) -> dict:
                 team_id,
                 len(persisted.get("recommendations", []) or []),
             )
-            return {"sector_team_outputs": {team_id: persisted}}
+            return {
+                "sector_team_outputs": {team_id: persisted},
+                "checkpoint_resumed_nodes": {f"sector_team_node:{team_id}": True},
+            }
 
     # Stage D' Wire 1: extract intensity_z from the regime substrate
     # (loaded by load_regime_substrate_node upstream of macro). None
@@ -1463,7 +1484,10 @@ def macro_economist_node(state: ResearchState) -> dict:
                 "[macro] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"macro_economist_node": True},
+            }
 
     macro_data = state.get("macro_data", {})
     prior_report = state.get("prior_macro_report", "")
@@ -2521,7 +2545,10 @@ def cio_node(state: ResearchState) -> dict:
                 "[cio] RESUME — reusing persisted output for %s "
                 "(zero LLM calls this invocation)", _run_date,
             )
-            return _persisted
+            return {
+                **_persisted,
+                "checkpoint_resumed_nodes": {"cio_node": True},
+            }
 
     # Collect all team recommendations as candidate list
     team_outputs = state.get("sector_team_outputs", {})
@@ -3394,44 +3421,14 @@ def _compute_focus_list_audit_lookup(
         market_regime, len(focus_list), summary,
     )
 
-    lookup_legacy: dict[str, dict] = {}
-    passed_tickers: set[str] = set()
-    for team_id, entries in focus_list.items():
-        for e in entries:
-            passed_tickers.add(e.ticker)
-            lookup_legacy[e.ticker] = {
-                "focus_score": e.focus_score,
-                "focus_stance": e.stance,
-                "focus_team_id": team_id,
-                "focus_rank_in_team": e.rank_in_team,
-                "focus_rank_in_sector": e.rank_in_sector,
-                "focus_list_passed": 1,
-                "agent_override": 0,
-                # Legacy recompute path has no per-team override telemetry
-                # (overrides are only known from PR 4 state); attribution is
-                # None here — the projection path above is authoritative.
-                "override_team_id": None,
-            }
-
-    for ticker, entry in focus_scores.items():
-        if ticker in passed_tickers:
-            continue
-        sector = entry.get("sector")
-        team_id = SECTOR_TEAM_MAP.get(sector)
-        if team_id is None:
-            continue
-        lookup_legacy[ticker] = {
-            "focus_score": entry["focus_score"],
-            "focus_stance": entry["stance"],
-            "focus_team_id": team_id,
-            "focus_rank_in_team": None,
-            "focus_rank_in_sector": None,
-            "focus_list_passed": 0,
-            "agent_override": 0,
-            "override_team_id": None,
-        }
-
-    return lookup_legacy
+    # Legacy recompute path has no per-team override telemetry (overrides
+    # are only known from PR 4 state) — build_focus_list_audit_lookup
+    # always attributes agent_override=0/override_team_id=None, which is
+    # correct here (the projection path above is authoritative when PR 4
+    # state IS present). Shared with the standalone Scanner path
+    # (data.scanner_orchestrator.build_pure_quant_focus_lookup) so this
+    # projection logic lives in exactly one place — see alpha-engine-config-I2515.
+    return build_focus_list_audit_lookup(focus_scores, focus_list, SECTOR_TEAM_MAP)
 
 
 # ── Secondary-work deadline guard ───────────────────────────────────────────

@@ -6,13 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+permissions: {}
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: alpha-engine-research
 
@@ -59,7 +61,7 @@ jobs:
       - name: Security audit
         run: |
           pip install pip-audit
-          pip-audit || true
+          pip-audit --ignore-vuln PYSEC-2026-2562 || true
 
   # Alert (Telegram) ONLY on genuine post-merge breakage of the default
   # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order

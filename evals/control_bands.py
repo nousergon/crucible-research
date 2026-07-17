@@ -100,6 +100,18 @@ INSUFFICIENT_HISTORY (honest N/A). 8 is a pragmatic floor; individuals
 charts give tighter limits nearer ~20, so n_points is surfaced for
 maturity. Mirrors calibration_kappa.MIN_REVIEWS_PER_CELL discipline."""
 
+DEFAULT_MONITORING_WINDOW = 4
+"""Phase-II window: the most-recent N weekly points the charts actually
+*test*. Everything before them is the Phase-I baseline that estimates
+the center + σ̂ and is never re-tested against itself. The Shewhart chart
+flags the latest point; the CUSUM accumulates from a zero start over
+these N points ONLY — the fix for config#2385's self-reference false
+positive, where running CUSUM over the *full* series let a transient
+early-baseline dip latch a downward breach on a combo whose latest score
+was actually its healthiest. 4 matches the CUSUM's own detection latency
+(k=0.5, h=5 signals a 1σ shift within ~4-5 samples) while leaving the
+baseline the majority of the (young) series."""
+
 _D2_N2 = 1.128
 """Hartley's d₂ constant for the moving range of n=2 consecutive points.
 σ̂ = MR-bar / d₂ is the standard individuals-chart σ estimator."""
@@ -130,6 +142,7 @@ rationale as rolling_mean's floor metric (alarms reject SEARCH)."""
 # ── Statuses ──────────────────────────────────────────────────────────────
 
 STATUS_INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+STATUS_INSUFFICIENT_VARIANCE = "INSUFFICIENT_VARIANCE"
 STATUS_IN_CONTROL = "IN_CONTROL"
 STATUS_OUT_OF_CONTROL = "OUT_OF_CONTROL"
 
@@ -226,6 +239,7 @@ def evaluate_series(
     series: list[float],
     *,
     min_history: int = DEFAULT_MIN_HISTORY,
+    monitoring_window: int = DEFAULT_MONITORING_WINDOW,
     k_sigma: float = DEFAULT_K_SIGMA,
     cusum_k: float = DEFAULT_CUSUM_K,
     cusum_h: float = DEFAULT_CUSUM_H,
@@ -233,9 +247,31 @@ def evaluate_series(
     """Run the Shewhart + CUSUM charts on one time-ordered series.
 
     ``series`` is the combo's weekly ``agent_quality_score_4w_mean``
-    points, oldest first. The center + σ are estimated from the baseline
-    (all points except the latest), and the latest point is the one
-    under test (Phase-I baseline / Phase-II monitoring split).
+    points, oldest first, evaluated as a genuine **Phase-I / Phase-II
+    split**:
+
+    * **Phase-I baseline** — all points except the most-recent
+      ``monitoring_window`` — estimates the in-control ``center`` and σ̂
+      (moving-range). These points ONLY fit the limits.
+    * **Phase-II monitoring** — the most-recent ``monitoring_window``
+      points — is what the charts test. The Shewhart chart flags the
+      latest point against the baseline limits; the CUSUM accumulates
+      from a **zero start** over the monitoring points alone.
+
+    Running CUSUM over the monitoring window (not the full series) is the
+    fix for config#2385 failure mode 2: the earlier baseline points that
+    *defined* the center are never re-tested against it, so a transient
+    early-baseline dip can no longer latch ``breached_low`` on a combo
+    whose latest score is actually healthy.
+
+    A **zero-variance baseline** (σ̂ == 0 — e.g. a combo graded a constant
+    5.0 across its whole baseline) offers no scale against which a
+    deviation can be judged significant, so the individuals chart is
+    degenerate. Rather than treating *any* non-identical next score as a
+    breach (config#2385 failure mode 1), such a combo returns
+    ``INSUFFICIENT_VARIANCE`` — an honest N/A, non-alarming. The
+    absolute-low floor alarm (``agent_quality_score_4w_mean_min < 3.0``)
+    remains the backstop for a catastrophic drop from a flat baseline.
     """
     n = len(series)
     if n < min_history:
@@ -246,30 +282,51 @@ def evaluate_series(
             reasons=[f"insufficient_history: {n} < {min_history} points"],
         )
 
-    baseline = series[:-1]
+    # Phase-I / Phase-II split. The moving-range σ̂ needs a range, so keep
+    # the baseline at >= 2 points even for unusual ``monitoring_window``
+    # values; the monitoring window takes the most-recent points.
+    n_monitor = max(1, min(monitoring_window, n - 2))
+    baseline = series[: n - n_monitor]
+    monitoring = series[n - n_monitor:]
     latest = series[-1]
     center = sum(baseline) / len(baseline)
     sigma = moving_range_sigma(baseline)
 
+    # Zero-variance baseline → degenerate individuals chart: no scale to
+    # judge a deviation, so any non-identical score would otherwise flag
+    # a spurious breach (config#2385 failure mode 1). Honest N/A instead;
+    # the flat-floor alarm still backstops absolute-low.
+    if sigma <= 0:
+        return ControlBandResult(
+            status=STATUS_INSUFFICIENT_VARIANCE,
+            n_points=n,
+            center=center,
+            sigma=sigma,
+            latest=latest,
+            reasons=[
+                f"insufficient_variance: baseline sigma 0 over "
+                f"{len(baseline)} constant points (center {center:.3f}) — "
+                f"no control limits, honest N/A"
+            ],
+        )
+
     lcl = center - k_sigma * sigma
     ucl = center + k_sigma * sigma
 
-    # Shewhart via direct comparison so it stays correct at sigma == 0
-    # (LCL == UCL == center; any deviation is a breach).
+    # Shewhart tests the latest (Phase-II) point against the baseline
+    # limits. sigma > 0 here, so the z-score is well-defined.
     shewhart_low = latest < lcl
     shewhart_high = latest > ucl
+    latest_z: Optional[float] = (latest - center) / sigma
 
-    latest_z: Optional[float] = None
-    cusum: Optional[CusumResult] = None
-    if sigma > 0:
-        latest_z = (latest - center) / sigma
-        # Run CUSUM over the full series against the baseline center.
-        cusum = tabular_cusum(
-            series, target=center, sigma=sigma, k=cusum_k, h=cusum_h,
-        )
-
-    cusum_low = bool(cusum and cusum.breached_low)
-    cusum_high = bool(cusum and cusum.breached_high)
+    # CUSUM accumulates over the Phase-II monitoring points ONLY, from a
+    # zero start — never over the baseline points used to fit the center
+    # (config#2385 failure mode 2).
+    cusum = tabular_cusum(
+        monitoring, target=center, sigma=sigma, k=cusum_k, h=cusum_h,
+    )
+    cusum_low = cusum.breached_low
+    cusum_high = cusum.breached_high
 
     reasons: list[str] = []
     if shewhart_low:
@@ -305,8 +362,8 @@ def evaluate_series(
         latest_z=latest_z,
         shewhart_low=shewhart_low,
         shewhart_high=shewhart_high,
-        cusum_c_minus=cusum.c_minus if cusum else None,
-        cusum_c_plus=cusum.c_plus if cusum else None,
+        cusum_c_minus=cusum.c_minus,
+        cusum_c_plus=cusum.c_plus,
         cusum_low=cusum_low,
         cusum_high=cusum_high,
         reasons=reasons,
@@ -404,6 +461,7 @@ def compute_and_emit_control_bands(
     breaches: list[dict[str, Any]] = []
     breach_emits: list[str] = []
     n_insufficient = 0
+    n_insufficient_variance = 0
     n_in_control = 0
     failed: list[dict[str, str]] = []
 
@@ -430,6 +488,8 @@ def compute_and_emit_control_bands(
 
         if result.status == STATUS_INSUFFICIENT_HISTORY:
             n_insufficient += 1
+        elif result.status == STATUS_INSUFFICIENT_VARIANCE:
+            n_insufficient_variance += 1
         elif result.status == STATUS_IN_CONTROL:
             n_in_control += 1
         elif result.status == STATUS_OUT_OF_CONTROL:
@@ -470,15 +530,17 @@ def compute_and_emit_control_bands(
 
     logger.info(
         "[control_bands] done combos=%d in_control=%d insufficient=%d "
-        "out_of_control=%d zscores_emitted=%d failed=%d",
-        len(combos), n_in_control, n_insufficient, breach_count,
-        len(zscore_data), len(failed),
+        "insufficient_variance=%d out_of_control=%d zscores_emitted=%d "
+        "failed=%d",
+        len(combos), n_in_control, n_insufficient, n_insufficient_variance,
+        breach_count, len(zscore_data), len(failed),
     )
 
     return {
         "combos_discovered": len(combos),
         "combos_in_control": n_in_control,
         "combos_insufficient_history": n_insufficient,
+        "combos_insufficient_variance": n_insufficient_variance,
         "breach_count": breach_count,
         "breaches": breaches,
         "breach_emits": breach_emits,
@@ -494,6 +556,7 @@ def _empty_summary(start: datetime, end: datetime) -> dict[str, Any]:
         "combos_discovered": 0,
         "combos_in_control": 0,
         "combos_insufficient_history": 0,
+        "combos_insufficient_variance": 0,
         "breach_count": 0,
         "breaches": [],
         "breach_emits": [],
