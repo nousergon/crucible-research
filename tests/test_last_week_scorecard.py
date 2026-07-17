@@ -15,10 +15,13 @@ per-test changes.
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+
+from nousergon_lib.quant.horizons import PRIMARY_HORIZON
+from nousergon_lib.trading_calendar import subtract_trading_days
 
 from evals.last_week_scorecard import (
     DEFAULT_SCORECARD_PREFIX,
@@ -307,6 +310,78 @@ class TestCoalesceLegacyOutcomes:
         sc = build_scorecard(conn, as_of_date=date(2026, 5, 23))
         assert sc.n_resolved_predictions == 1
         assert sc.overall_predictor_hit_rate == 1.0
+
+
+class TestResolutionWindowBoundary:
+    """Regression coverage for config#2288.
+
+    Old bug: `window_start = window_end - timedelta(weeks=lookback_weeks)`
+    measured the window purely in calendar weeks, so a 4-calendar-week
+    (28-day) window could never reach a prediction old enough to have
+    cleared the 21-TRADING-day resolution horizon (~29-30 calendar
+    days) — `n_resolved_predictions` was structurally 0 regardless of
+    upstream data.
+
+    Fix: the window's far edge is now anchored at
+    `window_end - PRIMARY_HORIZON trading days`, then extended
+    `lookback_weeks` further back from there. These tests plant a
+    prediction exactly at that resolution boundary (must be included)
+    and one immediately outside the widened window (must be excluded),
+    proving the window actually reaches the trading-day horizon instead
+    of falling a day or two short by construction.
+    """
+
+    def test_prediction_at_resolution_boundary_is_included(self, tmp_path):
+        conn = _make_db(tmp_path / "research.db")
+        _seed_population(conn, "AAPL", "Tech")
+        as_of = date(2026, 7, 11)
+        window_end = as_of - timedelta(days=1)
+        resolution_boundary = subtract_trading_days(window_end, PRIMARY_HORIZON)
+
+        # A prediction dated exactly PRIMARY_HORIZON trading days before
+        # window_end is old enough to have resolved. Under the OLD
+        # calendar-weeks-only window this date sat outside a 4-week
+        # window (2026-06-09 < 2026-06-12) and was silently dropped.
+        _seed_prediction(
+            conn, "AAPL", resolution_boundary.isoformat(), "UP", 0.7,
+            correct=1, log_alpha=0.05,
+        )
+        conn.commit()
+
+        sc = build_scorecard(conn, as_of_date=as_of, lookback_weeks=4)
+        assert sc.n_resolved_predictions == 1
+        assert sc.overall_predictor_hit_rate == 1.0
+
+    def test_prediction_before_widened_window_start_is_excluded(self, tmp_path):
+        conn = _make_db(tmp_path / "research.db")
+        _seed_population(conn, "AAPL", "Tech")
+        as_of = date(2026, 7, 11)
+        window_end = as_of - timedelta(days=1)
+        resolution_boundary = subtract_trading_days(window_end, PRIMARY_HORIZON)
+        window_start = resolution_boundary - timedelta(weeks=4)
+        too_old = window_start - timedelta(days=1)
+
+        _seed_prediction(
+            conn, "AAPL", too_old.isoformat(), "UP", 0.7,
+            correct=1, log_alpha=0.05,
+        )
+        conn.commit()
+
+        sc = build_scorecard(conn, as_of_date=as_of, lookback_weeks=4)
+        assert sc.n_resolved_predictions == 0
+        assert sc.overall_predictor_hit_rate is None
+
+    def test_old_calendar_only_window_would_have_dropped_the_boundary_row(self, tmp_path):
+        """Sanity-checks the bug is real: the pre-fix `window_end - 4
+        weeks` calendar-only start is strictly AFTER (narrower than) the
+        resolution boundary for this as_of_date, i.e. the old window
+        excluded a prediction that had actually resolved.
+        """
+        as_of = date(2026, 7, 11)
+        window_end = as_of - timedelta(days=1)
+        resolution_boundary = subtract_trading_days(window_end, PRIMARY_HORIZON)
+        old_window_start = window_end - timedelta(weeks=4)
+        assert resolution_boundary < old_window_start
 
 
 class TestSurpriseListEdgeCases:
