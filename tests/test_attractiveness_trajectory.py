@@ -104,3 +104,24 @@ def test_digest_markdown_renders():
     md = format_digest_markdown(_build())
     assert "Pre-repricing" in md and "Rising attractiveness" in md
     assert "UP" in md and "/Attractiveness_Trends" in md
+
+
+def test_price_read_failure_degrades_gracefully_and_fires_observe_alert():
+    """§61 pre-persistence carve-out (config#1684): a price-fetch failure must
+    not raise (the signal degrades to rising-only) AND must fire the ALARMED
+    observe surface, not just a WARN log."""
+    from unittest.mock import patch
+
+    from scoring.attractiveness_trajectory import _read_price_returns
+
+    with patch(
+        "data.fetchers.price_fetcher.fetch_price_data",
+        side_effect=RuntimeError("arcticdb unavailable"),
+    ), patch("observe_alerts.publish_observe_alert") as mock_alert:
+        price_ret, sector_etf_ret = _read_price_returns(["UP", "FLAT"], window_weeks=8)
+
+    assert price_ret == {} and sector_etf_ret == {}
+    assert mock_alert.called, "price-read failure must fire an observe alert (§61)"
+    kwargs = mock_alert.call_args.kwargs
+    assert "trajectory_price_read" in kwargs.get("source", "")
+    assert "arcticdb unavailable" in mock_alert.call_args.args[0]

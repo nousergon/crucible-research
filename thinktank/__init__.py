@@ -8,6 +8,14 @@ reconcile lifecycle, and sweeps news/events over covered names.
 Boundaries (plan: alpha-engine-config/private-docs/research-thinktank-plan-260702.md):
 - Writes ONLY to the ``thinktank/`` S3 namespace (+ the shared SFT corpus
   prefix). Never touches ``signals/`` or any existing consumer contract.
+  ONE narrow, deliberate exception (epic alpha-engine-config-I2515): the
+  challenger-selection producer ALSO writes a conforming shadow view to
+  ``signals_shadow/thinktank_coverage/{trading_day}/signals.json`` — the
+  shape the shared champion/challenger leaderboard scorer
+  (``scoring/leaderboard_producers.py``) already knows how to read. This is
+  the OBSERVE-ONLY substrate other challenger producers already write to
+  (never read by live trading/executor/predictor); see
+  ``thinktank/challenger_selection.py``.
 - Provider-agnostic by construction: OpenAI-compatible wire contract behind
   a per-tier model registry (``thinktank.yaml``); Anthropic/OpenAI/self-hosted
   vLLM are registry swaps, not code changes.
@@ -29,6 +37,17 @@ THEME_LATEST_TMPL = "thinktank/themes/{kind}/{key}/latest.json"
 EVENTS_KEY_TMPL = "thinktank/events/{trading_day}.jsonl"
 RATINGS_KEY_TMPL = "thinktank/ratings/{trading_day}.json"
 RATINGS_LATEST_KEY = "thinktank/ratings/latest.json"
+# Challenger-arm leaderboard submission (epic alpha-engine-config-I2515):
+# Think Tank's top-N covered names by independent rating, written at the
+# tail of every non-dry run — see thinktank/challenger_selection.py.
+CHALLENGER_SELECTION_KEY_TMPL = "thinktank/challenger_selection/{trading_day}.json"
+CHALLENGER_SELECTION_LATEST_KEY = "thinktank/challenger_selection/latest.json"
+# Conforming shadow view for the shared champion/challenger leaderboard
+# scorer (config#1221/#1223 substrate) — OUTSIDE the thinktank/ namespace by
+# design, mirroring every other challenger producer's shadow key. Written
+# ONLY when coverage_complete (see challenger_selection.py); not registered
+# in producers/registry.py yet (registration tracked separately).
+CHALLENGER_SHADOW_SIGNALS_KEY_TMPL = "signals_shadow/thinktank_coverage/{trading_day}/signals.json"
 MANIFEST_KEY_TMPL = "thinktank/runs/{trading_day}/manifest_{run_id}.json"
 COSTS_KEY_TMPL = "thinktank/costs/{month}.json"
 SFT_PRODUCER = "crucible_thinktank"

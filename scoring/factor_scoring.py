@@ -26,15 +26,21 @@ attractiveness-pillars-260520 arc):
                             CAPEX growth. Backed by alpha-engine-data Phase 3a
                             fundamental fields (revenue_growth_3y /
                             eps_growth_3y / payout_ratio / capex_growth_5y).
-- ``stewardship_score``   — Capital allocation discipline (Phase 3b):
-                            (1 - payout_ratio) + 5y CAPEX growth.
-                            Thin-quant signal by design — the Stewardship
-                            pillar's qualitative side (Qual Analyst's
-                            pillar rubric) carries most of the discriminative
-                            weight. Insider ownership % is deferred (Finnhub
-                            metric=all does not expose it; would need a
-                            separate /stock/insider-transactions integration
-                            to earn its way into the composite).
+- ``stewardship_score``   — Capital allocation discipline (Phase 3b, extended
+                            config#2428 with an institutional-accumulation
+                            component): (1 - payout_ratio) + 5y CAPEX growth
+                            + net institutional accumulation (13F QoQ fund
+                            count delta, sourced from the ``inst_ownership``
+                            derived table via ``data.substrate.reader
+                            .read_inst_ownership`` — the same reader
+                            ``qual_tools.get_institutional_activity`` uses).
+                            Still a thin-quant signal by design — the
+                            Stewardship pillar's qualitative side (Qual
+                            Analyst's pillar rubric) carries most of the
+                            discriminative weight. Insider ownership % is
+                            deferred (Finnhub metric=all does not expose it;
+                            would need a separate /stock/insider-transactions
+                            integration to earn its way into the composite).
 
 All composites returned on a 0-100 within-sector percentile scale so they
 compose with the existing 0-100 quant/qual sub-scores in
@@ -121,6 +127,17 @@ _BASELINE_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
         ("sustainable_growth_rate", 0.25, False),
         ("capex_growth_5y", 0.15, False),  # reinvestment intensity proxy
     ],
+    # config#2428: rebalanced 2-component -> 3-component split adding an
+    # institutional-accumulation signal (net 13F fund count delta,
+    # gated/scaled by the previously-orphaned institutional_min_funds /
+    # institutional_boost research params — see
+    # ``institutional_accumulation_score`` below). Weights: payout_ratio
+    # and capex_growth_5y each give up 0.15 (0.50 -> 0.35) to fund the new
+    # 0.30 institutional component — smart money accumulating/distributing
+    # is itself a stewardship signal (are large, informed holders
+    # endorsing management's capital allocation with their own capital),
+    # but it's noisier and lower-conviction than the two existing
+    # fundamental components, hence the smaller share.
     "stewardship_score": [
         # Lower payout = more retention capacity for compounders. Yes,
         # "good stewardship" is context-dependent (high payout is fine
@@ -129,8 +146,15 @@ _BASELINE_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
         # within sector partially neutralizes this — mature
         # high-payout sectors (Utilities, REITs) rank against each other,
         # growth sectors rank against each other.
-        ("payout_ratio", 0.50, True),
-        ("capex_growth_5y", 0.50, False),  # sustained reinvestment
+        ("payout_ratio", 0.35, True),
+        ("capex_growth_5y", 0.35, False),  # sustained reinvestment
+        # Derived column: gated/scaled net institutional fund accumulation
+        # (n_funds_increasing - n_funds_decreasing) for the most recent
+        # 13F quarter. NaN when the ticker has no inst_ownership row
+        # (no 13F coverage yet / not held by any tracked fund) — same
+        # NaN-propagates-and-reallocates convention as every other
+        # component here.
+        ("institutional_accumulation_score", 0.30, False),
     ],
 }
 
@@ -164,21 +188,34 @@ _DERIVED_FACTOR_DEFS: dict[str, str] = {
     # propagates NaN — partial-coverage handling continues to work
     # downstream.
     "sustainable_growth_rate": "roe * (1 - payout_ratio)",
+    # config#2428: net institutional accumulation (n_funds_increasing -
+    # n_funds_decreasing), gated by institutional_min_funds and scaled by
+    # institutional_boost (both from config.get_research_params() —
+    # previously orphaned once the CIK-buggy fetcher that used to read
+    # them was deprecated). NaN when inst_ownership has no row for the
+    # ticker. See _add_institutional_accumulation_factor.
+    "institutional_accumulation_score": (
+        "gate(n_funds_increasing - n_funds_decreasing, institutional_min_funds)"
+        " * institutional_boost"
+    ),
 }
 
 
 def _add_derived_factors(merged: pd.DataFrame) -> pd.DataFrame:
     """Compute derived raw factor columns referenced by ``_COMPOSITE_DEFS``.
 
-    Currently only computes ``sustainable_growth_rate`` = roe × (1 -
-    payout_ratio). NaN inputs propagate to NaN outputs so the
-    partial-coverage handling in ``compute_factor_composites`` continues
-    to work — a ticker with roe present but payout_ratio missing
-    contributes NaN to sustainable_growth_rate and the weight reallocates
-    pro-rata to the other Growth pillar components.
+    Computes ``sustainable_growth_rate`` = roe × (1 - payout_ratio) and
+    ``institutional_accumulation_score`` (config#2428 — see
+    ``_add_institutional_accumulation_factor``). NaN inputs propagate to
+    NaN outputs so the partial-coverage handling in
+    ``compute_factor_composites`` continues to work — a ticker with roe
+    present but payout_ratio missing contributes NaN to
+    sustainable_growth_rate and the weight reallocates pro-rata to the
+    other Growth pillar components (same contract for Stewardship +
+    institutional_accumulation_score).
 
     Mutates ``merged`` in place AND returns it for convenience. Idempotent —
-    safe to call twice (overwrites the derived column).
+    safe to call twice (overwrites the derived columns).
     """
     if "roe" in merged.columns and "payout_ratio" in merged.columns:
         # 1 - payout_ratio = retention rate. NaN propagates through both
@@ -192,6 +229,65 @@ def _add_derived_factors(merged: pd.DataFrame) -> pd.DataFrame:
         # via direct indexing as a KeyError; the explicit NaN insertion
         # mirrors the rank-step contract.)
         merged["sustainable_growth_rate"] = float("nan")
+
+    merged = _add_institutional_accumulation_factor(merged)
+    return merged
+
+
+def _add_institutional_accumulation_factor(merged: pd.DataFrame) -> pd.DataFrame:
+    """Compute ``institutional_accumulation_score`` (config#2428).
+
+    Net 13F fund accumulation = ``n_funds_increasing - n_funds_decreasing``
+    for the most recent quarter, gated by ``institutional_min_funds`` (a
+    ticker needs at least that many funds *moving* — increasing OR
+    decreasing — before the signal is considered meaningful; below that
+    threshold it's too thin a sample to trust, so we emit 0/neutral
+    rather than a noisy raw delta) and scaled by ``institutional_boost``
+    (both research params — orphaned since the CIK-buggy fetcher that
+    used to consume them was deprecated 2026-07-13; this finally rewires
+    them).
+
+    NaN when ``n_funds_increasing`` / ``n_funds_decreasing`` aren't present
+    on ``merged`` at all (inst_ownership wasn't joined in — e.g. a caller
+    invoking ``compute_factor_composites`` without an inst_ownership_df,
+    same tolerant-reader contract as the Phase 3a fields). Per-row NaN
+    (ticker present in the join but with null fund counts — i.e. no 13F
+    coverage for that name this quarter) also propagates to NaN, which is
+    the correct "no data" signal — NOT the same as "0 net accumulation".
+
+    Mutates ``merged`` in place AND returns it. Idempotent.
+    """
+    if "n_funds_increasing" not in merged.columns or "n_funds_decreasing" not in merged.columns:
+        merged["institutional_accumulation_score"] = float("nan")
+        return merged
+
+    try:
+        from config import get_research_params
+        params = get_research_params()
+        min_funds = params["institutional_min_funds"]
+        boost = params["institutional_boost"]
+    except Exception as e:  # noqa: BLE001 - config read must never break scoring
+        logger.debug(
+            "institutional_accumulation_score: research params unavailable (%s), "
+            "using defaults min_funds=3 boost=3.0", e,
+        )
+        min_funds = 3
+        boost = 3.0
+
+    n_inc = merged["n_funds_increasing"]
+    n_dec = merged["n_funds_decreasing"]
+    net = n_inc - n_dec  # NaN propagates when either side is NaN
+
+    # Gate: total funds *moving* (either direction) below min_funds is too
+    # thin a sample — treat as neutral (0) rather than a noisy raw delta.
+    # Rows with NaN net (no inst_ownership row at all) stay NaN through the
+    # np.where below since the comparison against NaN is False either way
+    # but we explicitly re-mask afterwards to be unambiguous.
+    n_moving = n_inc.fillna(0) + n_dec.fillna(0)
+    gated = net.where(n_moving >= min_funds, other=0.0)
+    gated = gated.mask(net.isna(), other=float("nan"))
+
+    merged["institutional_accumulation_score"] = gated * boost
     return merged
 
 
@@ -223,8 +319,9 @@ def compute_factor_composites(
     technical_df: pd.DataFrame,
     fundamental_df: pd.DataFrame,
     sector_map: dict[str, str],
+    inst_ownership_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Compute the 4 factor composites per ticker.
+    """Compute the 6 factor composites per ticker.
 
     Args:
         technical_df: feature store technical.parquet (per-ticker price-derived).
@@ -235,12 +332,22 @@ def compute_factor_composites(
             columns referenced in _COMPOSITE_DEFS for quality / value.
         sector_map: {ticker: sector_name} mapping. Tickers without a sector
             mapping default to ``"Unknown"`` and are ranked together.
+        inst_ownership_df: optional 13F institutional-ownership snapshot
+            (config#2428), same shape as
+            ``data.substrate.reader.read_inst_ownership()`` — one row per
+            ticker for the most recent quarter with ``n_funds_increasing``
+            / ``n_funds_decreasing`` columns. Omitted or empty →
+            ``institutional_accumulation_score`` emits NaN for every
+            ticker (tolerant-reader contract, same as the Phase 3a
+            fields when fundamental_df lacks them) and stewardship_score
+            falls back to its 2 remaining components.
 
     Returns:
         DataFrame with columns:
             ticker, sector,
             quality_score, momentum_score, low_vol_score, value_score,
-            quality_n, momentum_n, low_vol_n, value_n
+            growth_score, stewardship_score,
+            quality_n, momentum_n, low_vol_n, value_n, growth_n, stewardship_n
             (the *_n columns count how many raw factors actually
             contributed per composite — see partial-data handling below.)
     """
@@ -252,6 +359,17 @@ def compute_factor_composites(
         fundamental_df.drop(columns=[c for c in fundamental_df.columns if c == "date"], errors="ignore"),
         on="ticker", how="outer", suffixes=("", "_fund"),
     )
+
+    # config#2428: outer-join in the 13F institutional-ownership snapshot
+    # (same partial-coverage posture as fundamental_df above — a ticker
+    # with no 13F row still gets every OTHER composite fully populated;
+    # only institutional_accumulation_score / stewardship_score degrade).
+    if inst_ownership_df is not None and len(inst_ownership_df) > 0 and "ticker" in inst_ownership_df.columns:
+        inst_cols = ["ticker", "n_funds_increasing", "n_funds_decreasing"]
+        inst_cols = [c for c in inst_cols if c in inst_ownership_df.columns]
+        merged = merged.merge(
+            inst_ownership_df[inst_cols], on="ticker", how="outer", suffixes=("", "_inst"),
+        )
 
     merged["sector"] = merged["ticker"].map(lambda t: sector_map.get(t, "Unknown"))
 
@@ -390,6 +508,11 @@ def compute_and_write_factor_profiles(
         compute_metron_supplemental_features. Absent on any run where the
         producer found nothing to add, or hasn't shipped yet — never blocks
         the main compute.)
+      - data/inst_ownership latest.json + parquet via
+        ``data.substrate.reader.read_inst_ownership`` (config#2428,
+        OPTIONAL — same reader ``qual_tools.get_institutional_activity``
+        uses; absent/empty just yields NaN institutional_accumulation_score,
+        never blocks the main compute).
 
     Writes:
       - s3://{bucket}/factors/profiles/{run_date}/by_ticker.json
@@ -427,10 +550,25 @@ def compute_and_write_factor_profiles(
     if supplemental_fundamental is not None and not supplemental_fundamental.empty:
         fundamental_df = pd.concat([fundamental_df, supplemental_fundamental], ignore_index=True)
 
+    # config#2428: 13F institutional-ownership snapshot for
+    # institutional_accumulation_score. Same reader + bucket convention as
+    # qual_tools.get_institutional_activity — genuinely optional artifact
+    # (no 13F data yet this quarter, or reader import fails in an
+    # environment without the substrate module wired up); never blocks
+    # the main compute, same posture as the Metron-supplemental reads
+    # above.
+    try:
+        from data.substrate.reader import read_inst_ownership
+        inst_ownership_df = read_inst_ownership(s3_client=s3, bucket=bucket)
+    except Exception as e:  # noqa: BLE001 - optional artifact, never block scoring
+        logger.info("inst_ownership read unavailable for factor profiles: %s", e)
+        inst_ownership_df = None
+
     profiles = compute_factor_composites(
         technical_df=technical_df,
         fundamental_df=fundamental_df,
         sector_map=sector_map,
+        inst_ownership_df=inst_ownership_df,
     )
 
     return write_factor_profiles_to_s3(profiles, run_date_str, bucket=bucket)

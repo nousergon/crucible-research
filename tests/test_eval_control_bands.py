@@ -119,15 +119,42 @@ class TestEvaluateSeries:
         assert r.latest_z is not None and r.latest_z < 0
         assert any("shewhart_low" in reason for reason in r.reasons)
 
-    def test_zero_variance_baseline_drop_still_flags(self):
-        # Constant baseline → sigma 0 → LCL==UCL==center; a drop must
-        # still flag (comparison path, not z which is undefined).
+    def test_zero_variance_baseline_is_insufficient_variance(self):
+        # config#2385 failure mode 1: a combo graded a constant baseline
+        # has sigma 0 → no scale to judge a deviation. It must NOT flag
+        # OUT_OF_CONTROL on any non-identical next score (the spurious
+        # breach the alarm first fired on). Honest N/A instead; the
+        # flat-floor alarm backstops absolute-low.
+        series = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 4.9]
+        r = cb.evaluate_series(series, min_history=8)
+        assert r.status == cb.STATUS_INSUFFICIENT_VARIANCE
+        assert r.sigma == 0.0
+        assert r.latest_z is None          # undefined at sigma 0, not a crash
+        assert r.shewhart_low is False     # never breaches
+        assert r.cusum_low is False
+        assert any("insufficient_variance" in reason for reason in r.reasons)
+
+    def test_zero_variance_baseline_large_drop_still_not_flagged(self):
+        # Even a large drop from a flat baseline stays INSUFFICIENT_VARIANCE
+        # — there is genuinely no variance scale, and the separate
+        # flat-floor alarm (< 3.0) is the backstop for absolute-low.
         series = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 3.0]
         r = cb.evaluate_series(series, min_history=8)
-        assert r.status == cb.STATUS_OUT_OF_CONTROL
-        assert r.shewhart_low is True
-        assert r.sigma == 0.0
-        assert r.latest_z is None  # undefined at sigma 0, not a crash
+        assert r.status == cb.STATUS_INSUFFICIENT_VARIANCE
+        assert r.status != cb.STATUS_OUT_OF_CONTROL
+
+    def test_transient_early_baseline_dip_does_not_self_reference_breach(self):
+        # config#2385 failure mode 2: a transient dip in the EARLY baseline
+        # (which defines the center) must not latch cusum_low when the
+        # combo's recent/latest scores are healthy — the exact
+        # `cusum_low: C- 0.00` + `latest > UCL` contradiction the old
+        # full-series CUSUM produced. The dip lives in the Phase-I
+        # baseline; CUSUM only walks the Phase-II monitoring window.
+        series = [4.5, 3.6, 4.5, 4.5, 4.5, 4.6, 4.6, 4.7, 4.8]
+        r = cb.evaluate_series(series, min_history=8)
+        assert r.status == cb.STATUS_IN_CONTROL
+        assert r.cusum_low is False        # not re-tested against baseline
+        assert r.shewhart_low is False     # latest is above center
 
     def test_sustained_downtrend_out_of_control(self):
         series = [4.6, 4.5, 4.5, 4.4, 4.0, 3.8, 3.6, 3.5, 3.4]

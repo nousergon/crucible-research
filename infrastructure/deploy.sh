@@ -28,6 +28,7 @@ FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
+FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -71,6 +72,46 @@ _lambda_function_exists() {
   echo "Hint: AccessDenied → check IAM policy on the calling principal." >&2
   echo "Hint: 504/throttle → transient AWS issue; retry the deploy." >&2
   exit 1
+}
+
+# ── Post-deploy alias-propagation verification ────────────────────────────
+#
+# config#2766: a Saturday production run reproduced the exact pre-fix
+# eval-rolling-mean zero-sigma OUT_OF_CONTROL output days after the fix
+# (crucible-research#417) merged, with deploy.yml reporting success on
+# every run since. The invoked ARN is the 'live' alias (see
+# infrastructure/step_function_advisory.json), not $LATEST — every deploy
+# function below does `update-function-code` -> `publish-version` ->
+# `update-alias`, but nothing ever confirmed the alias actually ended up
+# pointing at the code that was just published. The `update-alias ... ||
+# create-alias` fallback also swallows update-alias's stderr unconditionally,
+# so a transient AWS-side failure there would silently fall through instead
+# of surfacing. Comparing CodeSha256 (Lambda's own content hash, already
+# used identically by both qualifiers) directly verifies the one invariant
+# every invoker of these Lambdas depends on, regardless of which upstream
+# mechanism (ECR :latest tag race, transient alias-update failure, control-
+# plane eventual consistency) would otherwise have caused the drift.
+_verify_live_alias() {
+  local fn_name="$1"
+  local expected_version="$2"
+  local latest_sha alias_sha
+
+  latest_sha=$(aws lambda get-function --function-name "$fn_name" \
+    --qualifier '$LATEST' --query 'Configuration.CodeSha256' \
+    --output text --region "$REGION")
+  alias_sha=$(aws lambda get-function --function-name "$fn_name" \
+    --qualifier live --query 'Configuration.CodeSha256' \
+    --output text --region "$REGION")
+
+  if [[ "$latest_sha" != "$alias_sha" ]]; then
+    echo "ERROR: $fn_name alias 'live' (CodeSha256=$alias_sha) does not match" >&2
+    echo "  \$LATEST (CodeSha256=$latest_sha) after publishing version $expected_version." >&2
+    echo "  The deploy did NOT propagate to the invoked alias -- failing the" >&2
+    echo "  build instead of leaving stale code live behind a green CI run" >&2
+    echo "  (config#2766)." >&2
+    exit 1
+  fi
+  echo "  Verified: alias 'live' -> version $expected_version, CodeSha256 $alias_sha matches \$LATEST."
 }
 
 # ── Throttle-aware Lambda invoke ─────────────────────────────────────────────
@@ -118,19 +159,48 @@ build_and_deploy_main() {
   PROMPTS_STAGED_FROM_CONFIG_REPO=0
   YAMLS_STAGED_FROM_CONFIG_REPO=()
 
+  # Resolve the research module config source: experiment-package FIRST, legacy
+  # top-level dir as fallback (config#1042 experiment-package adoption — matches
+  # the executor config_loader / backtester spot_backtest.sh precedent). The
+  # package copy is canonical; the legacy `research/` dir is being removed once
+  # every reader is package-aware — this was the last one. $ALPHA_ENGINE_EXPERIMENT_ID
+  # is not injected in the GitHub-Actions Lambda-deploy context, so it defaults
+  # to "reference" (the prod experiment). Fallback keeps this working through the
+  # cutover window (legacy still present) AND after the legacy dir is deleted.
+  EXPERIMENT_ID="${ALPHA_ENGINE_EXPERIMENT_ID:-reference}"
+  RESEARCH_CFG_DIR=""
+  for candidate in \
+    "$CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research" \
+    "$CONFIG_REPO_DIR/research"; do
+    if [ -d "$candidate" ]; then
+      RESEARCH_CFG_DIR="$candidate"
+      break
+    fi
+  done
+  if [ -z "$RESEARCH_CFG_DIR" ]; then
+    echo "ERROR: research config dir not found — tried (package-first):"
+    echo "  $CONFIG_REPO_DIR/experiments/$EXPERIMENT_ID/research/ (experiment package)"
+    echo "  $CONFIG_REPO_DIR/research/ (legacy top-level)"
+    echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
+    echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+    echo "      (and optionally ALPHA_ENGINE_EXPERIMENT_ID; default: reference)"
+    exit 1
+  fi
+  echo "Research config source: $RESEARCH_CFG_DIR (experiment=$EXPERIMENT_ID)"
+
   # -- prompts -------------------------------------------------------------
   if [ -d "config/prompts" ] && ls config/prompts/*.txt &>/dev/null; then
     echo "Using existing config/prompts/ (local dev workflow)"
   else
-    if [ -d "$CONFIG_REPO_DIR/research/prompts" ]; then
-      echo "Staging research prompts from $CONFIG_REPO_DIR/research/prompts/..."
+    if [ -d "$RESEARCH_CFG_DIR/prompts" ]; then
+      echo "Staging research prompts from $RESEARCH_CFG_DIR/prompts/..."
       mkdir -p config/prompts
-      cp "$CONFIG_REPO_DIR/research/prompts/"*.txt config/prompts/
+      cp "$RESEARCH_CFG_DIR/prompts/"*.txt config/prompts/
       PROMPTS_STAGED_FROM_CONFIG_REPO=1
     else
       echo "ERROR: research prompts not found — tried:"
       echo "  config/prompts/ (local dev)"
-      echo "  $CONFIG_REPO_DIR/research/prompts/ (config repo sibling)"
+      echo "  $RESEARCH_CFG_DIR/prompts/ (config repo, experiment=$EXPERIMENT_ID)"
       echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
       echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
       exit 1
@@ -142,7 +212,7 @@ build_and_deploy_main() {
     if [ -f "config/$yaml" ]; then
       echo "Using existing config/$yaml (local dev workflow)"
     else
-      src="$CONFIG_REPO_DIR/research/$yaml"
+      src="$RESEARCH_CFG_DIR/$yaml"
       if [ -f "$src" ]; then
         echo "Staging config/$yaml from $src..."
         cp "$src" "config/$yaml"
@@ -150,7 +220,7 @@ build_and_deploy_main() {
       else
         echo "ERROR: config/$yaml not found — tried:"
         echo "  config/$yaml (local dev)"
-        echo "  $src (config repo sibling)"
+        echo "  $src (config repo, experiment=$EXPERIMENT_ID)"
         echo "Hint: clone nousergon/alpha-engine-config as a sibling directory,"
         echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
         exit 1
@@ -287,6 +357,7 @@ build_and_deploy_main() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_MAIN" "$VERSION"
 
   # Canary invocation
   #
@@ -507,6 +578,7 @@ deploy_eval_judge() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_EVAL_JUDGE" "$VERSION"
 }
 
 # ── Eval-rolling-mean function: reuses the main container image ──────────────
@@ -567,6 +639,7 @@ deploy_eval_rolling_mean() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_EVAL_ROLLING_MEAN" "$VERSION"
 }
 
 # ── deploy_rationale_clustering ─────────────────────────────────────────────
@@ -640,6 +713,7 @@ deploy_rationale_clustering() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_RATIONALE_CLUSTERING" "$VERSION"
 }
 
 # ── Eval-judge batch chain: image-share + per-Lambda CMD override ───────────
@@ -721,6 +795,7 @@ _deploy_image_shared_lambda() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$fn_name" "$VERSION"
 }
 
 deploy_eval_judge_batch() {
@@ -768,6 +843,21 @@ deploy_thinktank() {
   _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
 }
 
+# Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B. Shared
+# image with the main runner; CMD override sets the entry to
+# signals_envelope_handler.handler. Invoked ONLY by the weekly SF's
+# SignalsEnvelope state (arn:aws:states:::lambda:invoke, synchronous),
+# placed immediately AFTER RegimeSubstrate so the regime read this producer
+# takes is same-day fresh (config#1580's no-week-old-data invariant) — never
+# triggered by EventBridge directly. Timeout 300s is generous: the envelope
+# is a read-two-artifacts-write-one job (scanner universe board + regime
+# substrate in, signals.json out), no LLM/LangGraph, pure quant transform.
+# Memory 1024MB matches the main runner's headroom for the pandas/boto3
+# working set the board read pulls in.
+deploy_signals_envelope() {
+  _deploy_image_shared_lambda "$FUNCTION_SIGNALS_ENVELOPE" "signals_envelope_handler" 300 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -780,9 +870,10 @@ case "$TARGET" in
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
   thinktank)             deploy_thinktank ;;
+  signals_envelope)      deploy_signals_envelope ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|both|all]"; exit 1 ;;
 esac
 
 echo ""
