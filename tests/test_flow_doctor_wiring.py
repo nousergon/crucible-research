@@ -59,17 +59,24 @@ def reset_root_logger():
 
 @pytest.fixture
 def temp_flow_doctor_yaml(tmp_path):
-    """Write a copy of the production flow-doctor.yaml with store.path
-    redirected into the test's tmp_path.
+    """Write a copy of the production flow-doctor.yaml with its store
+    block forced to a local sqlite file under tmp_path.
 
-    The production yaml hardcodes /tmp/flow_doctor.db (Lambda ephemeral
-    convention) which isn't writable in every CI/sandbox env. Tests that
-    actually invoke flow_doctor.init() need a redirectable path.
+    Production now points store.type at the shared DynamoDB dedup table
+    (alpha-engine-config#2418) so dedup_cooldown_minutes survives across
+    separate process/Lambda invocations. Wiring tests only need to verify
+    that setup_logging() attaches a FlowDoctorHandler and plumbs
+    exclude_patterns — they must never touch live AWS credentials/tables,
+    so the store type is unconditionally overridden here regardless of
+    what the real flow-doctor.yaml declares.
     """
     import yaml as yamllib
     with open(REPO_ROOT / "flow-doctor.yaml") as f:
         cfg = yamllib.safe_load(f)
-    cfg["store"]["path"] = str(tmp_path / "flow_doctor_test.db")
+    cfg["store"] = {
+        "type": "sqlite",
+        "path": str(tmp_path / "flow_doctor_test.db"),
+    }
     yaml_path = tmp_path / "flow-doctor.yaml"
     with open(yaml_path, "w") as f:
         yamllib.safe_dump(cfg, f)

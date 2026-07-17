@@ -63,6 +63,8 @@ from nousergon_lib.eval_artifacts import (
     eval_latest_key,
     new_eval_run_id,
 )
+from nousergon_lib.quant.horizons import PRIMARY_HORIZON
+from nousergon_lib.trading_calendar import subtract_trading_days
 
 from evals import outcome_store
 
@@ -84,6 +86,12 @@ _TOP_K = 3
 # backtester's own rolling-mean horizon for predictor / signal-quality
 # metrics; agents see the same window the auto-config loop optimizes
 # against.
+#
+# This is the width of the INFORMATIVE span, not the raw calendar
+# distance back from `as_of_date` — see `build_scorecard` for how it
+# combines with the resolution-horizon offset (config#2288). Widening
+# or narrowing this value changes how much history is surfaced; it does
+# NOT need to account for the 21-trading-day resolution lag itself.
 _DEFAULT_LOOKBACK_WEEKS = 4
 
 # Minimum sample size before we surface a per-sector hit rate. Sectors
@@ -175,9 +183,31 @@ def build_scorecard(
     `as_of_date` is the Saturday the scorecard is being built FOR — i.e.,
     next cycle's run date. The lookback window ends one day before
     `as_of_date` so the current cycle's own predictions don't leak in.
+
+    Window sizing (config#2288): outcomes resolve on a 21-TRADING-day
+    horizon (`nousergon_lib.quant.horizons.PRIMARY_HORIZON`), which is
+    ~29-30 CALENDAR days, not ~21. A naive `lookback_weeks` window
+    measured purely in calendar weeks back from `window_end` can
+    therefore structurally exclude every prediction old enough to have
+    resolved — the original bug: a 4-calendar-week (28-day) window
+    never reaches a prediction that's had its full 21-trading-day
+    resolution period elapse, so `n_resolved_predictions` was
+    chronically 0 regardless of whether the upstream resolution job was
+    working.
+
+    Fix: anchor the window's FAR edge to `window_end` minus the
+    resolution horizon in actual trading days (via
+    `subtract_trading_days`), then extend `lookback_weeks` further back
+    from THERE for the informative span. `window_end` itself is left at
+    `as_of_date - 1 day` unchanged — recent, not-yet-resolved
+    predictions are still fetched (needed so `n_resolved_predictions`
+    can be contrasted against the total candidate pool) but the window
+    now actually spans back far enough to contain predictions that have
+    had time to resolve.
     """
     window_end = as_of_date - timedelta(days=1)
-    window_start = window_end - timedelta(weeks=lookback_weeks)
+    resolution_boundary = subtract_trading_days(window_end, PRIMARY_HORIZON)
+    window_start = resolution_boundary - timedelta(weeks=lookback_weeks)
     window_start_s = window_start.isoformat()
     window_end_s = window_end.isoformat()
 
