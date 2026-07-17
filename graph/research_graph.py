@@ -68,6 +68,7 @@ from config import (
     RATING_SELL_THRESHOLD,
     SECTOR_COHERENCE_GATE_ENABLED,
     SECTOR_COHERENCE_UW_MIN_SCORE,
+    MAX_QUARANTINED_TICKERS,
     FACTOR_BLEND_ENABLED,
     FACTOR_BLEND_WEIGHT,
     get_factor_blend_regime_weights,
@@ -122,6 +123,7 @@ from scoring.factor_scoring import (
 )
 from scoring.focus_list import (
     build_focus_list,
+    build_focus_list_audit_lookup,
     compute_focus_scores,
     summarize_focus_list,
 )
@@ -475,6 +477,14 @@ class ResearchState(TypedDict, total=False):
 
     # ── Investment theses (computed by score_aggregator) ─────────────────────
     investment_theses: Annotated[dict[str, InvestmentThesis], take_last]
+
+    # ── Per-ticker quarantine (config#2247) ──────────────────────────────────
+    # Tickers deterministically omitted from signals.json this run (their
+    # held-thesis update failed for real). Aggregated by score_aggregator from
+    # the per-team ``quarantined`` lists, subject to the run-level floor; read
+    # by _build_signals_payload (explicit-absence field + carry-forward
+    # suppression) and archive_writer (RED telemetry + Telegram page).
+    quarantined: Annotated[list[dict], take_last]
 
     # ── Dispatch metadata (for Send()) ───────────────────────────────────────
     team_id: Annotated[str, take_last]  # set by Send() per team
@@ -1956,6 +1966,43 @@ def score_aggregator(state: ResearchState) -> dict:
         logger.error("[score_aggregator] %s", msg)
         raise RuntimeError(msg)
 
+    # ── Per-ticker quarantine floor (config#2247) ─────────────────────────
+    # Brian's 2026-07-11 ruling amends all-agents-strict at the SCOPE level:
+    # a ticker whose held-thesis update failed deterministically is QUARANTINED
+    # (omitted from signals.json with an explicit record) and the run completes
+    # for the rest — UNLESS the run-level floor is breached, in which case the
+    # run still hard-fails as before. The "whole sector team" arm of the floor
+    # is the all-agents-strict gate above (a failed/missing/partial team still
+    # raises); this arm is the per-ticker count. No-stale-carry-forward stays
+    # absolute (enforced in _build_signals_payload).
+    quarantined: list[dict] = []
+    for tid, out in team_outputs.items():
+        for q in out.get("quarantined", []) or []:
+            # Stamp team_id defensively so downstream telemetry can attribute.
+            quarantined.append({**q, "team_id": q.get("team_id", tid)})
+
+    if len(quarantined) > MAX_QUARANTINED_TICKERS:
+        tickers = [q.get("ticker") for q in quarantined]
+        msg = (
+            f"QUARANTINE-FLOOR: {len(quarantined)} tickers quarantined this "
+            f"run ({tickers}) exceeds the floor of {MAX_QUARANTINED_TICKERS} "
+            f"— Research HARD-FAILS (no signals.json / email / DB write). A "
+            f"handful of per-ticker failures is quarantinable; a broad failure "
+            f"is a systemic problem the run must not paper over. Succeeded "
+            f"teams are persisted, so an SF redrive re-attempts the quarantined "
+            f"tickers within the long 429-retry window."
+        )
+        logger.error("[score_aggregator] %s", msg)
+        raise RuntimeError(msg)
+
+    if quarantined:
+        logger.warning(
+            "[score_aggregator] %d ticker(s) quarantined (within floor of %d) "
+            "— completing run with explicit-absence contract: %s",
+            len(quarantined), MAX_QUARANTINED_TICKERS,
+            [q.get("ticker") for q in quarantined],
+        )
+
     investment_theses = {}
     market_regime = state.get("market_regime", "neutral")
 
@@ -2291,7 +2338,7 @@ def score_aggregator(state: ResearchState) -> dict:
     for ticker, thesis in investment_theses.items():
         _validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
 
-    return {"investment_theses": investment_theses}
+    return {"investment_theses": investment_theses, "quarantined": quarantined}
 
 
 _PILLAR_NAMES = ("quality", "value", "momentum", "growth", "stewardship", "defensiveness")
@@ -3374,44 +3421,14 @@ def _compute_focus_list_audit_lookup(
         market_regime, len(focus_list), summary,
     )
 
-    lookup_legacy: dict[str, dict] = {}
-    passed_tickers: set[str] = set()
-    for team_id, entries in focus_list.items():
-        for e in entries:
-            passed_tickers.add(e.ticker)
-            lookup_legacy[e.ticker] = {
-                "focus_score": e.focus_score,
-                "focus_stance": e.stance,
-                "focus_team_id": team_id,
-                "focus_rank_in_team": e.rank_in_team,
-                "focus_rank_in_sector": e.rank_in_sector,
-                "focus_list_passed": 1,
-                "agent_override": 0,
-                # Legacy recompute path has no per-team override telemetry
-                # (overrides are only known from PR 4 state); attribution is
-                # None here — the projection path above is authoritative.
-                "override_team_id": None,
-            }
-
-    for ticker, entry in focus_scores.items():
-        if ticker in passed_tickers:
-            continue
-        sector = entry.get("sector")
-        team_id = SECTOR_TEAM_MAP.get(sector)
-        if team_id is None:
-            continue
-        lookup_legacy[ticker] = {
-            "focus_score": entry["focus_score"],
-            "focus_stance": entry["stance"],
-            "focus_team_id": team_id,
-            "focus_rank_in_team": None,
-            "focus_rank_in_sector": None,
-            "focus_list_passed": 0,
-            "agent_override": 0,
-            "override_team_id": None,
-        }
-
-    return lookup_legacy
+    # Legacy recompute path has no per-team override telemetry (overrides
+    # are only known from PR 4 state) — build_focus_list_audit_lookup
+    # always attributes agent_override=0/override_team_id=None, which is
+    # correct here (the projection path above is authoritative when PR 4
+    # state IS present). Shared with the standalone Scanner path
+    # (data.scanner_orchestrator.build_pure_quant_focus_lookup) so this
+    # projection logic lives in exactly one place — see alpha-engine-config-I2515.
+    return build_focus_list_audit_lookup(focus_scores, focus_list, SECTOR_TEAM_MAP)
 
 
 # ── Secondary-work deadline guard ───────────────────────────────────────────
@@ -3629,6 +3646,14 @@ def archive_writer(state: ResearchState) -> dict:
     # building it twice is cheap and keeps the guard authoritative over
     # the precise bytes that would land in signals.json.
     _candidate_signals_payload = _build_signals_payload(state)
+    # Emit the research_optimizer boost columns (short_interest_adj /
+    # institutional_boost) onto the universe + buy_candidates entries here —
+    # the I/O belongs in the node, not in the pure builder, and annotating
+    # before the stub guard keeps the guarded bytes identical to the written
+    # bytes (config#1857). Reader-gated + env-flagged: a no-op emitting 0.0
+    # unless RESEARCH_BOOST_SIGNALS_ENABLED=true, so it never breaks the write.
+    from scoring.boost_signals import emit_boost_signals
+    emit_boost_signals(_candidate_signals_payload, run_date=run_date)
     assert_no_stub_output(
         signals_payload=_candidate_signals_payload,
         consolidated_report=state.get("consolidated_report", "") or "",
@@ -3802,6 +3827,47 @@ def archive_writer(state: ResearchState) -> dict:
         scanner_universe=universe_symbols,
         tool_call_counts_by_team=tool_call_counts_by_team,
     )
+
+    # ── Per-ticker quarantine page (config#2247) ──────────────────────────
+    # When a run completes with quarantined tickers (within the floor — a
+    # floor breach would have hard-failed at score_aggregator and never
+    # reached here), page the operator LOUDLY. Explicit-absence ≠ silent
+    # swallow: the omission is recorded in signals.json AND surfaced RED here.
+    # Best-effort/secondary per the fail-loud rule's clause (i): the load-
+    # bearing surfaces are the signals.json `quarantined` field (already
+    # written above) + the WARN logs — a Telegram outage must not fail an
+    # otherwise-successful run.
+    quarantined_records = state.get("quarantined", []) or []
+    if quarantined_records:
+        _summary = ", ".join(
+            f"{q.get('ticker')} ({q.get('team_id')})" for q in quarantined_records
+        )
+        logger.error(
+            "[archive_writer] %d ticker(s) QUARANTINED this run (config#2247, "
+            "explicit-absence contract) — omitted from signals.json, no "
+            "carry-forward: %s", len(quarantined_records), _summary,
+        )
+        try:
+            from ops_alerts import publish_ops_alert
+
+            publish_ops_alert(
+                message=(
+                    f"🔴 QUARANTINE — {len(quarantined_records)} ticker(s) "
+                    f"omitted from signals.json for {run_date} "
+                    f"(deterministic held-thesis failure, config#2247): "
+                    f"{_summary}. Run completed for all other names; NO "
+                    f"stale-thesis carry-forward. Investigate the per-ticker "
+                    f"thesis-update failures."
+                ),
+                severity="ERROR",
+                source="research:archive_writer",
+            )
+        except Exception as e:  # noqa: BLE001 — secondary observability
+            logger.warning(
+                "[archive_writer] quarantine Telegram publish failed: %s "
+                "(WARN+ERROR logs + signals.json `quarantined` field remain "
+                "the load-bearing surfaces)", e,
+            )
 
     # ── research_intel neutral artifact (config#1500 — Phase 0 of #1499) ──────
     # Publish the neutral, product-facing intel ONCE at derivation time to a
@@ -4516,6 +4582,13 @@ def _build_signals_payload(state: ResearchState) -> dict:
     prior_theses = state.get("prior_theses", {})
     pop = state.get("new_population", [])
     pop_tickers = {p["ticker"] for p in pop}
+    # Per-ticker quarantine (config#2247): tickers deterministically omitted
+    # from this run. They must NOT be carried forward from prior_theses in the
+    # population pass below — that would silently reinstate a stale thesis,
+    # violating both the explicit-absence contract AND the no-stale-carry-
+    # forward invariant. The quarantine set makes the omission LOUD instead.
+    quarantined_records = state.get("quarantined", []) or []
+    quarantined_tickers = {q.get("ticker") for q in quarantined_records}
     pop_lookup = {p["ticker"]: p for p in pop}
     sector_map = state.get("sector_map", {})
     sector_ratings = state.get("sector_ratings", {})
@@ -4595,6 +4668,11 @@ def _build_signals_payload(state: ResearchState) -> dict:
     # Second: population tickers without fresh theses — carry over from prior week
     for p in pop:
         ticker = p["ticker"]
+        if ticker in quarantined_tickers:
+            # Explicit absence (config#2247) — a quarantined held ticker is
+            # deliberately dropped this run, NOT carried forward with a stale
+            # prior thesis. The `quarantined` field below records it loudly.
+            continue
         if ticker not in signals:
             prior = prior_theses.get(ticker, {})
             sector = sector_map.get(ticker, p.get("sector", "Unknown"))
@@ -4746,6 +4824,21 @@ def _build_signals_payload(state: ResearchState) -> dict:
         "population": [p["ticker"] for p in pop],
         "universe": universe,
         "buy_candidates": buy_candidates,
+        # Per-ticker quarantine (config#2247) — the explicit-absence contract.
+        # Additive, backward-compatible: consumers that don't read it are
+        # unaffected (they already must tolerate a ticker being absent per the
+        # S3 signals contract). Consumers that DO read it get a loud, machine-
+        # readable record of which tickers were deterministically omitted and
+        # why, instead of a silent gap.
+        "quarantined": [
+            {
+                "ticker": q.get("ticker"),
+                "reason": q.get("reason"),
+                "team_id": q.get("team_id"),
+                "stage": q.get("stage"),
+            }
+            for q in quarantined_records
+        ],
         "architecture_version": "sector_teams",
     }
 

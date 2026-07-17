@@ -17,9 +17,11 @@ import pytest
 from moto import mock_aws
 
 from thinktank import LEDGER_KEY
+from thinktank.challenger_selection import CHALLENGER_TOP_N, write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.costs import BudgetExceededError
 from thinktank.run import run_daily
+from thinktank.schemas import CoverageLedger, LedgerEntry, RatingRow, RatingsBoard
 from thinktank.settings import load_settings
 from thinktank.storage import ThinktankStore
 
@@ -35,6 +37,7 @@ class _FakeBackend:
     def __init__(self):
         self.macro_material_change = False
         self.sweep_updates: dict[str, str] = {}  # ticker -> rationale
+        self.ratings: dict[str, int] = {}  # ticker -> independent rating override (default 72)
         self.calls: list[str] = []
         self.users: list[tuple[str, str]] = []  # (schema_name, user_content)
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
@@ -54,12 +57,15 @@ class _FakeBackend:
                 "change_summary": "changed" if self.macro_material_change else "",
             }
         elif name == "CompanyThesisRatedLLM":
+            m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
+            ticker = m_ticker.group(1) if m_ticker else None
             body = {
                 "business_summary": "b", "moat": "m", "filings_review": "f",
                 "news_sentiment": "n", "valuation": "v", "market_dynamics": "md",
                 "risks": ["r1"], "catalysts": ["c1"], "stance": "attractive",
                 "conviction": 70, "summary": "s",
-                "rating": 72, "rating_rationale": "evidence-driven number",
+                "rating": self.ratings.get(ticker, 72),
+                "rating_rationale": "evidence-driven number",
             }
         elif name == "SweepBatchLLM":
             m = re.search(r"batch: (.+)", user)
@@ -231,6 +237,38 @@ def test_dry_run_writes_nothing(tt_config):
         assert listing.get("KeyCount", 0) == 0
 
 
+def test_gap_fill_mode_sizes_intake_to_measured_gap_only(tt_config):
+    """The Saturday SF's gap-fill mode (2026-07-14 cadence design): sized to
+    the EXACT measured coverage_gap, never daily_new_names, and never
+    padded with stale-refill — a re-run with a zero gap adds nothing."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # RUN 1 — normal daily mode covers T0-T2 (daily_new_names=3 in tt_config)
+        manifest, store = _run(tt_config, backend, s3)
+        assert manifest.mode == "daily"
+        assert manifest.names_added == ["T0", "T1", "T2"]
+
+        # RUN 2 — gap_fill_only: the board has 8 tickers, 3 already covered,
+        # so the measured gap is 5 (T3-T7) — ALL of them get covered in one
+        # pass, ignoring tt_config's daily_new_names=3 cap entirely.
+        manifest2, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest2.mode == "gap_fill"
+        assert manifest2.names_added == ["T3", "T4", "T5", "T6", "T7"]
+        assert manifest2.names_refreshed == []
+        assert manifest2.coverage_gap["uncovered_count"] == 5
+
+        # RUN 3 — fully covered now; gap_fill_only must add NOTHING, and must
+        # NOT fall back to stale-refill even though covered names exist.
+        manifest3, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest3.mode == "gap_fill"
+        assert manifest3.names_added == []
+        assert manifest3.names_refreshed == []
+        assert manifest3.coverage_gap["uncovered_count"] == 0
+
+
 def test_budget_breach_refuses_run(tt_config, monkeypatch):
     monkeypatch.setenv("THINKTANK_MONTHLY_BUDGET_USD", "0.0")
     with mock_aws():
@@ -345,3 +383,273 @@ def test_operator_refresh_mode(tt_config):
 
         with pytest.raises(ValueError, match="not in coverage ledger"):
             _run(tt_config, backend, s3, refresh_tickers=["ZZZZ"])
+
+
+# ── challenger selection (epic alpha-engine-config-I2515) ───────────────────
+
+
+def test_challenger_selection_written_daily_then_gap_fill(tt_config):
+    """The challenger-selection artifact (leaderboard submission for the
+    Think-Tank challenger arm) is written at the tail of every non-dry run,
+    and the conforming ``signals_shadow/`` view only once coverage is
+    complete.
+
+    NOTE on ``coverage_gap``/``coverage_complete`` timing: ``manifest.
+    coverage_gap`` keeps its pre-run convention (computed before
+    ``select_intake``), but this artifact's ``uncovered_count``/
+    ``coverage_complete`` are recomputed at the call site AFTER this run's
+    thesis writes — the run that fills the last gap (Saturday's gap_fill)
+    must self-report complete, or the leaderboard shadow view slips to the
+    NEXT run.
+
+    - RUN 1 (daily): adds T0-T2 against an empty ledger → post-run gap is
+      5 of 8, coverage_complete False; selections ranked by TT's OWN
+      rating (not attractiveness); shadow signals NOT written (incomplete).
+    - RUN 2 (gap_fill): adds T3-T7 (the whole remaining gap) → post-run
+      gap is 0, coverage_complete True on the SAME run that completed
+      coverage; conforming shadow signals ARE written.
+    - RUN 3 (gap_fill, no-op): still fully covered → complete stays True,
+      shadow refreshed.
+    """
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        # stamp an as_of on the universe board so board_date propagates
+        board = json.loads(
+            s3.get_object(Bucket=BUCKET, Key="scanner/universe/latest.json")["Body"].read()
+        )
+        board["as_of"] = "2026-07-11"
+        s3.put_object(Bucket=BUCKET, Key="scanner/universe/latest.json", Body=json.dumps(board))
+
+        # RUN 1 — daily covers T0-T2 (daily_new_names=3); distinct ratings
+        # so ranking-by-rating is distinguishable from ranking-by-attractiveness
+        # (T0/T1/T2 are attractiveness-ranked 1/2/3, but rating order differs).
+        backend.ratings = {"T0": 60, "T1": 90, "T2": 75}
+        manifest, store = _run(tt_config, backend, s3)
+        assert manifest.mode == "daily"
+        assert manifest.challenger_selection_written is True
+
+        sel = store.get_json("thinktank/challenger_selection/latest.json")
+        assert sel["schema_version"] == 1
+        assert sel["arm"] == "thinktank_coverage"
+        assert sel["mode"] == "daily"
+        assert sel["run_id"] == manifest.run_id
+        assert sel["trading_day"] == manifest.trading_day
+        assert sel["board_date"] == "2026-07-11"
+        # post-run: 3 of 8 covered by this run's intake → 5 uncovered
+        assert sel["uncovered_count"] == 5
+        assert sel["coverage_complete"] is False
+        # ranked by RATING desc, not by attractiveness_score/rank
+        assert [row["ticker"] for row in sel["selections"]] == ["T1", "T2", "T0"]
+        assert [row["rating"] for row in sel["selections"]] == [90, 75, 60]
+        # attractiveness_rank rides along as metadata only, unrelated to order
+        by_ticker = {row["ticker"]: row for row in sel["selections"]}
+        assert by_ticker["T0"]["attractiveness_rank"] == 1
+        assert by_ticker["T1"]["attractiveness_rank"] == 2
+        assert by_ticker["T0"]["stance"] == "attractive"
+        assert by_ticker["T0"]["conviction"] == 70
+        assert by_ticker["T0"]["thesis_version"] == 1
+
+        dated = store.get_json(f"thinktank/challenger_selection/{manifest.trading_day}.json")
+        assert dated == sel
+        assert store.get_json(
+            f"signals_shadow/thinktank_coverage/{manifest.trading_day}/signals.json"
+        ) is None
+
+        # RUN 2 — gap_fill_only shores up T3-T7 (the whole remaining gap)
+        backend.ratings.update({"T3": 95, "T4": 50, "T5": 85, "T6": 40, "T7": 70})
+        manifest2, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest2.mode == "gap_fill"
+        assert manifest2.names_added == ["T3", "T4", "T5", "T6", "T7"]
+        assert manifest2.challenger_selection_written is True
+
+        sel2 = store.get_json("thinktank/challenger_selection/latest.json")
+        assert sel2["mode"] == "gap_fill"
+        # post-run: this run filled the whole remaining gap → complete on
+        # the SAME run that completed coverage (the Saturday-gap_fill case)
+        assert sel2["uncovered_count"] == 0
+        assert sel2["coverage_complete"] is True
+        assert [row["ticker"] for row in sel2["selections"]] == [
+            "T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6",
+        ]
+        assert [row["rating"] for row in sel2["selections"]] == [
+            95, 90, 85, 75, 70, 60, 50, 40,
+        ]
+        # conforming shadow view written on the completing run itself
+        assert store.get_json(
+            f"signals_shadow/thinktank_coverage/{manifest2.trading_day}/signals.json"
+        ) is not None
+
+        # RUN 3 — gap_fill_only no-op: still fully covered → complete stays
+        # True, shadow refreshed.
+        manifest3, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest3.mode == "gap_fill"
+        assert manifest3.names_added == []
+
+        sel3 = store.get_json("thinktank/challenger_selection/latest.json")
+        assert sel3["uncovered_count"] == 0
+        assert sel3["coverage_complete"] is True
+        assert [row["ticker"] for row in sel3["selections"]] == [
+            "T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6",
+        ]
+
+        shadow = store.get_json(
+            f"signals_shadow/thinktank_coverage/{manifest3.trading_day}/signals.json"
+        )
+        assert shadow is not None
+        assert shadow["date"] == manifest3.trading_day
+        assert shadow["run_date"] == manifest3.calendar_date
+        signals = shadow["signals"]
+        assert set(signals) == {"T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6"}
+        for ticker, row in signals.items():
+            assert row["signal"] == "ENTER"
+            assert isinstance(row["score"], float)
+        # scores strictly descending in the same rank order as selections
+        ordered_scores = [signals[t]["score"] for t in
+                           ["T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6"]]
+        assert ordered_scores == sorted(ordered_scores, reverse=True)
+        assert ordered_scores == [95.0, 90.0, 85.0, 75.0, 70.0, 60.0, 50.0, 40.0]
+
+
+def test_challenger_selection_truncates_to_top_n_by_rating():
+    """Unit-level check of the producer's ranking/truncation logic directly
+    (no LLM/moto round-trip needed): with more covered+rated names than
+    CHALLENGER_TOP_N, only the top N by rating are selected, in descending
+    rating order, and a None-rating row is excluded from the ranking pool."""
+    n_extra = CHALLENGER_TOP_N + 5
+    ledger = CoverageLedger(
+        entries={
+            f"X{i}": LedgerEntry(
+                ticker=f"X{i}", covered_since="2026-07-01",
+                thesis_version=1, thesis_updated_on="2026-07-01",
+            )
+            for i in range(n_extra)
+        }
+        | {
+            "UNRATED": LedgerEntry(
+                ticker="UNRATED", covered_since="2026-07-01",
+                thesis_version=1, thesis_updated_on="2026-07-01",
+            )
+        }
+    )
+    board = RatingsBoard(
+        trading_day="2026-07-14",
+        rows={
+            f"X{i}": RatingRow(
+                ticker=f"X{i}", rating=i, stance="attractive",
+                conviction=50, thesis_version=1, attractiveness_rank=n_extra - i,
+            )
+            for i in range(n_extra)
+        }
+        | {
+            "UNRATED": RatingRow(
+                ticker="UNRATED", rating=None, stance="neutral",
+                conviction=None, thesis_version=1, attractiveness_rank=1,
+            )
+        },
+    )
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+        selection = write_challenger_selection(
+            store, ledger, board,
+            run_id="run1", mode="daily",
+            trading_day="2026-07-14", calendar_date="2026-07-14",
+            board_date="2026-07-11",
+            coverage_gap={"uncovered_count": 3},
+        )
+
+        assert len(selection.selections) == CHALLENGER_TOP_N
+        ratings = [row.rating for row in selection.selections]
+        assert ratings == sorted(ratings, reverse=True)
+        # the top N by rating are the highest-numbered X{i} (rating == i)
+        expected_tickers = [f"X{i}" for i in range(n_extra - 1, n_extra - 1 - CHALLENGER_TOP_N, -1)]
+        assert [row.ticker for row in selection.selections] == expected_tickers
+        assert "UNRATED" not in {row.ticker for row in selection.selections}
+
+        # incomplete coverage (uncovered_count=3) → conforming shadow NOT written
+        assert selection.coverage_complete is False
+        assert store.get_json(
+            "signals_shadow/thinktank_coverage/2026-07-14/signals.json"
+        ) is None
+
+
+def test_challenger_selection_shadow_signals_conforming_shape():
+    """Direct check of the conforming ``signals_shadow/`` shape against what
+    ``scoring/leaderboard_producers.py::_enter_ranked_and_scores`` actually
+    reduces on: a top-level ``signals`` dict keyed by ticker, each entry
+    carrying ``signal == "ENTER"`` and a numeric ``score`` — written only
+    when ``coverage_complete``."""
+    ledger = CoverageLedger(
+        entries={
+            t: LedgerEntry(
+                ticker=t, covered_since="2026-07-01",
+                thesis_version=1, thesis_updated_on="2026-07-01",
+            )
+            for t in ("A", "B", "C")
+        }
+    )
+    board = RatingsBoard(
+        trading_day="2026-07-14",
+        rows={
+            "A": RatingRow(ticker="A", rating=80, stance="attractive", conviction=60, thesis_version=1, attractiveness_rank=2),
+            "B": RatingRow(ticker="B", rating=95, stance="attractive", conviction=90, thesis_version=2, attractiveness_rank=1),
+            "C": RatingRow(ticker="C", rating=40, stance="avoid", conviction=30, thesis_version=1, attractiveness_rank=3),
+        },
+    )
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+        selection = write_challenger_selection(
+            store, ledger, board,
+            run_id="run1", mode="gap_fill",
+            trading_day="2026-07-14", calendar_date="2026-07-14",
+            board_date="2026-07-11",
+            coverage_gap={"uncovered_count": 0},  # coverage complete
+        )
+        assert selection.coverage_complete is True
+
+        shadow = store.get_json("signals_shadow/thinktank_coverage/2026-07-14/signals.json")
+        assert shadow is not None
+        assert shadow["date"] == "2026-07-14"
+        assert shadow["run_date"] == "2026-07-14"
+        signals = shadow["signals"]
+        assert set(signals) == {"A", "B", "C"}
+        for row in signals.values():
+            assert row["signal"] == "ENTER"
+            assert isinstance(row["score"], float)
+        # B (95) > A (80) > C (40) — the reducer re-derives rank from score,
+        # but this view is already in that order too.
+        assert [signals[t]["score"] for t in ("B", "A", "C")] == [95.0, 80.0, 40.0]
+
+
+def test_challenger_selection_raises_on_empty_board_with_nonempty_ledger():
+    """Fleet rule: a missing/empty ratings board while the coverage ledger
+    is non-empty is a producer desync — RAISE, never silently skip/empty."""
+    ledger = CoverageLedger(
+        entries={
+            "A": LedgerEntry(
+                ticker="A", covered_since="2026-07-01",
+                thesis_version=1, thesis_updated_on="2026-07-01",
+            )
+        }
+    )
+    board = RatingsBoard()  # no rows — out of sync with the ledger
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+        with pytest.raises(RuntimeError, match="out of sync"):
+            write_challenger_selection(
+                store, ledger, board,
+                run_id="run1", mode="daily",
+                trading_day="2026-07-14", calendar_date="2026-07-14",
+                board_date=None,
+                coverage_gap={"uncovered_count": 1},
+            )

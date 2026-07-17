@@ -257,3 +257,64 @@ class TestHandler:
         assert result["status"] == "OK"
         assert result["summary"]["shadows"] == {}
         assert "loadings exploded" in result["summary"]["shadow_error"]
+
+    def test_universe_board_written_and_summarized(self, handler_mod):
+        # alpha-engine-config-I2515: the standalone Scanner path becomes a
+        # universe-board producer. The handler records the written key in
+        # summary.universe_board without disturbing the live OK path.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-29/candidates.json"), \
+             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                   return_value="scanner/universe/2026-05-29/universe.json"), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["summary"]["universe_board"] == {
+            "status": "OK", "key": "scanner/universe/2026-05-29/universe.json",
+        }
+        assert "universe_board_error" not in result["summary"]
+
+    def test_universe_board_failure_does_not_downgrade_live_ok(self, handler_mod):
+        # A board build/write failure is WHOLLY fail-soft: live stays OK, the
+        # failure is recorded in summary.universe_board_error (no-silent-fails)
+        # — mirrors the shadow-artifact fail-soft contract above.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-29/candidates.json"), \
+             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                   side_effect=RuntimeError("factor profiles unreadable")), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["summary"]["universe_board"] == {"status": "error", "key": None}
+        assert "factor profiles unreadable" in result["summary"]["universe_board_error"]
+
+    def test_universe_board_receives_market_regime_and_artifact(self, handler_mod):
+        # market_regime must thread through so build_pure_quant_focus_lookup
+        # blends on the SAME regime the scanner used, not a stale default.
+        captured = {}
+        ok_artifact = _ok_artifact()
+
+        def fake_write(artifact, **kwargs):
+            captured.update(kwargs)
+            captured["artifact"] = artifact
+            return "scanner/universe/2026-05-29/universe.json"
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=ok_artifact), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-29/candidates.json"), \
+             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                   side_effect=fake_write), \
+             patch("boto3.client", return_value=MagicMock()):
+            handler_mod.handler(
+                {"run_date": "2026-05-30", "market_regime": "bull"}, context=None,
+            )
+        assert captured["market_regime"] == "bull"
+        assert captured["artifact"] is ok_artifact

@@ -463,6 +463,131 @@ def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
     return build_shadow_artifacts(live_artifact, eval_log, factor_loadings, params)
 
 
+def build_scanner_eval_rows_for_board(
+    eval_log: list[dict],
+    focus_lookup: dict[str, dict],
+    run_date: str,
+) -> list[dict]:
+    """Project the candidates-artifact ``scanner_eval_log`` (already the
+    AUTHORITATIVE per-ticker scanner verdict — ``run_quant_filter``'s
+    ``_last_eval_log``, JSON-safe cast — with fields ``ticker, sector,
+    tech_score, rsi_14, current_price, avg_volume_20d, price_vs_ma200,
+    atr_pct, scan_path, quant_filter_pass, filter_fail_reason,
+    liquidity_pass, volatility_pass``) into the ``scanner_evaluations``-row
+    shape ``scoring.universe_board.build_universe_board`` consumes.
+
+    This is the Scanner-path equivalent of
+    ``graph.research_graph._build_scanner_eval_rows`` — same eval_log
+    source, same row shape — minus the agent-only ``extra_override_tickers``
+    union (there is no agent run in this Lambda, so every row comes
+    straight from the scanner's own ~900-ticker universe pass).
+
+    Adds ``eval_date`` and merges in the pure-quant focus-list audit fields
+    from ``focus_lookup`` (see
+    ``scoring.focus_list.build_pure_quant_focus_lookup``). Tickers absent
+    from ``focus_lookup`` (factor-blend disabled, or the substrate wasn't
+    available this cycle) keep their board-schema-tolerated null
+    ``focus_score``/``focus_stance`` — never fabricated. Agent-only fields
+    (``agent_override``/``override_team_id`` when an agent actually looked a
+    ticker up outside its focus list) have no equivalent here and always
+    degrade to ``0``/``None`` via the shared lookup builder.
+    """
+    rows = []
+    for rec in eval_log:
+        ticker = rec.get("ticker")
+        if not ticker:
+            continue
+        row = {**rec, "eval_date": run_date}
+        fl_entry = focus_lookup.get(ticker)
+        if fl_entry is not None:
+            row.update(fl_entry)
+        rows.append(row)
+    return rows
+
+
+def write_universe_board_for_scanner_run(
+    artifact: dict,
+    *,
+    market_regime: str = "neutral",
+    s3_client: Any | None = None,
+    bucket: str = _DEFAULT_BUCKET,
+) -> str:
+    """Standalone-Scanner path's universe-board write (alpha-engine-config-I2515,
+    completing L1995 Phase 5's producer side — the Research graph's
+    ``archive_writer`` has been the SOLE producer of ``scanner/universe/``
+    until now).
+
+    DUAL-WRITE TRANSITION STATE: the Research graph ALSO writes this board
+    (``graph/research_graph.py::archive_writer`` →
+    ``scoring.universe_board.compute_and_write_universe_board``) and will
+    keep doing so until the SF cutover retires the graph's internal scanner
+    (S3 contract safety — both producers coexist during the migration).
+    Same-day overwrite by whichever producer runs LAST is expected and
+    idempotent-ish; the two producers' rows can differ on agent-audit
+    fields (``focus_*``/``agent_override``) since only the Research graph
+    ever has a real agent run backing those fields. See alpha-engine-config-I2515.
+
+    Sequencing (factor-profiles ordering, resolved): ``build_universe_board``
+    reads the pillar substrate from ``factors/profiles/{run_date}/by_ticker.json``
+    (``scoring.universe_board._read_factor_profiles``). That substrate is
+    produced by ``scoring.factor_scoring.compute_and_write_factor_profiles``,
+    which needs only ``run_date`` + ``sector_map`` and reads
+    ``features/{run_date}/{technical,fundamental}.parquet`` — DataPhase1
+    outputs already required upstream of the Scanner SF state (the same
+    feature store this module's own ``build_candidates_artifact`` reads) —
+    i.e. it has NO graph-only input. So this function produces it directly
+    here rather than waiting on the Research graph's
+    ``compute_factor_profiles_node``. This call is best-effort: on failure
+    ``build_universe_board`` already WARN-degrades pillar/attractiveness
+    fields to null (``scoring/universe_board.py::_read_factor_profiles``),
+    so a hiccup here degrades board content, not availability.
+
+    Best-effort secondary observability overall, mirroring the shadow-
+    artifact / leaderboard blocks in ``lambda/scanner_handler.py``: this
+    function's caller must wrap it in a fail-soft try/except — a board
+    failure must NEVER fail the Scanner Lambda's primary deliverable
+    (candidates.json, already written by the time the caller reaches this).
+
+    Returns the dated S3 key written.
+    """
+    from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
+    from scoring.factor_scoring import compute_and_write_factor_profiles
+    from scoring.focus_list import build_pure_quant_focus_lookup
+    from scoring.universe_board import compute_and_write_universe_board
+
+    s3 = s3_client if s3_client is not None else boto3.client("s3")
+    run_date = artifact["run_date"]
+
+    # sector_map isn't threaded through the candidates artifact (it's a
+    # ~900-entry map, out of scope for that contract) — re-derive it from
+    # the same S3-backed constituents source build_candidates_artifact just
+    # read. Single cheap S3 GET; constituents.json cannot change mid-invocation.
+    _, sector_map = fetch_sp500_sp400_with_sectors()
+
+    try:
+        compute_and_write_factor_profiles(
+            run_date=run_date, sector_map=sector_map, bucket=bucket,
+        )
+    except Exception as exc:  # noqa: BLE001 — board-support only, see docstring
+        logger.warning(
+            "[scanner_orchestrator] factor-profile production failed for "
+            "board support (non-fatal — board pillars degrade to null via "
+            "build_universe_board's own fail-soft read): %s", exc,
+        )
+
+    focus_lookup = build_pure_quant_focus_lookup(
+        market_regime=market_regime, run_date=run_date, bucket=bucket,
+    )
+    # artifact["scanner_eval_log"] is already JSON-safe-cast by
+    # build_candidates_artifact (_json_safe_eval_log) — no re-cast needed.
+    scanner_evals = build_scanner_eval_rows_for_board(
+        artifact.get("scanner_eval_log") or [], focus_lookup, run_date,
+    )
+    return compute_and_write_universe_board(
+        run_date, scanner_evals, bucket=bucket, s3_client=s3,
+    )
+
+
 def write_shadow_candidates_artifact(
     artifact: dict,
     spec_name: str,

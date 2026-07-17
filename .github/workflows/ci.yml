@@ -6,13 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+permissions: {}
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: alpha-engine-research
 

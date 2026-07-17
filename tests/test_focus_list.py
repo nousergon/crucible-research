@@ -8,6 +8,8 @@ Phase 1c factor composites + Phase 3 blend formula. Pure helper tests
 
 import pytest
 
+from unittest.mock import patch
+
 from scoring.focus_list import (
     FOCUS_LIST_DEFAULT_SIZE,
     FOCUS_LIST_HARD_CAP,
@@ -15,6 +17,8 @@ from scoring.focus_list import (
     FocusListEntry,
     _assign_stance,
     build_focus_list,
+    build_focus_list_audit_lookup,
+    build_pure_quant_focus_lookup,
     compute_focus_scores,
     summarize_focus_list,
 )
@@ -417,3 +421,115 @@ def test_summarize_focus_list_shape():
     assert s["technology"]["stance_mix"] == {"momentum": 2, "quality": 2}
     assert s["healthcare"]["n"] == 0
     assert s["healthcare"]["top_3"] == []
+
+
+# ── build_focus_list_audit_lookup (alpha-engine-config-I2515) ───────────────
+#
+# Shared projection extracted from graph.research_graph's legacy fallback
+# branch so BOTH callers (the graph's agent-state-absent fallback AND the
+# standalone Scanner path) build the flat scanner_evaluations audit-lookup
+# from exactly one implementation.
+
+
+def test_build_focus_list_audit_lookup_passed_and_near_miss(regime_weights, sector_team_map):
+    # 3 Tech tickers, team size 2 → NVDA/META pass, AAPL is a near miss.
+    profiles = {
+        "NVDA": _profile("Technology", q=60, m=95, v=30, lv=20),
+        "META": _profile("Technology", q=70, m=80, v=40, lv=30),
+        "AAPL": _profile("Technology", q=80, m=50, v=60, lv=50),
+    }
+    scores = compute_focus_scores(profiles, "bull", regime_weights)
+    fl = build_focus_list(scores, sector_team_map, per_team_size={"technology": 2})
+
+    lookup = build_focus_list_audit_lookup(scores, fl, sector_team_map)
+
+    assert lookup["NVDA"]["focus_list_passed"] == 1
+    assert lookup["NVDA"]["focus_rank_in_team"] == 1
+    assert lookup["NVDA"]["focus_team_id"] == "technology"
+    assert lookup["META"]["focus_list_passed"] == 1
+    # AAPL scored but cut by the team-size-2 cap → near-miss row.
+    assert lookup["AAPL"]["focus_list_passed"] == 0
+    assert lookup["AAPL"]["focus_rank_in_team"] is None
+    assert lookup["AAPL"]["focus_rank_in_sector"] is None
+    assert lookup["AAPL"]["focus_team_id"] == "technology"
+    # Pure-quant projection never attributes an agent — always 0/None.
+    for row in lookup.values():
+        assert row["agent_override"] == 0
+        assert row["override_team_id"] is None
+
+
+def test_build_focus_list_audit_lookup_drops_unmapped_sector(regime_weights):
+    """A ticker whose sector has no team mapping is dropped from the
+    near-miss branch rather than synthesizing a fake team_id."""
+    profiles = {
+        "ORPHAN": _profile("Aerospace & Crypto Hybrids", q=80, m=80, v=80, lv=80),
+    }
+    scores = compute_focus_scores(profiles, "bull", regime_weights)
+    fl = build_focus_list(scores, sector_team_map={})  # no team mapping at all
+    lookup = build_focus_list_audit_lookup(scores, fl, sector_team_map={})
+    assert "ORPHAN" not in lookup
+
+
+# ── build_pure_quant_focus_lookup (alpha-engine-config-I2515) ───────────────
+#
+# The standalone Scanner path's entry point — no agent/graph run backs it,
+# so this IS the only focus-list audit path in that Lambda (not a fallback).
+
+
+class TestBuildPureQuantFocusLookup:
+    def test_empty_when_factor_blend_disabled(self):
+        with patch("config.FACTOR_BLEND_ENABLED", False):
+            result = build_pure_quant_focus_lookup(market_regime="bull")
+        assert result == {}
+
+    def test_empty_when_factor_profiles_unreadable(self):
+        with patch("config.FACTOR_BLEND_ENABLED", True), \
+             patch("scoring.factor_scoring.read_factor_profiles_from_s3",
+                    return_value=None):
+            result = build_pure_quant_focus_lookup(
+                market_regime="bull", run_date="2026-06-06",
+            )
+        assert result == {}
+
+    def test_populates_lookup_from_factor_profiles(self):
+        profiles = {
+            "NVDA": {"sector": "Technology", "quality_score": 70.0,
+                     "momentum_score": 95.0, "value_score": 20.0,
+                     "low_vol_score": 25.0},
+            "MSFT": {"sector": "Technology", "quality_score": 90.0,
+                     "momentum_score": 60.0, "value_score": 40.0,
+                     "low_vol_score": 55.0},
+        }
+        with patch("config.FACTOR_BLEND_ENABLED", True), \
+             patch("scoring.factor_scoring.read_factor_profiles_from_s3",
+                   return_value=profiles):
+            result = build_pure_quant_focus_lookup(
+                market_regime="bull", run_date="2026-06-06",
+            )
+        assert "NVDA" in result and "MSFT" in result
+        assert result["NVDA"]["focus_list_passed"] == 1
+        assert result["NVDA"]["agent_override"] == 0
+        assert result["NVDA"]["override_team_id"] is None
+        # NVDA (momentum=95) outranks MSFT (momentum=60) in a BULL regime.
+        assert result["NVDA"]["focus_rank_in_team"] == 1
+
+    def test_reads_dated_profile_key_not_latest(self):
+        """run_date is threaded through to read_factor_profiles_from_s3 so
+        the Scanner path reads THIS cycle's freshly-written profile rather
+        than an arbitrary latest.json (which could be a stale prior week
+        if this Lambda invocation races another writer)."""
+        captured = {}
+
+        def fake_read(run_date=None, bucket=None):
+            captured["run_date"] = run_date
+            captured["bucket"] = bucket
+            return None
+
+        with patch("config.FACTOR_BLEND_ENABLED", True), \
+             patch("scoring.factor_scoring.read_factor_profiles_from_s3",
+                   side_effect=fake_read):
+            build_pure_quant_focus_lookup(
+                market_regime="bull", run_date="2026-06-06", bucket="test-bucket",
+            )
+        assert captured["run_date"] == "2026-06-06"
+        assert captured["bucket"] == "test-bucket"

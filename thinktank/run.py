@@ -5,13 +5,33 @@ Order of operations (one ``--daily`` invocation):
 2. load read-side context (board, signals, macro report, news, RAG probe)
 3. themes: seed if absent / reconcile if a new weekly landed
 4. intake: top-N uncovered by attractiveness (rank-bounded) + stalest refresh
+   — UNLESS gap_fill_only (below), which skips the stalest-refresh half
 5. thesis builds for the intake set
 6. events sweep over all covered names → thesis updates where flagged
 7. churn-gated daily macro-theme update from sweep-surfaced developments
-8. persist ledger, events, manifest, month cost ledger; flush SFT rows
+8. persist ledger, ratings board, challenger selection, events, manifest,
+   month cost ledger; flush SFT rows
+
+New S3 keys (epic alpha-engine-config-I2515, champion/challenger
+leaderboard — Think Tank is the CHALLENGER arm):
+    ``thinktank/challenger_selection/{trading_day}.json`` + ``latest.json``
+    — see ``thinktank.challenger_selection`` for the producer and
+    ``thinktank.schemas.ChallengerSelection`` for the artifact contract.
 
 ``--dry-run`` exercises 1–4 read-only and prints the plan (no LLM calls, no
 writes) — the boot-validation mode.
+
+``gap_fill_only`` (2026-07-14 cadence design): the Saturday SF's mode. The
+daily EventBridge cadence (``research/thinktank.yaml``'s ``daily_new_names``,
+still steps 1-8 above unmodified) grows coverage toward the full
+``rank_ceiling=150`` universe day by day and handles staleness refresh
+gradually. Saturday's job is narrower and reactive: once the fresh weekly
+scan lands, shore up whatever of the CURRENT top-``GAP_FILL_TOP_N`` (60)
+the daily cadence hasn't caught up to yet — sized to the exact measured
+gap (``coverage_gap.uncovered_count``), never a fixed constant, and never
+padded with stale-refill picks (that's the daily job's role). Keeps the
+weekly SF's think-tank footprint small and bounded regardless of how big
+the full-universe backlog gets.
 
 Usage:
     python -m thinktank.run --daily
@@ -30,6 +50,7 @@ from nousergon_lib.dates import now_dual
 
 from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
 from thinktank.analyst import build_thesis, sweep
+from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import load_context
 from thinktank.costs import BudgetGuard
@@ -49,11 +70,20 @@ from thinktank.themes import ThemeKeeper
 logger = logging.getLogger(__name__)
 
 
+GAP_FILL_TOP_N = 60
+"""Rank window the Saturday SF's gap-fill mode shores up — the "current
+scanner top-60" window, independent of the daily cadence's rank_ceiling
+(150). Shared with ``_compute_coverage_gap``'s default so the reported
+gap and the actual gap-fill selection are always computed over the same
+window."""
+
+
 def run_daily(
     settings: ThinktankSettings | None = None,
     *,
     dry_run: bool = False,
     refresh_tickers: list[str] | None = None,
+    gap_fill_only: bool = False,
     store: ThinktankStore | None = None,
     client: ThinktankClient | None = None,
     ssm_client=None,
@@ -66,7 +96,12 @@ def run_daily(
 
     manifest = RunManifest(
         run_id=run_id,
-        mode="dry_run" if dry_run else ("operator_refresh" if refresh_tickers else "daily"),
+        mode=(
+            "dry_run" if dry_run
+            else "operator_refresh" if refresh_tickers
+            else "gap_fill" if gap_fill_only
+            else "daily"
+        ),
         trading_day=trading_day,
         calendar_date=calendar_date,
         started_at=datetime.now(timezone.utc).isoformat(),
@@ -86,7 +121,7 @@ def run_daily(
         )
 
     ledger = load_ledger(store)
-    manifest.coverage_gap = _compute_coverage_gap(ctx.board, ledger)
+    manifest.coverage_gap = _compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N)
     if refresh_tickers is not None:
         # Operator-refresh mode ({"refresh_tickers": [...]} event / backfill):
         # re-underwrite ONLY the named covered tickers — no intake, no sweep,
@@ -98,6 +133,30 @@ def run_daily(
                 "operator refresh only re-underwrites covered names."
             )
         new_rows, refresh = [], sorted(set(refresh_tickers))
+    elif gap_fill_only:
+        # Saturday SF gap-fill mode (2026-07-14 cadence design): the daily
+        # cadence (settings.daily_new_names/day) already grows coverage
+        # toward the full rank_ceiling=150 universe and handles staleness
+        # refresh gradually — this mode's ONLY job is shoring up whatever
+        # of the CURRENT scanner top-60 the daily cadence hasn't caught up
+        # to yet by the time the fresh weekly board lands. Sized to the
+        # EXACT current gap (manifest.coverage_gap, computed just above
+        # against the same GAP_FILL_TOP_N window) rather than a fixed
+        # constant — a small, data-driven weekly patch, not a bulk
+        # re-cover pass. skip_stale_refill=True: staleness refresh is the
+        # daily job's role, not this one's — padding this run's budget
+        # with stale-refill picks would double-do daily's job and break
+        # the "only what actually changed this week" sizing this mode
+        # relies on to stay fast and small.
+        gap = manifest.coverage_gap if isinstance(manifest.coverage_gap, dict) else {}
+        gap_count = gap.get("uncovered_count", 0)
+        new_rows, refresh = select_intake(
+            ledger,
+            ctx.board,
+            daily_new_names=gap_count,
+            rank_ceiling=GAP_FILL_TOP_N,
+            skip_stale_refill=True,
+        )
     else:
         new_rows, refresh = select_intake(
             ledger,
@@ -221,6 +280,23 @@ def run_daily(
         store, ledger, theses_written, trading_day=trading_day
     )
     manifest.ratings_rows = len(board.rows)
+    # coverage_complete must reflect the ledger AFTER this run's thesis
+    # writes, not the start-of-run manifest.coverage_gap — otherwise the
+    # run that fills the last gap (Saturday's gap_fill) self-labels its
+    # own selection incomplete and the leaderboard shadow view slips to
+    # the NEXT run. manifest.coverage_gap keeps its pre-run convention.
+    write_challenger_selection(
+        store,
+        ledger,
+        board,
+        run_id=run_id,
+        mode=manifest.mode,
+        trading_day=trading_day,
+        calendar_date=calendar_date,
+        board_date=(ctx.board or {}).get("as_of"),
+        coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
+    )
+    manifest.challenger_selection_written = True
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 

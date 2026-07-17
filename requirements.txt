@@ -1,13 +1,25 @@
 # Core
+# setuptools floor for PYSEC-2026-3447 (newly disclosed; CI's pip-audit gate
+# started failing 2026-07-14 against the default 79.0.1 bundled by the
+# GH Actions Python 3.11 image). Not a build-backend requirement here — direct
+# pin exists solely to satisfy the security-audit gate.
+setuptools>=83.0.0
 anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
-langsmith~=0.7
+# Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
+# TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
+# `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
+# Dependabot's manifest scan flag the range as covering vulnerable <0.8.18
+# builds even though a fresh resolve already picked a newer version; `~=0.8.18`
+# hard-excludes every pre-fix release while staying within the 0.8.x line
+# (minimum version movement that clears the advisory).
+langsmith~=0.8.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=1.60
+openai>=2.45.0
 
 # Evals
 agentevals~=0.0
@@ -17,7 +29,7 @@ yfinance~=0.2.54
 requests-ratelimiter~=0.7
 pandas~=2.2
 numpy~=1.26
-requests~=2.31
+requests~=2.34
 feedparser~=6.0.11
 beautifulsoup4~=4.12
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
@@ -29,9 +41,9 @@ beautifulsoup4~=4.12
 lxml~=6.1
 
 # Config / storage
-pyyaml~=6.0.1
+pyyaml~=6.0.3
 boto3~=1.34
-pydantic~=2.7
+pydantic~=2.13
 # alpha-engine-lib provides setup_logging, BasePreflight, and (since v0.3.0)
 # the rag submodule consolidating db/embeddings/retrieval/schema previously
 # duplicated in this repo's rag/ folder.
@@ -84,7 +96,15 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # throttle-retry helper. The invoke is now LOAD-BEARING (not best-effort like
 # the alerts call), so krepis must be importable in the deploy environment —
 # this floor makes it a hard runtime/deploy dependency.
-krepis>=0.7.0
+#
+# Bumped to >=0.13.0 (config#1675 / config#2575): evals/judge.py +
+# evals/judge_models.py now delegate their transport/mechanics layer
+# (rubric rendering, structured-output tool spec + batch-result parse,
+# custom_id codec, judge-model registry) to krepis.judge, which ships
+# starting 0.13.0. BLOCKED until nousergon/krepis#27 merges + PyPI
+# publish completes — see that PR + this repo's companion PR for the
+# gate:dependency linkage.
+krepis>=0.13.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5
@@ -102,11 +122,11 @@ pytest-asyncio~=0.23
 # same-major (1.x) patch/minor bump, no API changes used by this repo.
 python-dotenv~=1.2.2
 # moto: mocked S3 for decision_capture integration tests
-moto~=5.0
+moto~=5.2
 
 # SEC EDGAR data
 edgartools~=2.0
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
-voyageai~=0.3
+voyageai~=0.5
