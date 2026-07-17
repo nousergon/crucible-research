@@ -29,7 +29,7 @@ yfinance~=0.2.54
 requests-ratelimiter~=0.7
 pandas~=2.2
 numpy~=1.26
-requests~=2.31
+requests~=2.34
 feedparser~=6.0.11
 beautifulsoup4~=4.12
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
