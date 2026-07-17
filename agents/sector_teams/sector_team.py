@@ -54,6 +54,27 @@ from graph.llm_cost_tracker import track_llm_cost
 log = logging.getLogger(__name__)
 
 
+class QuarantinableThesisError(RuntimeError):
+    """A held ticker's thesis update failed DETERMINISTICALLY (its LLM output
+    could not be parsed into a valid thesis after the correction-feedback
+    retries) — a per-ticker terminal failure, NOT a transient/infra one.
+
+    Per the per-ticker quarantine contract (config#2247, Brian's 2026-07-11
+    ruling amending all-agents-strict at the SCOPE level only): a ticker that
+    raises this is QUARANTINED — omitted from signals.json with an explicit
+    ``quarantined`` record, RED telemetry + Telegram page — and the run
+    completes for the rest, subject to the run-level floor (> ``MAX_QUARANTINED
+    _TICKERS`` quarantined tickers OR a whole failed team still hard-fails).
+
+    Deliberately distinct from a bare ``RuntimeError`` / a rate-limit (429)
+    error: a transient/TPM failure re-rolling can't fix must STILL hard-fail
+    (so an SF redrive retries the whole team) — only a deterministic per-ticker
+    content failure is quarantine-eligible. NO stale-thesis carry-forward
+    (unchanged): a quarantined ticker becomes an explicit absence, never a
+    silently-carried prior thesis.
+    """
+
+
 @dataclass
 class SectorTeamContext:
     """Bundled context for a sector team run — avoids 17-parameter function signatures."""
@@ -256,6 +277,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     )
 
     thesis_updates = {}
+    # Per-ticker quarantine (config#2247): a held ticker whose thesis update
+    # fails DETERMINISTICALLY is recorded here and omitted from thesis_updates
+    # (explicit absence, no carry-forward) rather than raising and killing the
+    # whole run. score_aggregator applies the run-level floor.
+    quarantined: list[dict] = []
     for ticker in team_held:
         # Held tickers must always have a prior_thesis. The held-stock update
         # path (triggers branch below + no-trigger preservation branch) both
@@ -301,12 +327,33 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
                 model_name_fallback=PER_STOCK_MODEL,
                 prompt=load_prompt("sector_team_thesis_update"),
             ):
-                updated = _update_thesis_for_held_stock(
-                    ticker, triggers, ctx.prior_theses.get(ticker),
-                    ctx.news_data_by_ticker.get(ticker),
-                    ctx.analyst_data_by_ticker.get(ticker),
-                    ctx.run_date, team_id, ctx.api_key,
-                )
+                try:
+                    updated = _update_thesis_for_held_stock(
+                        ticker, triggers, ctx.prior_theses.get(ticker),
+                        ctx.news_data_by_ticker.get(ticker),
+                        ctx.analyst_data_by_ticker.get(ticker),
+                        ctx.run_date, team_id, ctx.api_key,
+                    )
+                except QuarantinableThesisError as exc:
+                    # Deterministic per-ticker output failure (the CRUS case,
+                    # config#2247). Quarantine and continue — omit from
+                    # thesis_updates (NO stale-thesis carry-forward), record the
+                    # explicit absence. Transient/429 failures are NOT
+                    # QuarantinableThesisError and still propagate → hard-fail.
+                    log.error(
+                        "[team:%s] QUARANTINE %s — held-thesis update failed "
+                        "deterministically (%s). Omitted from signals.json "
+                        "(explicit-absence contract, config#2247); no "
+                        "prior-thesis carry-forward. Run continues for the rest.",
+                        team_id, ticker, exc,
+                    )
+                    quarantined.append({
+                        "ticker": ticker,
+                        "team_id": team_id,
+                        "stage": "held_thesis_update",
+                        "reason": str(exc),
+                    })
+                    continue
             thesis_updates[ticker] = updated
         else:
             # No material event — preserve prior thesis. Normalize the
@@ -374,6 +421,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         "error": team_error,
         "partial": team_partial,
         "partial_reasons": partial_reasons,
+        # Per-ticker quarantine records (config#2247). Distinct from
+        # error/partial (which are TEAM-level and still hard-fail): these are
+        # individual tickers deterministically omitted from signals.json.
+        # score_aggregator aggregates across teams and applies the floor.
+        "quarantined": quarantined,
         # PR 4 of scanner-placement arc — tickers the quant agent looked up
         # via @tool get_factor_profile that were NOT in this team's focus
         # list. archive_writer projects these onto scanner_evaluations
@@ -731,10 +783,10 @@ def _update_thesis_for_held_stock(
             "NOT carried forward.",
             ticker, _MAX_PARSE_ATTEMPTS, last_error,
         )
-        raise RuntimeError(
+        raise QuarantinableThesisError(
             f"held-thesis update for {ticker} ({team_id}) failed "
             f"after {_MAX_PARSE_ATTEMPTS} attempts and cannot "
-            f"produce real output — all-agents-strict hard-fail "
+            f"produce real output — per-ticker quarantine "
             f"(no prior-thesis carry-forward): {last_error}"
         ) from last_error
 

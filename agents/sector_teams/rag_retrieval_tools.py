@@ -10,6 +10,12 @@ Pairs with the producer-side ingest pipelines in alpha-engine-data:
     ``source="news_polygon"`` / ``"news_gdelt"`` / ``"news_yahoo_rss"``
   - PR B (#230): Form 4 insider transactions (structured parquet —
     not in RAG corpus; queried elsewhere)
+  - config#2428: 13F institutional ownership, ingested with
+    ``doc_type="13F"`` by ``rag/pipelines/ingest_13f.py`` (reads the
+    ``inst_ownership`` derived table, one document per ticker per
+    quarter). Until this landed, "13F" was documented below as part of
+    the filings default set but had no producer — queries silently
+    returned nothing.
   - Existing: 10-K / 10-Q / 8-K / earnings_transcript / thesis
 
 All retrieval goes through the existing hybrid (BM25 + pgvector)
@@ -82,8 +88,14 @@ def reset_rag_retrieval_stats() -> None:
 # Default doc_type sets per tool. Defaults narrow the candidate
 # corpus before the hybrid retriever scores — significantly faster
 # than scoring across the whole corpus.
+# config#2428: "13F" added now that a producer exists —
+# alpha-engine-data's rag/pipelines/ingest_13f.py reads the inst_ownership
+# derived table and ingests one document per (ticker, quarter). Before
+# this, "13F" was documented above/in search_filings' docstring as part
+# of the "expanded set" but silently returned nothing (no ingest pipeline
+# ever wrote doc_type="13F" documents).
 DEFAULT_FILINGS_DOC_TYPES = (
-    "10-K", "10-Q", "8-K", "14A", "S-1", "S-4", "13D", "13G",
+    "10-K", "10-Q", "8-K", "14A", "S-1", "S-4", "13D", "13G", "13F",
 )
 
 

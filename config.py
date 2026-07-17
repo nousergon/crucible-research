@@ -164,6 +164,16 @@ _COHERENCE_GATE_CFG: dict = _AGGREGATOR_CFG.get("macro_sector_coherence_gate", {
 SECTOR_COHERENCE_GATE_ENABLED: bool = bool(_COHERENCE_GATE_CFG.get("enabled", False))
 SECTOR_COHERENCE_UW_MIN_SCORE: float = float(_COHERENCE_GATE_CFG.get("uw_min_score", 80.0))
 
+# ── Per-ticker quarantine floor (config#2247) ────────────────────────────────
+# Brian's 2026-07-11 ruling amends all-agents-strict at the SCOPE level: a held
+# ticker whose thesis update fails deterministically is QUARANTINED (omitted
+# from signals.json, explicit-absence contract) and the run completes for the
+# rest — UNLESS MORE THAN this many tickers are quarantined in one run, in
+# which case the run still hard-fails (a broad failure is systemic, not
+# quarantinable). The "whole sector team" arm of the floor is the separate
+# all-agents-strict team gate. Default 2 (> 2 → hard-fail).
+MAX_QUARANTINED_TICKERS: int = int(_AGGREGATOR_CFG.get("max_quarantined_tickers", 2))
+
 # ── Attractiveness candidate feed (config#1400 / ARCHITECTURE §43) ───────────
 # Champion/challenger CUT: when enabled, rank the scanned universe by the live
 # 6-pillar attractiveness composite (the SSOT z-blend→percentile) and feed the
