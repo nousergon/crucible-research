@@ -128,6 +128,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from nousergon_lib.contracts import validate as validate_contract
+from nousergon_lib.trading_calendar import count_trading_days
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,14 @@ REGIME_SUBSTRATE_PREFIX = "regime"
 _INTENSITY_Z_BULL_FLOOR = 0.5
 _INTENSITY_Z_BEAR_CEIL = -0.5
 
+# I2880: max staleness of the ``latest.json`` universe-board FALLBACK, counted
+# in NYSE TRADING days (never calendar days — a 7-calendar-day window is ~1.5
+# trading weeks). Reached only when this cycle's dated board is absent. A
+# same-weekly-cycle board is 0-1 trading days old; a board from a PRIOR weekly
+# cycle is ~5 trading days old, so a window of 3 rejects a stale-cycle board
+# while tolerating holiday-shifted same-cycle slack.
+_MAX_BOARD_FALLBACK_STALENESS_TRADING_DAYS = 3
+
 _NEUTRAL_SECTOR_RATIONALE = (
     "signals_envelope v1 (no-agent producer): neutral sizing — no "
     "research-authored sector view available from pure-quant sources."
@@ -169,31 +178,43 @@ def read_universe_board(
 ) -> dict:
     """Read the scanner universe board (schema_version 3, ``scoring/
     universe_board.py``). RAISES loud if unavailable at either the
-    dated key or the ``latest.json`` sidecar.
+    dated key or the ``latest.json`` sidecar, OR if the ``latest.json``
+    fallback is more than ``_MAX_BOARD_FALLBACK_STALENESS_TRADING_DAYS``
+    trading days stale relative to ``run_date`` (I2880).
 
     The board is the SOLE source of universe membership for this
     producer — an empty/absent board means no trading day can be
     constructed from pure-quant sources, which is a real fault, not a
     degrade-gracefully case (unlike the regime substrate — see
-    ``read_regime_substrate``).
+    ``read_regime_substrate``). Equally, a silently-failed scanner that
+    leaves this cycle's dated board absent must NOT fall through to a
+    prior-cycle ``latest.json`` and trade a stale universe with
+    ``status: OK`` — the fallback is bounded by trading-day staleness.
     """
     s3 = _client(s3_client)
-    keys = []
-    if run_date:
-        keys.append(UNIVERSE_BOARD_DATED_TPL.format(date=run_date))
-    keys.append(UNIVERSE_BOARD_LATEST_KEY)
+    dated_key = (
+        UNIVERSE_BOARD_DATED_TPL.format(date=run_date) if run_date else None
+    )
+    keys = ([dated_key] if dated_key else []) + [UNIVERSE_BOARD_LATEST_KEY]
 
     last_exc: Exception | None = None
     for key in keys:
         try:
             obj = s3.get_object(Bucket=bucket, Key=key)
-            return json.loads(obj["Body"].read())
+            board = json.loads(obj["Body"].read())
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code")
             if code in ("NoSuchKey", "404"):
                 last_exc = e
                 continue
             raise
+        # I2880: the latest.json fallback is reached ONLY when this cycle's
+        # dated board is absent (a silently-failed scanner). Bound it by
+        # trading-day staleness so we never silently trade a prior-cycle
+        # universe. The dated key is inherently current, so it skips the guard.
+        if key == UNIVERSE_BOARD_LATEST_KEY and dated_key is not None:
+            _assert_board_fallback_fresh(board, run_date)
+        return board
 
     raise RuntimeError(
         f"signals_envelope: no scanner universe board found at any of "
@@ -203,6 +224,47 @@ def read_universe_board(
         "envelope (no-silent-fails). Ensure the scanner has run for this "
         "cycle before invoking signals_envelope."
     ) from last_exc
+
+
+def _assert_board_fallback_fresh(board: dict, run_date: str) -> None:
+    """I2880: reject a stale ``latest.json`` universe-board fallback.
+
+    Reached only when the dated board for ``run_date`` is missing and we fell
+    through to ``scanner/universe/latest.json``. Staleness is counted in NYSE
+    TRADING days (not calendar days), comparing the board's own ``as_of``
+    against ``run_date``. A same-weekly-cycle board is same-day-or-newer /
+    0-1 trading days old; a prior-cycle board is ~5 trading days old and is
+    rejected. Fails loud rather than silently trade a prior-cycle universe.
+    """
+    as_of = board.get("as_of")
+    if not as_of:
+        raise RuntimeError(
+            "signals_envelope: the dated universe board for "
+            f"{run_date!r} is absent and the latest.json fallback carries no "
+            "'as_of' — cannot verify freshness; refusing to trade an "
+            "unverifiable universe (no-silent-stale)."
+        )
+    try:
+        board_date = date.fromisoformat(str(as_of))
+        ref_date = date.fromisoformat(str(run_date))
+    except ValueError as e:
+        raise RuntimeError(
+            "signals_envelope: unparseable date validating the universe-board "
+            f"fallback (as_of={as_of!r}, run_date={run_date!r}): {e}"
+        ) from e
+    if board_date >= ref_date:
+        return  # same-day-or-newer than run_date — fresh
+    stale_td = count_trading_days(board_date, ref_date)
+    if stale_td > _MAX_BOARD_FALLBACK_STALENESS_TRADING_DAYS:
+        raise RuntimeError(
+            "signals_envelope: the dated universe board for "
+            f"{run_date!r} is absent and the latest.json fallback "
+            f"(as_of={as_of}) is {stale_td} trading days stale "
+            f"(> {_MAX_BOARD_FALLBACK_STALENESS_TRADING_DAYS}) — the scanner "
+            "missed at least one weekly cycle. Refusing to build a trading "
+            "day from a prior-cycle universe (no-silent-stale). Re-run the "
+            f"scanner for {run_date} before invoking signals_envelope."
+        )
 
 
 def read_regime_substrate(bucket: str, s3_client: Any = None) -> dict | None:
@@ -257,22 +319,54 @@ def derive_market_regime(substrate: dict | None) -> str:
 
     ``intensity_z >= +0.5`` -> ``"bull"``; ``<= -0.5`` -> ``"bear"``; else
     ``"neutral"``. Substrate unavailable / no numeric ``intensity_z`` ->
-    ``"neutral"`` with a WARN (the one fail-soft exception — see
-    ``read_regime_substrate``).
+    ``"bear"`` (fail-SAFE, I2881) with a loud alert — see below.
     """
     z = _extract_intensity_z(substrate)
     if z is None:
-        logger.warning(
-            "signals_envelope: no usable intensity_z from regime substrate "
-            "— market_regime='neutral' (fail-soft; substrate has its own "
-            "non-blocking SF producer + freshness monitor)."
-        )
-        return "neutral"
+        # I2881: fail SAFE, not soft. A missing/unreadable regime substrate
+        # must NOT default to 'neutral' — that silently DISABLES the
+        # executor's bear-market risk gates (bear position cap, sector
+        # underweight entry block, which key off market_regime) in exactly
+        # the weeks they matter most. Degrade to the CONSERVATIVE regime
+        # ('bear') so risk controls stay ON, and page loudly so a persistent
+        # substrate failure is fixed rather than run blind. Downside is one
+        # over-cautious cycle on a transient read glitch (opportunity cost,
+        # never capital risk).
+        _alert_regime_substrate_unavailable()
+        return "bear"
     if z >= _INTENSITY_Z_BULL_FLOOR:
         return "bull"
     if z <= _INTENSITY_Z_BEAR_CEIL:
         return "bear"
     return "neutral"
+
+
+def _alert_regime_substrate_unavailable() -> None:
+    """I2881: loud alert when the regime substrate is unreadable and
+    ``derive_market_regime`` fails safe to ``'bear'``. Best-effort publish —
+    the fail-safe regime is already applied regardless of alert delivery."""
+    msg = (
+        "signals_envelope: regime substrate unreadable / no usable "
+        "intensity_z — FAILING SAFE to market_regime='bear' (I2881: keeps "
+        "the executor's bear risk gates ON). A persistent failure runs the "
+        "book at maximum caution every cycle — investigate the regime "
+        "substrate producer."
+    )
+    logger.error(msg)
+    try:
+        from nousergon_lib.alerts import publish
+
+        publish(
+            msg,
+            severity="error",
+            source="signals-envelope",
+            dedup_key="signals_envelope_regime_substrate_failsafe_bear",
+        )
+    except Exception as exc:  # noqa: BLE001 — alert is best-effort; fail-safe regime already applied
+        logger.warning(
+            "signals_envelope: regime-unavailable alert publish failed "
+            "(fail-safe regime still applied): %s", exc,
+        )
 
 
 # ── Envelope construction (pure — no I/O) ───────────────────────────────────

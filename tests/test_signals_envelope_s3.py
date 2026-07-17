@@ -102,6 +102,29 @@ class TestReadUniverseBoard:
         with pytest.raises(RuntimeError, match="no scanner universe board found"):
             read_universe_board(BUCKET, run_date="2026-07-14", s3_client=mocked_s3)
 
+    def test_stale_latest_fallback_raises(self, mocked_s3):
+        # I2880: dated board absent; latest.json is from a PRIOR weekly cycle
+        # (as_of weeks old). Must fail loud, not silently trade a stale universe.
+        stale = _sample_board()
+        stale["as_of"] = "2026-06-01"
+        body = json.dumps(stale).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="trading days stale"):
+            read_universe_board(BUCKET, run_date="2026-07-15", s3_client=mocked_s3)
+
+    def test_latest_fallback_missing_as_of_raises(self, mocked_s3):
+        # I2880: an unverifiable fallback (no as_of) must not be trusted.
+        board = _sample_board()
+        board.pop("as_of")
+        body = json.dumps(board).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="carries no"):
+            read_universe_board(BUCKET, run_date="2026-07-15", s3_client=mocked_s3)
+
 
 # ── read_regime_substrate ────────────────────────────────────────────────────
 
@@ -165,7 +188,7 @@ class TestCli:
         out = json.loads(capsys.readouterr().out)
         assert out["target"] == "shadow"
         assert out["universe_count"] == 2
-        assert out["market_regime"] == "neutral"  # no substrate present
+        assert out["market_regime"] == "bear"  # I2881: no substrate → fail-safe bear
 
     def test_production_with_ack_flag_writes_live_key(self, mocked_s3, capsys, monkeypatch):
         _put_board(mocked_s3, "2026-07-14", _sample_board())
