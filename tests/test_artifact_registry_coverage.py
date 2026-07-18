@@ -76,6 +76,12 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # cost/capture streams above; the decision_artifacts/_eval/ prefix is
     # grandfathered in ARTIFACT_REGISTRY.yaml).
     "evals/judge.py": 2,
+    # Judge re-anchor marker (config#2575 item 7) — writes to the SAME
+    # changelog/entries/ corpus as rolling_mean.py's regression auto-emit
+    # (already registered; observability, not a load-bearing freshness
+    # SLA), so no new ARTIFACT_REGISTRY row, just this per-file PUT pin
+    # (same rationale as evals/control_bands.py above).
+    "evals/judge_reanchor.py": 1,
     "evals/last_week_scorecard.py": 2,
     "evals/orchestrator.py": 2,
     "evals/rationale_clustering.py": 1,
