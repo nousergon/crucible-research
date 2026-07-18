@@ -485,6 +485,11 @@ AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
 ANTHROPIC_API_KEY: str = get_secret("ANTHROPIC_API_KEY", required=False, default="") or ""
 FMP_API_KEY: str = get_secret("FMP_API_KEY", required=False, default="") or ""
 FRED_API_KEY: str = get_secret("FRED_API_KEY", required=False, default="") or ""
+# config#2575 (OpenRouter shadow-judge tier) — SSM-first with env fallback,
+# same convention as every other pinned secret above. get_secret() resolves
+# via krepis.secrets: cache -> SSM -> os.environ, so the live-smoke script's
+# env-only CI posture (no SSM-capable IAM role there) still works unchanged.
+OPENROUTER_API_KEY: str = get_secret("OPENROUTER_API_KEY", required=False, default="") or ""
 
 # ── Thesis management ───────────────────────────────────────────────────────
 _thesis_cfg: dict = _cfg.get("thesis", {})
