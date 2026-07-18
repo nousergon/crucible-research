@@ -206,6 +206,43 @@ class TestSuccessPath:
         assert read_board.call_args.args[0] == "custom-bucket"
         assert write.call_args.kwargs["bucket"] == "custom-bucket"
 
+    def test_preflight_flag_forwarded_to_read_universe_board(self, handler_mod):
+        """config-I2916: the weekly SF threads ``preflight.$: $.research_dry``
+        (true only on the Friday-PM shell run). The handler must forward it to
+        read_universe_board so the fallback-staleness guard is downgraded to a
+        WARN for the dry-Scanner preflight — and it is DISTINCT from
+        dry_run_llm (the full read/build/write path still runs)."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()) as read_board, \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("k1", "k2"),
+             ):
+            handler_mod.handler(
+                {"run_date": "2026-07-14", "preflight": True}, None,
+            )
+        # Not short-circuited: the read path actually ran (distinct from dry).
+        read_board.assert_called_once()
+        assert read_board.call_args.kwargs.get("preflight") is True
+
+    def test_preflight_defaults_false_on_real_run(self, handler_mod):
+        """Absent ``preflight`` (every real Saturday invoke) must forward
+        preflight=False so the I2880 staleness guard stays fully in force."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()) as read_board, \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("k1", "k2"),
+             ):
+            handler_mod.handler({"run_date": "2026-07-14"}, None)
+        assert read_board.call_args.kwargs.get("preflight") is False
+
     def test_substrate_none_is_not_an_error(self, handler_mod):
         """The module's ONE documented fail-soft exception: a None
         substrate (missing/unreadable) must reach build_signals_envelope

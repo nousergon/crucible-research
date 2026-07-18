@@ -174,7 +174,10 @@ def _client(s3_client: Any = None):
 
 
 def read_universe_board(
-    bucket: str, run_date: str | None = None, s3_client: Any = None,
+    bucket: str,
+    run_date: str | None = None,
+    s3_client: Any = None,
+    preflight: bool = False,
 ) -> dict:
     """Read the scanner universe board (schema_version 3, ``scoring/
     universe_board.py``). RAISES loud if unavailable at either the
@@ -190,6 +193,21 @@ def read_universe_board(
     leaves this cycle's dated board absent must NOT fall through to a
     prior-cycle ``latest.json`` and trade a stale universe with
     ``status: OK`` — the fallback is bounded by trading-day staleness.
+
+    ``preflight`` (config-I2916): the weekly SF's Friday-PM shell run
+    deliberately runs the Scanner DRY (``dry_run_llm.$: $.research_dry``),
+    so this cycle's dated board is ALWAYS absent on the preflight and
+    ``read_universe_board`` ALWAYS falls through to the prior-Saturday
+    ``latest.json`` — which is structurally ~5 trading days stale by
+    Friday evening. That is an EXPECTED artefact of the dry-scanner
+    preflight contract, not a real staleness fault, so on ``preflight=True``
+    the fallback-staleness bound is downgraded from a hard raise to a
+    WARN (see ``_assert_board_fallback_fresh``). Every OTHER integrity
+    check is untouched: a genuinely absent fallback (BOTH keys missing)
+    still raises, an unverifiable/unparseable ``as_of`` still raises, and
+    on the real Saturday run (``preflight=False``) the staleness bound is
+    fully in force. The preflight's whole point is bootstrap/transport
+    smoke, so the read path stays live rather than short-circuiting.
     """
     s3 = _client(s3_client)
     dated_key = (
@@ -213,7 +231,7 @@ def read_universe_board(
         # trading-day staleness so we never silently trade a prior-cycle
         # universe. The dated key is inherently current, so it skips the guard.
         if key == UNIVERSE_BOARD_LATEST_KEY and dated_key is not None:
-            _assert_board_fallback_fresh(board, run_date)
+            _assert_board_fallback_fresh(board, run_date, preflight=preflight)
         return board
 
     raise RuntimeError(
@@ -226,7 +244,9 @@ def read_universe_board(
     ) from last_exc
 
 
-def _assert_board_fallback_fresh(board: dict, run_date: str) -> None:
+def _assert_board_fallback_fresh(
+    board: dict, run_date: str, preflight: bool = False,
+) -> None:
     """I2880: reject a stale ``latest.json`` universe-board fallback.
 
     Reached only when the dated board for ``run_date`` is missing and we fell
@@ -235,6 +255,19 @@ def _assert_board_fallback_fresh(board: dict, run_date: str) -> None:
     against ``run_date``. A same-weekly-cycle board is same-day-or-newer /
     0-1 trading days old; a prior-cycle board is ~5 trading days old and is
     rejected. Fails loud rather than silently trade a prior-cycle universe.
+
+    ``preflight`` (config-I2916): on the weekly SF's Friday-PM shell run the
+    dated board is INTENTIONALLY absent (dry Scanner) and this fallback is
+    ALWAYS the prior-Saturday board (~5 trading days old by Friday PM) — a
+    structural artefact of the dry-scanner preflight contract, not a real
+    scanner miss. So on ``preflight=True`` the staleness bound is downgraded
+    from a hard raise to a WARN: the preflight completes its bootstrap/
+    transport smoke instead of failing on an expected-stale fallback, while
+    the real Saturday run (``preflight=False``) keeps the bound fully in
+    force. NOTE: preflight relaxes ONLY the staleness bound — a fallback
+    with a missing/unparseable ``as_of`` (an unverifiable, possibly
+    corrupt board) still raises even under preflight, since that is a real
+    integrity fault the smoke is meant to surface.
     """
     as_of = board.get("as_of")
     if not as_of:
@@ -256,7 +289,7 @@ def _assert_board_fallback_fresh(board: dict, run_date: str) -> None:
         return  # same-day-or-newer than run_date — fresh
     stale_td = count_trading_days(board_date, ref_date)
     if stale_td > _MAX_BOARD_FALLBACK_STALENESS_TRADING_DAYS:
-        raise RuntimeError(
+        msg = (
             "signals_envelope: the dated universe board for "
             f"{run_date!r} is absent and the latest.json fallback "
             f"(as_of={as_of}) is {stale_td} trading days stale "
@@ -265,6 +298,19 @@ def _assert_board_fallback_fresh(board: dict, run_date: str) -> None:
             "day from a prior-cycle universe (no-silent-stale). Re-run the "
             f"scanner for {run_date} before invoking signals_envelope."
         )
+        if preflight:
+            # config-I2916: Friday-PM shell run — the dated board is
+            # intentionally absent (dry Scanner) so this stale fallback is
+            # EXPECTED, not a real scanner miss. WARN instead of raising so
+            # the preflight completes its bootstrap/transport smoke; the
+            # real Saturday run (preflight=False) still hard-fails here.
+            logger.warning(
+                "[signals_envelope] PREFLIGHT: tolerating stale universe-board "
+                "fallback (would hard-fail on a real run). %s",
+                msg,
+            )
+            return
+        raise RuntimeError(msg)
 
 
 def read_regime_substrate(bucket: str, s3_client: Any = None) -> dict | None:
