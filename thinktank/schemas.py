@@ -292,6 +292,11 @@ class RunManifest(_Artifact):
     themes_reconciled: bool = False
     theme_updates_written: int = 0
     context_sources_present: dict[str, bool] = Field(default_factory=dict)
+    coverage_gap: dict | None = Field(
+        default=None,
+        description="Coverage gap vs scanner top-N: top60/top30 pct covered, "
+        "uncovered counts. Emitted at end of every daily run.",
+    )
     ratings_rows: int = 0
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
     total_cost_usd: float = 0.0
