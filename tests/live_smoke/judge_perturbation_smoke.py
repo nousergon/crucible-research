@@ -16,9 +16,11 @@ quality), NOT on stock outcomes.
 
 Runs:
   * CI on PRs touching evals/judge.py, evals/perturbation.py, or the
-    rubric prompts — gated on ANTHROPIC_API_KEY + the alpha-engine-config
-    checkout (the rubric prompts are gitignored). Forks without the
-    secret get a clean skip (exit 0), not a failure.
+    rubric prompts — gated on OPENROUTER_API_KEY (alpha-engine-config-I2997,
+    2026-07-19: evaluate_artifact migrated off direct Anthropic to
+    OpenRouter/DeepSeek V4 Flash) + the alpha-engine-config checkout (the
+    rubric prompts are gitignored). Forks without the secret get a clean
+    skip (exit 0), not a failure.
   * Locally: .venv/bin/python tests/live_smoke/judge_perturbation_smoke.py
 
 Tolerant by design: LLM scores vary run-to-run, so the gate is a
@@ -39,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ.setdefault("ALPHA_ENGINE_SECRETS_SOURCE", "env")
 
 # Curated high-signal subset (bounds cost: 1 reference judging per rubric
-# + one per corruption ≈ 10 Haiku calls). These corruptions are
+# + one per corruption ≈ 10 judge LLM calls). These corruptions are
 # unambiguous degradations a competent judge must catch.
 _SUBSET_NAMES = {
     "strip_numerical_grounding",
@@ -60,10 +62,14 @@ _MIN_CAUGHT_RATE = 0.75
 
 
 def main() -> int:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    # alpha-engine-config-I2997 (2026-07-19): evaluate_artifact migrated
+    # off direct Anthropic to OpenRouter/DeepSeek V4 Flash — this smoke
+    # exercises that same sync judge path via _default_judge, so it now
+    # needs an OpenRouter key, not an Anthropic one.
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         print(
-            "judge_perturbation_smoke: ANTHROPIC_API_KEY not set; skipping. "
+            "judge_perturbation_smoke: OPENROUTER_API_KEY not set; skipping. "
             "(Expected on fork PRs without the secret; not a failure.)",
             file=sys.stderr,
         )
