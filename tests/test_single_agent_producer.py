@@ -17,7 +17,9 @@ from tests.test_signals_producer_contract import (  # noqa: E402
     _REQUIRED_TOP_LEVEL,
 )
 from producers.single_agent import (  # noqa: E402
+    CHALLENGER_MODEL,
     RankingProducerOutput,
+    assess_candidates,
     build_single_agent_signals,
     run_single_agent_producer,
 )
@@ -119,3 +121,77 @@ def test_run_injects_assess_fn(monkeypatch):
 def test_registry_has_single_agent_challenger():
     spec = RESEARCH_PRODUCERS.get("single_agent_quant")
     assert spec is not None and spec.kind == "challenger" and spec.build is not None
+
+
+# ── assess_candidates (alpha-engine-config-I2997: OpenRouter/DeepSeek V4 Pro,
+#    fake krepis.llm transport — no real network) ──────────────────────────
+
+
+class _FakeAgentPrompt:
+    def __init__(self):
+        self.text = "SYSTEM PROMPT PLACEHOLDER"
+
+    def langsmith_metadata(self):
+        return {}
+
+
+def test_assess_candidates_uses_deepseek_pro_non_strict_structured_output(monkeypatch):
+    import agents.prompt_loader as prompt_loader
+
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
+
+    captured_specs = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return type("Resp", (), {
+                "choices": [type("Choice", (), {
+                    "message": type("Msg", (), {
+                        "content": (
+                            '{"assessments": ['
+                            '{"ticker": "AAA", "qual_score": 91, "conviction": "rising", '
+                            '"brief_thesis": "strong"}]}'
+                        ),
+                    })(),
+                })()],
+                "model": "deepseek/deepseek-v4-pro",
+                "usage": None,
+            })()
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self):
+            self.chat = FakeChat()
+
+    def factory(spec, api_key):
+        captured_specs.append(spec)
+        return FakeClient()
+
+    out = assess_candidates(
+        ["AAA"], {"AAA": {"technical_score": 80.0}}, {"AAA": "Technology"},
+        api_key="sk-test", client_factory=factory,
+    )
+    assert out == [
+        {"ticker": "AAA", "qual_score": 91.0, "conviction": "rising", "brief_thesis": "strong"}
+    ]
+    assert len(captured_specs) == 1
+    spec = captured_specs[0]
+    assert spec.provider == "openrouter"
+    assert spec.model == CHALLENGER_MODEL == "deepseek/deepseek-v4-pro"
+    # REQUIRED, not incidental — see producers/single_agent.py module docstring:
+    # strict json_schema is live-verified unreliable for DeepSeek on OpenRouter.
+    assert spec.structured_outputs is False
+    assert spec.reasoning == {"exclude": True}
+
+
+def test_assess_candidates_requires_api_key(monkeypatch):
+    import agents.prompt_loader as prompt_loader
+    monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
+    import config
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "", raising=False)
+
+    with pytest.raises(RuntimeError, match="OpenRouter API key"):
+        assess_candidates(["AAA"], {}, {}, api_key=None)

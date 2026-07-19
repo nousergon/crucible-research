@@ -13,14 +13,20 @@ name: Judge Perturbation Smoke
 # or the smoke itself. Rubric PROMPT changes live in alpha-engine-config
 # and reach the judge via that repo's notify-research dispatch.
 #
-# Needs BOTH the ANTHROPIC_API_KEY secret (live judge call) AND the
+# alpha-engine-config-I2997 (2026-07-19): evaluate_artifact (the sync
+# judge path this smoke exercises via _default_judge) migrated off direct
+# Anthropic to OpenRouter/DeepSeek V4 Flash — this workflow now needs
+# OPENROUTER_API_KEY instead of ANTHROPIC_API_KEY.
+#
+# Needs BOTH the OPENROUTER_API_KEY secret (live judge call) AND the
 # alpha-engine-config checkout (the eval rubric prompts are gitignored
 # here and loaded at runtime). Forks without the API secret get a clean
 # skip (the script exits 0 when the env var is unset).
 #
-# Cost: ~6 Haiku judge calls per run (1 reference per rubric + one per
-# corruption) — cents. Tolerant caught-rate gate absorbs LLM variance;
-# a regressed/insensitive judge still fails it.
+# Cost: ~6 DeepSeek V4 Flash judge calls per run (1 reference per rubric +
+# one per corruption) — cents, cheaper than the pre-migration Haiku
+# baseline. Tolerant caught-rate gate absorbs LLM variance; a
+# regressed/insensitive judge still fails it.
 
 on:
   pull_request:
@@ -70,6 +76,6 @@ jobs:
 
       - name: Run judge perturbation smoke
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PYTHONPATH: .
         run: python tests/live_smoke/judge_perturbation_smoke.py

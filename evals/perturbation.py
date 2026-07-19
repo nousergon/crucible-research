@@ -533,7 +533,11 @@ def build_artifact(agent_id: str, agent_output: dict,
 
 def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
                    api_key: Optional[str]) -> dict[str, int]:
-    """Live-judge adapter: score an artifact → {dimension: score}."""
+    """Live-judge adapter: score an artifact → {dimension: score}.
+
+    ``api_key`` is an OpenRouter key since alpha-engine-config-I2997
+    (2026-07-19) — ``evaluate_artifact`` migrated off direct Anthropic;
+    see its docstring."""
     ev = evaluate_artifact(artifact, judge_model=judge_model, api_key=api_key)
     return {d.dimension: d.score for d in ev.dimension_scores}
 
@@ -542,8 +546,13 @@ def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
                      api_key: Optional[str]) -> dict[str, int]:
     """OpenRouter shadow-judge adapter (config#2575 item 6) — same
     ``judge_fn`` call shape as ``_default_judge`` but routes through
-    ``evals.judge.evaluate_artifact_openrouter`` instead of the Anthropic
-    ``evaluate_artifact`` path. Pass as ``run_perturbation_battery(...,
+    ``evals.judge.evaluate_artifact_openrouter`` (the shadow-tagged,
+    excluded-from-decision-authority tier) instead of
+    ``evals.judge.evaluate_artifact`` (the sync PRIMARY path — which,
+    since alpha-engine-config-I2997, 2026-07-19, also calls OpenRouter
+    under the hood via the same shared call core, but persists under the
+    caller's Haiku/Sonnet ``judge_model`` identity, not the shadow one).
+    Pass as ``run_perturbation_battery(...,
     judge_fn=openrouter_judge, judge_model=OPENROUTER_SHADOW.logical_key)``
     to validate the shadow tier against the SAME perturbation harness
     (same battery, same caught-rate threshold) used to validate Haiku —
