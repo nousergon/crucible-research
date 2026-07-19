@@ -42,14 +42,18 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import boto3
+from krepis.judge import JudgeToolCallLeakError
 from krepis.judge import ToolResultNotFoundError as _LibToolResultNotFoundError
 from krepis.judge import build_structured_tool_spec as _lib_build_tool_spec
+from krepis.judge import check_openai_tool_response_for_leak
 from krepis.judge import decode_custom_id as _lib_decode_custom_id
 from krepis.judge import encode_custom_id as _lib_encode_custom_id
 from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
 from krepis.judge import render_rubric as _lib_render_rubric
+from krepis.llm_config import ModelSpec
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
+from openai import OpenAI
 
 from nousergon_lib.decision_capture import DecisionArtifact
 from nousergon_lib.eval_artifacts import (
@@ -80,10 +84,10 @@ def _new_judge_run_id() -> str:
     """
     return new_eval_run_id()
 
-from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
+from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
 from agents.langchain_utils import invoke_structured_with_validation_retry
 from agents.prompt_loader import LoadedPrompt, load_prompt
-from evals.judge_models import TAG_BY_LOGICAL, request_model_for
+from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
 from graph.state_schemas import (
     RubricEvalArtifact,
@@ -790,6 +794,289 @@ def evaluate_artifact(
         dimension_scores=llm_output.dimension_scores,
         overall_reasoning=llm_output.overall_reasoning,
     )
+
+
+# ── OpenRouter shadow-judge tier (config#2575 items 2-3) ─────────────────
+#
+# **Shadow-only.** Runs the SAME rubric/artifact through the SAME
+# ``RubricEvalArtifact`` output shape as ``evaluate_artifact`` above (no
+# bespoke third judge implementation, per config#2575's binding
+# constraint carried forward from config#1676/#1675), but on the
+# OpenAI-compatible transport via ``krepis.llm``'s adapter instead of
+# LangChain's ``ChatAnthropic`` — the Anthropic-specific
+# ``with_structured_output`` + ``invoke_structured_with_validation_retry``
+# chokepoint has no OpenRouter equivalent, so this is a parallel call path
+# that converges on the identical persisted-artifact contract.
+#
+# Callers MUST treat every artifact this function returns as shadow-only:
+# persist it (``evals/judge_models.SHADOW_LOGICAL_KEYS`` marks
+# ``OPENROUTER_SHADOW.logical_key`` as excluded from escalation routing/
+# RationaleClustering/ReplayConcordance/Director consumption) but never
+# feed it into ``should_escalate_to_sonnet`` or any decision path until
+# the perturbation-suite validation (config#2575 item 6) passes and an
+# explicit promotion event (item 7) lifts the exclusion.
+
+MAX_OPENROUTER_JUDGE_RETRIES = 3
+"""Same attempt budget as ``MAX_JUDGE_RETRIES`` (Anthropic path) — kept as
+a distinct constant rather than reusing the same name since the retry
+UNIT differs: each Anthropic retry is a langchain
+``invoke_structured_with_validation_retry`` correction turn (feeds the
+validation error back as context); each OpenRouter retry here is a fresh
+``krepis.llm.LLMClient.structured`` attempt (its own internal correction
+loop) PLUS this function's own leak-guard gate. Both cap worst-case
+latency at 3 full model calls."""
+
+
+def _openrouter_judge_model_spec(*, request_model: str, max_tokens: int) -> "ModelSpec":
+    """Build the ``ModelSpec`` for the OpenRouter shadow-judge tier.
+
+    ``reasoning={"exclude": True}`` is NOT the default here — live
+    validation (config#2575, 2026-07-18) confirmed a reasoning-capable
+    OpenRouter model can burn its entire budget on chain-of-thought before
+    ever emitting the forced tool call (``finish_reason="length"``, no
+    ``tool_calls`` — see ``krepis.judge.check_openai_tool_response_for_leak``
+    and its docstring for the live-reproduced failure shape). Excluding
+    reasoning avoids paying for tokens that never reach the scored output
+    and, per the same live check, reliably avoids the truncation failure
+    mode for the pinned model. A future judge-tier model that specifically
+    benefits from visible reasoning could override this — kept as an
+    explicit, documented default rather than silently omitted.
+    """
+    return ModelSpec(
+        provider="openrouter",
+        model=request_model,
+        max_tokens=max_tokens,
+        reasoning={"exclude": True},
+    )
+
+
+def evaluate_artifact_openrouter(
+    artifact: DecisionArtifact,
+    *,
+    judge_run_id: Optional[str] = None,
+    judge_model: str = OPENROUTER_SHADOW.logical_key,
+    api_key: Optional[str] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    judged_artifact_s3_key: Optional[str] = None,
+    max_retries: int = MAX_OPENROUTER_JUDGE_RETRIES,
+) -> RubricEvalArtifact:
+    """Judge a single ``DecisionArtifact`` against its rubric via the
+    OpenRouter shadow-judge tier.
+
+    Mirrors ``evaluate_artifact``'s contract exactly (same rubric
+    resolution, same empty-input / degenerate-input skip gates, same
+    ``RubricEvalArtifact`` output shape, same S3 persistence/metric
+    conventions downstream) — the only difference is the transport:
+    ``krepis.llm.LLMClient`` (OpenAI-compatible) instead of LangChain's
+    ``ChatAnthropic``, because the Anthropic-specific structured-output
+    retry chokepoint (``invoke_structured_with_validation_retry``) has no
+    OpenRouter equivalent.
+
+    Leak guard (config#2575 item 3): before accepting ANY OpenRouter
+    response as a valid structured judge output, checks it against
+    ``krepis.judge.check_openai_tool_response_for_leak`` — catches both
+    the reasoning-budget-truncation and control-token-leak failure
+    shapes documented on that function (both live-reproduced against a
+    real OpenRouter call while building this guard). A caught leak is
+    logged at WARNING with a DISTINCT, grep-able marker
+    (``[eval_judge_openrouter] leak_guard_triggered``) so a near-miss is
+    diagnosable separately from an ordinary retry — closing the
+    retry-masking visibility gap flagged in this issue's own thread
+    (2026-07-15/16 comments) for the sibling Anthropic-Batches
+    structural-parse-failure case. A caught leak consumes a retry
+    attempt (fresh decoder sample) rather than failing immediately,
+    since — like ordinary schema non-conformance — a resample often
+    recovers.
+
+    Raises:
+      - ``ValueError`` if no rubric is mapped for the artifact's
+        agent_id (same as ``evaluate_artifact``).
+      - ``RuntimeError`` if all ``max_retries`` attempts fail (leak
+        guard trip or schema validation failure) — same fail-loud
+        contract as ``evaluate_artifact``.
+    """
+    rubric_name = resolve_rubric_for_agent(artifact.agent_id)
+    if rubric_name is None:
+        raise ValueError(
+            f"No rubric mapped for agent_id={artifact.agent_id!r}. "
+            f"Pre-filter with resolve_rubric_for_agent() if iterating "
+            f"a mixed batch."
+        )
+
+    judge_run_id = judge_run_id or _new_judge_run_id()
+    loaded_prompt = load_prompt(rubric_name)
+
+    if not artifact.agent_output:
+        return _make_skip_eval_artifact(
+            artifact,
+            rubric_name=rubric_name,
+            rubric_version=loaded_prompt.version,
+            judge_model=judge_model,
+            judge_run_id=judge_run_id,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+            skip_reason="precluded_by_empty_upstream",
+        )
+
+    if _is_degenerate_input(artifact):
+        logger.info(
+            "[eval_judge_openrouter] degenerate_input skip — agent_id=%s",
+            artifact.agent_id,
+        )
+        return _make_skip_eval_artifact(
+            artifact,
+            rubric_name=rubric_name,
+            rubric_version=loaded_prompt.version,
+            judge_model=judge_model,
+            judge_run_id=judge_run_id,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+            skip_reason="degenerate_input",
+        )
+
+    rendered = _render_rubric(artifact, loaded_prompt)
+    request_model = request_model_for(judge_model)
+    spec = _openrouter_judge_model_spec(request_model=request_model, max_tokens=max_tokens)
+    client = OpenAI(
+        base_url=spec.resolved_base_url(),
+        api_key=_resolve_openrouter_api_key(api_key),
+    )
+
+    tool_schema = _build_rubric_tool_spec()
+    tool_name = tool_schema["name"]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": tool_schema["name"],
+            "description": tool_schema["description"],
+            "parameters": tool_schema["input_schema"],
+        },
+    }]
+
+    last_error: Optional[BaseException] = None
+    llm_output: Optional[RubricEvalLLMOutput] = None
+    resolved_model: Optional[str] = None
+    total_usd = 0.0
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=spec.model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": "You are a strict, evidence-grounded rubric judge."},
+                    {"role": "user", "content": rendered},
+                ],
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": tool_name}},
+                extra_body={"reasoning": spec.reasoning} if spec.reasoning else {},
+            )
+        except Exception as exc:  # noqa: BLE001 — transport error, bounded retry below
+            last_error = exc
+            logger.warning(
+                "[eval_judge_openrouter:%s] attempt %d/%d transport error: %s",
+                artifact.agent_id, attempt, max_retries, exc,
+            )
+            continue
+
+        choice = resp.choices[0]
+        resolved_model = getattr(resp, "model", None) or resolved_model
+        usage = getattr(resp, "usage", None)
+        cost = getattr(usage, "cost", None) if usage is not None else None
+        if isinstance(cost, (int, float)):
+            total_usd += float(cost)
+
+        try:
+            check_openai_tool_response_for_leak(choice, tool_name=tool_name)
+        except JudgeToolCallLeakError as exc:
+            last_error = exc
+            # DISTINCT, grep-able marker — see docstring: a leak near-miss
+            # must be diagnosable separately from ordinary schema-validation
+            # retries, not folded into the same generic "attempt failed" line.
+            logger.warning(
+                "[eval_judge_openrouter:%s] leak_guard_triggered attempt=%d/%d "
+                "reason=%s finish_reason=%s request_model=%s",
+                artifact.agent_id, attempt, max_retries,
+                exc.reason, exc.finish_reason, spec.model,
+            )
+            continue
+
+        tool_calls = choice.message.tool_calls or []
+        matching = next(
+            (tc for tc in tool_calls if tc.function.name == tool_name), None,
+        )
+        if matching is None:
+            last_error = ValueError(
+                f"no {tool_name!r} tool call in OpenRouter response "
+                f"(finish_reason={choice.finish_reason!r})"
+            )
+            logger.warning(
+                "[eval_judge_openrouter:%s] attempt %d/%d: %s",
+                artifact.agent_id, attempt, max_retries, last_error,
+            )
+            continue
+
+        try:
+            raw_args = json.loads(matching.function.arguments)
+            llm_output = RubricEvalLLMOutput.model_validate(raw_args)
+            last_error = None
+            break
+        except Exception as exc:  # noqa: BLE001 — covers JSONDecodeError + ValidationError; bounded retry
+            last_error = exc
+            logger.warning(
+                "[eval_judge_openrouter:%s] attempt %d/%d schema validation "
+                "failed: %s",
+                artifact.agent_id, attempt, max_retries, exc,
+            )
+            continue
+
+    if llm_output is None:
+        raise RuntimeError(
+            f"[eval_judge_openrouter] {max_retries} attempts failed for "
+            f"agent_id={artifact.agent_id} judge={judge_model}. Last error: "
+            f"{type(last_error).__name__ if last_error else 'Unknown'}: "
+            f"{last_error}. Inspect the leak_guard_triggered / schema "
+            f"validation WARNING logs above."
+        )
+
+    logger.info(
+        "[eval_judge_openrouter] persisted-cost agent_id=%s request_model=%s "
+        "resolved_model=%s provider_cost_usd=%.6f (shadow-only, no "
+        "decision authority — config#2575)",
+        artifact.agent_id, request_model, resolved_model, total_usd,
+    )
+
+    return RubricEvalArtifact(
+        run_id=artifact.run_id,
+        judge_run_id=judge_run_id,
+        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        judged_agent_id=artifact.agent_id,
+        judged_artifact_s3_key=judged_artifact_s3_key,
+        rubric_id=rubric_name,
+        rubric_version=loaded_prompt.version,
+        judge_model=judge_model,
+        judge_request_model=request_model,
+        judge_resolved_model=resolved_model,
+        dimension_scores=llm_output.dimension_scores,
+        overall_reasoning=llm_output.overall_reasoning,
+    )
+
+
+def _resolve_openrouter_api_key(api_key: Optional[str]) -> str:
+    """Resolve the OpenRouter API key: explicit ``api_key`` arg wins,
+    else ``config.OPENROUTER_API_KEY`` (SSM-first with env fallback via
+    ``krepis.secrets.get_secret`` — same convention as
+    ``evaluate_artifact``'s ``api_key or ANTHROPIC_API_KEY`` pattern).
+    Raises loudly rather than letting the OpenAI SDK client construction
+    fail with a less diagnosable error.
+    """
+    key = api_key or OPENROUTER_API_KEY
+    if not key:
+        raise RuntimeError(
+            "evaluate_artifact_openrouter requires an OpenRouter API key: "
+            "pass api_key= explicitly, or ensure config.OPENROUTER_API_KEY "
+            "resolves (SSM parameter /alpha-engine/OPENROUTER_API_KEY, or "
+            "the OPENROUTER_API_KEY environment variable as a fallback)."
+        )
+    return key
 
 
 # ── Persistence ───────────────────────────────────────────────────────────

@@ -87,8 +87,57 @@ SONNET = JudgeModelSpec(
     ),
 )
 
-_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET)
+OPENROUTER_SHADOW = JudgeModelSpec(
+    logical_key="openrouter-shadow",
+    request_model="deepseek/deepseek-v4-flash",
+    tag="orsh",
+    pinned=False,
+    pin_note=(
+        "config#2575 item 2 (2026-07-18). Cheapest-first pick among "
+        "OpenRouter models with confirmed tool-call/structured-output "
+        "support, NOT Kimi K2.6 by default per Brian's standing "
+        "preference — live OpenRouter catalog pricing pulled 2026-07-18 "
+        "showed deepseek/deepseek-v4-flash at ~$0.098/$0.196 per M "
+        "prompt/completion tokens vs moonshotai/kimi-k2.6 at "
+        "~$0.95/$4.00/M (~17x more expensive blended), with "
+        "deepseek-v4-flash still a frontier-class, large-context (1M "
+        "tok), tool-calling-capable model from a reputable lab — unlike "
+        "the handful of sub-$0.05/M models (8B-and-under open weights) "
+        "that are cheaper still but too weak to be a credible "
+        "cross-provider quality critic on this rubric family. Verified "
+        "live: a real OpenRouter `chat.completions.create` call with a "
+        "forced RubricEvalLLMOutput-shaped tool returned a clean, "
+        "well-formed structured tool call (2026-07-18). NOT pinned to a "
+        "dated snapshot — OpenRouter does not publish one for this "
+        "model/provider-route combination (the route is picked by "
+        "OpenRouter's own routing, e.g. 'DigitalOcean', 'ModelRun', "
+        "which can itself vary call-to-call); drift is detected post-hoc "
+        "via `judge_resolved_model` + the re-anchor protocol, same as "
+        "SONNET's un-pinnable-alias case above. **Shadow-only — carries "
+        "NO decision authority** (config#2575 binding constraint): runs "
+        "alongside HAIKU/SONNET, persists under its own `judge_model` "
+        "key, is read by nothing in the escalation/RationaleClustering/"
+        "ReplayConcordance/Director path until the perturbation-suite "
+        "validation (config#2575 item 6) passes. See "
+        "`evals/perturbation_openrouter_smoke.py` for the validation run."
+    ),
+)
+
+_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET, OPENROUTER_SHADOW)
 _BY_LOGICAL: dict[str, JudgeModelSpec] = {s.logical_key: s for s in _SPECS}
+
+SHADOW_LOGICAL_KEYS: frozenset[str] = frozenset({OPENROUTER_SHADOW.logical_key})
+"""Judge logical keys that are SHADOW-ONLY (config#2575 binding
+constraint carried forward from config#1676/#1675): a shadow judge's
+verdicts are persisted for later agreement-metric computation but MUST
+NOT be read by any escalation-routing or downstream-consumption path
+(RationaleClustering, ReplayConcordance, Director) until its
+perturbation-suite validation passes and an explicit promotion event
+(with a logged re-anchor marker, config#2575 item 7) moves it out of
+this set. Centralized here — rather than each consumer hardcoding
+`!= "openrouter-shadow"` — so a future shadow tier is added to exactly
+one place and every consumer's exclusion check picks it up
+automatically."""
 
 TAG_BY_LOGICAL: dict[str, str] = {s.logical_key: s.tag for s in _SPECS}
 """Logical-key → custom_id tag. Single source for judge.py's custom_id

@@ -105,11 +105,12 @@ class TestTagMapContinuity:
     def test_tag_values_match_legacy_codec(self):
         # The custom_id codec depended on these exact tags before the
         # registry existed; changing them would orphan historical
-        # custom_ids. Lock them.
-        assert judge_models.TAG_BY_LOGICAL == {
-            "claude-haiku-4-5": "h45",
-            "claude-sonnet-4-6": "s46",
-        }
+        # custom_ids. Lock them via a subset check (not full-dict
+        # equality) so a new registry entry (e.g. OPENROUTER_SHADOW,
+        # config#2575) doesn't require editing this pin — only a change
+        # to an EXISTING tag would fail it.
+        assert judge_models.TAG_BY_LOGICAL["claude-haiku-4-5"] == "h45"
+        assert judge_models.TAG_BY_LOGICAL["claude-sonnet-4-6"] == "s46"
 
     def test_judge_module_sources_tag_map_from_registry(self):
         # Single source of truth — judge._JUDGE_MODEL_TAG must BE the

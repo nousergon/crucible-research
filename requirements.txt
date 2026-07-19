@@ -101,10 +101,16 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # evals/judge_models.py now delegate their transport/mechanics layer
 # (rubric rendering, structured-output tool spec + batch-result parse,
 # custom_id codec, judge-model registry) to krepis.judge, which ships
-# starting 0.13.0. BLOCKED until nousergon/krepis#27 merges + PyPI
-# publish completes — see that PR + this repo's companion PR for the
-# gate:dependency linkage.
-krepis>=0.13.0
+# starting 0.13.0. (krepis#27 merged 2026-07-15, published as krepis==0.13.0.)
+#
+# Bumped again to >=0.16.0 (config#2575 items 2/3, 2026-07-18):
+# evals/judge.py's new evaluate_artifact_openrouter (the OpenRouter
+# shadow-judge tier) needs krepis.judge.check_openai_tool_response_for_leak
+# + JudgeToolCallLeakError (the judge-tier-specific tool-call leak guard),
+# which ship starting 0.16.0. BLOCKED until the companion krepis PR merges
+# + PyPI publish completes — same gate:dependency linkage pattern as the
+# 0.13.0 bump above.
+krepis>=0.16.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5

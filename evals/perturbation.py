@@ -47,7 +47,7 @@ from nousergon_lib.decision_capture import (
     ModelMetadata,
 )
 
-from evals.judge import DEFAULT_JUDGE_MODEL, evaluate_artifact
+from evals.judge import DEFAULT_JUDGE_MODEL, evaluate_artifact, evaluate_artifact_openrouter
 
 
 # ── Reference fixtures ─────────────────────────────────────────────────────
@@ -535,6 +535,21 @@ def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
                    api_key: Optional[str]) -> dict[str, int]:
     """Live-judge adapter: score an artifact → {dimension: score}."""
     ev = evaluate_artifact(artifact, judge_model=judge_model, api_key=api_key)
+    return {d.dimension: d.score for d in ev.dimension_scores}
+
+
+def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
+                     api_key: Optional[str]) -> dict[str, int]:
+    """OpenRouter shadow-judge adapter (config#2575 item 6) — same
+    ``judge_fn`` call shape as ``_default_judge`` but routes through
+    ``evals.judge.evaluate_artifact_openrouter`` instead of the Anthropic
+    ``evaluate_artifact`` path. Pass as ``run_perturbation_battery(...,
+    judge_fn=openrouter_judge, judge_model=OPENROUTER_SHADOW.logical_key)``
+    to validate the shadow tier against the SAME perturbation harness
+    (same battery, same caught-rate threshold) used to validate Haiku —
+    the EXPERIMENTS 2026-05-29 harness this whole module implements.
+    """
+    ev = evaluate_artifact_openrouter(artifact, judge_model=judge_model, api_key=api_key)
     return {d.dimension: d.score for d in ev.dimension_scores}
 
 

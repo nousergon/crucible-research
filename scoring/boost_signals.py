@@ -51,6 +51,8 @@ import logging
 import os
 from typing import Callable, Optional
 
+from alpha_engine_lib.secrets import get_secret
+
 logger = logging.getLogger(__name__)
 
 _MARKET_DATA_PREFIX = "market_data/"
@@ -227,7 +229,7 @@ def read_institutional_map(
         logger.warning("[boost_signals] institutional artifact read failed: %s", e)
     # 2. live 13F fetch for the screened universe
     if fetcher is None:
-        if not os.environ.get("EDGAR_IDENTITY"):
+        if not get_secret("EDGAR_IDENTITY", required=False):
             logger.info(
                 "[boost_signals] no institutional artifact and EDGAR_IDENTITY unset "
                 "— institutional_boost=0.0 this run"
