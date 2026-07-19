@@ -285,8 +285,21 @@ class TestScannerLeaderboardProducer:
 
 
 class TestProducerLeaderboardProducer:
-    def test_writes_with_enter_scores(self, s3):
+    def test_writes_with_enter_scores(self, s3, monkeypatch):
         from scoring.leaderboard_producers import build_producer_leaderboard
+        from producers.registry import ProducerSpec
+
+        # config-I2993: agentic_sector_teams is retired — no producer is
+        # currently registered kind=="champion". This test still needs to lock
+        # down the join/scoring path end-to-end, so it monkeypatches in a
+        # standin champion spec (as if a successor champion were registered)
+        # rather than asserting on the now-retired name. The no-champion-
+        # registered CURRENT state is covered separately below.
+        standin = ProducerSpec(
+            name="standin_champion", kind="champion", version="v1",
+            description="test standin — not the real registry", build=None,
+        )
+        monkeypatch.setattr("producers.registry.champion_producer", lambda: standin)
 
         entry = "2026-06-01"
         # live champion signals.json + one shadow challenger.
@@ -308,11 +321,29 @@ class TestProducerLeaderboardProducer:
         assert res["key"] == "research/producer_leaderboard/2026-06-27.json"
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
         assert got["leaderboard_id"] == "producer"
-        assert got["champion"] == "agentic_sector_teams"
+        assert got["champion"] == "standin_champion"
         names = {s["name"]: s for s in got["specs"]}
         assert "no_agent_quant" in names
         # champion ranks A>B and A outperforms → IC = 1.0.
-        assert names["agentic_sector_teams"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
+        assert names["standin_champion"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
+
+    def test_no_champion_registered_returns_status_and_writes_nothing(self, s3):
+        # Current real-registry state (config-I2993): agentic_sector_teams is
+        # retired and no successor champion is registered. The leaderboard
+        # must degrade gracefully — a distinguishable status, no exception,
+        # and no artifact written (never a leaderboard silently missing a
+        # champion row) — rather than raising StopIteration.
+        from scoring.leaderboard_producers import build_producer_leaderboard
+
+        entry = "2026-06-01"
+        _put_json(s3, f"signals_shadow/no_agent_quant/{entry}/signals.json", {"signals": {
+            "B": {"signal": "ENTER", "score": 88},
+        }})
+
+        res = build_producer_leaderboard(s3, _BUCKET, "2026-06-27", top_n=1)
+        assert res == {"status": "no_champion_registered"}
+        with pytest.raises(s3.exceptions.NoSuchKey):
+            s3.get_object(Bucket=_BUCKET, Key="research/producer_leaderboard/2026-06-27.json")
 
     def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):
         import scoring.leaderboard_producers as lp
