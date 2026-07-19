@@ -205,20 +205,30 @@ def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
     return SpecDay(ranked=[t for t, _ in rows], scores={t: s for t, s in rows})
 
 
-def _load_producer_specs(s3: Any, bucket: str, dates: list[str]) -> tuple[SpecHistory, list[SpecHistory]]:
+def _load_producer_specs(
+    s3: Any, bucket: str, dates: list[str],
+) -> tuple[Optional[SpecHistory], list[SpecHistory]]:
     """Champion (live ``signals/{date}/signals.json``) + every challenger
     (``signals_shadow/{producer}/{date}/signals.json``) as SpecHistories, each
-    reduced to its ENTER picks ranked by score."""
-    from producers.registry import RESEARCH_PRODUCERS, challenger_producers
+    reduced to its ENTER picks ranked by score.
 
-    champ_spec = next(p for p in RESEARCH_PRODUCERS.values() if p.kind == "champion")
-    champion = SpecHistory(name=champ_spec.name, kind="champion")
-    for d in dates:
-        doc = _get_json(s3, bucket, _SIGNALS_LIVE.format(date=d))
-        if doc:
-            day = _enter_ranked_and_scores(doc)
-            if day.ranked:
-                champion.by_date[d] = day
+    Champion is ``None`` when no ``kind=="champion"`` producer is currently
+    registered (config-I2993: ``agentic_sector_teams`` retired 2026-07-12,
+    no successor champion spec registered yet — that registration is tracked
+    separately). Callers must treat ``None`` as an honest "no champion to
+    score", not an error."""
+    from producers.registry import champion_producer, challenger_producers
+
+    champ_spec = champion_producer()
+    champion: Optional[SpecHistory] = None
+    if champ_spec is not None:
+        champion = SpecHistory(name=champ_spec.name, kind="champion")
+        for d in dates:
+            doc = _get_json(s3, bucket, _SIGNALS_LIVE.format(date=d))
+            if doc:
+                day = _enter_ranked_and_scores(doc)
+                if day.ranked:
+                    champion.by_date[d] = day
 
     challengers: list[SpecHistory] = []
     for spec in challenger_producers():
@@ -331,6 +341,18 @@ def build_producer_leaderboard(
     try:
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
         champion, challengers = _load_producer_specs(s3, bucket, dates)
+        if champion is None:
+            # No kind=="champion" producer registered (config-I2993:
+            # agentic_sector_teams retired 2026-07-12, no successor champion
+            # spec registered yet). This is an honest, expected state post-
+            # retirement, not a failure — WARN and return a distinguishable
+            # status rather than raising or fabricating a champion row.
+            logger.warning(
+                "[leaderboard] no producer registered kind==\"champion\" in "
+                "RESEARCH_PRODUCERS — skipping producer leaderboard for %s "
+                "(config-I2993).", date_str,
+            )
+            return {"status": "no_champion_registered"}
         realized = _resolve_realized_returns(s3, bucket, dates, horizon_days)
         leaderboard = score_leaderboard(
             champion, challengers, realized, top_n=top_n, horizon_days=horizon_days,
