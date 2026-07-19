@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -31,11 +32,40 @@ from nousergon_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )
+from evals.judge_models import OPENROUTER_SHADOW
 from graph.state_schemas import (
     RubricDimensionScore,
     RubricEvalArtifact,
     RubricEvalLLMOutput,
 )
+
+
+# ── OpenRouter transport fakes (alpha-engine-config-I2997) — mirrors
+#    tests/test_eval_judge_openrouter.py's helpers; duplicated locally
+#    (rather than imported) since that module imports fixtures FROM this
+#    one and a back-import would cycle. ──────────────────────────────────
+
+
+def _openai_tool_call(name: str, arguments: dict):
+    return SimpleNamespace(
+        id="call_1",
+        type="function",
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+    )
+
+
+def _openai_response(
+    *, finish_reason: str, tool_calls=None, content=None,
+    model="deepseek/deepseek-v4-flash", cost: float = 0.0001,
+):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = SimpleNamespace(finish_reason=finish_reason, message=message)
+    usage = SimpleNamespace(cost=cost)
+    return SimpleNamespace(choices=[choice], model=model, usage=usage)
+
+
+def _valid_tool_args() -> dict:
+    return _make_llm_output().model_dump()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -336,6 +366,12 @@ class TestBuildLegacyEvalS3Key:
 
 
 class TestEvaluateArtifact:
+    """alpha-engine-config-I2997 (2026-07-19): ``evaluate_artifact`` migrated
+    off direct Anthropic (``ChatAnthropic``) to the SAME OpenRouter
+    forced-tool-call transport core ``evaluate_artifact_openrouter`` already
+    used (config#2575) — mocks ``judge_mod.OpenAI`` (mirrors
+    ``tests/test_eval_judge_openrouter.py``), not ``ChatAnthropic``."""
+
     def test_unmapped_agent_raises(self):
         from evals.judge import evaluate_artifact
         artifact = _make_artifact("totally_made_up_agent")
@@ -345,26 +381,18 @@ class TestEvaluateArtifact:
     def test_full_pipeline_with_mocked_llm(self, monkeypatch):
         from evals import judge as judge_mod
 
-        # PR #106: with_structured_output(include_raw=True) returns a
-        # runnable whose .invoke() yields a dict with parsed/raw/parsing_error.
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = {
-            "parsed": _make_llm_output(),
-            "raw": MagicMock(content="ok"),
-            "parsing_error": None,
-        }
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+        )
 
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(
-            judge_mod, "ChatAnthropic", return_value=fake_llm,
-        ) as mock_anthropic:
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client) as mock_openai_cls:
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
                 artifact,
                 judge_model="claude-haiku-4-5",
-                api_key="sk-test",
+                api_key="sk-or-test",
                 judged_artifact_s3_key="decision_artifacts/2026/05/09/sector_quant:technology/r1.json",
             )
 
@@ -373,318 +401,219 @@ class TestEvaluateArtifact:
         assert result.judged_agent_id == "sector_quant:technology"
         assert result.run_id == artifact.run_id
         assert result.rubric_id == "eval_rubric_sector_quant"
-        # judge_model is the STABLE logical key (persistence/dimension)...
+        # judge_model is the STABLE logical key (persistence/dimension) —
+        # PRESERVED across the migration (S3 path / CloudWatch dimension /
+        # rolling-mean identity; see evaluate_artifact's docstring).
         assert result.judge_model == "claude-haiku-4-5"
-        # ...while the API call is PINNED to the dated snapshot (L4578(a)).
-        assert mock_anthropic.call_args.kwargs["model"] == (
-            "claude-haiku-4-5-20251001"
-        )
-        assert result.judge_request_model == "claude-haiku-4-5-20251001"
-        # MagicMock raw has no dict response_metadata → resolved is None,
-        # not a crash (defensive capture).
-        assert result.judge_resolved_model is None
+        # ...while the ACTUAL API call now goes to the OpenRouter default
+        # evaluate_artifact_openrouter already uses (Brian's ruling: "keep
+        # consistent" rather than a bespoke new pin) — NOT the old Anthropic
+        # dated-snapshot pin.
+        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["model"] == OPENROUTER_SHADOW.request_model
+        assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
         assert result.judged_artifact_s3_key.endswith("/r1.json")
-        # Rubric version comes from the loaded prompt's frontmatter; we
-        # don't pin to a specific semver here so prompt updates don't
-        # break this test.
         assert result.rubric_version  # non-empty
-        # Dimension scores propagated
         assert len(result.dimension_scores) == 6
         assert result.dimension_scores[0].dimension == "numerical_grounding"
-        # Overall reasoning propagated
         assert "regime engagement" in result.overall_reasoning
-        # First-attempt success — should NOT have called invoke more than once
-        assert fake_structured.invoke.call_count == 1
-        # And must have requested include_raw=True
-        fake_llm.with_structured_output.assert_called_once()
-        kwargs = fake_llm.with_structured_output.call_args.kwargs
-        assert kwargs.get("include_raw") is True
+        # First-attempt success — should NOT have called create more than once
+        assert fake_client.chat.completions.create.call_count == 1
+        # base_url must resolve to the OpenRouter endpoint.
+        mock_openai_cls.assert_called_once()
+        assert mock_openai_cls.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        assert mock_openai_cls.call_args.kwargs["api_key"] == "sk-or-test"
+        # reasoning={"exclude": True} forwarded (truncation-avoidance default).
+        assert call_kwargs["extra_body"] == {"reasoning": {"exclude": True}}
 
-    def test_records_resolved_model_from_response_metadata(self):
-        """L4578(a): the API-resolved model is captured per-artifact for
-        drift detection / the re-anchor protocol."""
+    def test_sonnet_tier_also_routes_to_the_same_openrouter_default(self):
+        """Brian's ruling collapses BOTH tiers' physical call onto the SAME
+        OpenRouter default — the Sonnet ``judge_model`` logical key is
+        preserved (persisted identity) but the request model is identical
+        to the Haiku tier's, not a separate Sonnet-equivalent pin."""
         from evals import judge as judge_mod
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = {
-            "parsed": _make_llm_output(),
-            # langchain_anthropic populates response_metadata['model']
-            # with the snapshot Anthropic resolved the request to.
-            "raw": MagicMock(
-                response_metadata={"model": "claude-haiku-4-5-20251001"},
-            ),
-            "parsing_error": None,
-        }
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+        )
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+            artifact = _make_artifact("sector_quant:technology")
+            result = judge_mod.evaluate_artifact(
+                artifact, judge_model="claude-sonnet-4-6", api_key="sk-or-test",
+            )
 
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        assert result.judge_model == "claude-sonnet-4-6"
+        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+
+    def test_records_resolved_model_from_response(self):
+        """L4578(a): the API-resolved model is captured per-artifact for
+        drift detection / the re-anchor protocol — now sourced from the
+        OpenRouter response's ``model`` field rather than langchain's
+        ``response_metadata``."""
+        from evals import judge as judge_mod
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+            model="deepseek/deepseek-v4-flash",
+        )
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             result = judge_mod.evaluate_artifact(
                 _make_artifact("sector_quant:technology"),
                 judge_model="claude-haiku-4-5",
-                api_key="sk-test",
+                api_key="sk-or-test",
             )
-        assert result.judge_resolved_model == "claude-haiku-4-5-20251001"
+        assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
 
     def test_renders_artifact_payload_into_prompt(self, monkeypatch):
         """Verify the rubric prompt is rendered with the artifact's
         input_data_snapshot + agent_output, not placeholder strings."""
         from evals import judge as judge_mod
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = {
-            "parsed": _make_llm_output(),
-            "raw": MagicMock(content="ok"),
-            "parsing_error": None,
-        }
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+        )
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             artifact = _make_artifact("sector_quant:technology")
-            judge_mod.evaluate_artifact(artifact, api_key="sk-test")
+            judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
-        # Inspect the rendered prompt passed to invoke.
-        call_args = fake_structured.invoke.call_args
-        messages = call_args[0][0]
-        rendered = messages[0].content
-        # Specific values from the snapshot must appear in the rendered prompt
+        # Inspect the rendered user-turn content passed to the API.
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        rendered = call_kwargs["messages"][1]["content"]
         assert "AAPL" in rendered
         assert "technology" in rendered
-        # And specific values from the agent output
         assert "ranked_picks" in rendered
         assert "RSI 55, TS 70." in rendered
-        # Substitution variables should NOT remain unrendered
         assert "{agent_input}" not in rendered
         assert "{agent_output}" not in rendered
 
     def test_retries_on_parse_failure_and_succeeds(self, monkeypatch, caplog):
-        """First attempt returns parsing_error; second attempt succeeds.
-        Pin: retry loop catches the parse failure, logs WARNING with
-        raw payload head, retries, returns the parsed result. Counts
-        2 invokes total."""
+        """First attempt has no tool call (ordinary non-conformance);
+        second attempt succeeds. Counts 2 creates total."""
         import logging
         from evals import judge as judge_mod
-        from pydantic import ValidationError
 
-        bad_resp = {
-            "parsed": None,
-            "raw": MagicMock(content='[{"dimension": "x", "score": 4'),
-            "parsing_error": ValidationError.from_exception_data(
-                "RubricEvalLLMOutput", []
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = [
+            _openai_response(finish_reason="stop", tool_calls=None, content="I refuse."),
+            _openai_response(
+                finish_reason="tool_calls",
+                tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
             ),
-        }
-        good_resp = {
-            "parsed": _make_llm_output(),
-            "raw": MagicMock(content="ok"),
-            "parsing_error": None,
-        }
+        ]
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.side_effect = [bad_resp, good_resp]
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
-             patch("time.sleep"), \
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client), \
              caplog.at_level(logging.WARNING):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
-                artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+                artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
             )
 
         assert isinstance(result, RubricEvalArtifact)
-        assert fake_structured.invoke.call_count == 2
-        # Loud-log the parse failure with raw head for diagnostic.
+        assert fake_client.chat.completions.create.call_count == 2
         warn_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("parse attempt 1/3 failed" in m for m in warn_msgs)
-        assert any("raw head=" in m for m in warn_msgs)
+        assert any("attempt 1/3" in m for m in warn_msgs)
 
     def test_raises_after_max_retries_exhausted(self, monkeypatch):
-        """All 3 attempts return parsing_error → raises RuntimeError
-        with diagnostic context. Bounds worst-case latency + makes
-        structural failures loud."""
+        """All 3 attempts fail (leak/truncation) → raises RuntimeError with
+        diagnostic context. Bounds worst-case latency + makes structural
+        failures loud."""
         from evals import judge as judge_mod
-        from pydantic import ValidationError
 
-        bad_resp = {
-            "parsed": None,
-            "raw": MagicMock(content="malformed"),
-            "parsing_error": ValidationError.from_exception_data(
-                "RubricEvalLLMOutput", []
-            ),
-        }
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="length", tool_calls=None, content=None,
+        )
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = bad_resp
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
-             patch("time.sleep"):
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             artifact = _make_artifact("sector_quant:technology")
-            with pytest.raises(RuntimeError, match="parse attempts failed"):
+            with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
-                    artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+                    artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
                 )
 
         # All 3 attempts fired (default MAX_JUDGE_RETRIES=3).
-        assert fake_structured.invoke.call_count == 3
+        assert fake_client.chat.completions.create.call_count == 3
 
     def test_retry_count_param_overrides_default(self, monkeypatch):
         """``max_retries`` param lets callers tune the budget — useful
         for the test-track flag and for ad-hoc replay scripts that
         want to fail fast."""
         from evals import judge as judge_mod
-        from pydantic import ValidationError
 
-        bad_resp = {
-            "parsed": None,
-            "raw": MagicMock(content="x"),
-            "parsing_error": ValidationError.from_exception_data(
-                "RubricEvalLLMOutput", []
-            ),
-        }
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="length", tool_calls=None, content=None,
+        )
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = bad_resp
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
-             patch("time.sleep"):
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with pytest.raises(RuntimeError):
                 judge_mod.evaluate_artifact(
-                    artifact, max_retries=1, api_key="sk-test",
+                    artifact, max_retries=1, api_key="sk-or-test",
                 )
 
         # Single attempt only.
-        assert fake_structured.invoke.call_count == 1
+        assert fake_client.chat.completions.create.call_count == 1
 
-    def test_recovers_deterministic_tool_xml_leak_via_correction_feedback(self):
-        """config#2237: the judge routes through the shared
-        ``invoke_structured_with_validation_retry`` chokepoint (was a bespoke
-        bare re-roll). A DETERMINISTIC tool-XML leak — the model emitting a
-        literal ``<parameter name="dimension_scores">`` tag, captured by
-        langchain as a ``str`` where ``list[RubricDimensionScore]`` is required
-        — re-rolled IDENTICALLY under the old loop and could never recover (the
-        2026-07-11 CRUS-class hard-fail). The chokepoint feeds the Pydantic
-        ``ValidationError`` plus the model's own prior malformed output back as
-        correction context, so a later attempt corrects the field. Mirrors
-        ``test_held_thesis_strict::test_reroll_recovers_when_a_later_attempt_valid``.
-        """
+    def test_control_token_leak_recovers_on_retry(self, caplog):
+        """Mirrors ``TestEvaluateArtifactOpenRouter``'s leak-guard coverage
+        — a control-token leak on attempt 1 consumes a retry (fresh
+        decoder sample), not an immediate failure; attempt 2 succeeds."""
         from evals import judge as judge_mod
-        from graph.state_schemas import RubricEvalLLMOutput
 
-        # The deterministic leak: a literal tool-XML tag string where a list is
-        # required. Constructing the schema with it raises the SAME
-        # ValidationError every attempt — a bare re-roll can't fix it; only the
-        # correction-feedback retry can.
-        leaked_xml = '\n<parameter name="dimension_scores">numerical_grounding: 4\n'
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = [
+            _openai_response(
+                finish_reason="stop",
+                content="<|tool_calls_section_begin|>garbage",
+                tool_calls=None,
+            ),
+            _openai_response(
+                finish_reason="tool_calls",
+                tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+            ),
+        ]
 
-        def _leak_response():
-            try:
-                RubricEvalLLMOutput(
-                    dimension_scores=leaked_xml, overall_reasoning="x",
-                )
-                raise AssertionError(
-                    "expected RubricEvalLLMOutput to reject a str dimension_scores"
-                )
-            except Exception as exc:  # pydantic.ValidationError
-                parsing_error = exc
-            return {"raw": object(), "parsed": None, "parsing_error": parsing_error}
-
-        def _valid_response():
-            return {
-                "raw": MagicMock(
-                    response_metadata={"model": "claude-haiku-4-5-20251001"},
-                ),
-                "parsed": _make_llm_output(),
-                "parsing_error": None,
-            }
-
-        class _RecordingStructuredLLM:
-            def __init__(self, responses):
-                self._responses = responses
-                self.calls = []  # captured message list per invoke
-
-            def invoke(self, messages, config=None):
-                self.calls.append(messages)
-                idx = min(len(self.calls) - 1, len(self._responses) - 1)
-                return self._responses[idx]
-
-        # [leak, leak, valid] — recovers on the 3rd attempt under the preserved
-        # budget (MAX_JUDGE_RETRIES=3 → chokepoint max_retries=2 → 3 attempts).
-        structured = _RecordingStructuredLLM(
-            [_leak_response(), _leak_response(), _valid_response()]
-        )
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client), \
+             caplog.at_level("WARNING"):
             artifact = _make_artifact("sector_quant:technology")
-            result = judge_mod.evaluate_artifact(
-                artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
-            )
+            result = judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
-        # Recovered: a valid RubricEvalArtifact carrying the 3rd attempt's scores.
         assert isinstance(result, RubricEvalArtifact)
         assert len(result.dimension_scores) == 6
         assert result.overall_reasoning == (
             "Solid grounding; regime engagement weakest."
         )
-        # resolved_model extraction (L4578(a)) preserved across the migration.
-        assert result.judge_resolved_model == "claude-haiku-4-5-20251001"
+        assert fake_client.chat.completions.create.call_count == 2
+        assert any("leak_guard_triggered" in rec.message for rec in caplog.records)
 
-        # 3 total attempts (fail-loud budget preserved).
-        assert len(structured.calls) == 3
-
-        # CORRECTION FEEDBACK — the discriminating assertion vs. a bare re-roll:
-        # attempt 1 sends only the rendered prompt; the retry does NOT re-send
-        # the identical single message but grows it with the prior raw output +
-        # a correction that names the schema violation.
-        assert len(structured.calls[0]) == 1
-        assert len(structured.calls[1]) > 1
-        retry_text = " ".join(
-            m.content for m in structured.calls[1]
-            if isinstance(getattr(m, "content", None), str)
-        )
-        assert "schema validation" in retry_text.lower()
-
-    def test_deterministic_leak_that_never_corrects_still_fails_loud(self):
-        """FAIL-LOUD is absolute (config#2237): a deterministic leak the model
-        never corrects across the full attempt budget must still ``raise`` — no
-        carry-forward, no swallow, no widened gate."""
+    def test_leak_that_never_recovers_still_fails_loud(self):
+        """FAIL-LOUD is absolute: a leak the model never corrects across
+        the full attempt budget must still ``raise`` — no carry-forward,
+        no swallow, no widened gate."""
         from evals import judge as judge_mod
-        from graph.state_schemas import RubricEvalLLMOutput
 
-        leaked_xml = '\n<parameter name="dimension_scores">numerical_grounding: 4\n'
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="length", tool_calls=None, content=None,
+        )
 
-        def _leak_response():
-            try:
-                RubricEvalLLMOutput(
-                    dimension_scores=leaked_xml, overall_reasoning="x",
-                )
-                raise AssertionError("expected ValidationError")
-            except Exception as exc:
-                parsing_error = exc
-            return {"raw": object(), "parsed": None, "parsing_error": parsing_error}
-
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = _leak_response()
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
-
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             artifact = _make_artifact("sector_quant:technology")
-            with pytest.raises(RuntimeError, match="parse attempts failed"):
+            with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
-                    artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+                    artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
                 )
 
         # Full budget exhausted (MAX_JUDGE_RETRIES=3 → 3 attempts).
-        assert fake_structured.invoke.call_count == 3
+        assert fake_client.chat.completions.create.call_count == 3
 
 
 # ── persist_eval_artifact ─────────────────────────────────────────────────
@@ -729,24 +658,17 @@ class TestEmptyInputShortCircuit:
         zero token cost, zero retry surface."""
         from evals import judge as judge_mod
 
-        fake_llm = MagicMock()
-        fake_structured = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
+        fake_client = MagicMock()
 
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
             result = judge_mod.evaluate_artifact(
                 self._make_empty_qual_artifact(),
                 judge_model="claude-haiku-4-5",
-                api_key="sk-test",
+                api_key="sk-or-test",
             )
 
-        # ChatAnthropic must have been instantiated only by load_prompt's
-        # downstream paths, NOT for an LLM call. The structured-output
-        # invoke path must never have fired.
-        assert fake_structured.invoke.call_count == 0, (
-            "Empty-input short-circuit must skip the LLM invoke entirely. "
-            f"Got invoke_count={fake_structured.invoke.call_count}"
-        )
+        assert result.judge_skip_reason == "precluded_by_empty_upstream"
+        fake_client.chat.completions.create.assert_not_called()
 
     def test_empty_agent_output_returns_skip_marker_artifact(self):
         """Skip path persists a RubricEvalArtifact with empty dimensions
@@ -797,26 +719,23 @@ class TestEmptyInputShortCircuit:
         result becomes the agent-failure signal we WANT to surface."""
         from evals import judge as judge_mod
 
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = {
-            "parsed": _make_llm_output(),
-            "raw": MagicMock(content="ok"),
-            "parsing_error": None,
-        }
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+        )
 
         artifact = _make_artifact("sector_quant:technology")
         # Quant ran, did 22 tool calls, but returned no qualifying picks
         # — the agent-failure pattern from workstream #2 (separate).
         artifact.agent_output = {"ranked_picks": [], "tool_calls": [{}] * 22, "iterations": 22}
 
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
-            result = judge_mod.evaluate_artifact(artifact, api_key="sk-test")
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+            result = judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
         # Judge MUST have run — empty ranked_picks is not the structural
         # skip pattern; it's an agent-quality signal we want surfaced.
-        assert fake_structured.invoke.call_count == 1
+        assert fake_client.chat.completions.create.call_count == 1
         assert result.judge_skip_reason is None
         assert len(result.dimension_scores) > 0
 

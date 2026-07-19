@@ -8,11 +8,32 @@ so a champion-vs-single-agent comparison isolates the value of the MULTI-AGENT
 ORCHESTRATION specifically (vs the value of an LLM at all, which the no-agent
 floor isolates). It is also the natural Phase-3 distillation target (config#1135).
 
-Mirrors the CIO single-Sonnet pattern (agents/investment_committee/ic_cio.py):
-``with_structured_output`` + deadline-bounded 429 retry + cost-telemetry
-callback + gitignored prompt via ``load_prompt``. Assembly reuses the live
-``_build_signals_payload`` (no reimplementation) — contract-identical to the
-champion; only the belief differs.
+Assembly reuses the live ``_build_signals_payload`` (no reimplementation) —
+contract-identical to the champion; only the belief differs.
+
+**alpha-engine-config-I2997 (2026-07-19): migrated ``assess_candidates`` off
+direct Anthropic (``ChatAnthropic``/Sonnet-4-6) to the fleet-SOTA
+``krepis.llm.LLMClient`` OpenRouter transport (DeepSeek V4 Pro — this
+challenger's per-candidate qualitative reasoning is the "heavier reasoning"
+tier per Brian's ruling, vs the lighter DeepSeek V4 Flash used for
+mechanical/high-volume sites). This is dispatched WEEKLY by the Saturday SF's
+ChallengerShadow state (``_run_challengers_only``), and is a SHADOW/
+best-effort challenger — never blocks the champion.**
+
+``ModelSpec.structured_outputs=False`` is REQUIRED, not a style choice: live-
+verified 2026-07-19 that OpenRouter's strict ``response_format=json_schema``
+mode is unreliable for DeepSeek-family models — across repeated live calls
+against this exact ``RankingProducerOutput`` schema, the model intermittently
+renamed the required ``ticker`` field (e.g. to ``symbol``/``candidate``),
+which the strict/json_schema path took as ground truth and failed schema
+validation on every attempt. ``structured_outputs=False`` (JSON-instruction +
+tolerant extraction — the krepis/Think-Tank fallback path) round-tripped this
+exact schema correctly on every live attempt tried. ``reasoning={"exclude":
+True}`` mirrors the fleet's two other live DeepSeek V4 OpenRouter consumers
+(morning-signal's ``fallback_llm``, crucible-research's own
+``evals/judge_models.py::OPENROUTER_SHADOW``) — without it a reasoning-
+capable OpenRouter model can burn its whole output budget on chain-of-thought
+and return empty content (config#1659 / config#2575).
 """
 
 from __future__ import annotations
@@ -157,52 +178,95 @@ def _format_candidate_block(scanner_tickers: list[str], technical_scores: dict, 
     return "\n".join(lines)
 
 
+CHALLENGER_MODEL = "deepseek/deepseek-v4-pro"
+"""OpenRouter/DeepSeek V4 Pro (alpha-engine-config-I2997, 2026-07-19). ID
+verified two ways: (1) live against the OpenRouter models API
+(`GET https://openrouter.ai/api/v1/models` lists `deepseek/deepseek-v4-pro`
+— "DeepSeek: DeepSeek V4 Pro"); (2) the sibling `deepseek/deepseek-v4-flash`
+ID cross-checked against two independent live fleet configs already running
+it (morning-signal's SSM `fallback_llm`, this repo's own
+`evals/judge_models.py::OPENROUTER_SHADOW`) confirms the `deepseek/deepseek-
+v4-*` naming family is correct. Never hand-write an OpenRouter model ID — a
+typo silently killed morning-signal on 2026-07-15."""
+
+CHALLENGER_LLM_MAX_RETRIES = 3
+"""SDK-level (openai client) retry count for transport/429 errors — the
+OpenAI SDK's own bounded-backoff retry, replacing the Anthropic-specific
+``invoke_anthropic_safe`` deadline-bounded 429 wrapper this call site used
+pre-migration (that wrapper inspects Anthropic-shaped rate-limit errors
+specifically and has no OpenRouter equivalent)."""
+
+
 def assess_candidates(
     scanner_tickers: list[str],
     technical_scores: dict,
     sector_map: dict,
     *,
     api_key: str | None = None,
+    client_factory=None,
 ) -> list[dict]:
-    """The single LLM call: one Sonnet invocation assesses every candidate.
+    """The single LLM call: one DeepSeek V4 Pro (OpenRouter) invocation
+    assesses every candidate.
 
-    Mirrors the CIO call site (structured output + deadline-bounded 429 retry +
-    cost-telemetry callback + gitignored prompt). Returns a list of assessment
-    dicts. Raises on a persistent rate-limit or parse failure (all-agents-strict
-    — a challenger that silently degrades would pollute the leaderboard)."""
-    from langchain_anthropic import ChatAnthropic
-    from langchain_core.messages import HumanMessage
+    Structured output via ``krepis.llm.LLMClient.structured()`` — the
+    fleet-SOTA multi-transport adapter (generalizes the Think-Tank-ratified
+    pattern). Returns a list of assessment dicts. Raises on a persistent
+    transport or parse failure (all-agents-strict — a challenger that
+    silently degrades would pollute the leaderboard).
 
-    from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY
+    ``client_factory`` is the krepis.llm.LLMClient test seam: a callable
+    ``(spec, api_key) -> transport_client``. Production leaves it unset."""
+    from krepis.llm import LLMClient
+    from krepis.llm_config import ModelSpec
+
+    from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY
     from agents.prompt_loader import load_prompt
-    from agents.langchain_utils import (
-        SECTOR_TEAM_LLM_MAX_RETRIES,
-        invoke_anthropic_safe,
-    )
-    from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = loaded.text + "\n\n## Candidates\n" + _format_candidate_block(
         scanner_tickers, technical_scores, sector_map
     )
-    llm = ChatAnthropic(
-        model=STRATEGIC_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    key = api_key or OPENROUTER_API_KEY
+    if not key:
+        raise RuntimeError(
+            "single_agent challenger requires an OpenRouter API key: pass "
+            "api_key= explicitly, or ensure config.OPENROUTER_API_KEY "
+            "resolves (SSM parameter /alpha-engine/OPENROUTER_API_KEY, or "
+            "the OPENROUTER_API_KEY environment variable as a fallback)."
+        )
+    spec = ModelSpec(
+        provider="openrouter",
+        model=CHALLENGER_MODEL,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        callbacks=[get_cost_telemetry_callback()],
+        # REQUIRED — see module docstring (live-verified 2026-07-19: strict
+        # response_format=json_schema is unreliable for DeepSeek-family
+        # models on OpenRouter; the JSON-instruction + tolerant-extraction
+        # fallback round-tripped this schema correctly every attempt).
+        structured_outputs=False,
+        reasoning={"exclude": True},
     )
-    structured_llm = llm.with_structured_output(RankingProducerOutput)
-    raw: RankingProducerOutput = invoke_anthropic_safe(
-        structured_llm,
-        [HumanMessage(content=prompt)],
-        label="single_agent_producer",
-        # SHADOW challenger: bound tightly so a rate-limit storm fails this
-        # best-effort call FAST rather than holding the champion's Lambda open
-        # for the global 75-min deadline. A missed shadow week is fine.
-        deadline_seconds=180.0,
-        config={"metadata": loaded.langsmith_metadata()},
+    client = LLMClient(
+        spec, api_key=key, client_factory=client_factory,
+        max_retries=CHALLENGER_LLM_MAX_RETRIES,
     )
+    result = client.structured(
+        # Behavior parity with the pre-migration call (a single
+        # HumanMessage carrying the whole rendered prompt, no system
+        # turn) — the whole prompt goes into user_content unchanged;
+        # system is empty rather than splitting/rewriting the prompt.
+        system="",
+        user_content=prompt,
+        schema=RankingProducerOutput,
+        schema_name="ranking_producer_output",
+        attempts=2,
+    )
+    logger.info(
+        "[single_agent] challenger llm_call model=%s resolved_model=%s "
+        "input_tokens=%d output_tokens=%d provider_cost_usd=%s",
+        CHALLENGER_MODEL, result.model, result.usage.input_tokens,
+        result.usage.output_tokens, result.usage.provider_cost_usd,
+    )
+    raw: RankingProducerOutput = result.parsed
     return [a.model_dump() for a in raw.assessments]
 
 

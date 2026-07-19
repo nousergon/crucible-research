@@ -23,6 +23,7 @@ from nousergon_lib.decision_capture import (
 )
 
 from evals.judge import _is_degenerate_input, evaluate_artifact
+from tests.test_eval_judge import _openai_response, _openai_tool_call
 
 
 def _artifact(
@@ -221,12 +222,12 @@ class TestEvaluateArtifactDegenerateInputShortCircuit:
         }
         artifact = _artifact("thesis_update:tech:MCK", snap)
 
-        mock_llm = MagicMock()
-        with patch.object(judge_mod, "ChatAnthropic", return_value=mock_llm):
-            eval_result = evaluate_artifact(artifact, api_key="sk-test")
+        fake_client = MagicMock()
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+            eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
 
         # No LLM call was made — the gate short-circuited
-        mock_llm.with_structured_output.assert_not_called()
+        fake_client.chat.completions.create.assert_not_called()
 
         assert eval_result.judge_skip_reason == "degenerate_input"
         assert eval_result.dimension_scores == []
@@ -253,20 +254,17 @@ class TestEvaluateArtifactDegenerateInputShortCircuit:
             ],
             overall_reasoning="passed",
         )
-        fake_structured = MagicMock()
-        fake_structured.invoke.return_value = {
-            "parsed": fake_parsed,
-            "raw": MagicMock(content="ok"),
-            "parsing_error": None,
-        }
-        fake_llm = MagicMock()
-        fake_llm.with_structured_output.return_value = fake_structured
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", fake_parsed.model_dump())],
+        )
 
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
-            eval_result = evaluate_artifact(artifact, api_key="sk-test")
+        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+            eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
 
         # LLM call was made
-        fake_llm.with_structured_output.assert_called_once()
+        fake_client.chat.completions.create.assert_called_once()
         # Got a real eval, not a skip
         assert eval_result.judge_skip_reason is None
         assert len(eval_result.dimension_scores) == 1
