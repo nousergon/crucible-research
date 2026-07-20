@@ -120,14 +120,30 @@ echo "  Transport     : SSM via lib chokepoint (python -m krepis.ssm_dispatcher)
 # ── Cleanup + spot-interruption retry trap (installed BEFORE launch) ─────────
 # Locate the private alpha-engine-config research/ subtree on the dispatcher
 # (ae-dashboard clones + boot-pulls the private repo; laptop fallback for
-# manual runs). Hard-fail if prompts are missing — deploy.sh parity: an
-# image/box without the real prompts must never ship/run (2026-04-11).
-RESEARCH_CONFIG_SRC="/home/ec2-user/alpha-engine-config/research"
-if [ ! -d "$RESEARCH_CONFIG_SRC" ]; then
-    RESEARCH_CONFIG_SRC="$HOME/Development/alpha-engine-config/research"
-fi
+# manual runs). Package-first, legacy top-level fallback — mirrors deploy.sh's
+# resolution (config#1042) and the on-box `resolve_experiment_config` call the
+# staged tarball ultimately feeds (line 115's ALPHA_ENGINE_EXPERIMENT_ID export
+# below only affects the box-side reader; the STAGING step here was picking
+# the config up locally before shipping it, and had drifted out of package-first
+# lockstep with deploy.sh — config#3066). Hard-fail if prompts are missing —
+# deploy.sh parity: an image/box without the real prompts must never ship/run
+# (2026-04-11).
+for _config_repo_root in "/home/ec2-user/alpha-engine-config" "$HOME/Development/alpha-engine-config"; do
+    if [ -d "$_config_repo_root/experiments/${ALPHA_ENGINE_EXPERIMENT_ID}/research" ]; then
+        RESEARCH_CONFIG_SRC="$_config_repo_root/experiments/${ALPHA_ENGINE_EXPERIMENT_ID}/research"
+        break
+    elif [ -d "$_config_repo_root/research" ]; then
+        RESEARCH_CONFIG_SRC="$_config_repo_root/research"
+        break
+    fi
+done
+unset _config_repo_root
 if ! ls "$RESEARCH_CONFIG_SRC/prompts/"*.txt >/dev/null 2>&1; then
-    echo "ERROR: research prompts not found at $RESEARCH_CONFIG_SRC/prompts/ —" >&2
+    echo "ERROR: research prompts not found — tried (package-first, experiment=${ALPHA_ENGINE_EXPERIMENT_ID}):" >&2
+    echo "  /home/ec2-user/alpha-engine-config/experiments/${ALPHA_ENGINE_EXPERIMENT_ID}/research/prompts/" >&2
+    echo "  /home/ec2-user/alpha-engine-config/research/prompts/ (legacy)" >&2
+    echo "  \$HOME/Development/alpha-engine-config/experiments/${ALPHA_ENGINE_EXPERIMENT_ID}/research/prompts/" >&2
+    echo "  \$HOME/Development/alpha-engine-config/research/prompts/ (legacy)" >&2
     echo "is alpha-engine-config cloned + pulled on this host? (deploy.sh parity check)" >&2
     exit 1
 fi
