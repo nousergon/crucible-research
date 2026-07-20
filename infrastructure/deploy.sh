@@ -29,6 +29,7 @@ FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
+FUNCTION_OPENROUTER_SHADOW="alpha-engine-research-openrouter-shadow"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -858,6 +859,24 @@ deploy_signals_envelope() {
   _deploy_image_shared_lambda "$FUNCTION_SIGNALS_ENVELOPE" "signals_envelope_handler" 300 1024
 }
 
+# OpenRouter shadow-judge scheduled runner — alpha-engine-config#2934.
+# Shared image with the main runner; CMD override sets the entry to
+# openrouter_shadow_handler.handler. Thin wrapper around
+# evals.openrouter_shadow.run_shadow_judge_over_date (crucible-research#470)
+# — invoked ONLY by EventBridge (infrastructure/setup-openrouter-shadow-
+# schedule.sh), never by the production Batches-API SF chain (deliberately
+# out of scope, see config#2934 / config#2575's deferred-items list).
+# Timeout 900s (Lambda max) is generous headroom for a week's capture
+# partition of sequential OpenRouter judge calls — mirrors thinktank's
+# timeout choice for the same "EventBridge->Lambda first" reasoning.
+# Memory 1024MB matches the main runner's boto3/pandas working set.
+# OPENROUTER_API_KEY resolves at import time via config.py's existing
+# SSM-first get_secret() chokepoint — no function-level env var config
+# or bespoke secrets hydration needed (same as eval_judge_handler.py).
+deploy_openrouter_shadow() {
+  _deploy_image_shared_lambda "$FUNCTION_OPENROUTER_SHADOW" "openrouter_shadow_handler" 900 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -871,9 +890,10 @@ case "$TARGET" in
   scanner)               deploy_scanner ;;
   thinktank)             deploy_thinktank ;;
   signals_envelope)      deploy_signals_envelope ;;
+  openrouter_shadow)     deploy_openrouter_shadow ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_openrouter_shadow ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|openrouter_shadow|both|all]"; exit 1 ;;
 esac
 
 echo ""

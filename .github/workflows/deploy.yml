@@ -235,6 +235,23 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh signals_envelope
 
+      # OpenRouter shadow-judge scheduled runner — alpha-engine-config#2934.
+      # Same image-share pattern as eval-judge/thinktank, CMD override sets
+      # the entry to openrouter_shadow_handler.handler. Invoked ONLY by the
+      # EventBridge rule infrastructure/setup-openrouter-shadow-schedule.sh
+      # creates — never by the production Batches-API SF chain. Auto-deployed
+      # on every push so evals/openrouter_shadow.py changes propagate without
+      # a manual step, matching every other shared-image Lambda's precedent
+      # (the class of bug this guards against: config#993 / the
+      # eval_rolling_mean 5-week-rot incident). The ci-deploy-guard test
+      # (tests/test_deploy_targets_invoked_by_workflow.py) enforces this
+      # step's existence.
+      - name: Deploy openrouter-shadow Lambda (alpha-engine-research-openrouter-shadow)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh openrouter_shadow
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
