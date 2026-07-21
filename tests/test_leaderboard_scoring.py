@@ -150,6 +150,37 @@ class TestScoreLeaderboard:
         assert names["agentic"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
         assert names["quant"]["realized_rank_ic"]["mean"] == pytest.approx(-1.0)
 
+    def test_champion_none_disables_topn_alpha_vs_champion_only(self):
+        """alpha-engine-config-I2998: no champion registered (config-I2993)
+        must not block scoring — realized_rank_ic stays champion-free-computable,
+        only topn_alpha_vs_champion (which needs a live comparator) goes null,
+        and no champion row is emitted."""
+        champ, chals, realized = _scanner_specs()
+        lb = score_leaderboard(None, chals, realized, top_n=2)
+        assert lb["champion"] is None
+        names = {s["name"]: s for s in lb["specs"]}
+        assert set(names) == {"chal"}
+        assert names["chal"]["topn_alpha_vs_champion"] is None
+        assert names["chal"]["realized_rank_ic"]["mean"] == pytest.approx(-1.0)
+
+    def test_topn_alpha_vs_benchmark(self):
+        # champion-free direct lift: spec top-N mean realized return minus the
+        # benchmark ticker's own realized return, per date.
+        champ, chals, realized = _scanner_specs()
+        realized = {d: {**r, "SPY": 0.01} for d, r in realized.items()}
+        lb = score_leaderboard(champ, chals, realized, top_n=2)
+        names = {s["name"]: s for s in lb["specs"]}
+        # champ top-2 {A,B}: date1 mean(0.10,0.05)-0.01=0.065; date2 mean(0.08,0.04)-0.01=0.05
+        alpha = names["champ"]["topn_alpha_vs_benchmark"]
+        assert alpha["n_dates"] == 2
+        assert alpha["mean"] == pytest.approx((0.065 + 0.05) / 2)
+
+    def test_benchmark_ticker_none_disables_metric(self):
+        champ, chals, realized = _scanner_specs()
+        lb = score_leaderboard(champ, chals, realized, top_n=2, benchmark_ticker=None)
+        names = {s["name"]: s for s in lb["specs"]}
+        assert names["champ"]["topn_alpha_vs_benchmark"] is None
+
 
 class TestCohortGate:
     def test_unmatured_date_does_not_join(self):
@@ -327,23 +358,38 @@ class TestProducerLeaderboardProducer:
         # champion ranks A>B and A outperforms → IC = 1.0.
         assert names["standin_champion"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
 
-    def test_no_champion_registered_returns_status_and_writes_nothing(self, s3):
+    def test_no_champion_registered_still_scores_challengers(self, s3):
         # Current real-registry state (config-I2993): agentic_sector_teams is
-        # retired and no successor champion is registered. The leaderboard
-        # must degrade gracefully — a distinguishable status, no exception,
-        # and no artifact written (never a leaderboard silently missing a
-        # champion row) — rather than raising StopIteration.
+        # retired and no successor champion is registered. Per alpha-engine
+        # -config-I2998, this must NOT block the leaderboard from being
+        # written or challengers from being scored — the prior behavior
+        # (writing nothing at all) meant crucible-backtester's
+        # champion_promotion.py could never observe this arm's evidence,
+        # exactly the "simultaneous no-contest" defect I2998 was filed to
+        # close. Champion-free metrics (realized_rank_ic,
+        # topn_alpha_vs_benchmark) must still be computed.
         from scoring.leaderboard_producers import build_producer_leaderboard
 
         entry = "2026-06-01"
         _put_json(s3, f"signals_shadow/no_agent_quant/{entry}/signals.json", {"signals": {
-            "B": {"signal": "ENTER", "score": 88},
+            "A": {"signal": "ENTER", "score": 90},
+            "B": {"signal": "ENTER", "score": 70},
         }})
+        _put_closes(s3, entry, {"A": 100, "B": 100, "SPY": 100})
+        for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
+            _put_closes(s3, d, {"A": 110, "B": 102, "SPY": 105})
 
         res = build_producer_leaderboard(s3, _BUCKET, "2026-06-27", top_n=1)
-        assert res == {"status": "no_champion_registered"}
-        with pytest.raises(s3.exceptions.NoSuchKey):
-            s3.get_object(Bucket=_BUCKET, Key="research/producer_leaderboard/2026-06-27.json")
+        assert res["status"] == "ok"
+        got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
+        assert got["champion"] is None
+        names = {s["name"]: s for s in got["specs"]}
+        assert "no_agent_quant" in names
+        row = names["no_agent_quant"]
+        assert row["topn_alpha_vs_champion"] is None
+        # top-1 pick is A (score 90): realized 0.10 vs SPY's realized 0.05.
+        assert row["topn_alpha_vs_benchmark"]["mean"] == pytest.approx(0.05)
+        assert row["realized_rank_ic"]["mean"] == pytest.approx(1.0)
 
     def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):
         import scoring.leaderboard_producers as lp
