@@ -46,6 +46,13 @@ class ThinktankStore:
             raise
         return obj["Body"].read().decode("utf-8")
 
+    def list_keys(self, prefix: str) -> list[str]:
+        keys: list[str] = []
+        paginator = self.s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        return keys
+
     def put_json(self, key: str, payload: Any) -> None:
         body = json.dumps(payload, indent=2, default=str).encode("utf-8")
         self._put(key, body, "application/json")

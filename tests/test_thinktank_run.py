@@ -40,11 +40,16 @@ class _FakeBackend:
         self.ratings: dict[str, int] = {}  # ticker -> independent rating override (default 72)
         self.calls: list[str] = []
         self.users: list[tuple[str, str]] = []  # (schema_name, user_content)
+        self.raise_on_ticker: str | None = None  # simulate a mid-batch crash/timeout
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         name = kwargs["response_format"]["json_schema"]["name"]
         user = kwargs["messages"][-1]["content"]
+        if name == "CompanyThesisRatedLLM" and self.raise_on_ticker:
+            m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
+            if m_ticker and m_ticker.group(1) == self.raise_on_ticker:
+                raise RuntimeError(f"simulated crash building {self.raise_on_ticker}")
         self.calls.append(name)
         self.users.append((name, user))
         if name == "ThemeThesisLLM":
@@ -291,6 +296,42 @@ def test_gap_fill_mode_sizes_intake_to_measured_gap_only(tt_config):
         assert manifest3.names_added == []
         assert manifest3.names_refreshed == []
         assert manifest3.coverage_gap["uncovered_count"] == 0
+
+
+def test_gap_fill_checkpoints_ledger_so_a_retry_only_rebuilds_the_remaining_gap(tt_config):
+    """config#3072: a Lambda timeout / SF retry mid-gap_fill must NOT restart
+    the whole batch from ticker 1 — each thesis write is checkpointed to the
+    ledger immediately, so a re-invocation of gap_fill_only re-selects intake
+    against a ledger that already reflects every unit completed so far."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # RUN 1 — normal daily covers T0-T2 (tt_config daily_new_names=3)
+        _run(tt_config, backend, s3)
+
+        # RUN 2 — gap_fill_only over the 5-name gap (T3-T7); the backend
+        # "crashes" partway through T5 — simulating the SF Lambda getting
+        # SIGKILLed mid-batch. T3 and T4 must already be checkpointed to
+        # the ledger even though the run as a whole raised.
+        backend.raise_on_ticker = "T5"
+        with pytest.raises(RuntimeError, match="simulated crash building T5"):
+            _run(tt_config, backend, s3, gap_fill_only=True)
+
+        store = ThinktankStore(BUCKET, s3)
+        ledger = CoverageLedger.model_validate(store.get_json(LEDGER_KEY))
+        assert set(ledger.entries) == {"T0", "T1", "T2", "T3", "T4"}
+
+        # RUN 3 — retry: gap_fill_only must pick up ONLY the still-uncovered
+        # remainder (T5-T7), never re-doing the already-checkpointed T3/T4.
+        backend.raise_on_ticker = None
+        manifest3, store = _run(tt_config, backend, s3, gap_fill_only=True)
+        assert manifest3.mode == "gap_fill"
+        assert manifest3.names_added == ["T5", "T6", "T7"]
+        assert manifest3.coverage_gap["uncovered_count"] == 3
+        ledger = CoverageLedger.model_validate(store.get_json(LEDGER_KEY))
+        assert set(ledger.entries) == {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"}
 
 
 def test_budget_breach_refuses_run(tt_config, monkeypatch):
