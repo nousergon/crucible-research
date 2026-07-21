@@ -41,8 +41,29 @@ on:
 # project's monthly data-transfer quota (config-I2780). The newest head is
 # the only one whose verdict matters; cancel the stale poll and let the
 # dispatcher's server-side dedupe decline the stale launch.
+#
+# The shared group above is keyed on PR number only, not SHA — deliberate,
+# so a genuine new push cancels an older push's in-flight canary. But
+# GitHub forms the concurrency group, and applies cancel-in-progress,
+# BEFORE any job-level `if` runs — so an irrelevant `labeled` event (e.g. a
+# triage bot's `source:groom` landing a couple seconds after this same
+# SHA's `synchronize` trigger) still contends for the shared group and
+# cancels whatever legitimate run is already in flight for that SHA, even
+# though the `label` job's own guard above means this new run is about to
+# skip both its jobs and do nothing. Root-caused live on config#2570's own
+# PR (crucible-research#478): the real synchronize-triggered canary run got
+# cancelled out from under it, and the CANCELLED check-runs it left behind
+# on that SHA are permanent — the Checks API keeps every run's check-runs,
+# not just the latest by name, so `label`/`canary` stayed red on that SHA
+# forever even though the "real" run for the winning trigger had nothing
+# left to do but skip. Fix: give irrelevant `labeled` events their own
+# run-id-scoped throwaway group so they never collide with (and never
+# cancel) the shared per-PR group.
 concurrency:
-  group: canary-replay-${{ github.event.pull_request.number }}
+  group: >-
+    canary-replay-${{ github.event.pull_request.number }}${{
+    (github.event.action == 'labeled' && github.event.label.name != 'canary:replay')
+    && format('-irrelevant-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
