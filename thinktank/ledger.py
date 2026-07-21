@@ -12,7 +12,7 @@ Intake policy (EPIC config#1579, skeleton-crew MVP):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from thinktank import LEDGER_KEY
 from thinktank.schemas import CoverageLedger, LedgerEntry
@@ -30,7 +30,7 @@ def load_ledger(store: ThinktankStore) -> CoverageLedger:
 
 
 def save_ledger(store: ThinktankStore, ledger: CoverageLedger) -> None:
-    ledger.updated_at = datetime.now(timezone.utc).isoformat()
+    ledger.updated_at = datetime.now(UTC).isoformat()
     store.put_json(LEDGER_KEY, ledger.model_dump())
 
 

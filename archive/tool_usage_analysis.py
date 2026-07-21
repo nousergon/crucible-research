@@ -16,7 +16,10 @@ trivially testable and reusable from a Lambda, a notebook, or the dashboard.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
+
+log = logging.getLogger(__name__)
 
 # Sentinel ``ticker`` for tool-call rows recorded at team/sector grain (the
 # combined quant+qual ReAct log is not scoped to a single ticker). Kept here so
@@ -45,9 +48,9 @@ def sector_label_for_team(team_id: str) -> str:
         sectors = TEAM_SECTORS.get(team_id)
         if sectors:
             return sectors[0]
-    except Exception:
+    except Exception as e:
         # Sector lookup failed — return team_id as fallback (recorded: KeyError, None-deref).
-        pass
+        log.debug("Sector lookup failed for team_id=%s: %s", team_id, e)
     return team_id
 
 

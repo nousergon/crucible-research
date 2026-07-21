@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 RESEARCH_PREFIX = "decision_artifacts/_sft_raw/"
 METRON_PREFIX = "metron/_sft_raw/"
@@ -194,11 +194,11 @@ def _date_from_key(key: str) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _today() -> date:
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 # ---------------------------------------------------------------------------

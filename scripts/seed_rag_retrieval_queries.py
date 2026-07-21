@@ -32,7 +32,6 @@ import psycopg2
 import yaml
 from dotenv import dotenv_values
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -83,8 +82,9 @@ def sample_ticker_named_entity(cur) -> list[dict]:
     """10-K Business chunks across diverse industries — query = ticker
     plus a distinctive proper-noun fragment from the chunk content."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         f"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -98,7 +98,7 @@ def sample_ticker_named_entity(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, content in cur.fetchall():
+    for cid, ticker, _doc_type, _fd, content in cur.fetchall():
         # Extract the first 2-4 word "Title Case" phrase (likely a
         # named entity / product / segment name) for the query.
         match = re.search(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})\b", content)
@@ -122,8 +122,9 @@ def sample_filing_type(cur) -> list[dict]:
     """8-K Item 2.02 (Results of Operations) chunks — keyword-strong queries
     keyed on the filing type + ticker + period anchor."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         f"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.section_label, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -137,7 +138,7 @@ def sample_filing_type(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, sec, content in cur.fetchall():
+    for cid, ticker, _doc_type, fd, _sec, content in cur.fetchall():
         quarter = f"Q{(fd.month - 1) // 3 + 1} {fd.year}"
         query = f"{ticker} 8-K results of operations {quarter}"
         out.append(_entry(
@@ -158,8 +159,9 @@ def sample_date_range(cur) -> list[dict]:
     """10-Q chunks anchored by their fiscal period — tests overlay of
     date pre-filter onto retrieval ordering."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         f"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.section_label, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -173,7 +175,7 @@ def sample_date_range(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, sec, content in cur.fetchall():
+    for cid, ticker, _doc_type, fd, _sec, content in cur.fetchall():
         quarter = f"Q{(fd.month - 1) // 3 + 1} {fd.year}"
         query = f"{ticker} {quarter} 10-Q financial condition"
         out.append(_entry(
@@ -194,8 +196,9 @@ def sample_quantitative_line_item(cur) -> list[dict]:
     r"""10-Q chunks containing literal $ amounts — keyword-strong queries
     keyed on the dollar context (line-item phrase + ticker)."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         rf"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -209,7 +212,7 @@ def sample_quantitative_line_item(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, content in cur.fetchall():
+    for cid, ticker, doc_type, _fd, content in cur.fetchall():
         # Find a $ amount + the 2-3 words before it (likely the line-item).
         match = re.search(r"((?:\b\w+\s+){1,4})\$([0-9][0-9.,]*)", content)
         if match:
@@ -240,8 +243,9 @@ def sample_abstract_thesis(cur) -> list[dict]:
     """10-K MD&A or thesis chunks — paraphrase-friendly queries that
     test cosine recall on conceptual content (vector-friendly category)."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         f"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.section_label, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -255,7 +259,7 @@ def sample_abstract_thesis(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, sec, content in cur.fetchall():
+    for cid, ticker, _doc_type, _fd, _sec, content in cur.fetchall():
         # Generic abstract query — tests whether vector cosine surfaces
         # this conceptual chunk despite the query lacking the chunk's
         # literal terms.
@@ -266,11 +270,11 @@ def sample_abstract_thesis(cur) -> list[dict]:
             category="abstract_thesis",
             preview=_preview(content),
             note=(
-                f"AUTOGENERATED — generic abstract query. Vector-friendly "
-                f"category. The query deliberately AVOIDS chunk-literal "
-                f"terms so cosine paraphrase has work to do; if pure "
-                f"keyword wins on this category that's a signal the seed "
-                f"queries are too coupled to literal content (refine)."
+                "AUTOGENERATED — generic abstract query. Vector-friendly "
+                "category. The query deliberately AVOIDS chunk-literal "
+                "terms so cosine paraphrase has work to do; if pure "
+                "keyword wins on this category that's a signal the seed "
+                "queries are too coupled to literal content (refine)."
             ),
         ))
     return out
@@ -280,8 +284,9 @@ def sample_conceptual_narrative(cur) -> list[dict]:
     """8-K material events / acquisitions / strategic announcements —
     queries about industry-shape narratives rather than line items."""
     cur.execute(
+        # `_BOILERPLATE_REGEX` is a hardcoded module constant, never external input.
+        "SELECT DISTINCT ON (d.ticker) "  # noqa: S608
         f"""
-        SELECT DISTINCT ON (d.ticker)
                c.id, d.ticker, d.doc_type, d.filed_date, c.section_label, c.content
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
@@ -297,7 +302,7 @@ def sample_conceptual_narrative(cur) -> list[dict]:
         (SAMPLES_PER_CATEGORY,),
     )
     out = []
-    for cid, ticker, doc_type, fd, sec, content in cur.fetchall():
+    for cid, ticker, _doc_type, _fd, sec, content in cur.fetchall():
         # Map section to a narrative theme.
         if "Acquisition" in sec:
             theme = "acquisition"

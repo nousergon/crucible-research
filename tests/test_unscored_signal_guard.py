@@ -19,8 +19,6 @@ signals/2026-04-04/signals.json).
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def _fake_llm_factory(response_content: str) -> MagicMock:
     """Build a MagicMock that mimics ChatAnthropic's invoke() response.

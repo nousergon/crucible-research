@@ -15,8 +15,8 @@ See ``agentic_sector_teams`` below (config-I2993).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from producers.no_agent import run_no_agent_producer
 from producers.single_agent import run_single_agent_producer

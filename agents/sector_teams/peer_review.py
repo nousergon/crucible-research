@@ -11,18 +11,16 @@ not an open-ended exploration.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from graph.llm_cost_tracker import get_cost_telemetry_callback
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
 )
-
+from agents.prompt_loader import load_prompt
 from config import (
     ANTHROPIC_API_KEY,
     MAX_TOKENS_PER_STOCK,
@@ -30,7 +28,7 @@ from config import (
     PER_STOCK_MODEL,
     TEAM_PICKS_PER_RUN,
 )
-from agents.prompt_loader import load_prompt
+from graph.llm_cost_tracker import get_cost_telemetry_callback
 
 log = logging.getLogger(__name__)
 
@@ -39,10 +37,10 @@ def run_peer_review(
     team_id: str,
     quant_picks: list[dict],
     qual_assessments: list[dict],
-    additional_candidate: Optional[dict],
+    additional_candidate: dict | None,
     technical_scores: dict,
     market_regime: str,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     regime_intensity_z: float | None = None,
 ) -> dict:
     """
@@ -299,7 +297,7 @@ def _quant_reviews_addition(
 def _merge_candidates(
     quant_picks: list[dict],
     qual_assessments: list[dict],
-    additional: Optional[dict],
+    additional: dict | None,
     additional_accepted: bool,
 ) -> list[dict]:
     """Merge quant picks with qual assessments into combined candidates."""
@@ -389,7 +387,7 @@ def _joint_finalization(
     ticker still ships with an empty rationale (don't lose the pick
     just because rationale generation hiccups).
     """
-    from graph.state_schemas import JointSelectionOutput, JointFinalizationDecision
+    from graph.state_schemas import JointFinalizationDecision, JointSelectionOutput
     from strict_mode import is_strict_validation_enabled
 
     # Pass 1 LLM instance — strategic-tier token budget for selection
@@ -420,7 +418,7 @@ def _joint_finalization(
     )
 
     selection_structured = finalization_llm.with_structured_output(JointSelectionOutput)
-    selection: Optional[JointSelectionOutput] = None
+    selection: JointSelectionOutput | None = None
     try:
         selection = invoke_anthropic_safe(
             selection_structured,

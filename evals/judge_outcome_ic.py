@@ -113,8 +113,9 @@ import os
 import sqlite3
 import tempfile
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from nousergon_lib.dates import expected_last_close
 from nousergon_lib.quant.horizons import DEFAULT_POLICY, HorizonPolicy
@@ -218,7 +219,7 @@ def student_t_two_sided_p(t_stat: float, df: float) -> float:
     return _regularized_incomplete_beta(df / 2.0, 0.5, x)
 
 
-def _pooled_spearman_p(ic: float, n: int) -> Optional[float]:
+def _pooled_spearman_p(ic: float, n: int) -> float | None:
     """Two-sided p for a pooled Spearman IC via the standard large-sample
     t-approximation ``t = r·sqrt((n-2)/(1-r²))``, df = n-2 — the same
     default ``scipy.stats.spearmanr`` uses. None when undefined (n < 3);
@@ -251,7 +252,7 @@ class AttributionResult:
     n_skip_markers: int
 
 
-def _ticker_from_agent_id(judged_agent_id: str) -> Optional[str]:
+def _ticker_from_agent_id(judged_agent_id: str) -> str | None:
     """Ticker for a ``thesis_update:{team}:{ticker}`` agent_id; None for
     every other family (they score team-/slate-level outputs)."""
     if not judged_agent_id.startswith(_TICKER_BEARING_PREFIX):
@@ -485,7 +486,7 @@ def compute_judge_outcome_ic(
 
 
 def load_eval_artifacts(
-    s3: Any, bucket: str, prefix: Optional[str] = None,
+    s3: Any, bucket: str, prefix: str | None = None,
 ) -> list[dict]:
     """Every persisted RubricEvalArtifact JSON under the ``_eval/`` prefix.
 
@@ -545,8 +546,8 @@ def build_judge_outcome_ic_block(
     s3: Any,
     bucket: str,
     *,
-    conn: Optional[sqlite3.Connection] = None,
-    eval_prefix: Optional[str] = None,
+    conn: sqlite3.Connection | None = None,
+    eval_prefix: str | None = None,
     policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> dict[str, Any]:
     """Load → attribute → join → compute; returns the frozen block.

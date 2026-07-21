@@ -21,12 +21,26 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timedelta
-from typing import Optional
-from unittest.mock import patch, MagicMock
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+# Both this file (for `local/run.py --offline` / `--stub-llm`) and the Lambda
+# handler's auto-gate (via dry_run.py::install_dry_run_stubs) need the same 7
+# synthetic agent functions; dry_run.py is the canonical (Lambda-importable)
+# home so there's exactly one definition to maintain. install_offline_stubs /
+# install_llm_only_stubs / patch_graph_modules below reference these names
+# with no signature change from this module's historical own definitions.
+from dry_run import (
+    _stub_run_cio,
+    _stub_run_macro_agent,
+    _stub_run_macro_agent_with_reflection,
+    _stub_run_peer_review,
+    _stub_run_qual_analyst,
+    _stub_run_quant_analyst,
+    _stub_run_sector_team,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +115,7 @@ def _stub_fetch_analyst_consensus(ticker, current_price=None):
     # populated them 402'd for every ticker on the current plan) — this
     # stub mirrors the real function so offline dry runs match production.
     logger.info("[offline] stub fetch_analyst_consensus: %s", ticker)
-    rng = random.Random(hash(ticker))
+    rng = random.Random(hash(ticker))  # noqa: S311 — deterministic offline-stub data, not security-sensitive
     price = current_price or rng.uniform(50, 500)
     return {
         "ticker": ticker,
@@ -147,29 +161,6 @@ def _stub_cache_insider_to_s3(data, date):
 def _stub_fetch_institutional_accumulation(tickers):
     logger.info("[offline] stub fetch_institutional_accumulation: %d tickers", len(tickers))
     return {}
-
-
-# ── LLM agent stubs (single-source — imported from /dry_run.py) ─────────────
-#
-# Both this file (local/offline_stubs.py for `local/run.py --offline`
-# and `--stub-llm`) and the Lambda handler's auto-gate (via
-# /dry_run.py::install_dry_run_stubs) need the same 7 synthetic agent
-# functions. dry_run.py is the canonical home (Lambda-importable);
-# this file imports them so there's exactly one definition to maintain.
-#
-# The imports surface the same 7 names this module historically defined,
-# so install_offline_stubs / install_llm_only_stubs / patch_graph_modules
-# below continue to reference them with no signature change.
-
-from dry_run import (
-    _stub_run_macro_agent_with_reflection,
-    _stub_run_macro_agent,
-    _stub_run_quant_analyst,
-    _stub_run_qual_analyst,
-    _stub_run_peer_review,
-    _stub_run_sector_team,
-    _stub_run_cio,
-)
 
 
 # ── S3 / archive stubs ──────────────────────────────────────────────────────

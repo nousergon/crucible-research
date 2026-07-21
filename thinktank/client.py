@@ -23,15 +23,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, TypeVar
+from datetime import UTC, datetime
+from typing import Any, TypeVar
 
 import boto3
-from pydantic import BaseModel, ValidationError
-
-from nousergon_lib.secrets import get_secret
 from nousergon_lib import sft
+from nousergon_lib.secrets import get_secret
+from pydantic import BaseModel, ValidationError
 
 from thinktank import SFT_PRODUCER
 from thinktank.schemas import TierUsage
@@ -264,7 +264,7 @@ class ThinktankClient:
         self._call_seq += 1
         self._sft_rows.setdefault(agent_id, []).append(
             _SftRow(
-                captured_at=datetime.now(timezone.utc).isoformat(),
+                captured_at=datetime.now(UTC).isoformat(),
                 model=tier.model,
                 call_seq=self._call_seq,
                 input_messages=messages,
@@ -357,9 +357,9 @@ def _extract_json(text: str) -> Any:
     cleaned = _FENCE_RE.sub("", text).strip()
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         # last resort: widest brace span (some models add a preamble sentence)
         start, end = cleaned.find("{"), cleaned.rfind("}")
         if start != -1 and end > start:
             return json.loads(cleaned[start : end + 1])
-        raise ValueError(f"no JSON object found in response: {text[:200]!r}")
+        raise ValueError(f"no JSON object found in response: {text[:200]!r}") from e

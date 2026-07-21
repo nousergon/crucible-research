@@ -44,7 +44,7 @@ import argparse
 import logging
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
 
@@ -62,7 +62,7 @@ from thinktank.ledger import (
     select_intake,
 )
 from thinktank.ratings import update_ratings_board
-from thinktank.schemas import CompanyThesis, EventRecord, RunManifest
+from thinktank.schemas import CompanyThesis, CoverageLedger, EventRecord, RunManifest
 from thinktank.settings import ThinktankSettings, load_settings
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
@@ -104,7 +104,7 @@ def run_daily(
         ),
         trading_day=trading_day,
         calendar_date=calendar_date,
-        started_at=datetime.now(timezone.utc).isoformat(),
+        started_at=datetime.now(UTC).isoformat(),
     )
 
     guard = BudgetGuard(store, settings, ssm_client=ssm_client)
@@ -169,7 +169,7 @@ def run_daily(
     covered_before = [] if refresh_tickers is not None else sorted(ledger.covered())
 
     if dry_run:
-        manifest.finished_at = datetime.now(timezone.utc).isoformat()
+        manifest.finished_at = datetime.now(UTC).isoformat()
         logger.info(
             "DRY RUN — would add %s, refresh %s, sweep %d covered names; "
             "month spend $%.2f / cap $%.2f",
@@ -309,7 +309,7 @@ def run_daily(
         cost_usd=manifest.total_cost_usd,
     )
     manifest.budget_month_spent_usd = cost_ledger.spent_usd
-    manifest.finished_at = datetime.now(timezone.utc).isoformat()
+    manifest.finished_at = datetime.now(UTC).isoformat()
     store.put_json(
         MANIFEST_KEY_TMPL.format(trading_day=trading_day, run_id=run_id),
         manifest.model_dump(),
@@ -333,7 +333,7 @@ def run_daily(
 
 def _compute_coverage_gap(
     board: dict | None,
-    ledger: "CoverageLedger",
+    ledger: CoverageLedger,
     *,
     top_n: int = 60,
 ) -> dict:

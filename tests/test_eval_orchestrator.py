@@ -20,17 +20,16 @@ from unittest.mock import MagicMock, patch
 import boto3
 import pytest
 from moto import mock_aws
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
 )
+
 from graph.state_schemas import (
     RubricDimensionScore,
     RubricEvalArtifact,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -125,7 +124,7 @@ def mocked_s3_with_captures():
         # picked up as input.
         client.put_object(
             Bucket="alpha-engine-research",
-            Key=f"decision_artifacts/_eval/2026-05-09/ic_cio/run-prev.claude-haiku-4-5.json",
+            Key="decision_artifacts/_eval/2026-05-09/ic_cio/run-prev.claude-haiku-4-5.json",
             Body=b"{}",
         )
 

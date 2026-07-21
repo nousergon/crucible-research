@@ -19,7 +19,7 @@ Locks down:
 from __future__ import annotations
 
 import json
-from typing import Iterable
+from collections.abc import Iterable
 
 import boto3
 import pytest
@@ -226,9 +226,8 @@ class TestScannerLeaderboardProducer:
         _put_closes(s3, entry, {"A": 100, "B": 100, "C": 100, "D": 100})
         # 21 trading dates after entry (use July placeholders); the 21st is horizon.
         horizon_dates = [f"2026-07-{d:02d}" for d in range(1, 25)]
-        for i, d in enumerate(horizon_dates):
+        for d in horizon_dates:
             # A rises most, D falls — champion order tracks returns.
-            mult = {0: ("A", 1.10), 1: ("B", 1.05), 2: ("C", 1.00), 3: ("D", 0.95)}
             _put_closes(s3, d, {"A": 110, "B": 105, "C": 100, "D": 95})
 
         res = build_scanner_leaderboard(s3, _BUCKET, "2026-06-27", top_n=2)
@@ -286,8 +285,8 @@ class TestScannerLeaderboardProducer:
 
 class TestProducerLeaderboardProducer:
     def test_writes_with_enter_scores(self, s3, monkeypatch):
-        from scoring.leaderboard_producers import build_producer_leaderboard
         from producers.registry import ProducerSpec
+        from scoring.leaderboard_producers import build_producer_leaderboard
 
         # config-I2993: agentic_sector_teams is retired — no producer is
         # currently registered kind=="champion". This test still needs to lock

@@ -36,8 +36,7 @@ def sector_team_mod():
     patch + exercise the REAL ``run_sector_team`` with the per-sub-agent
     track_llm_cost scopes under test. Mirrors test_sector_team_recursion
     _partial.py::fresh_modules."""
-    from agents.sector_teams import quant_analyst, qual_analyst, peer_review
-    from agents.sector_teams import sector_team
+    from agents.sector_teams import peer_review, qual_analyst, quant_analyst, sector_team
     importlib.reload(quant_analyst)
     importlib.reload(qual_analyst)
     importlib.reload(peer_review)

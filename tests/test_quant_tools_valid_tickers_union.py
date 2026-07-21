@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from agents.sector_teams.quant_tools import create_quant_tools
 
 
@@ -44,7 +42,7 @@ def test_valid_tickers_includes_technical_scores_when_missing_from_price_data():
             "atr_pct": 1.0}
         for t in sector_tickers + population_tickers
     }
-    price_data = {t: None for t in population_tickers}  # ONLY population
+    price_data = dict.fromkeys(population_tickers)  # ONLY population
     fundamentals_data = {
         t: {"net_income_ttm": 1000, "free_cash_flow_ttm": 500,
             "total_debt": 100, "total_assets": 10000}

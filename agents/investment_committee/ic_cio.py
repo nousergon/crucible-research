@@ -9,25 +9,23 @@ Writes entry theses for advanced stocks. All decisions (advance, reject, deadloc
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
 from typing import Literal
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
-from config import (
-    STRATEGIC_MODEL,
-    PER_STOCK_MODEL,
-    MAX_TOKENS_STRATEGIC,
-    ANTHROPIC_API_KEY,
-)
-from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
+)
+from agents.prompt_loader import load_prompt
+from config import (
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_STRATEGIC,
+    PER_STOCK_MODEL,
+    STRATEGIC_MODEL,
 )
 from strict_mode import is_strict_validation_enabled
 
@@ -110,13 +108,13 @@ def run_cio(
     open_slots: int,
     exits: list[dict],
     run_date: str,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     prior_decisions: list[dict] | None = None,
     *,
     max_new_entrants: int = 10,
     min_new_entrants: int = 2,
     force_fill_conviction_floor: float = 60.0,
-    prior_cycle_scorecard: Optional[str] = None,
+    prior_cycle_scorecard: str | None = None,
     deblended: bool = False,
     sector_neutral_quality: dict[str, float] | None = None,
 ) -> dict:
@@ -335,7 +333,7 @@ def run_cio_critic(
     candidates: list[dict],
     macro_context: dict,
     sector_ratings: dict,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> dict:
     """Critique the CIO's advance set with a cheap Haiku reviewer (config#927).
 
@@ -414,7 +412,7 @@ def run_cio_with_reflection(
     open_slots: int,
     exits: list[dict],
     run_date: str,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     prior_decisions: list[dict] | None = None,
     *,
     max_iterations: int = 2,

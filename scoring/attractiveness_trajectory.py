@@ -27,7 +27,7 @@ import json
 import logging
 import math
 import os
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +59,19 @@ CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", "https://console.nousergon
 
 # ── pure numeric helpers ─────────────────────────────────────────────────────
 
-def _zmap(d: dict[str, Optional[float]]) -> dict[str, float]:
+def _zmap(d: dict[str, float | None]) -> dict[str, float]:
     """Cross-sectional z-score of the non-null values (std==0 / <2 → all 0)."""
     vals = [v for v in d.values() if v is not None]
     if len(vals) < 2:
-        return {t: 0.0 for t in d}
+        return dict.fromkeys(d, 0.0)
     m = sum(vals) / len(vals)
     sd = (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
     if sd == 0:
-        return {t: 0.0 for t in d}
+        return dict.fromkeys(d, 0.0)
     return {t: (0.0 if v is None else (v - m) / sd) for t, v in d.items()}
 
 
-def _percentile(sorted_vals: list[float], pct: float) -> Optional[float]:
+def _percentile(sorted_vals: list[float], pct: float) -> float | None:
     if not sorted_vals:
         return None
     k = (len(sorted_vals) - 1) * (pct / 100.0)
@@ -99,7 +99,7 @@ def _theil_sen(y) -> tuple[float, float, float]:
 # ── the signal ───────────────────────────────────────────────────────────────
 
 def build_trajectory(
-    history_df: "Any",
+    history_df: Any,
     price_ret: dict[str, float],
     sector_etf_ret: dict[str, float],
     *,
@@ -196,7 +196,7 @@ def build_trajectory(
 
 # ── wiring: read prices + history, write artifact, email digest ──────────────
 
-def _window_log_return(df, window_days: int) -> Optional[float]:
+def _window_log_return(df, window_days: int) -> float | None:
     """Log return over the trailing ``window_days`` of a price frame's Close
     (slices to the window — ``fetch_price_data`` only returns coarse periods)."""
     import pandas as pd
@@ -267,7 +267,7 @@ def compute_and_write_trajectory(
     bucket: str | None = None,
     s3_client: Any = None,
     send_email: bool = True,
-) -> Optional[str]:
+) -> str | None:
     """archive_writer entry point — read history + prices, build + write the
     trajectory artifact, send the weekly digest. Returns the dated S3 key (or
     None when there's not enough history yet). Caller wraps fail-soft."""

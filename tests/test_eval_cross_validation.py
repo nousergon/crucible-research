@@ -25,7 +25,6 @@ from evals.cross_validation import (
     summarize_agreement,
 )
 
-
 # ── parse_worksheet ─────────────────────────────────────────────────────
 
 
@@ -343,7 +342,7 @@ def test_render_markdown_report_has_expected_columns(tmp_path):
     agreements = summarize_agreement(pairs)
     md = render_markdown_report(
         agreements,
-        bundle_dir=Path("/tmp/bundle-x"),
+        bundle_dir=tmp_path / "bundle-x",
         n_artifacts_rated=1,
     )
     # The column header line is present
@@ -604,7 +603,7 @@ def test_render_spotcheck_report_has_concurrence_table(tmp_path):
             operator_notes="rationales are templated, not tailored",
         ),
     ]
-    md = render_spotcheck_report(outcomes, bundle_dir=Path("/tmp/bundle"))
+    md = render_spotcheck_report(outcomes, bundle_dir=tmp_path / "bundle")
     # Concurrence table headers
     assert "| rubric_family | judge_model | n | agree | partial | disagree |" in md
     # Dispute appendix surfaces both reasonings
@@ -624,5 +623,5 @@ def test_render_spotcheck_report_no_disputes(tmp_path):
             override_score=None, operator_notes=None,
         ),
     ]
-    md = render_spotcheck_report(outcomes, bundle_dir=Path("/tmp/bundle"))
+    md = render_spotcheck_report(outcomes, bundle_dir=tmp_path / "bundle")
     assert "No disputes flagged" in md

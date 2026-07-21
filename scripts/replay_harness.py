@@ -55,10 +55,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def fetch_artifact(
     agent_id: str,
     date: str,
     *,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
     s3_client: Any = None,
     s3_bucket: str = _DEFAULT_S3_BUCKET,
     s3_prefix: str = _DEFAULT_S3_PREFIX,
@@ -158,7 +158,7 @@ def fetch_artifact(
 
 def rehydrate_price_data(
     tickers: list[str],
-    data_snapshot_id: Optional[str],
+    data_snapshot_id: str | None,
     *,
     bucket: str = "alpha-engine-research",
     period: str = "1y",
@@ -290,8 +290,8 @@ def diff_outputs(recorded: dict, replayed: dict) -> list[FieldDiff]:
 class FaithfulReplayResult:
     agent_id: str
     run_id: str
-    data_snapshot_id: Optional[str]
-    code_sha: Optional[str]
+    data_snapshot_id: str | None
+    code_sha: str | None
     pinned: bool  # True iff the ArcticDB read was actually as_of-pinned
     recorded_output: dict
     replayed_output: dict
@@ -317,8 +317,8 @@ def _thesis_update_node(
     snapshot: dict,
     recorded_output: dict,
     *,
-    temperature: Optional[float] = None,
-    node_fn: Optional[Callable[..., dict]] = None,
+    temperature: float | None = None,
+    node_fn: Callable[..., dict] | None = None,
 ) -> dict:
     """Dispatch entry for ``thesis_update:{team}:{ticker}`` — invokes
     ``agents.sector_teams.sector_team._update_thesis_for_held_stock`` with
@@ -371,10 +371,10 @@ def faithful_replay(
     agent_id: str,
     date: str,
     *,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
     s3_client: Any = None,
     arctic_lib: Any = None,
-    node_fn: Optional[Callable[..., dict]] = None,
+    node_fn: Callable[..., dict] | None = None,
     rehydrate_prices: bool = False,
 ) -> FaithfulReplayResult:
     """Rehydrate + re-run the node that produced ``(agent_id, date)`` and
@@ -490,9 +490,9 @@ class OutcomeDistribution:
     temperature: float
     actual_recorded: dict
     field_value_counts: dict[str, Counter]
-    conviction_values: list[Optional[int]]
-    conviction_mean: Optional[float]
-    conviction_delta_from_recorded: Optional[float]
+    conviction_values: list[int | None]
+    conviction_mean: float | None
+    conviction_delta_from_recorded: float | None
     raw_outputs: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -552,9 +552,9 @@ def counterfactual_replay(
     *,
     n_replay: int = 1,
     temperature: float = 0.0,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
     s3_client: Any = None,
-    node_fn: Optional[Callable[..., dict]] = None,
+    node_fn: Callable[..., dict] | None = None,
 ) -> OutcomeDistribution:
     """Rehydrate the artifact, apply ``perturbation``, and re-run the node
     ``n_replay`` times at ``temperature``, returning a distribution summary.
@@ -686,9 +686,9 @@ def run_coin_scenario(
     ticker: str = "COIN",
     n_replay: int = 20,
     temperature: float = 0.7,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
     s3_client: Any = None,
-    node_fn: Optional[Callable[..., dict]] = None,
+    node_fn: Callable[..., dict] | None = None,
 ) -> OutcomeDistribution:
     """Run the concrete COIN counterfactual against a pre-fix artifact.
 
@@ -769,7 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
     args = build_parser().parse_args(argv)
 

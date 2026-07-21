@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # Each tuple: (site_label, schema_attr_name, tier,
 # estimated_worst_case_tokens, justification_comment).
 #

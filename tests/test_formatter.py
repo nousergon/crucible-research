@@ -3,9 +3,7 @@ Tests for emailer/formatter.py.
 All functions are pure — no mocking needed.
 """
 
-import pytest
 from emailer.formatter import _inline_md, _md_to_html, format_email
-
 
 # ── _inline_md ────────────────────────────────────────────────────────────────
 

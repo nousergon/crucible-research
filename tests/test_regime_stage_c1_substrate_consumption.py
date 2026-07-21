@@ -23,9 +23,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GRAPH_PATH = REPO_ROOT / "graph" / "research_graph.py"
 
@@ -39,7 +36,8 @@ def _force_real_module(module_name: str):
     leave a MagicMock attribute behind, and signature-inspection here
     sees ``(*args, **kwargs)`` instead of the real signature.
     """
-    import sys, importlib
+    import importlib
+    import sys
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
 
@@ -57,6 +55,7 @@ def _make_am_with_s3_responses(responses: dict[str, bytes | None]):
     uses self.s3.get_object directly (boto3-like interface). So we
     install a stub on self.s3 that handles get_object."""
     import io
+
     from archive.manager import ArchiveManager
 
     am = ArchiveManager.__new__(ArchiveManager)

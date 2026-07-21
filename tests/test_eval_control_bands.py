@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 from evals import control_bands as cb
 
-
-_UTC = timezone.utc
+_UTC = UTC
 
 
 def _dims(agent: str, criterion: str, judge: str = "claude-haiku-4-5") -> list[dict]:

@@ -23,10 +23,12 @@ from moto import mock_aws
 from scoring.signals_envelope import (
     _build_arg_parser,
     build_signals_envelope,
-    main as envelope_main,
     read_regime_substrate,
     read_universe_board,
     write_envelope,
+)
+from scoring.signals_envelope import (
+    main as envelope_main,
 )
 
 BUCKET = "alpha-engine-research"

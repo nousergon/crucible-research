@@ -4,8 +4,9 @@ import json
 import os
 import sqlite3
 import tempfile
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 ArchiveManager = pytest.importorskip("archive.manager", reason="archive.manager requires gitignored config").ArchiveManager
 
@@ -114,7 +115,7 @@ class TestArchiveSchema:
         forgotten bump leaves migrations un-applied. Lockstep pin per
         the schema.py docstring discipline ("To add a new migration:
         add an entry + bump SCHEMA_VERSION")."""
-        from archive.schema import SCHEMA_VERSION, MIGRATIONS
+        from archive.schema import MIGRATIONS, SCHEMA_VERSION
         assert SCHEMA_VERSION == max(MIGRATIONS.keys())
 
     def test_score_performance_has_stance_column(self, archive_in_memory):

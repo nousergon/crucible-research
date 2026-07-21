@@ -13,7 +13,6 @@ import pytest
 
 from evals import judge_models
 
-
 _SPECS = (judge_models.HAIKU, judge_models.SONNET)
 # Anthropic dated-snapshot suffix, e.g. '-20251001'.
 _DATED_SNAPSHOT_RE = re.compile(r"-\d{8}$")

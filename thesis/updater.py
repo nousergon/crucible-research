@@ -7,10 +7,8 @@ thesis dict written to S3 and the DB. Operates per-ticker, no LLM.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
-from scoring.aggregator import score_to_rating
 from thesis.structured import build_structured_thesis
 
 
@@ -82,7 +80,7 @@ def build_thesis_record(
         "long_term_rating": aggregated.get("long_term_rating"),
         # Structured thesis for next run's agent prompts
         "structured_thesis": structured_thesis,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -97,14 +95,14 @@ def _build_summary(ticker: str, aggregated: dict, news_json: dict, research_json
     catalyst = news_json.get("key_catalyst") or research_json.get("key_upside") or ""
     risk = research_json.get("key_risk") or ""
     consensus = research_json.get("consensus_direction", "neutral")
-    sentiment = news_json.get("sentiment", "neutral")
+    _sentiment = news_json.get("sentiment", "neutral")
 
     parts = [f"{ticker} rates {rating} (score: {score:.0f})."]
 
     if consensus == "bullish":
-        parts.append(f"Analyst consensus is bullish.")
+        parts.append("Analyst consensus is bullish.")
     elif consensus == "bearish":
-        parts.append(f"Analyst consensus is bearish.")
+        parts.append("Analyst consensus is bearish.")
 
     if catalyst:
         parts.append(f"Key catalyst: {catalyst}")
@@ -115,7 +113,7 @@ def _build_summary(ticker: str, aggregated: dict, news_json: dict, research_json
     return " ".join(parts)
 
 
-def check_rating_change(thesis: dict, prior_thesis: Optional[dict]) -> Optional[str]:
+def check_rating_change(thesis: dict, prior_thesis: dict | None) -> str | None:
     """
     Return a string describing a rating change if one occurred, else None.
     e.g., "HOLD → BUY"

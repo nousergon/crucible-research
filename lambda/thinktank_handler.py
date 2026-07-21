@@ -56,6 +56,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 
 # Repo root on sys.path so ``from thinktank.run import ...`` resolves under
 # Lambda's task layout. Mirrors the existing shared-image handlers
@@ -99,7 +100,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
 
     from nousergon_lib.secrets import get_secret
 

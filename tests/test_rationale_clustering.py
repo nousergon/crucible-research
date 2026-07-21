@@ -18,11 +18,10 @@ Covers:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ── Per-agent extraction ──────────────────────────────────────────────────
 
@@ -320,7 +319,7 @@ class TestComputeAndEmit:
         from evals.rationale_clustering import compute_and_emit
 
         # Single sector_quant artifact with 2 picks → below MIN floor.
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         key = "decision_artifacts/2026/05/09/sector_quant/run-1.json"
         artifacts = {
             key: {
@@ -350,7 +349,7 @@ class TestComputeAndEmit:
     def test_high_concentration_template_corpus(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         # 8 templated rationales spread across 2 artifacts → above floor.
         templates = [
             f"P/E of {n} attractive vs sector median of {n + 5}"
@@ -409,7 +408,7 @@ class TestComputeAndEmit:
     def test_dry_run_skips_metric_emission(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         templates = [
             f"P/E of {n} attractive vs sector median of {n + 5}"
             for n in range(10, 18)
@@ -442,7 +441,7 @@ class TestComputeAndEmit:
     def test_load_failure_continues_to_next_artifact(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         good_key = "decision_artifacts/2026/05/09/sector_quant/good.json"
         bad_key = "decision_artifacts/2026/05/09/sector_quant/bad.json"
         # Only register the good key in the stub; the bad key triggers KeyError.
@@ -488,7 +487,7 @@ class TestScopeCapTruncation:
     def test_truncates_when_rationales_exceed_cap(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         # Generate 600 templated rationales across one artifact — exceeds
         # default cap of 500.
         templates = [
@@ -527,7 +526,7 @@ class TestScopeCapTruncation:
     def test_no_truncation_when_below_cap(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         templates = [f"r{n}" for n in range(30)]  # well under cap
         key = "decision_artifacts/2026/05/09/sector_quant/run-1.json"
         artifacts = {
@@ -584,7 +583,7 @@ class TestKeyLevelScopeCap:
     def test_key_cap_bounds_get_object_calls_to_most_recent(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         # 6 artifacts/day over 2 days = 12 keys; cap at 6 → only the
         # 6 most-recent keys (all of 05/09) may be fetched.
         artifacts = self._artifacts_across_days(6, ["08", "09"])
@@ -613,7 +612,7 @@ class TestKeyLevelScopeCap:
     def test_no_key_cap_when_below_bound(self):
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         artifacts = self._artifacts_across_days(4, ["08", "09"])  # 8 keys
         s3 = _build_s3_stub_with_artifacts(artifacts)
         summary = compute_and_emit(
@@ -632,7 +631,7 @@ class TestKeyLevelScopeCap:
         ``[-max:]`` slice genuinely keeps the newest rationales."""
         from evals.rationale_clustering import compute_and_emit
 
-        end = datetime(2026, 5, 9, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, tzinfo=UTC)
         # 6/day over 2 days; rationale cap 6 → the 6 kept rationales
         # must all be day-09 (one rationale per artifact here).
         artifacts = self._artifacts_across_days(6, ["08", "09"])

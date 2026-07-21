@@ -39,7 +39,8 @@ and return empty content (config#1659 / config#2575).
 from __future__ import annotations
 
 import logging
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -219,8 +220,8 @@ def assess_candidates(
     from krepis.llm import LLMClient
     from krepis.llm_config import ModelSpec
 
-    from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY
     from agents.prompt_loader import load_prompt
+    from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = loaded.text + "\n\n## Candidates\n" + _format_candidate_block(

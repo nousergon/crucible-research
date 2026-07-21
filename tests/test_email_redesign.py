@@ -23,14 +23,11 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from graph.research_graph import (
     _build_notable_developments,
     _build_regime_trend,
     consolidator,
 )
-
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 

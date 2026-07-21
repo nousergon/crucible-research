@@ -13,12 +13,10 @@ since pillar coverage is not load-bearing under those weights.
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import patch
 
-import pytest
-
 from graph.research_graph import _check_pillar_distribution_sanity
-
 
 _ZERO_WEIGHTS = {
     "quality": 0.0, "value": 0.0, "momentum": 0.0,
@@ -126,7 +124,7 @@ def test_zero_theses_short_circuits_at_any_weight_state():
 
 def test_epsilon_boundary_treats_near_zero_weights_as_zero():
     """Float-residual weights (e.g. 1e-9) should not trip the load-bearing gate."""
-    tiny_weights = {p: 1e-9 / 6 for p in _ZERO_WEIGHTS}
+    tiny_weights = dict.fromkeys(_ZERO_WEIGHTS, 1e-09 / 6)
     theses = {"AAPL": _thesis_without_pillar()}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", tiny_weights), \
          patch("krepis.alerts.publish") as mock_publish:
@@ -138,7 +136,7 @@ def test_half_pillar_ramp_with_low_coverage_still_fires():
     """The 50/50 half-pillar-ramp config (cutover-diagnostic-recipe.md): Σ
     pillar = 0.5 IS load-bearing, so coverage failures must surface.
     """
-    half_weights = {p: 0.5 / 6 for p in _ZERO_WEIGHTS}
+    half_weights = dict.fromkeys(_ZERO_WEIGHTS, 0.5 / 6)
     theses = {f"TICK{i}": _thesis_without_pillar() for i in range(5)}
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", half_weights), \
          patch("krepis.alerts.publish") as mock_publish:
@@ -203,14 +201,14 @@ def test_dedup_key_falls_back_to_utc_today_when_thesis_lacks_run_date():
     callers. Once the producer plumbs run_date into the thesis dict,
     this fallback becomes dead code — but until then it matters.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     theses = {"AAPL": _thesis_without_pillar()}  # no run_date
     with patch("graph.research_graph.PILLAR_COMPOSITE_WEIGHTS", _AQR_WEIGHTS), \
          patch("krepis.alerts.publish") as mock_publish:
         _check_pillar_distribution_sanity(theses)
 
     dedup_key = mock_publish.call_args.kwargs["dedup_key"]
-    utc_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    utc_today = datetime.now(UTC).strftime("%Y-%m-%d")
     assert utc_today in dedup_key, (
         f"dedup_key must fall back to UTC today when thesis run_date "
         f"is absent; got {dedup_key!r}"

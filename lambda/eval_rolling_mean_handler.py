@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 from datetime import datetime
 
 # Repo root on sys.path so ``from evals.rolling_mean import ...``
@@ -32,9 +33,13 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from graph.langsmith_pandas_patch import install as _install_ls_patch
+
 _install_ls_patch()
 
-from nousergon_lib.logging import monitor_handler, setup_logging
+# Imported after the sys.path.insert above — this Lambda entrypoint isn't
+# on sys.path until that line runs (mirrors lambda/handler.py's pattern).
+from nousergon_lib.logging import monitor_handler, setup_logging  # noqa: E402
+
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -60,7 +65,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
 
 
@@ -177,8 +182,8 @@ def handler(event, context):
     agent_quality: dict
     try:
         import boto3
-
         from nousergon_lib.dates import now_dual
+
         from scripts.build_agent_quality import build_agent_quality, write_agent_quality
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
@@ -218,8 +223,8 @@ def handler(event, context):
     producer_leaderboard: dict
     try:
         import boto3
-
         from nousergon_lib.dates import now_dual
+
         from scoring.leaderboard_producers import build_producer_leaderboard
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")

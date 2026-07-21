@@ -44,6 +44,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from nousergon_lib.logging import monitor_handler, setup_logging
+
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
         "LAMBDA_TASK_ROOT",
@@ -112,7 +113,7 @@ def handler(event, context):
                 submit_iso.replace("Z", "+00:00")
             )
             elapsed = int(
-                (datetime.datetime.now(datetime.timezone.utc) - submit_dt)
+                (datetime.datetime.now(datetime.UTC) - submit_dt)
                 .total_seconds()
             )
         except (ValueError, TypeError):
@@ -124,7 +125,7 @@ def handler(event, context):
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         poll_result = poll_batch(batch_id=batch_id, anthropic_client=client)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception(
             "[eval_judge_poll_handler] poll API failed for batch_id=%s",
             batch_id,

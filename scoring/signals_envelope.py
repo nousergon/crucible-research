@@ -121,12 +121,11 @@ import argparse
 import json
 import logging
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
-
 from nousergon_lib.contracts import validate as validate_contract
 from nousergon_lib.trading_calendar import count_trading_days
 
@@ -441,7 +440,7 @@ def build_sector_ratings(sectors: list[str]) -> dict[str, dict]:
 
 
 def build_sector_modifiers(sectors: list[str]) -> dict[str, float]:
-    return {sector: 1.0 for sector in sectors}
+    return dict.fromkeys(sectors, 1.0)
 
 
 def _build_universe_entry(stock: dict) -> dict[str, Any] | None:
@@ -506,7 +505,7 @@ def build_signals_envelope(
     sectors = _board_sectors(stocks)
     universe = build_universe_entries(stocks)
     market_regime = derive_market_regime(substrate)
-    now_iso = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now_iso = datetime.now(UTC).strftime("%H:%M:%S")
 
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

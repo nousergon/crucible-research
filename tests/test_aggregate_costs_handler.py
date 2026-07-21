@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HANDLER_PATH = _REPO_ROOT / "lambda" / "aggregate_costs_handler.py"
 

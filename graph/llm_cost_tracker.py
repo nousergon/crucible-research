@@ -97,15 +97,20 @@ import contextvars
 import json
 import logging
 import os
+import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal, Optional
+from typing import Any, Literal
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from langchain_core.callbacks import BaseCallbackHandler
 
+# New code uses the post-rename name directly (don't extend the deprecated shim).
+from nousergon_lib import sft
 from nousergon_lib.cost import (
     PriceCardLookupError,
     PriceTable,
@@ -120,9 +125,6 @@ from nousergon_lib.decision_capture import (
     FullPromptContext,
     ModelMetadata,
 )
-# New code uses the post-rename name directly (don't extend the deprecated shim).
-from nousergon_lib import sft
-from langchain_core.callbacks import BaseCallbackHandler
 
 from agents.prompt_loader import LoadedPrompt
 from config import _find_config
@@ -270,14 +272,14 @@ def _resolve_run_budget_ceiling() -> float:
 # Lives in a ContextVar so async + threaded runs (LangGraph Send fan-out)
 # share the same accumulator across frames within a single pipeline
 # invocation.
-_run_cost_totals: contextvars.ContextVar[dict[str, float]] = contextvars.ContextVar(
-    "alpha_engine_cost_tracker_run_totals", default={},
+_run_cost_totals: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar(
+    "alpha_engine_cost_tracker_run_totals", default=None,
 )
 
 
 def _accumulate_run_cost(run_id: str, frame_cost_usd: float) -> float:
     """Add ``frame_cost_usd`` to the per-run accumulator and return the new total."""
-    totals = dict(_run_cost_totals.get())
+    totals = dict(_run_cost_totals.get() or {})
     totals[run_id] = totals.get(run_id, 0.0) + frame_cost_usd
     new_total = totals[run_id]
     _run_cost_totals.set(totals)
@@ -295,7 +297,7 @@ def get_run_cost(run_id: str) -> float:
     invocation. Used by tests and, optionally, by diagnostic logging.
     Returns 0.0 if the run has no recorded cost (unknown run_id, or
     capture flag was off so cost wasn't computed)."""
-    return _run_cost_totals.get().get(run_id, 0.0)
+    return (_run_cost_totals.get() or {}).get(run_id, 0.0)
 
 
 def _build_cost_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) -> str:
@@ -328,7 +330,7 @@ def _build_sft_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) -
 # ── SFT-capture serialization helpers ─────────────────────────────────────
 
 
-def _sanitize_invocation_params(params: Any) -> Optional[dict]:
+def _sanitize_invocation_params(params: Any) -> dict | None:
     """Return a JSON-safe copy of model invocation params with secrets dropped.
 
     LangChain hands the chat-model start callback an ``invocation_params``
@@ -351,7 +353,7 @@ def _sanitize_invocation_params(params: Any) -> Optional[dict]:
     return cleaned
 
 
-def _serialize_input_messages(messages: Any) -> Optional[list]:
+def _serialize_input_messages(messages: Any) -> list | None:
     """Serialize the chat-model input messages to JSON-safe dicts, untruncated.
 
     ``messages`` is langchain's ``List[List[BaseMessage]]`` (a batch of one
@@ -378,7 +380,7 @@ def _serialize_input_messages(messages: Any) -> Optional[list]:
         return None
 
 
-def _serialize_output_message(response: Any) -> tuple[Optional[dict], Optional[str]]:
+def _serialize_output_message(response: Any) -> tuple[dict | None, str | None]:
     """Serialize the model completion (AIMessage) to a JSON-safe dict + text.
 
     Returns ``(message_dict, text)``. ``message_dict`` carries the full
@@ -387,8 +389,8 @@ def _serialize_output_message(response: Any) -> tuple[Optional[dict], Optional[s
     the convenience flat-text rendering (``generation.text``). Either may be
     ``None`` on a shape surprise; the caller logs and records what it has.
     """
-    message_dict: Optional[dict] = None
-    text: Optional[str] = None
+    message_dict: dict | None = None
+    text: str | None = None
     try:
         from langchain_core.messages import message_to_dict
 
@@ -399,8 +401,8 @@ def _serialize_output_message(response: Any) -> tuple[Optional[dict], Optional[s
             message = getattr(generation, "message", None)
             if message is not None:
                 message_dict = message_to_dict(message)
-    except Exception:  # noqa: BLE001 — best-effort serialization
-        pass
+    except Exception as e:  # noqa: BLE001 — best-effort serialization
+        logger.debug("Best-effort message serialization failed: %s", e)
     return message_dict, text
 
 
@@ -415,9 +417,7 @@ _PRICING_SUBDIR = "cost"
 # only ("claude-haiku-4-5") because Anthropic publishes prices per family,
 # not per snapshot. Strip the suffix before lookup so a runtime model
 # pinned to a snapshot still matches its family card.
-import re as _re
-
-_SNAPSHOT_SUFFIX_RE = _re.compile(r"-\d{8}$")
+_SNAPSHOT_SUFFIX_RE = re.compile(r"-\d{8}$")
 
 
 def _normalize_model_for_pricing(model_name: str) -> str:
@@ -438,8 +438,8 @@ def _normalize_model_for_pricing(model_name: str) -> str:
     inherits the family card without config maintenance.
     """
     return _SNAPSHOT_SUFFIX_RE.sub("", model_name)
-_price_table: Optional[PriceTable] = None
-_tool_fee_table: Optional[ToolFeeTable] = None
+_price_table: PriceTable | None = None
+_tool_fee_table: ToolFeeTable | None = None
 
 
 def _resolve_pricing_path() -> Path:
@@ -471,7 +471,7 @@ def _load_price_table() -> PriceTable:
     return _price_table
 
 
-def _load_tool_fee_table() -> Optional[ToolFeeTable]:
+def _load_tool_fee_table() -> ToolFeeTable | None:
     """Load + cache the server-tool fee table from the same yaml.
 
     Returns ``None`` when the yaml has no ``tool_fees:`` section so the
@@ -529,11 +529,11 @@ class _Frame:
     """
 
     agent_id: str
-    sector_team_id: Optional[str]
-    node_name: Optional[str]
-    run_type: Optional[RunType]
-    prompt: Optional[LoadedPrompt]
-    run_id: Optional[str] = None
+    sector_team_id: str | None
+    node_name: str | None
+    run_type: RunType | None
+    prompt: LoadedPrompt | None
+    run_id: str | None = None
     # config#1753: the actually-rendered user-prompt string (what was
     # handed to ``HumanMessage(content=...)``), as opposed to ``prompt``
     # above which is the raw pre-render ``LoadedPrompt`` template. Settable
@@ -548,9 +548,9 @@ class _Frame:
     # ``with`` block exits). Read at frame-exit to populate
     # ``FullPromptContext.user_prompt``; falls back to ``prompt.text``
     # when never set (see ``track_llm_cost`` docstring).
-    rendered_prompt: Optional[str] = None
+    rendered_prompt: str | None = None
 
-    model_name: Optional[str] = None
+    model_name: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -563,7 +563,7 @@ class _Frame:
     web_search_requests: int = 0
     web_fetch_requests: int = 0
     call_count: int = 0
-    enter_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    enter_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     # Per-call rows buffered in memory for the JSONL sink. One dict per
     # Anthropic API call; flushed in JSONL form at scope exit.
     per_call_rows: list[dict] = field(default_factory=list)
@@ -576,28 +576,28 @@ class _Frame:
 
 
 # Stack of frames — supports nested ``track_llm_cost`` (rare, but legal).
-_frame_stack: contextvars.ContextVar[list[_Frame]] = contextvars.ContextVar(
-    "alpha_engine_cost_tracker_frames", default=[],
+_frame_stack: contextvars.ContextVar[list[_Frame] | None] = contextvars.ContextVar(
+    "alpha_engine_cost_tracker_frames", default=None,
 )
 
 # Pending SFT inputs captured at ``on_chat_model_start``, keyed by langchain
 # call run_id, consumed (popped) at the paired ``on_llm_end``. Lives in a
 # ContextVar so async + threaded fan-out keeps each task's pending inputs
 # separate. Only populated when the capture flag is on.
-_pending_sft_inputs: contextvars.ContextVar[dict[str, dict]] = contextvars.ContextVar(
-    "alpha_engine_cost_tracker_pending_sft", default={},
+_pending_sft_inputs: contextvars.ContextVar[dict[str, dict] | None] = contextvars.ContextVar(
+    "alpha_engine_cost_tracker_pending_sft", default=None,
 )
 
 # Populated metadata, keyed by agent_id — read by ``_capture_if_enabled``
 # at the node boundary right after ``track_llm_cost`` exits.
 _completed_metadata: contextvars.ContextVar[
-    dict[str, tuple[ModelMetadata, FullPromptContext]]
+    dict[str, tuple[ModelMetadata, FullPromptContext]] | None
 ] = contextvars.ContextVar(
-    "alpha_engine_cost_tracker_completed", default={},
+    "alpha_engine_cost_tracker_completed", default=None,
 )
 
 
-def _current_frame() -> Optional[_Frame]:
+def _current_frame() -> _Frame | None:
     stack = _frame_stack.get()
     return stack[-1] if stack else None
 
@@ -654,7 +654,7 @@ class CostTelemetryCallback(BaseCallbackHandler):
                 "messages for run_id=%s — output will be captured without "
                 "the paired input", run_id,
             )
-        pending = dict(_pending_sft_inputs.get())
+        pending = dict(_pending_sft_inputs.get() or {})
         pending[str(run_id)] = {
             "input_messages": input_messages,
             "invocation_params": _sanitize_invocation_params(
@@ -700,7 +700,7 @@ class CostTelemetryCallback(BaseCallbackHandler):
         # immutable, dollars are derived" rule.
         frame.per_call_rows.append({
             "schema_version": _PER_CALL_SCHEMA_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "call_seq": frame.call_count,
             "model_name": call_model or frame.model_name,
             "input_tokens": usage["input_tokens"],
@@ -718,7 +718,7 @@ class CostTelemetryCallback(BaseCallbackHandler):
         # serialization — never raise in the research hot path.
         if _is_capture_enabled():
             run_id = kwargs.get("run_id")
-            pending = dict(_pending_sft_inputs.get())
+            pending = dict(_pending_sft_inputs.get() or {})
             input_rec = pending.pop(str(run_id), None) if run_id is not None else None
             if run_id is not None:
                 _pending_sft_inputs.set(pending)
@@ -726,7 +726,7 @@ class CostTelemetryCallback(BaseCallbackHandler):
             # Per-call staging row; the canonical SFT record (frame dims → meta) is
             # built from these at flush via nousergon_lib.sft.build_record.
             frame.sft_rows.append({
-                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "captured_at": datetime.now(UTC).isoformat(),
                 "call_seq": frame.call_count,
                 "model": call_model or frame.model_name,
                 "input_messages": input_rec["input_messages"] if input_rec else None,
@@ -828,7 +828,7 @@ class CostTelemetryCallback(BaseCallbackHandler):
             return {"web_search_requests": 0, "web_fetch_requests": 0}
 
     @staticmethod
-    def _extract_model_name(response: Any) -> Optional[str]:
+    def _extract_model_name(response: Any) -> str | None:
         """Best-effort model-name extraction from the response.
 
         Returns None if the response shape doesn't expose it; the frame
@@ -853,15 +853,15 @@ class CostTelemetryCallback(BaseCallbackHandler):
         return None
 
 
-_callback_singleton: Optional[CostTelemetryCallback] = None
+_callback_singleton: CostTelemetryCallback | None = None
 
 
 # ── Per-call JSONL flush ──────────────────────────────────────────────────
 
 
 def _enrich_row_with_frame_dimensions(
-    row: dict, frame: _Frame, *, table: Optional[PriceTable],
-    tool_fee_table: Optional[ToolFeeTable] = None,
+    row: dict, frame: _Frame, *, table: PriceTable | None,
+    tool_fee_table: ToolFeeTable | None = None,
 ) -> dict:
     """Stamp frame-level dimensions onto a per-call row + compute cost_usd.
 
@@ -887,7 +887,7 @@ def _enrich_row_with_frame_dimensions(
     enriched["prompt_version"] = frame.prompt.version if frame.prompt else None
     enriched["prompt_version_hash"] = frame.prompt.hash if frame.prompt else None
 
-    cost: Optional[float] = None
+    cost: float | None = None
     model_name = enriched.get("model_name")
     if table is not None and model_name and model_name != "unknown":
         try:
@@ -939,10 +939,10 @@ def _enrich_row_with_frame_dimensions(
 def _flush_cost_rows_to_s3(
     *,
     frame: _Frame,
-    table: Optional[PriceTable],
-    tool_fee_table: Optional[ToolFeeTable] = None,
+    table: PriceTable | None,
+    tool_fee_table: ToolFeeTable | None = None,
     s3_client: Any | None = None,
-) -> Optional[str]:
+) -> str | None:
     """Serialize ``frame.per_call_rows`` to JSONL + write to S3.
 
     Returns the S3 key written, or None if the buffer is empty (frames
@@ -997,7 +997,7 @@ def _flush_cost_rows_to_s3(
 
 def _flush_sft_rows_to_s3(
     *, frame: _Frame, s3_client: Any | None = None,
-) -> Optional[str]:
+) -> str | None:
     """Serialize ``frame.sft_rows`` to JSONL + write to the SFT-lossless sink.
 
     Stamps the constant frame-level dimensions (run_id, agent_id,
@@ -1095,13 +1095,13 @@ def get_cost_telemetry_callback() -> CostTelemetryCallback:
 def track_llm_cost(
     agent_id: str,
     *,
-    sector_team_id: Optional[str] = None,
-    node_name: Optional[str] = None,
-    run_type: Optional[RunType] = "weekly_research",
-    prompt: Optional[LoadedPrompt] = None,
-    rendered_prompt: Optional[str] = None,
-    model_name_fallback: Optional[str] = None,
-    run_id: Optional[str] = None,
+    sector_team_id: str | None = None,
+    node_name: str | None = None,
+    run_type: RunType | None = "weekly_research",
+    prompt: LoadedPrompt | None = None,
+    rendered_prompt: str | None = None,
+    model_name_fallback: str | None = None,
+    run_id: str | None = None,
 ) -> Iterator[_Frame]:
     """Scope LLM token accumulation to one agent decision.
 
@@ -1182,7 +1182,7 @@ def track_llm_cost(
         run_id=run_id,
         rendered_prompt=rendered_prompt,
     )
-    stack = _frame_stack.get()
+    stack = _frame_stack.get() or []
     new_stack = stack + [frame]
     token = _frame_stack.set(new_stack)
     exception_raised = False
@@ -1260,8 +1260,8 @@ def track_llm_cost(
     # Compute cost if we have a real model and the price table is loadable.
     # The same loaded table is reused for the JSONL flush below — one load
     # covers the aggregate ModelMetadata + every per-call row.
-    table_for_flush: Optional[PriceTable] = None
-    tool_fee_table_for_flush: Optional[ToolFeeTable] = None
+    table_for_flush: PriceTable | None = None
+    tool_fee_table_for_flush: ToolFeeTable | None = None
     if model_name != "unknown":
         try:
             table_for_flush = _load_price_table()
@@ -1336,7 +1336,7 @@ def track_llm_cost(
     )
 
     # Stash for the next ``_capture_if_enabled`` call to read.
-    completed = dict(_completed_metadata.get())
+    completed = dict(_completed_metadata.get() or {})
     completed[agent_id] = (metadata, prompt_context)
     _completed_metadata.set(completed)
 
@@ -1346,7 +1346,7 @@ def track_llm_cost(
     # AFTER the JSONL flush below so operators can inspect the per-call
     # rows on S3 to diagnose what broke the budget — raising before the
     # flush would lose the calls that contributed to the breach.
-    cumulative_after_frame: Optional[float] = None
+    cumulative_after_frame: float | None = None
     if run_id:
         cumulative_after_frame = _accumulate_run_cost(run_id, metadata.cost_usd)
 
@@ -1437,7 +1437,7 @@ def track_llm_cost(
             )
 
 
-def pop_metadata_for(agent_id: str) -> Optional[tuple[ModelMetadata, FullPromptContext]]:
+def pop_metadata_for(agent_id: str) -> tuple[ModelMetadata, FullPromptContext] | None:
     """Retrieve and clear the populated ``(ModelMetadata, FullPromptContext)``
     for ``agent_id`` if a recent ``track_llm_cost`` exit has stashed one.
 
@@ -1445,7 +1445,7 @@ def pop_metadata_for(agent_id: str) -> Optional[tuple[ModelMetadata, FullPromptC
     back to a placeholder so capture can still write something.
     Pops the entry to keep the dict bounded under heavy fan-out.
     """
-    completed = dict(_completed_metadata.get())
+    completed = dict(_completed_metadata.get() or {})
     pair = completed.pop(agent_id, None)
     _completed_metadata.set(completed)
     return pair

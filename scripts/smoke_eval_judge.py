@@ -49,7 +49,6 @@ from nousergon_lib.decision_capture import DecisionArtifact  # noqa: E402
 
 from evals.judge import evaluate_artifact, resolve_rubric_for_agent  # noqa: E402
 
-
 _BUCKET = "alpha-engine-research"
 _DEFAULT_AGENTS = ("macro_economist", "ic_cio")
 

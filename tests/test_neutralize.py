@@ -57,8 +57,8 @@ def test_pure_momentum_score_is_neutralized_out():
     # score == momentum exactly → after neutralization the ranking should no
     # longer track momentum (residual ~ 0 up to rescale).
     tickers, momentum, _ = _cross_section()
-    scores = {t: float(m) for t, m in zip(tickers, momentum)}
-    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum)}
+    scores = {t: float(m) for t, m in zip(tickers, momentum, strict=True)}
+    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum, strict=True)}
     out = neutralize_scores(scores, exp, NeutralizationConfig(enabled=True, factors=("momentum",), rescale=False))
     out_vec = np.array([out[t] for t in tickers])
     assert abs(_spearman(out_vec, momentum)) < 0.2  # momentum influence removed
@@ -69,8 +69,8 @@ def test_recovers_idiosyncratic_ranking():
     # ranking track the idiosyncratic component, not momentum.
     tickers, momentum, idio = _cross_section(seed=3)
     raw = momentum + idio
-    scores = {t: float(v) for t, v in zip(tickers, raw)}
-    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum)}
+    scores = {t: float(v) for t, v in zip(tickers, raw, strict=True)}
+    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum, strict=True)}
     out = neutralize_scores(scores, exp, NeutralizationConfig(enabled=True, factors=("momentum",), rescale=False))
     out_vec = np.array([out[t] for t in tickers])
     assert _spearman(out_vec, idio) > 0.8           # tracks idiosyncratic alpha
@@ -83,10 +83,10 @@ def test_multifactor_momentum_beta_size():
     beta = rng.normal(size=len(tickers))
     size = rng.normal(size=len(tickers))
     raw = 2 * momentum + beta - size + idio
-    scores = {t: float(v) for t, v in zip(tickers, raw)}
+    scores = {t: float(v) for t, v in zip(tickers, raw, strict=True)}
     exp = {
         t: {"momentum": float(m), "beta": float(b), "size": float(s)}
-        for t, m, b, s in zip(tickers, momentum, beta, size)
+        for t, m, b, s in zip(tickers, momentum, beta, size, strict=True)
     }
     out = neutralize_scores(
         scores, exp,
@@ -101,8 +101,8 @@ def test_multifactor_momentum_beta_size():
 def test_rescale_preserves_level_and_spread():
     tickers, momentum, idio = _cross_section(seed=1)
     raw = 5 + 3 * (momentum + idio)
-    scores = {t: float(v) for t, v in zip(tickers, raw)}
-    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum)}
+    scores = {t: float(v) for t, v in zip(tickers, raw, strict=True)}
+    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum, strict=True)}
     out = neutralize_scores(scores, exp, NeutralizationConfig(enabled=True, factors=("momentum",), rescale=True))
     out_vec = np.array([out[t] for t in tickers])
     raw_vec = np.array(list(scores.values()))
@@ -122,9 +122,9 @@ def test_below_min_names_is_identity():
 def test_missing_exposures_keep_original_score():
     tickers, momentum, idio = _cross_section(seed=5)
     raw = momentum + idio
-    scores = {t: float(v) for t, v in zip(tickers, raw)}
+    scores = {t: float(v) for t, v in zip(tickers, raw, strict=True)}
     # Drop exposures for two names — they must survive with their original score.
-    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum)}
+    exp = {t: {"momentum": float(m)} for t, m in zip(tickers, momentum, strict=True)}
     del exp[tickers[0]]
     exp[tickers[1]] = {"momentum": float("nan")}
     out = neutralize_scores(scores, exp, NeutralizationConfig(enabled=True, factors=("momentum",), rescale=False))
@@ -135,7 +135,7 @@ def test_missing_exposures_keep_original_score():
 
 def test_constant_factor_is_identity():
     tickers, _, idio = _cross_section(seed=9)
-    scores = {t: float(v) for t, v in zip(tickers, idio)}
+    scores = {t: float(v) for t, v in zip(tickers, idio, strict=True)}
     exp = {t: {"momentum": 1.0} for t in tickers}  # constant → uninformative
     out = neutralize_scores(scores, exp, NeutralizationConfig(enabled=True, factors=("momentum",)))
     assert out == scores

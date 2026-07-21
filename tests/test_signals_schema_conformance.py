@@ -20,8 +20,9 @@ contracts = pytest.importorskip(
     reason="needs alpha-engine-lib[contracts] >= 0.59.1",
 )
 
-from graph.research_graph import _build_signals_payload
-from tests.test_signals_producer_contract import _synthetic_state
+# Imported after the importorskip guard above.
+from graph.research_graph import _build_signals_payload  # noqa: E402
+from tests.test_signals_producer_contract import _synthetic_state  # noqa: E402
 
 
 def _payload() -> dict:

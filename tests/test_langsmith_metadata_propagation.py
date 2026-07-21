@@ -24,8 +24,7 @@ from pathlib import Path
 import pytest
 
 from agents import prompt_loader
-from agents.prompt_loader import LoadedPrompt, load_prompt
-
+from agents.prompt_loader import load_prompt
 
 # ── Unit — LoadedPrompt.langsmith_metadata() ─────────────────────────────
 

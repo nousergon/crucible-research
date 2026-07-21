@@ -29,13 +29,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from hashlib import sha1
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
-from evals.metrics import DEFAULT_NAMESPACE, DEFAULT_METRIC_NAME
+from evals.metrics import DEFAULT_METRIC_NAME, DEFAULT_NAMESPACE
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ def _get_metric_data_all(
     merged: list[dict[str, Any]] = []
     for chunk_start in range(0, len(queries), _GET_METRIC_DATA_MAX_QUERIES):
         chunk = queries[chunk_start:chunk_start + _GET_METRIC_DATA_MAX_QUERIES]
-        next_token: Optional[str] = None
+        next_token: str | None = None
         while True:
             kwargs: dict[str, Any] = {
                 "MetricDataQueries": chunk,
@@ -204,13 +204,13 @@ def _build_metric_data_queries(
 
 def compute_and_emit_4w_mean(
     *,
-    end_time: Optional[datetime] = None,
+    end_time: datetime | None = None,
     namespace: str = DEFAULT_NAMESPACE,
     source_metric: str = DEFAULT_METRIC_NAME,
     derived_metric: str = DERIVED_METRIC_NAME,
     floor_metric: str = DERIVED_FLOOR_METRIC_NAME,
-    cloudwatch_client: Optional[Any] = None,
-    s3_client: Optional[Any] = None,
+    cloudwatch_client: Any | None = None,
+    s3_client: Any | None = None,
 ) -> dict[str, Any]:
     """Compute and emit the rolling-4-week-mean derived metric.
 
@@ -233,7 +233,7 @@ def compute_and_emit_4w_mean(
     """
     cw = cloudwatch_client or boto3.client("cloudwatch")
     s3 = s3_client or boto3.client("s3")
-    end = end_time or datetime.now(timezone.utc)
+    end = end_time or datetime.now(UTC)
     start = end - timedelta(days=ROLLING_WINDOW_DAYS)
     period_seconds = ROLLING_WINDOW_DAYS * 86400  # one datapoint per window
 
@@ -374,7 +374,7 @@ def compute_and_emit_4w_mean(
     # to compute and emitting None would corrupt the alarm.
     eligible = [c for c in combo_stats if c["n"] >= min_n]
     excluded_low_n = len(combo_stats) - len(eligible)
-    floor_combo: Optional[dict[str, Any]] = None
+    floor_combo: dict[str, Any] | None = None
     if eligible:
         floor_combo = min(eligible, key=lambda c: c["value"])
     elif combo_stats:
@@ -500,7 +500,7 @@ def _emit_regression_entry(
     window_start: datetime,
     window_end: datetime,
     s3_client: Any,
-) -> Optional[str]:
+) -> str | None:
     """Write one schema-1.0.0 ``eval_score_regression`` entry to the
     system-wide changelog corpus.
 
@@ -509,7 +509,7 @@ def _emit_regression_entry(
     Returns the structured S3 key on success.
     """
     try:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
         ts_utc = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
         entry_date = ts.strftime("%Y-%m-%d")
         ts_id = ts_utc.replace(":", "-").rstrip("Z")
@@ -526,7 +526,8 @@ def _emit_regression_entry(
             f"{agent_id}|{criterion}|{judge_model}|"
             f"{window_start.isoformat()}|{window_end.isoformat()}"
         ).encode()
-        event_hash = sha1(digest_input).hexdigest()[:7]
+        # Short deterministic dedup id, not a security digest.
+        event_hash = sha1(digest_input, usedforsecurity=False).hexdigest()[:7]
         event_id = f"{ts_id}_{actor}_{event_hash}"
 
         summary = (

@@ -13,14 +13,13 @@ The end-to-end orchestrator-level test (``build_batch_plan`` →
 from __future__ import annotations
 
 import pytest
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
 )
-from graph.state_schemas import RubricDimensionScore, RubricEvalLLMOutput
 
+from graph.state_schemas import RubricEvalLLMOutput
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -53,7 +52,7 @@ def _make_artifact(
 
 class TestCustomIdCodec:
     def test_round_trip_short_agent_id(self):
-        from evals.judge import encode_custom_id, decode_custom_id
+        from evals.judge import decode_custom_id, encode_custom_id
 
         cid = encode_custom_id(
             judged_agent_id="ic_cio",
@@ -68,7 +67,7 @@ class TestCustomIdCodec:
         assert model == "claude-haiku-4-5"
 
     def test_round_trip_sonnet_model(self):
-        from evals.judge import encode_custom_id, decode_custom_id
+        from evals.judge import decode_custom_id, encode_custom_id
 
         cid = encode_custom_id(
             judged_agent_id="macro_economist",
@@ -83,7 +82,7 @@ class TestCustomIdCodec:
         the longest agent_id in the wild today is
         ``thesis_update:technology:NVDA`` (~30 chars) but a defensive
         truncation guard matters for future agent_ids that could overflow."""
-        from evals.judge import encode_custom_id, _CUSTOM_ID_PATTERN
+        from evals.judge import _CUSTOM_ID_PATTERN, encode_custom_id
 
         long_agent = "thesis_update:technology:VERYLONGCOMPANYNAMEHERE_ABCDEFGHIJKL"
         cid = encode_custom_id(

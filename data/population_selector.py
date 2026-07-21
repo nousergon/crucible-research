@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import Optional
 
 from nousergon_lib.universe import filter_to_universe
+
 from graph.state_schemas import ADVANCE_DECISIONS
 from scoring.composite import normalize_conviction
 
@@ -187,9 +187,6 @@ def select_population(
     # Classify sectors and compute slots
     sector_classes = classify_sectors(sector_ratings, pop_config)
     sector_slots = compute_sector_slots(sector_classes, pop_config)
-
-    # Index current population by ticker
-    current_by_ticker = {p["ticker"]: p for p in current_population}
 
     # Index scored candidates by ticker (includes re-scored incumbents)
     candidates_by_ticker = {c["ticker"]: c for c in scored_candidates}
@@ -486,7 +483,8 @@ def compute_exits_and_open_slots(
     min_lt_score = rotation_config.get("min_long_term_score", 45)
     min_tenure = rotation_config.get("min_tenure_weeks", 2)
     collapse_thresh = rotation_config.get("thesis_collapse_threshold", 40)
-    min_rotation_pct = rotation_config.get("min_rotation_pct", 0.10)
+    # min_rotation_pct: intentionally NOT read here (L4534) — the unconditional
+    # rotation floor it used to drive was removed; see the NOTE below.
     max_rotations = rotation_config.get("max_rotations_per_run", 10)
 
     remaining: list[dict] = []

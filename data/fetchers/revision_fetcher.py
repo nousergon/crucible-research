@@ -13,24 +13,23 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+
+# Use the shared FMP rate limiter from analyst_fetcher
+from data.fetchers.analyst_fetcher import _fmp_get as _fmp_get_shared
 
 log = logging.getLogger(__name__)
 
 _FMP_V3 = "https://financialmodelingprep.com/api/v3"
 
-# Use the shared FMP rate limiter from analyst_fetcher
-from data.fetchers.analyst_fetcher import _fmp_get as _fmp_get_shared
 
-
-def _fmp_get(endpoint: str, params: Optional[dict] = None) -> dict | list:
+def _fmp_get(endpoint: str, params: dict | None = None) -> dict | list:
     return _fmp_get_shared(endpoint, params=params, base=_FMP_V3)
 
 
 def fetch_revisions(
     tickers: list[str],
     bucket: str = "alpha-engine-research",
-    reference_date: Optional[str] = None,
+    reference_date: str | None = None,
 ) -> dict[str, dict]:
     """
     Fetch current EPS consensus and compute revision metrics against prior week.
@@ -121,7 +120,7 @@ def _load_best_prior_snapshot(
     today: datetime,
     bucket: str,
     lookback_days: int = 14,
-) -> Optional[dict]:
+) -> dict | None:
     """Try to load the most recent prior revision snapshot from S3."""
     try:
         import boto3
@@ -132,7 +131,8 @@ def _load_best_prior_snapshot(
                 key = f"archive/revisions/{check_date}.json"
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 return json.loads(obj["Body"].read())
-            except Exception:
+            except Exception as e:
+                log.debug("No prior revision snapshot at %s: %s", check_date, e)
                 continue
     except Exception as e:
         log.debug("Could not load prior revision snapshot: %s", e)
@@ -159,14 +159,15 @@ def _load_revision_streaks(
                     data = json.loads(obj["Body"].read())
                     snapshots.append((check_date, data))
                     break
-                except Exception:
+                except Exception as e:
                     # Revision fetch failed for this checkpoint — try the next one
                     # (recorded: S3 list/read failures, JSON decode errors, truncated archives).
+                    log.debug("Revision snapshot checkpoint %s failed: %s", check_date, e)
                     continue
-    except Exception:
+    except Exception as e:
         # Outer fetch failed entirely (e.g., S3 list permissions) — empty result set
         # (recorded: boto3 auth, S3 prefix scan failures).
-        pass
+        log.debug("Revision streak fetch failed entirely: %s", e)
     snapshots.sort(key=lambda x: x[0])
     return snapshots
 

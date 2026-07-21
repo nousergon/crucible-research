@@ -37,14 +37,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from agents.sector_teams.peer_review import (
     _candidate_composite_score,
     _joint_finalization,
     _merge_candidates,
 )
-from graph.state_schemas import JointSelectionOutput, JointFinalizationDecision
+from graph.state_schemas import JointSelectionOutput
 
 
 class _FakeLLM:

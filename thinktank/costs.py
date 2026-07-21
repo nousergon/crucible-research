@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from thinktank import COSTS_KEY_TMPL
@@ -97,7 +97,7 @@ class BudgetGuard:
         month = self.month_key(calendar_date)
         ledger = self.load_ledger(month)
         ledger.spent_usd = round(ledger.spent_usd + cost_usd, 6)
-        ledger.updated_at = datetime.now(timezone.utc).isoformat()
+        ledger.updated_at = datetime.now(UTC).isoformat()
         ledger.runs.append(
             {"run_id": run_id, "trading_day": trading_day, "cost_usd": cost_usd}
         )

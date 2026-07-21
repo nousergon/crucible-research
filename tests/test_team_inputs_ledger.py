@@ -56,7 +56,7 @@ def test_round_trip(conn):
         ("2026-06-13", "technology"),
     ).fetchall()
     assert [r[0] for r in rows] == ["AAPL", "NVDA"]
-    assert dict((r[0], r[1]) for r in rows) == {"AAPL": "held_population", "NVDA": "scanner"}
+    assert {r[0]: r[1] for r in rows} == {"AAPL": "held_population", "NVDA": "scanner"}
 
 
 def test_idempotent_on_rerun(conn):

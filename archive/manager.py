@@ -18,19 +18,15 @@ Application code uses "ticker". Both refer to the stock symbol (e.g., "AAPL").
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
-
-import logging
 
 import boto3
 from botocore.exceptions import ClientError
 
-from config import S3_BUCKET, AWS_REGION
+from config import AWS_REGION, S3_BUCKET
 from retry import retry
 
 log = logging.getLogger(__name__)
@@ -42,11 +38,11 @@ _BACKUP_KEY_TPL = "backups/research_{date}.db"
 # ── S3 helpers ────────────────────────────────────────────────────────────────
 
 class ArchiveManager:
-    def __init__(self, bucket: str = S3_BUCKET, region: str = AWS_REGION, local_db_path: Optional[str] = None):
+    def __init__(self, bucket: str = S3_BUCKET, region: str = AWS_REGION, local_db_path: str | None = None):
         self.bucket = bucket
         self.s3 = boto3.client("s3", region_name=region)
         self.local_db_path = local_db_path or os.path.join(tempfile.gettempdir(), "research.db")
-        self.db_conn: Optional[sqlite3.Connection] = None
+        self.db_conn: sqlite3.Connection | None = None
 
     # ── Database lifecycle ────────────────────────────────────────────────────
 
@@ -89,7 +85,7 @@ class ArchiveManager:
 
     # ── S3 object helpers ─────────────────────────────────────────────────────
 
-    def _s3_get(self, key: str) -> Optional[str]:
+    def _s3_get(self, key: str) -> str | None:
         """Download S3 object and return as string. Returns None if not found.
 
         Fast-exits on NoSuchKey — the generic retry decorator would otherwise
@@ -132,7 +128,7 @@ class ArchiveManager:
             "thesis": self._load_thesis_json(f"{base}/thesis.json"),
         }
 
-    def _load_thesis_json(self, key: str) -> Optional[dict]:
+    def _load_thesis_json(self, key: str) -> dict | None:
         raw = self._s3_get(key)
         if raw:
             try:
@@ -159,9 +155,10 @@ class ArchiveManager:
         results = {}
         # SQLite pre-3.24: no window functions. Use GROUP BY + MAX(id) for latest per ticker.
         placeholders = ",".join("?" for _ in tickers)
-        try:
-            rows = self.db_conn.execute(
-                f"""SELECT t.symbol, t.rating, t.score, t.conviction, t.signal,
+        # noqa reason (S608 below): `placeholders` is a `?,?,...` bind-count string
+        # built from `len(tickers)`, never from ticker values themselves — the actual
+        # tickers are passed as bound params in the `execute()` call, not interpolated.
+        query = f"""SELECT t.symbol, t.rating, t.score, t.conviction, t.signal,
                            t.thesis_summary, t.technical_score, t.price_target_upside,
                            t.quant_score, t.qual_score
                     FROM investment_thesis t
@@ -170,7 +167,10 @@ class ArchiveManager:
                         FROM investment_thesis
                         WHERE symbol IN ({placeholders})
                         GROUP BY symbol
-                    ) latest ON t.id = latest.max_id""",
+                    ) latest ON t.id = latest.max_id"""  # noqa: S608
+        try:
+            rows = self.db_conn.execute(
+                query,
                 tickers,
             ).fetchall()
             for row in rows:
@@ -196,9 +196,9 @@ class ArchiveManager:
         self,
         ticker: str,
         run_date: str,
-        news_report: Optional[str],
-        research_report: Optional[str],
-        thesis: Optional[dict],
+        news_report: str | None,
+        research_report: str | None,
+        thesis: dict | None,
         category: str = "universe",
     ) -> None:
         """
@@ -253,7 +253,7 @@ class ArchiveManager:
         if not moat_assessment or not isinstance(moat_assessment, dict):
             return
         key = f"archive/universe/{ticker}/moat_profile.json"
-        existing: Optional[str] = None
+        existing: str | None = None
         try:
             existing = self._s3_get(key)
         except Exception:  # noqa: BLE001 — fetch failure means no prior file (or transient S3); start fresh, don't lose this run
@@ -264,8 +264,8 @@ class ArchiveManager:
                 parsed = json.loads(existing)
                 if isinstance(parsed, list):
                     history = parsed
-            except Exception:  # noqa: BLE001 — corrupt prior snapshot: start fresh, don't lose this run
-                pass
+            except Exception as e:  # noqa: BLE001 — corrupt prior snapshot: start fresh, don't lose this run
+                log.debug("Discarding corrupt prior moat_profile snapshot for %s: %s", ticker, e)
 
         new_entry = {"run_date": run_date, **moat_assessment}
         # Idempotency: replace any prior entry with the same run_date.
@@ -468,7 +468,7 @@ class ArchiveManager:
 
     def load_sector_team_run(
         self, run_date: str, team_id: str,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Load a previously-persisted sector-team output for resume.
 
         Returns the team ``output`` dict iff a well-formed envelope
@@ -608,7 +608,7 @@ class ArchiveManager:
 
     def load_agent_run(
         self, run_date: str, agent_id: str,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Load a previously-persisted non-team agent output for resume.
 
         Same contract as ``load_sector_team_run``: returns the agent
@@ -781,7 +781,7 @@ class ArchiveManager:
             log.debug("Failed to load predictions JSON: %s", e)
             return {}
 
-    def load_candidates_json(self, run_date: str) -> Optional[dict]:
+    def load_candidates_json(self, run_date: str) -> dict | None:
         """Load the standalone Scanner SF state's candidates artifact at
         ``candidates/{run_date}/candidates.json`` (L1995).
 
@@ -1074,7 +1074,7 @@ class ArchiveManager:
         )
 
     def close_candidate_tenure(self, symbol: str, exit_date: str, exit_score: float,
-                                exit_reason: str, replaced_by: Optional[str], tenure_days: int,
+                                exit_reason: str, replaced_by: str | None, tenure_days: int,
                                 peak_score: float) -> None:
         if not self.db_conn:
             return
@@ -1326,7 +1326,7 @@ class ArchiveManager:
             (ticker,),
         )
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
     def save_analyst_resource(
         self,
@@ -1372,10 +1372,15 @@ class ArchiveManager:
         if agent_prefix:
             clauses.append("agent LIKE ?")
             params.append(f"{agent_prefix}%")
+        # `clauses` entries are hardcoded column-comparison literals (never
+        # since_date/agent_prefix-derived); bound values travel via `params` below.
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = (
+            "SELECT ticker, run_date, agent, resource_type, resource_detail, "  # noqa: S608
+            "influence FROM analyst_resources" + where + " ORDER BY run_date"
+        )
         rows = self.db_conn.execute(
-            "SELECT ticker, run_date, agent, resource_type, resource_detail, "
-            "influence FROM analyst_resources" + where + " ORDER BY run_date",
+            query,
             params,
         ).fetchall()
         return [dict(r) for r in rows]
@@ -1390,7 +1395,6 @@ class ArchiveManager:
         max_age_weeks: int = 12,
     ) -> dict[str, list[dict]]:
         """Load episodic memories for tickers (exact match) and sectors (related stocks)."""
-        import json as _json
         from datetime import date, timedelta
         cutoff = str(date.today() - timedelta(weeks=max_age_weeks))
 

@@ -17,8 +17,6 @@ surviving strict mode.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from graph.research_graph import _strict_validation_enabled, _validate

@@ -25,14 +25,14 @@ import io
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from scoring.universe_board import (
+    _PILLAR_ORDER,
     _bucket,
     _client,
     _load_pillar_weights,
     _num,
-    _PILLAR_ORDER,
     compute_cross_sectional_attractiveness,
 )
 

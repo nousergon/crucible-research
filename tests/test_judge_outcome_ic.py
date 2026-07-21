@@ -23,6 +23,7 @@ Locks down:
 from __future__ import annotations
 
 import pytest
+from nousergon_lib.quant.horizons import DEFAULT_POLICY
 
 from evals.judge_outcome_ic import (
     MIN_EVAL_DATES,
@@ -35,7 +36,6 @@ from evals.judge_outcome_ic import (
     student_t_two_sided_p,
 )
 from evals.outcome_store import PrimaryOutcome
-from nousergon_lib.quant.horizons import DEFAULT_POLICY
 
 # ── Fixture helpers ────────────────────────────────────────────────────────
 

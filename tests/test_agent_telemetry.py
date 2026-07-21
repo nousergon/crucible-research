@@ -17,8 +17,7 @@ calls. We never make real boto3 calls in tests.
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -58,7 +57,7 @@ def _enable_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _enter_time(seconds_ago: float) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    return datetime.now(UTC) - timedelta(seconds=seconds_ago)
 
 
 class TestEmitAgentCompletion:

@@ -24,7 +24,7 @@ which tolerates a partial list by treating missing tickers as REJECT.
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -150,14 +150,13 @@ class TestCIOPerCandidateInvariant:
         (``min_length=1``), so we patch the wrapper to bypass that and
         exercise the run_cio empty-handling branch directly."""
         from agents.investment_committee.ic_cio import run_cio
-        from graph.state_schemas import CIORawOutput
 
         # Construct a CIORawOutput-like that bypasses min_length=1
         # validation by setting decisions on an instance constructed
         # with one item then mutating to empty post-construction
         # (mirrors what would happen if the LLM emitted [] and the SDK
         # parser somehow let it through — defense in depth).
-        from graph.state_schemas import CIORawDecision
+        from graph.state_schemas import CIORawDecision, CIORawOutput
         raw = CIORawOutput(decisions=[
             CIORawDecision(ticker="X", decision="REJECT")
         ])

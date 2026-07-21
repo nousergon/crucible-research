@@ -55,27 +55,35 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, date, datetime
+from typing import Any
 
 import boto3
-from krepis.judge import JudgeToolCallLeakError
+from krepis.judge import JudgeToolCallLeakError, check_openai_tool_response_for_leak
 from krepis.judge import ToolResultNotFoundError as _LibToolResultNotFoundError
 from krepis.judge import build_structured_tool_spec as _lib_build_tool_spec
-from krepis.judge import check_openai_tool_response_for_leak
 from krepis.judge import decode_custom_id as _lib_decode_custom_id
 from krepis.judge import encode_custom_id as _lib_encode_custom_id
 from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
 from krepis.judge import render_rubric as _lib_render_rubric
 from krepis.llm_config import ModelSpec
-from openai import OpenAI
-
 from nousergon_lib.decision_capture import DecisionArtifact
 from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
     eval_latest_key,
     new_eval_run_id,
 )
+from openai import OpenAI
+
+from agents.prompt_loader import LoadedPrompt, load_prompt
+from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
+from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
+from graph.state_schemas import (
+    RubricEvalArtifact,
+    RubricEvalLLMOutput,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _new_judge_run_id() -> str:
@@ -98,16 +106,6 @@ def _new_judge_run_id() -> str:
     explicit ``judge_run_id`` strings where determinism is needed.
     """
     return new_eval_run_id()
-
-from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
-from agents.prompt_loader import LoadedPrompt, load_prompt
-from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
-from graph.state_schemas import (
-    RubricEvalArtifact,
-    RubricEvalLLMOutput,
-)
-
-logger = logging.getLogger(__name__)
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────
@@ -152,7 +150,7 @@ loud failure for the operator to diagnose."""
 # ── Agent → rubric mapping ────────────────────────────────────────────────
 
 
-def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
+def resolve_rubric_for_agent(agent_id: str) -> str | None:
     """Return the rubric prompt name for ``agent_id``, or ``None`` if
     the agent type is intentionally unevaluated.
 
@@ -301,9 +299,9 @@ def _make_skip_eval_artifact(
     rubric_version: str,
     judge_model: str,
     judge_run_id: str,
-    judged_artifact_s3_key: Optional[str],
+    judged_artifact_s3_key: str | None,
     skip_reason: str = "precluded_by_empty_upstream",
-    overall_reasoning: Optional[str] = None,
+    overall_reasoning: str | None = None,
 ) -> RubricEvalArtifact:
     """Build the skip-marker eval for an artifact that should not be
     scored by the rubric. Shared by the sync + batch paths.
@@ -346,7 +344,7 @@ def _make_skip_eval_artifact(
     return RubricEvalArtifact(
         run_id=artifact.run_id,
         judge_run_id=judge_run_id,
-        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         judged_agent_id=artifact.agent_id,
         judged_artifact_s3_key=judged_artifact_s3_key,
         rubric_id=rubric_name,
@@ -602,11 +600,11 @@ def parse_batch_message(
 def evaluate_artifact(
     artifact: DecisionArtifact,
     *,
-    judge_run_id: Optional[str] = None,
+    judge_run_id: str | None = None,
     judge_model: str = DEFAULT_JUDGE_MODEL,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    judged_artifact_s3_key: Optional[str] = None,
+    judged_artifact_s3_key: str | None = None,
     max_retries: int = MAX_JUDGE_RETRIES,
 ) -> RubricEvalArtifact:
     """Judge a single ``DecisionArtifact`` against its rubric — the sync
@@ -768,7 +766,7 @@ def evaluate_artifact(
     return RubricEvalArtifact(
         run_id=artifact.run_id,
         judge_run_id=judge_run_id,
-        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         judged_agent_id=artifact.agent_id,
         judged_artifact_s3_key=judged_artifact_s3_key,
         rubric_id=rubric_name,
@@ -813,7 +811,7 @@ not a langchain correction turn. Caps worst-case latency at 3 full model
 calls."""
 
 
-def _openrouter_judge_model_spec(*, request_model: str, max_tokens: int) -> "ModelSpec":
+def _openrouter_judge_model_spec(*, request_model: str, max_tokens: int) -> ModelSpec:
     """Build the ``ModelSpec`` for an OpenRouter judge call.
 
     ``reasoning={"exclude": True}`` is NOT the default here — live
@@ -843,7 +841,7 @@ class _OpenRouterJudgeCallResult:
     ``RubricEvalArtifact``."""
 
     llm_output: RubricEvalLLMOutput
-    resolved_model: Optional[str]
+    resolved_model: str | None
     total_usd: float
 
 
@@ -853,7 +851,7 @@ def _call_openrouter_judge_llm(
     agent_id: str,
     request_model: str,
     max_tokens: int,
-    api_key: Optional[str],
+    api_key: str | None,
     max_retries: int,
     log_prefix: str,
 ) -> _OpenRouterJudgeCallResult:
@@ -896,9 +894,9 @@ def _call_openrouter_judge_llm(
         },
     }]
 
-    last_error: Optional[BaseException] = None
-    llm_output: Optional[RubricEvalLLMOutput] = None
-    resolved_model: Optional[str] = None
+    last_error: BaseException | None = None
+    llm_output: RubricEvalLLMOutput | None = None
+    resolved_model: str | None = None
     total_usd = 0.0
 
     for attempt in range(1, max_retries + 1):
@@ -989,11 +987,11 @@ def _call_openrouter_judge_llm(
 def evaluate_artifact_openrouter(
     artifact: DecisionArtifact,
     *,
-    judge_run_id: Optional[str] = None,
+    judge_run_id: str | None = None,
     judge_model: str = OPENROUTER_SHADOW.logical_key,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    judged_artifact_s3_key: Optional[str] = None,
+    judged_artifact_s3_key: str | None = None,
     max_retries: int = MAX_OPENROUTER_JUDGE_RETRIES,
 ) -> RubricEvalArtifact:
     """Judge a single ``DecisionArtifact`` against its rubric via the
@@ -1083,7 +1081,7 @@ def evaluate_artifact_openrouter(
     return RubricEvalArtifact(
         run_id=artifact.run_id,
         judge_run_id=judge_run_id,
-        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         judged_agent_id=artifact.agent_id,
         judged_artifact_s3_key=judged_artifact_s3_key,
         rubric_id=rubric_name,
@@ -1096,7 +1094,7 @@ def evaluate_artifact_openrouter(
     )
 
 
-def _resolve_openrouter_api_key(api_key: Optional[str]) -> str:
+def _resolve_openrouter_api_key(api_key: str | None) -> str:
     """Resolve the OpenRouter API key: explicit ``api_key`` arg wins,
     else ``config.OPENROUTER_API_KEY`` (SSM-first with env fallback via
     ``nousergon_lib.secrets.get_secret`` — the fleet's standard secret-
@@ -1178,7 +1176,7 @@ def build_eval_s3_key(
     run_id: str,
     judge_run_id: str,
     judge_model: str,
-    timestamp: Optional[datetime] = None,  # noqa: ARG001 — see below
+    timestamp: datetime | None = None,  # noqa: ARG001 — see below
     prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
@@ -1237,7 +1235,7 @@ def build_legacy_eval_s3_key(
     run_id: str,
     judge_run_id: str,
     judge_model: str,
-    timestamp: Optional[datetime] = None,
+    timestamp: datetime | None = None,
     prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Build the *legacy* nested Option B key (pre-config#793 swap).
@@ -1254,7 +1252,7 @@ def build_legacy_eval_s3_key(
     """
     if not judge_run_id:
         raise ValueError("build_legacy_eval_s3_key requires judge_run_id.")
-    ts = timestamp or datetime.now(timezone.utc)
+    ts = timestamp or datetime.now(UTC)
     date_partition = ts.strftime("%Y-%m-%d")
     return (
         f"{prefix}{date_partition}/{judge_run_id}/"

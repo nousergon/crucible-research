@@ -19,15 +19,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-
 from nousergon_lib.quant.horizons import PRIMARY_HORIZON
 from nousergon_lib.trading_calendar import subtract_trading_days
 
 from evals.last_week_scorecard import (
     DEFAULT_SCORECARD_PREFIX,
     Scorecard,
-    SectorRow,
-    TickerOutcome,
     build_scorecard,
     emit_scorecard_to_s3,
     format_scorecard_text,

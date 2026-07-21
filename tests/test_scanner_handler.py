@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HANDLER_PATH = _REPO_ROOT / "lambda" / "scanner_handler.py"
 
@@ -203,8 +202,8 @@ class TestHandler:
                                 ("2026-05-29", "2026-05-29")]:   # Fri → Fri
             captured = {}
 
-            def fake_build(**kwargs):
-                captured.update(kwargs)
+            def fake_build(*, _captured=captured, **kwargs):
+                _captured.update(kwargs)
                 return _ok_artifact()
 
             with patch.object(handler_mod, "_ensure_init"), \

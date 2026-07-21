@@ -12,7 +12,8 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import FrozenInstanceError
+from datetime import date
 from io import BytesIO
 
 import pandas as pd
@@ -24,14 +25,13 @@ from data.substrate import (
     read_substrate_for_population,
 )
 from data.substrate.reader import (
-    NEWS_AGGREGATES_PREFIX,
     ANALYST_REVISIONS_PREFIX,
     INSIDER_TRANSACTIONS_PREFIX,
+    NEWS_AGGREGATES_PREFIX,
     read_analyst_revisions,
     read_insider_transactions_window,
     read_news_aggregates,
 )
-
 
 # ── In-memory S3 mock ──────────────────────────────────────────────────
 
@@ -482,7 +482,7 @@ def test_substrate_snapshot_frozen():
     snap = SubstrateSnapshot(
         ticker="AAPL", as_of_date=date(2026, 5, 13),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         snap.news_n_articles = 5  # type: ignore[misc]
 
 
