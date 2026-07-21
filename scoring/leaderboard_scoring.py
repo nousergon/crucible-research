@@ -224,28 +224,71 @@ def _topn_alpha_metric(
     return date_clustered_stats(per_date)
 
 
+def _topn_alpha_vs_benchmark_metric(
+    spec: SpecHistory,
+    realized: Mapping[str, Mapping[str, float]],
+    top_n: int,
+    benchmark_ticker: str,
+) -> dict | None:
+    """Date-clustered long-only top-N alpha = mean(spec top-N) − the
+    ``benchmark_ticker``'s own realized return, per date, clustered across
+    dates (alpha-engine-config-I2998: a champion-free, self-contained lift
+    metric — comparable across specs with no live comparator dependency).
+    ``realized`` already carries every ticker present in the same
+    ``staging/daily_closes/{date}.parquet`` join ``_resolve_realized_returns``
+    uses for every other ticker (SPY included — verified live 2026-07-20), so
+    no separate benchmark fetch is needed here. A date contributes only when
+    BOTH the spec's top-N return AND the benchmark's realized return are
+    available for that date."""
+    per_date: list[float] = []
+    for date_str, day in spec.by_date.items():
+        ret = realized.get(date_str)
+        if not ret:
+            continue
+        bench_r = ret.get(benchmark_ticker)
+        if bench_r is None:
+            continue
+        spec_r = _top_n_return_by_date(day, ret, top_n)
+        if spec_r is None:
+            continue
+        per_date.append(spec_r - bench_r)
+    return date_clustered_stats(per_date)
+
+
 def score_leaderboard(
-    champion: SpecHistory,
+    champion: SpecHistory | None,
     challengers: Sequence[SpecHistory],
     realized: Mapping[str, Mapping[str, float]],
     *,
     top_n: int = 50,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    benchmark_ticker: str | None = "SPY",
 ) -> dict:
-    """Score the champion + every challenger on the two cutover-gate objectives,
-    joined to ``realized`` (``{date: {ticker: forward_return}}``). PURE — no I/O.
+    """Score the champion (if any) + every challenger on the cutover-gate
+    objectives, joined to ``realized`` (``{date: {ticker: forward_return}}``).
+    PURE — no I/O.
+
+    ``champion`` is ``Optional`` (alpha-engine-config-I2998): no producer is
+    currently registered ``kind=="champion"`` (config-I2993 retired
+    ``agentic_sector_teams`` without a successor) — scoring must degrade to
+    champion-free metrics rather than refuse to run. ``topn_alpha_vs_champion``
+    is ``None`` for every spec whenever ``champion`` is ``None`` (nothing to
+    compare against); ``realized_rank_ic`` and ``topn_alpha_vs_benchmark`` are
+    unaffected, since neither needs a live comparator.
 
     Returns a leaderboard dict::
 
         {
-          "champion": <name>,
+          "champion": <name> | None,
           "horizon_days": 21,
           "top_n": 50,
+          "benchmark_ticker": <str> | None,
           "n_dates": <#dates with ANY realized join>,
           "specs": [
             {"name", "kind",
              "realized_rank_ic": <clustered stats | None>,
-             "topn_alpha_vs_champion": <clustered stats | None>,  # None for the champion
+             "topn_alpha_vs_champion": <clustered stats | None>,  # None for the champion, and whenever champion is None
+             "topn_alpha_vs_benchmark": <clustered stats | None>,  # champion-free direct lift vs benchmark_ticker
              "n_dates_scored": <#dates this spec contributed>},
             ...
           ],
@@ -256,7 +299,10 @@ def score_leaderboard(
     the failure is recorded)."""
     dates_with_join = sorted(
         d for d in realized
-        if (d in champion.by_date or any(d in c.by_date for c in challengers))
+        if (
+            (champion is not None and d in champion.by_date)
+            or any(d in c.by_date for c in challengers)
+        )
         and realized.get(d)
     )
 
@@ -265,8 +311,12 @@ def score_leaderboard(
     def _row(spec: SpecHistory, is_champion: bool) -> dict:
         try:
             rank_ic = _rank_ic_metric(spec, realized)
-            alpha = None if is_champion else _topn_alpha_metric(
+            alpha_vs_champion = None if (is_champion or champion is None) else _topn_alpha_metric(
                 spec, champion, realized, top_n,
+            )
+            alpha_vs_benchmark = (
+                _topn_alpha_vs_benchmark_metric(spec, realized, top_n, benchmark_ticker)
+                if benchmark_ticker else None
             )
             n_scored = sum(
                 1 for d in spec.by_date if realized.get(d)
@@ -275,7 +325,8 @@ def score_leaderboard(
                 "name": spec.name,
                 "kind": spec.kind,
                 "realized_rank_ic": rank_ic,
-                "topn_alpha_vs_champion": alpha,
+                "topn_alpha_vs_champion": alpha_vs_champion,
+                "topn_alpha_vs_benchmark": alpha_vs_benchmark,
                 "n_dates_scored": n_scored,
             }
         except Exception as exc:  # noqa: BLE001 — observe artifact, per-spec isolation
@@ -288,18 +339,21 @@ def score_leaderboard(
                 "kind": spec.kind,
                 "realized_rank_ic": None,
                 "topn_alpha_vs_champion": None,
+                "topn_alpha_vs_benchmark": None,
                 "n_dates_scored": 0,
                 "error": str(exc),
             }
 
-    spec_rows.append(_row(champion, is_champion=True))
+    if champion is not None:
+        spec_rows.append(_row(champion, is_champion=True))
     for ch in challengers:
         spec_rows.append(_row(ch, is_champion=False))
 
     return {
-        "champion": champion.name,
+        "champion": champion.name if champion is not None else None,
         "horizon_days": horizon_days,
         "top_n": top_n,
+        "benchmark_ticker": benchmark_ticker,
         "n_dates": len(dates_with_join),
         "specs": spec_rows,
     }

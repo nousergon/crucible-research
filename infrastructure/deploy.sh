@@ -402,16 +402,25 @@ build_and_deploy_main() {
 
   # Handler returns {"status": "OK|SKIPPED|ERROR"} or {"statusCode": 500} on env var failure.
   # Accept OK or SKIPPED (wrong_time / already_run / market_holiday are expected).
+  # On any non-pass, SURFACE THE REAL DETAIL rather than a bare 'UNKNOWN':
+  # the handler's ERROR return carries the message under ``error`` (outer
+  # except) — NOT ``errorMessage`` — and the 500 env path under ``body``;
+  # reading only ``errorMessage`` collapsed every genuine canary failure to
+  # an opaque 'UNKNOWN', making the rollback un-diagnosable (2026-07-21
+  # incident). ``errorMessage`` is still consulted for a Lambda-runtime
+  # unhandled crash, and the raw payload is the last-resort fallback.
   CANARY_STATUS=$(python3 -c "
 import json, sys
 d = json.load(open('$CANARY_OUT'))
 s = d.get('status', '')
 if s in ('OK', 'SKIPPED'):
     print(s)
-elif d.get('statusCode') == 500:
-    print('ENV_ERROR')
 else:
-    print(d.get('errorMessage', 'UNKNOWN'))
+    detail = (d.get('error') or d.get('body') or d.get('errorMessage')
+              or d.get('reason') or json.dumps(d))
+    detail = ' '.join(str(detail).split())[:300]
+    label = 'ENV_ERROR' if d.get('statusCode') == 500 else (s or 'UNKNOWN')
+    print(f'{label}: {detail}')
 " 2>/dev/null || echo "PARSE_ERROR")
   rm -f "$CANARY_OUT"
 

@@ -448,6 +448,55 @@ def handler(event, context):
     skip_dry_run_gate = event.get("skip_dry_run_gate", False)
     dry_run_llm = event.get("dry_run_llm", False)
 
+    # ── dry_run_llm — deploy-canary boot/import/wiring smoke ──────────────
+    # dry_run_llm is EXCLUSIVELY the deploy canary's smoke-test mode
+    # (infrastructure/deploy.sh sends {"dry_run_llm": true}). It MUST be a
+    # deterministic, side-effect-free boot validation: build_graph()
+    # exercises node wiring + imports (the 2026-05-06 RAG-import class of
+    # bug) and create_initial_state() exercises state construction — neither
+    # needs upstream data, S3, the DB, or the wall clock. Returning HERE —
+    # before the time gate, preflight, DB download, and the scorecard /
+    # team-accuracy emitters below — makes the canary behave identically no
+    # matter WHEN a deploy lands. Previously the dry return was buried past
+    # all that real I/O, so a deploy landing inside the 5:40-5:55am PT
+    # weekday gate window (so the time gate did not SKIP it) executed real
+    # S3/DB work in the canary; a transient failure there returned
+    # status=ERROR and tripped a spurious auto-rollback (2026-07-21
+    # incident). This matches the fleet convention already used by the
+    # thinktank / aggregate_costs / rationale_clustering / eval_judge dry
+    # paths (return before any S3 / secrets).
+    if dry_run_llm:
+        from archive.manager import ArchiveManager
+        from graph.research_graph import build_graph, create_initial_state
+        from dry_run import install_dry_run_stubs
+        _dry_run_date = str(most_recent_trading_day(datetime.date.today()))
+        logger.info(
+            "dry_run_llm=True: boot/import/wiring validation only "
+            "(preflight-equivalent; time gate + data-dependent graph not executed)"
+        )
+        # ArchiveManager() is constructed but never downloads the DB — boot
+        # validation needs no upstream artifacts. Stubs are installed so any
+        # direct-bound archive_writer / email_sender nodes captured at
+        # build_graph() time stay inert.
+        _dry_archive = ArchiveManager()
+        _restore = install_dry_run_stubs(_dry_archive)
+        try:
+            build_graph()
+            create_initial_state(
+                run_date=_dry_run_date,
+                archive_manager=_dry_archive,
+                is_early_close=False,
+            )
+        finally:
+            _restore()
+        logger.info("dry_run_llm boot validation OK for %s", _dry_run_date)
+        return {
+            "status": "OK",
+            "dry_run_llm": True,
+            "phase": "boot_validation",
+            "date": _dry_run_date,
+        }
+
     # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
     if not force and not weekly and not _is_scheduled_run_time():
         return {"status": "SKIPPED", "reason": "wrong_time"}
@@ -641,76 +690,30 @@ def handler(event, context):
                 is_early_close=early_close,
             )
 
-        if dry_run_llm:
-            # Preflight-equivalent boot validation — the Saturday SF shell-run
-            # wires this via research_dry=true, and it boots EVERY stage in
-            # preflight-only mode (the spots run --preflight-only), so NO
-            # upstream per-date artifacts are produced. The research graph
-            # hard-depends on upstream data — compute_factor_profiles_node
-            # reads features/{run_date}/*.parquet (written by DataPhase1) and
-            # CORRECTLY hard-fails when it is absent (feedback_no_silent_fails).
-            # Invoking the full graph in a dry rehearsal therefore fails on
-            # upstream data the dry run can never have produced (the 2026-06-18
-            # shell-run failed exactly here). So in dry mode we validate the
-            # bootstrap/import/wiring surface — the keystone's actual purpose,
-            # symmetric with the spots' --preflight-only — and return
-            # ok_dry_run WITHOUT executing the data-dependent graph. The
-            # full-graph integration smoke (orchestration / schema / reducers)
-            # is covered by CI (fixtured) and the real Saturday run (real
-            # upstream data); it never belonged on a data-less dry pass.
-            #
-            # build_graph() under stubs validates node wiring + imports (the
-            # 2026-05-06 RAG-import class of bug); create_initial_state()
-            # validates state construction. Neither needs upstream artifacts.
-            # Stubs are still installed so the direct-bound archive_writer /
-            # email_sender nodes captured at build_graph() time stay inert.
-            from dry_run import install_dry_run_stubs
-            logger.info(
-                "dry_run_llm=True: boot/import/wiring validation only "
-                "(preflight-equivalent; data-dependent graph not executed)"
-            )
-            _restore = install_dry_run_stubs(archive)
-            try:
-                _dry_graph = build_graph()
-                _dry_state = create_initial_state(
-                    run_date=run_date,
-                    archive_manager=archive,
-                    is_early_close=early_close,
-                )
-            finally:
-                _restore()
-            logger.info("dry_run_llm boot validation OK for %s", run_date)
-            return {
-                "status": "OK",
-                "dry_run_llm": True,
-                "phase": "boot_validation",
-                "date": run_date,
-            }
-        else:
-            # Snapshot the PRIOR population BEFORE the champion's graph mutates
-            # + commits it (archive_writer node) so the challenger producers
-            # (post-step below) start from the SAME held book — a clean
-            # selection-only comparison (config#1223 B3).
-            _prior_population = archive.load_population()
-            final_state = graph.invoke(initial_state)
+        # Snapshot the PRIOR population BEFORE the champion's graph mutates
+        # + commits it (archive_writer node) so the challenger producers
+        # (post-step below) start from the SAME held book — a clean
+        # selection-only comparison (config#1223 B3).
+        _prior_population = archive.load_population()
+        final_state = graph.invoke(initial_state)
 
-            # ── Challenger producers (config#1223 research observe substrate) ──
-            # FAIL-HARD (Brian ruling 2026-07-03, config#1683): the champion's
-            # signals.json is ALREADY persisted by the graph's archive_writer
-            # node before this step, so a raise here loses no live deliverable —
-            # it turns an experiment gap into a red run instead of weeks of
-            # silently-empty signals_shadow/ (the 6/27 audit, then the 7/3
-            # observe_alerts packaging miss — both invisible behind the previous
-            # WARN swallow). Experiment producers are producers; producers fail
-            # loud (feedback_no_silent_fails). run_challengers itself raises
-            # ChallengerShadowGapError on any producer gap.
-            from producers.runner import run_challengers
-            _shadow = run_challengers(
-                archive, run_date,
-                run_time=final_state.get("run_time", "") or run_date,
-                population=_prior_population,
-            )
-            logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
+        # ── Challenger producers (config#1223 research observe substrate) ──
+        # FAIL-HARD (Brian ruling 2026-07-03, config#1683): the champion's
+        # signals.json is ALREADY persisted by the graph's archive_writer
+        # node before this step, so a raise here loses no live deliverable —
+        # it turns an experiment gap into a red run instead of weeks of
+        # silently-empty signals_shadow/ (the 6/27 audit, then the 7/3
+        # observe_alerts packaging miss — both invisible behind the previous
+        # WARN swallow). Experiment producers are producers; producers fail
+        # loud (feedback_no_silent_fails). run_challengers itself raises
+        # ChallengerShadowGapError on any producer gap.
+        from producers.runner import run_challengers
+        _shadow = run_challengers(
+            archive, run_date,
+            run_time=final_state.get("run_time", "") or run_date,
+            population=_prior_population,
+        )
+        logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
 
         # ── Trajectory validation (Phase 2 eval) ──────────────────
         _trajectory_result = None
