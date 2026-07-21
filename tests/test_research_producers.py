@@ -16,7 +16,11 @@ from tests.test_signals_producer_contract import (  # noqa: E402
     _REQUIRED_TOP_LEVEL,
 )
 from producers.no_agent import build_no_agent_signals  # noqa: E402
-from producers.registry import RESEARCH_PRODUCERS, challenger_producers  # noqa: E402
+from producers.registry import (  # noqa: E402
+    RESEARCH_PRODUCERS,
+    champion_producer,
+    challenger_producers,
+)
 
 
 def _inputs():
@@ -103,8 +107,35 @@ def test_threshold_controls_entry():
 
 
 def test_registry_invariants():
+    # config-I2993: agentic_sector_teams is RETIRED — no producer is currently
+    # registered kind=="champion" (retiring a spec does not auto-promote a
+    # successor; that registration is tracked separately). champion_producer()
+    # must return None rather than raising, and no OTHER spec may silently
+    # carry kind=="champion" only because it happens to be first in dict order.
     champs = [p for p in RESEARCH_PRODUCERS.values() if p.kind == "champion"]
-    assert len(champs) == 1 and champs[0].build is None
+    assert champs == []
+    assert champion_producer() is None
     chals = challenger_producers()
     assert chals and all(p.build is not None for p in chals)
     assert "no_agent_quant" in {p.name for p in chals}
+
+
+def test_agentic_sector_teams_is_retired_with_date():
+    # Root-cause fix for config-I2993: the retired six-team+CIO producer must
+    # be a queryable fact (kind + retired_date), not a stale "champion" label
+    # a downstream reader (evaluator/backtester e2e_lift) has to re-derive.
+    spec = RESEARCH_PRODUCERS["agentic_sector_teams"]
+    assert spec.kind == "retired"
+    assert spec.retired_date == "2026-07-12"
+    assert spec.build is None
+
+
+def test_only_agentic_sector_teams_is_retired():
+    # Every OTHER registered producer must be untouched by the additive
+    # retired_date field (defaults to None) and keep its pre-existing kind.
+    retired = {name: p for name, p in RESEARCH_PRODUCERS.items() if p.kind == "retired"}
+    assert set(retired) == {"agentic_sector_teams"}
+    for name, p in RESEARCH_PRODUCERS.items():
+        if name == "agentic_sector_teams":
+            continue
+        assert p.retired_date is None

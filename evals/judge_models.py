@@ -41,36 +41,25 @@ ID and appending a date returns HTTP 404 — so it cannot be pinned at
 request time; its drift is caught post-hoc via the resolved-model record
 instead. This asymmetry is why pinning is a per-spec property, not a
 blanket "append a date suffix" rule.
+
+**config#1675 / config#2575 lift (2026-07-15):** the registry TYPE
+(``JudgeModelSpec``) and the resolution MECHANICS (``resolve()`` /
+``request_model_for()``) now delegate to ``krepis.judge`` — this module
+keeps ownership of the actual Haiku/Sonnet roster (the closed, audited
+set of judge models THIS pipeline runs) and re-exports the same
+zero-argument call shape existing callers already use, so
+``evals.judge_models.resolve("claude-haiku-4-5")`` behaves identically
+to before the lift. ``krepis.judge.resolve``/``request_model_for`` take
+the registry (``specs``) as an explicit parameter rather than owning a
+global one, since the judge-model roster is a per-consumer decision —
+this module is where that roster lives for crucible-research.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class JudgeModelSpec:
-    """One judge model's three identities (see module docstring)."""
-
-    logical_key: str
-    """Stable identity — S3 path / CloudWatch dimension / custom_id tag.
-    Never changes on a snapshot pin."""
-
-    request_model: str
-    """Exact string sent to the Anthropic API. A dated snapshot when one
-    exists (``pinned=True``), otherwise the alias (``pinned=False``)."""
-
-    tag: str
-    """Compact custom_id tag (keeps the Batches API custom_id under its
-    64-char ceiling)."""
-
-    pinned: bool
-    """True iff ``request_model`` is an immutable dated snapshot. False
-    means no snapshot is published and the alias is the canonical ID."""
-
-    pin_note: str
-    """Why this spec is (or isn't) pinned — auditable rationale."""
-
+from krepis.judge import JudgeModelSpec
+from krepis.judge import request_model_for as _lib_request_model_for
+from krepis.judge import resolve as _lib_resolve
 
 HAIKU = JudgeModelSpec(
     logical_key="claude-haiku-4-5",
@@ -98,10 +87,57 @@ SONNET = JudgeModelSpec(
     ),
 )
 
-_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET)
+OPENROUTER_SHADOW = JudgeModelSpec(
+    logical_key="openrouter-shadow",
+    request_model="deepseek/deepseek-v4-flash",
+    tag="orsh",
+    pinned=False,
+    pin_note=(
+        "config#2575 item 2 (2026-07-18). Cheapest-first pick among "
+        "OpenRouter models with confirmed tool-call/structured-output "
+        "support, NOT Kimi K2.6 by default per Brian's standing "
+        "preference — live OpenRouter catalog pricing pulled 2026-07-18 "
+        "showed deepseek/deepseek-v4-flash at ~$0.098/$0.196 per M "
+        "prompt/completion tokens vs moonshotai/kimi-k2.6 at "
+        "~$0.95/$4.00/M (~17x more expensive blended), with "
+        "deepseek-v4-flash still a frontier-class, large-context (1M "
+        "tok), tool-calling-capable model from a reputable lab — unlike "
+        "the handful of sub-$0.05/M models (8B-and-under open weights) "
+        "that are cheaper still but too weak to be a credible "
+        "cross-provider quality critic on this rubric family. Verified "
+        "live: a real OpenRouter `chat.completions.create` call with a "
+        "forced RubricEvalLLMOutput-shaped tool returned a clean, "
+        "well-formed structured tool call (2026-07-18). NOT pinned to a "
+        "dated snapshot — OpenRouter does not publish one for this "
+        "model/provider-route combination (the route is picked by "
+        "OpenRouter's own routing, e.g. 'DigitalOcean', 'ModelRun', "
+        "which can itself vary call-to-call); drift is detected post-hoc "
+        "via `judge_resolved_model` + the re-anchor protocol, same as "
+        "SONNET's un-pinnable-alias case above. **Shadow-only — carries "
+        "NO decision authority** (config#2575 binding constraint): runs "
+        "alongside HAIKU/SONNET, persists under its own `judge_model` "
+        "key, is read by nothing in the escalation/RationaleClustering/"
+        "ReplayConcordance/Director path until the perturbation-suite "
+        "validation (config#2575 item 6) passes. See "
+        "`evals/perturbation_openrouter_smoke.py` for the validation run."
+    ),
+)
+
+_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET, OPENROUTER_SHADOW)
 _BY_LOGICAL: dict[str, JudgeModelSpec] = {s.logical_key: s for s in _SPECS}
-_BY_REQUEST: dict[str, JudgeModelSpec] = {s.request_model: s for s in _SPECS}
-_BY_TAG: dict[str, JudgeModelSpec] = {s.tag: s for s in _SPECS}
+
+SHADOW_LOGICAL_KEYS: frozenset[str] = frozenset({OPENROUTER_SHADOW.logical_key})
+"""Judge logical keys that are SHADOW-ONLY (config#2575 binding
+constraint carried forward from config#1676/#1675): a shadow judge's
+verdicts are persisted for later agreement-metric computation but MUST
+NOT be read by any escalation-routing or downstream-consumption path
+(RationaleClustering, ReplayConcordance, Director) until its
+perturbation-suite validation passes and an explicit promotion event
+(with a logged re-anchor marker, config#2575 item 7) moves it out of
+this set. Centralized here — rather than each consumer hardcoding
+`!= "openrouter-shadow"` — so a future shadow tier is added to exactly
+one place and every consumer's exclusion check picks it up
+automatically."""
 
 TAG_BY_LOGICAL: dict[str, str] = {s.logical_key: s.tag for s in _SPECS}
 """Logical-key → custom_id tag. Single source for judge.py's custom_id
@@ -119,20 +155,21 @@ def resolve(model: str) -> JudgeModelSpec:
     audited set, so an unrecognized string is a bug (a typo or an
     un-registered model), not something to paper over with a soft
     fallback. Fail loud per the no-silent-fails rule.
+
+    Delegates to ``krepis.judge.resolve`` against this module's
+    Haiku/Sonnet registry (config#2575 lift) — the error message is
+    re-raised with this module's own known-keys list so it still points
+    callers at ``evals/judge_models.py`` rather than the lib.
     """
-    spec = (
-        _BY_LOGICAL.get(model)
-        or _BY_REQUEST.get(model)
-        or _BY_TAG.get(model)
-    )
-    if spec is None:
+    try:
+        return _lib_resolve(model, _SPECS)
+    except KeyError:
         raise KeyError(
             f"Unknown judge model {model!r}; register it in "
             f"evals/judge_models.py (known logical keys: "
             f"{sorted(_BY_LOGICAL)}). Judge models are a closed, audited "
             f"set — an unrecognized id is a bug, not a fallback."
-        )
-    return spec
+        ) from None
 
 
 def request_model_for(logical_key: str) -> str:
@@ -142,4 +179,4 @@ def request_model_for(logical_key: str) -> str:
     and the Batches API ``build_batch_request``) route through so the
     pinned snapshot is applied in exactly one place.
     """
-    return resolve(logical_key).request_model
+    return _lib_request_model_for(logical_key, _SPECS)

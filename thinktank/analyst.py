@@ -15,9 +15,12 @@ from __future__ import annotations
 import json
 import logging
 
+from nousergon_lib.pillars import QualitativePillarAssessment
+
 from agents.prompt_loader import load_prompt
 
 from thinktank import THESIS_KEY_TMPL, THESIS_LATEST_TMPL
+from thinktank.archive import save_moat_profile
 from thinktank.capture import emit_thesis_capture
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, filings_excerpts
@@ -34,12 +37,21 @@ logger = logging.getLogger(__name__)
 
 THESIS_TIER = "thesis"
 SWEEP_TIER = "sweep"
+PILLAR_TIER = "pillar"
 
 _ANALYST_SYSTEM = (
     "You are a buy-side equity research analyst writing an institutional "
     "investment thesis. Be concrete and evidence-based: cite the specific "
     "inputs provided (filings excerpts, news, metrics, themes). Distinguish "
     "what you know from the inputs vs. general knowledge. No boilerplate."
+)
+_PILLAR_SYSTEM = (
+    "You are the same buy-side analyst, now decomposing your attractiveness "
+    "view into the institutional 6-pillar framework (quality, value, "
+    "momentum, growth, stewardship, defensiveness) plus a structured moat "
+    "assessment. Use ONLY the evidence provided — do not invent pillar "
+    "evidence or a moat the evidence doesn't support; 'none' is the honest "
+    "default for the moat primary_type."
 )
 _SWEEP_SYSTEM = (
     "You are the coverage-desk analyst doing the daily events sweep. For each "
@@ -138,6 +150,42 @@ def build_thesis(
         },
     )
 
+    # config#2678: second, decoupled structured extraction — the qualitative
+    # 6-pillar/moat decomposition, over the SAME scanner-blind evidence
+    # bundle as the thesis call above (mirrors agents/sector_teams/
+    # qual_analyst.py's pattern). client.complete() fails loud (bounded
+    # corrective retry, then ThinktankLLMError) on a parse failure — there
+    # is no lax-mode empty path for this to silently degrade onto.
+    pillar_prompt = load_prompt("thinktank_pillar")
+    rendered_pillar = pillar_prompt.format(
+        ticker=ticker,
+        sector=sector or "unknown",
+        board_row=json.dumps(_facts_board_row(board_row), default=str),
+        weekly_signal=json.dumps(signals_entry or {}, default=str),
+        news_aggregate=json.dumps(news or {}, default=str),
+        insider_transactions=json.dumps(insider or {}, default=str),
+        analyst_revisions=json.dumps(analyst or {}, default=str),
+        inst_ownership=json.dumps(inst_own or {}, default=str),
+        filings_excerpts="\n---\n".join(filings) or "(no filings context available)",
+        macro_theme=themes.macro_summary(),
+        sector_theme=themes.sector_summary(sector),
+    )
+    pillar_result = client.complete(
+        PILLAR_TIER,
+        agent_id="analyst_pillar",
+        system=_PILLAR_SYSTEM,
+        user=rendered_pillar,
+        response_model=QualitativePillarAssessment,
+        prompt_id=pillar_prompt.name,
+        prompt_version=pillar_prompt.version,
+        sft_meta={
+            "ticker": ticker,
+            "thesis_version": next_version,
+            "trading_day": trading_day,
+        },
+    )
+    pillar_assessment: QualitativePillarAssessment = pillar_result.parsed  # type: ignore[assignment]
+
     macro_v, sector_vs = themes.theme_versions()
     thesis = CompanyThesis(
         ticker=ticker,
@@ -156,9 +204,13 @@ def build_thesis(
         model=result.model,
         tier=result.tier,
         prompt_version=prompt.version,
-        cost_usd=result.cost_usd,
+        cost_usd=result.cost_usd + pillar_result.cost_usd,
+        pillar_assessment=pillar_assessment,
     )
     _write_thesis(store, thesis)
+    save_moat_profile(
+        store, ticker, trading_day, pillar_assessment.quality_moat.model_dump()
+    )
     emit_thesis_capture(
         base_run_id=client.run_id,
         ticker=ticker,

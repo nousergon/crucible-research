@@ -102,6 +102,114 @@ class TestReadUniverseBoard:
         with pytest.raises(RuntimeError, match="no scanner universe board found"):
             read_universe_board(BUCKET, run_date="2026-07-14", s3_client=mocked_s3)
 
+    def test_stale_latest_fallback_raises(self, mocked_s3):
+        # I2880: dated board absent; latest.json is from a PRIOR weekly cycle
+        # (as_of weeks old). Must fail loud, not silently trade a stale universe.
+        stale = _sample_board()
+        stale["as_of"] = "2026-06-01"
+        body = json.dumps(stale).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="trading days stale"):
+            read_universe_board(BUCKET, run_date="2026-07-15", s3_client=mocked_s3)
+
+    def test_latest_fallback_missing_as_of_raises(self, mocked_s3):
+        # I2880: an unverifiable fallback (no as_of) must not be trusted.
+        board = _sample_board()
+        board.pop("as_of")
+        body = json.dumps(board).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="carries no"):
+            read_universe_board(BUCKET, run_date="2026-07-15", s3_client=mocked_s3)
+
+    def test_stale_latest_fallback_preflight_warns_not_raises(
+        self, mocked_s3, caplog,
+    ):
+        # config-I2916: on the Friday-PM shell run the Scanner runs DRY, so the
+        # dated board is intentionally absent and the fallback is ALWAYS the
+        # prior-Saturday board (~5 trading days stale by Friday). That is an
+        # EXPECTED artefact of the preflight contract, not a real scanner miss:
+        # preflight=True must WARN + RETURN the board, NOT raise, so the
+        # preflight completes its bootstrap/transport smoke.
+        stale = _sample_board()
+        stale["as_of"] = "2026-06-01"
+        body = json.dumps(stale).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            board = read_universe_board(
+                BUCKET, run_date="2026-07-15", s3_client=mocked_s3,
+                preflight=True,
+            )
+        assert len(board["stocks"]) == 2
+        assert any(
+            "PREFLIGHT" in r.message and "stale universe-board" in r.message
+            for r in caplog.records
+        ), "preflight staleness tolerance must emit a WARN, not swallow silently"
+
+    def test_stale_latest_fallback_real_run_still_raises_with_preflight_false(
+        self, mocked_s3,
+    ):
+        # Regression companion to the preflight case: on the REAL Saturday run
+        # (preflight=False, the default) the I2880 staleness bound stays fully
+        # in force — a genuinely stale fallback must still hard-fail so no
+        # prior-cycle universe is ever silently traded.
+        stale = _sample_board()
+        stale["as_of"] = "2026-06-01"
+        body = json.dumps(stale).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="trading days stale"):
+            read_universe_board(
+                BUCKET, run_date="2026-07-15", s3_client=mocked_s3,
+                preflight=False,
+            )
+
+    def test_preflight_still_raises_on_missing_as_of(self, mocked_s3):
+        # config-I2916: preflight relaxes ONLY the staleness bound. A fallback
+        # with no ``as_of`` (an unverifiable / possibly corrupt board) is a real
+        # integrity fault the smoke is meant to surface — it must still raise
+        # even under preflight.
+        board = _sample_board()
+        board.pop("as_of")
+        body = json.dumps(board).encode("utf-8")
+        mocked_s3.put_object(
+            Bucket=BUCKET, Key="scanner/universe/latest.json", Body=body
+        )
+        with pytest.raises(RuntimeError, match="carries no"):
+            read_universe_board(
+                BUCKET, run_date="2026-07-15", s3_client=mocked_s3,
+                preflight=True,
+            )
+
+    def test_preflight_true_with_fresh_dated_board_is_noop(self, mocked_s3):
+        # config-I2916: preflight must not change behaviour when a fresh dated
+        # board exists (the guard is only reached on the latest.json fallback);
+        # the dated key is read directly and the staleness path never runs.
+        _put_board(mocked_s3, "2026-07-14", _sample_board())
+        board = read_universe_board(
+            BUCKET, run_date="2026-07-14", s3_client=mocked_s3, preflight=True,
+        )
+        assert len(board["stocks"]) == 2
+
+    def test_preflight_still_raises_when_both_keys_absent(self, mocked_s3):
+        # config-I2916: preflight is NOT a blanket bypass — a genuinely absent
+        # board (BOTH the dated key and latest.json missing) is a real
+        # bootstrap/transport failure that must still raise loud even on the
+        # preflight (its whole point is surfacing exactly this).
+        with pytest.raises(RuntimeError, match="no scanner universe board found"):
+            read_universe_board(
+                BUCKET, run_date="2026-07-14", s3_client=mocked_s3,
+                preflight=True,
+            )
+
 
 # ── read_regime_substrate ────────────────────────────────────────────────────
 
@@ -165,7 +273,7 @@ class TestCli:
         out = json.loads(capsys.readouterr().out)
         assert out["target"] == "shadow"
         assert out["universe_count"] == 2
-        assert out["market_regime"] == "neutral"  # no substrate present
+        assert out["market_regime"] == "bear"  # I2881: no substrate → fail-safe bear
 
     def test_production_with_ack_flag_writes_live_key(self, mocked_s3, capsys, monkeypatch):
         _put_board(mocked_s3, "2026-07-14", _sample_board())

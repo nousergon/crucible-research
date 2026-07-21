@@ -36,6 +36,17 @@ _TIMEOUT = 10
 _FMP_COUNTER_BUCKET = "alpha-engine-research"
 _FMP_COUNTER_KEY = "health/fmp_daily_count.json"
 
+# Defined here (before _load_fmp_counter) rather than down with the other
+# rate-limiter constants: _load_fmp_counter's S3-failure path returns this
+# constant directly, and the module-level `_fmp_daily_count =
+# _load_fmp_counter()` call below executes at IMPORT time — i.e. before
+# Python would reach a later top-level assignment. The previous ordering
+# (constant defined after both the function and its call site) raised
+# NameError at import/collection time in any environment where the S3 read
+# genuinely raises — no AWS credentials, sandboxed CI, network-denied test
+# runs — which is exactly the `test` CI job (config#2345).
+_FMP_DAILY_LIMIT = 250  # FMP free tier hard limit; FMP returns 429 if exceeded
+
 
 def _load_fmp_counter() -> int:
     """Load today's FMP call count from S3. Returns 0 if not found or stale."""
@@ -45,8 +56,14 @@ def _load_fmp_counter() -> int:
         data = _json.loads(obj["Body"].read())
         if data.get("date") == str(date.today()):
             return data.get("count", 0)
-    except Exception:
-        pass
+    except Exception as e:
+        # S3 errors (transient failures, access issues) → WARN and degrade
+        # conservatively to avoid un-throttling the budget mid-day. Treating a
+        # failed load as "at limit" is conservative: we skip calls that may have
+        # already been made today, but never silently un-throttle on a transient
+        # failure (which would cause duplicate calls if the error was temporary).
+        logger.warning("Failed to load FMP counter from S3: %s — treating as at/near limit", e)
+        return _FMP_DAILY_LIMIT
     return 0
 
 
@@ -70,7 +87,6 @@ _fmp_lock = threading.Lock()
 _fmp_last_call = 0.0
 _fmp_daily_count = _load_fmp_counter()
 _FMP_MIN_INTERVAL = 1.0  # 1s between calls — spreads 250 daily quota over ~4 min
-_FMP_DAILY_LIMIT = 250  # FMP free tier hard limit; FMP returns 429 if exceeded
 _FMP_MAX_RETRIES = 3
 _FMP_RETRY_BACKOFF = 5.0  # seconds, doubles each retry
 

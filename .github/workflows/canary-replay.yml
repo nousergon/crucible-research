@@ -1,0 +1,209 @@
+name: Canary Replay
+
+# Per-PR gate for alpha-engine-config#2246 (Saturday-replay canary). Single
+# workflow with two jobs — `label` decides (via path filter) whether this
+# PR touches weekly-critical paths and applies the `canary:replay` label;
+# `canary` dispatches the actual probe run, gated on `label`'s own output
+# OR a pre-existing label (e.g. applied manually by a human on an earlier
+# run). This used to be two separate workflow files connected by a
+# `labeled` trigger: label-canary-replay.yml applied the label with the
+# default GITHUB_TOKEN, and canary-replay.yml re-triggered on `labeled` to
+# see it. GitHub Actions' anti-recursion protection means a `labeled` event
+# caused by the default GITHUB_TOKEN never starts a new workflow run, so
+# that second run never fired — a PR opened once (no follow-up push) would
+# never get gated (alpha-engine-config#2691). Consuming the label job's
+# output directly, in the same run, makes that cross-workflow-trigger
+# dependency structurally impossible.
+#
+# Path list MUST stay in lockstep with agents/canary_replay.py's own
+# probes: a change to any of these could regress what the Saturday
+# weekly-SF actually executes.
+#
+# Thin GHA shim on this PUBLIC repo (free/unmetered hosted runner) — the
+# actual probe workload runs on EC2 spot, dispatched via
+# alpha-engine-canary-replay-dispatcher (nousergon-data). Brian's binding
+# ruling: the canary ALWAYS runs all 3 probes together regardless of which
+# repo's PR triggered it, so this shim supplies ITS OWN branch as
+# research_ref and lets data_ref default to main on the dispatcher side.
+#
+# Fork PRs have no OIDC trust to this account — configure-aws-credentials
+# fails cleanly and the job exits 0 rather than failing a check a fork
+# contributor cannot fix.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    # The `labeled` trigger type fires for ANY label added to the PR, not
+    # just `canary:replay` — without this guard, an unrelated label (e.g.
+    # a triage bot applying `source:groom` moments after pushing the PR's
+    # head commit) fires a SECOND, near-simultaneous workflow run for the
+    # same SHA alongside the `synchronize`-triggered run already in
+    # flight. Both reach the `canary` job and race the dispatcher's
+    # per-run-token dedupe, so one of them gets declined with
+    # `concurrent_skip` and (pre-fix) hard-failed the check even though
+    # the other run's dispatch was legitimate (alpha-engine-config#2570).
+    if: github.event.action != 'labeled' || github.event.label.name == 'canary:replay'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      weekly_critical: ${{ steps.filter.outputs.weekly_critical }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+        id: filter
+        with:
+          filters: |
+            weekly_critical:
+              - 'agents/sector_teams/**'
+              - 'agents/langchain_utils.py'
+              - 'agents/canary_replay.py'
+              - 'lambda/handler.py'
+              - '.github/workflows/canary-replay.yml'
+      - name: Apply canary:replay label
+        if: steps.filter.outputs.weekly_critical == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr edit "${{ github.event.pull_request.number }}" --add-label canary:replay
+
+  canary:
+    needs: label
+    if: needs.label.outputs.weekly_critical == 'true' || contains(github.event.pull_request.labels.*.name, 'canary:replay')
+    # One in-flight canary DISPATCH per PR: iterative pushes to an
+    # actively-developed branch superseded each other 29 times on
+    # 2026-07-16 alone (21 on this repo), and every launched replay ran the
+    # data probe's full-corpus pgvector read against production Neon — the
+    # amplification that exhausted the project's monthly data-transfer
+    # quota (config-I2780). The newest head is the only one whose verdict
+    # matters; cancel the stale poll and let the dispatcher's server-side
+    # dedupe decline the stale launch.
+    #
+    # Scoped to THIS job, not the workflow as a whole (config#2570 residual
+    # — a workflow-level group let an unrelated `labeled` event's run (which
+    # always skips both jobs here, guarded above) CANCEL an already-running
+    # `synchronize` run's `canary` job outright, before it could converge to
+    # its own correct SKIPPED conclusion — cancellation fired regardless of
+    # what the labeled-run's own `if:` guards decided, since GitHub claims
+    # the concurrency group at run start, before job-level `if:` is
+    # evaluated. The cheap, always-fast `label` job never needs to
+    # participate in this group; only `canary`'s expensive dispatch+poll
+    # does).
+    concurrency:
+      group: canary-replay-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Configure AWS credentials
+        id: aws_creds
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4
+        with:
+          role-to-assume: arn:aws:iam::711398986525:role/github-actions-canary-replay-dispatch
+          aws-region: us-east-1
+
+      - name: Skip (no OIDC trust — fork PR)
+        if: steps.aws_creds.outcome == 'failure'
+        run: |
+          echo "No OIDC trust available (fork PR) — skipping canary replay gate."
+
+      - name: Dispatch canary
+        if: steps.aws_creds.outcome == 'success'
+        id: dispatch
+        env:
+          # Passed via env (shell-escaped), never spliced directly into the
+          # run: script — head.ref/head.sha are attacker-controlled on a
+          # pull_request trigger (fork branch names/commits), and direct
+          # ${{ }} interpolation into a run: block is a script-injection
+          # vector CodeQL flags (github.com/nousergon/crucible-research
+          # code-scanning finding on this workflow's first draft).
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_RESEARCH_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg mode "pr" \
+            --arg repo "nousergon/crucible-research" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg sha "$PR_SHA" \
+            --arg research_ref "$PR_RESEARCH_REF" \
+            '{mode: $mode, repo: $repo, pr_number: $pr_number, sha: $sha, research_ref: $research_ref}')
+
+          RESP=$(mktemp)
+          aws lambda invoke --function-name alpha-engine-canary-replay-dispatcher \
+            --payload "$PAYLOAD" --cli-binary-format raw-in-base64-out \
+            --region us-east-1 "$RESP" >/dev/null
+          cat "$RESP"
+
+          LAUNCHED=$(jq -r '.launched' "$RESP")
+          REASON=$(jq -r '.reason' "$RESP")
+          if [ "$LAUNCHED" != "true" ]; then
+            if [ "$REASON" = "concurrent_skip" ]; then
+              # Another dispatch for this exact PR+SHA is already in flight
+              # (e.g. a duplicate/near-simultaneous webhook delivery) — the
+              # dispatcher's own dedupe is authoritative that a run WILL
+              # produce this run_token's marker, so poll for it below
+              # instead of hard-failing a check the other run is already
+              # servicing.
+              echo "canary already in flight for this PR+SHA (reason=concurrent_skip) — polling its marker instead of failing"
+            else
+              echo "::error::canary-replay-dispatcher declined to launch: $(cat "$RESP")"
+              exit 1
+            fi
+          fi
+          MARKER_KEY=$(jq -r '.marker_key' "$RESP")
+          # `// 0` degrades safely if the dispatcher Lambda hasn't been
+          # redeployed with dispatched_at yet (config-I2753 rollout: this
+          # workflow and the Lambda deploy don't have to land in lockstep)
+          # — 0 makes the freshness check below always pass, matching the
+          # pre-fix behavior, rather than a bare `null` breaking the awk
+          # numeric comparison and timing out every run.
+          DISPATCHED_AT=$(jq -r '.dispatched_at // 0' "$RESP")
+          echo "marker_key=${MARKER_KEY}" >> "$GITHUB_OUTPUT"
+          echo "dispatched_at=${DISPATCHED_AT}" >> "$GITHUB_OUTPUT"
+
+      - name: Poll for completion marker
+        if: steps.aws_creds.outcome == 'success'
+        run: |
+          MARKER_KEY="${{ steps.dispatch.outputs.marker_key }}"
+          DISPATCHED_AT="${{ steps.dispatch.outputs.dispatched_at }}"
+          DEADLINE=$((SECONDS + 1200))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            if aws s3api head-object --bucket alpha-engine-research --key "$MARKER_KEY" --region us-east-1 >/dev/null 2>&1; then
+              aws s3 cp "s3://alpha-engine-research/${MARKER_KEY}" marker.json --region us-east-1 --quiet
+              # config-I2753 defense-in-depth: marker_key is deterministic
+              # per (repo, PR, sha) — the dispatcher now deletes any
+              # pre-existing marker before launching (primary fix), but this
+              # is a cheap, load-bearing second check: never trust a marker
+              # OLDER than this dispatch's own launch. Root-caused live
+              # 2026-07-17 (crucible-research#444) — a poller accepted a
+              # ~23h-stale FAIL marker within 2s of dispatch while the
+              # freshly-launched box went on to genuinely PASS 5.5 minutes
+              # later, too late for anyone to see. Fail LATE (timeout)
+              # rather than fail WRONG (stale verdict).
+              FINISHED_AT=$(jq -r '.finished_at // 0' marker.json)
+              if awk -v f="$FINISHED_AT" -v d="$DISPATCHED_AT" 'BEGIN { exit !(f >= d) }'; then
+                cat marker.json
+                STATUS=$(jq -r '.overall_status' marker.json)
+                echo "canary overall_status=${STATUS}"
+                if [ "$STATUS" = "PASS" ]; then
+                  exit 0
+                else
+                  echo "::error::canary replay FAILED — see marker.json above for per-probe detail"
+                  exit 1
+                fi
+              else
+                echo "stale marker at ${MARKER_KEY} (finished_at=${FINISHED_AT} < dispatched_at=${DISPATCHED_AT}) — ignoring, still waiting for this dispatch's own marker"
+              fi
+            fi
+            sleep 20
+          done
+          echo "::error::timed out waiting for canary completion marker at ${MARKER_KEY}"
+          exit 1

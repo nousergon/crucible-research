@@ -49,6 +49,15 @@ Event shape:
                                    # forwarded to write_envelope() verbatim
                                    # (production intent is always explicit,
                                    # never inferred)
+      "preflight": true           # config-I2916: Friday-PM shell-run signal
+                                   # (SF threads preflight.$: $.research_dry).
+                                   # DISTINCT from dry_run_llm — keeps the full
+                                   # read/build/write path live (transport
+                                   # smoke) and only downgrades the I2880
+                                   # universe-board fallback-staleness guard to
+                                   # a WARN (the dry Scanner leaves the dated
+                                   # board absent, so the stale fallback is
+                                   # expected on Fridays). Default false.
       "bucket": "alpha-engine-research"   # optional, default RESEARCH_BUCKET
     }
 
@@ -145,6 +154,18 @@ def handler(event, context):
 
     bucket = event.get("bucket", _DEFAULT_BUCKET)
 
+    # config-I2916: the weekly SF threads ``preflight.$: $.research_dry`` (true
+    # ONLY on the Friday-PM shell run). It is DISTINCT from ``dry_run_llm``
+    # above: dry_run_llm short-circuits before any S3 access, whereas preflight
+    # keeps the full read/build/write path LIVE (bootstrap/transport smoke is
+    # the preflight's whole point) and only downgrades the universe-board
+    # fallback-staleness guard from a hard raise to a WARN — because the dry
+    # Scanner leaves this cycle's dated board intentionally absent, so the
+    # ~5-trading-day-stale prior-Saturday fallback is EXPECTED on Fridays, not
+    # a real scanner miss. On the real Saturday run research_dry=false, so
+    # preflight=false and the I2880 guard stays fully in force.
+    preflight = bool(event.get("preflight", False))
+
     _ensure_init()
 
     from scoring.signals_envelope import (
@@ -166,7 +187,9 @@ def handler(event, context):
     # Board missing = hard precondition failure. read_universe_board
     # already raises RuntimeError (no-silent-fails) — propagates uncaught,
     # never converted to an ERROR dict here.
-    board = read_universe_board(bucket, run_date=run_date, s3_client=s3)
+    board = read_universe_board(
+        bucket, run_date=run_date, s3_client=s3, preflight=preflight,
+    )
 
     # Substrate missing/unreadable = the ONE documented fail-soft exception
     # in this module: returns None + WARN, market_regime defaults to

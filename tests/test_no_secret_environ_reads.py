@@ -37,6 +37,7 @@ _PINNED_SECRETS = frozenset(
         "EDGAR_IDENTITY",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
+        "OPENROUTER_API_KEY",
     ]
 )
 

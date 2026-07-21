@@ -102,7 +102,20 @@ def should_escalate_to_sonnet(
     threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
 ) -> bool:
     """Per-artifact escalation: True iff any Haiku dimension score is
-    below ``threshold``."""
+    below ``threshold``.
+
+    Callers MUST only pass a ``haiku_eval`` whose ``judge_model`` is an
+    AUTHORITATIVE tier — never a shadow-only judge_model (see
+    ``evals.judge_models.SHADOW_LOGICAL_KEYS``, config#2575). A shadow
+    judge's scores get no escalation authority until its perturbation-
+    suite validation passes and an explicit promotion event lifts the
+    exclusion; this function does not itself gate on that (it has no
+    judge_model to check — ``RubricEvalArtifact.judge_model`` is a field
+    on the artifact, not a parameter here), so the discipline lives in
+    every call site never feeding it a shadow artifact in the first
+    place. ``evals.openrouter_shadow`` deliberately never calls this
+    function.
+    """
     return any(d.score < threshold for d in haiku_eval.dimension_scores)
 
 

@@ -1,0 +1,59 @@
+# version: 0.1.0
+Decompose your attractiveness view of {ticker} (sector: {sector}) into the
+institutional 6-pillar framework, using ONLY the evidence below — the SAME
+evidence you were given for the thesis (you are deliberately NOT shown the
+house quant composite or its pillar scores).
+
+CURRENT HOUSE THEMES:
+Macro: {macro_theme}
+Sector: {sector_theme}
+
+COMPANY FACTS — raw metrics and liquidity from the universe board:
+{board_row}
+
+WEEKLY RESEARCH SIGNAL:
+{weekly_signal}
+
+NEWS AGGREGATE:
+{news_aggregate}
+
+INSIDER TRANSACTIONS:
+{insider_transactions}
+
+ANALYST REVISIONS:
+{analyst_revisions}
+
+INSTITUTIONAL OWNERSHIP:
+{inst_ownership}
+
+FILINGS EXCERPTS:
+{filings_excerpts}
+
+For EACH of the 6 pillars (quality, value, momentum, growth, stewardship,
+defensiveness), produce a 0-100 subscore, a confidence (low/medium/high),
+and 1-5 evidence strings grounded in the inputs above:
+- quality: durable profitability + capital efficiency (Buffett/Munger
+  compounder lens, Piotroski-style).
+- value: multi-metric, industry-relative price-to-fundamentals.
+- momentum: price + earnings-revision momentum.
+- growth: SUSTAINABLE growth (reinvestment rate x ROIC), not raw revenue
+  CAGR — distinguish compounder from cash-cow.
+- stewardship: capital allocation discipline (buyback timing, insider
+  alignment, M&A track record).
+- defensiveness: low-vol / beta / drawdown profile.
+
+For the quality pillar, ALSO produce a structured moat assessment:
+primary_type (network_effects / switching_costs / cost_advantage /
+intangibles / efficient_scale / process_power / none — "none" is the
+honest default, do not fabricate a moat), secondary_types (subordinate
+archetypes, may be empty), width (wide 20y+ / narrow 10-20y / none),
+durability_years (0-50), trend (widening / stable / eroding), and
+evidence citations from the filings/news above.
+
+Finally, catalyst_horizon_modulation: a -20 to +20 near-term catalyst
+effect orthogonal to the 6 pillars (positive = imminent catalyst raises
+near-term attractiveness; negative = imminent risk lowers it; 0 if none).
+
+If the evidence doesn't support a clean pillar decomposition (e.g. very
+thin coverage), score the pillar 50 (neutral) with confidence "low" and an
+evidence entry explaining the absence — do not invent evidence.

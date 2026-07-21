@@ -74,6 +74,46 @@ _lambda_function_exists() {
   exit 1
 }
 
+# ── Post-deploy alias-propagation verification ────────────────────────────
+#
+# config#2766: a Saturday production run reproduced the exact pre-fix
+# eval-rolling-mean zero-sigma OUT_OF_CONTROL output days after the fix
+# (crucible-research#417) merged, with deploy.yml reporting success on
+# every run since. The invoked ARN is the 'live' alias (see
+# infrastructure/step_function_advisory.json), not $LATEST — every deploy
+# function below does `update-function-code` -> `publish-version` ->
+# `update-alias`, but nothing ever confirmed the alias actually ended up
+# pointing at the code that was just published. The `update-alias ... ||
+# create-alias` fallback also swallows update-alias's stderr unconditionally,
+# so a transient AWS-side failure there would silently fall through instead
+# of surfacing. Comparing CodeSha256 (Lambda's own content hash, already
+# used identically by both qualifiers) directly verifies the one invariant
+# every invoker of these Lambdas depends on, regardless of which upstream
+# mechanism (ECR :latest tag race, transient alias-update failure, control-
+# plane eventual consistency) would otherwise have caused the drift.
+_verify_live_alias() {
+  local fn_name="$1"
+  local expected_version="$2"
+  local latest_sha alias_sha
+
+  latest_sha=$(aws lambda get-function --function-name "$fn_name" \
+    --qualifier '$LATEST' --query 'Configuration.CodeSha256' \
+    --output text --region "$REGION")
+  alias_sha=$(aws lambda get-function --function-name "$fn_name" \
+    --qualifier live --query 'Configuration.CodeSha256' \
+    --output text --region "$REGION")
+
+  if [[ "$latest_sha" != "$alias_sha" ]]; then
+    echo "ERROR: $fn_name alias 'live' (CodeSha256=$alias_sha) does not match" >&2
+    echo "  \$LATEST (CodeSha256=$latest_sha) after publishing version $expected_version." >&2
+    echo "  The deploy did NOT propagate to the invoked alias -- failing the" >&2
+    echo "  build instead of leaving stale code live behind a green CI run" >&2
+    echo "  (config#2766)." >&2
+    exit 1
+  fi
+  echo "  Verified: alias 'live' -> version $expected_version, CodeSha256 $alias_sha matches \$LATEST."
+}
+
 # ── Throttle-aware Lambda invoke ─────────────────────────────────────────────
 #
 # The bounded, jittered "retry ONLY on the throttle/concurrency signal" invoke
@@ -317,6 +357,7 @@ build_and_deploy_main() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_MAIN" "$VERSION"
 
   # Canary invocation
   #
@@ -361,16 +402,25 @@ build_and_deploy_main() {
 
   # Handler returns {"status": "OK|SKIPPED|ERROR"} or {"statusCode": 500} on env var failure.
   # Accept OK or SKIPPED (wrong_time / already_run / market_holiday are expected).
+  # On any non-pass, SURFACE THE REAL DETAIL rather than a bare 'UNKNOWN':
+  # the handler's ERROR return carries the message under ``error`` (outer
+  # except) — NOT ``errorMessage`` — and the 500 env path under ``body``;
+  # reading only ``errorMessage`` collapsed every genuine canary failure to
+  # an opaque 'UNKNOWN', making the rollback un-diagnosable (2026-07-21
+  # incident). ``errorMessage`` is still consulted for a Lambda-runtime
+  # unhandled crash, and the raw payload is the last-resort fallback.
   CANARY_STATUS=$(python3 -c "
 import json, sys
 d = json.load(open('$CANARY_OUT'))
 s = d.get('status', '')
 if s in ('OK', 'SKIPPED'):
     print(s)
-elif d.get('statusCode') == 500:
-    print('ENV_ERROR')
 else:
-    print(d.get('errorMessage', 'UNKNOWN'))
+    detail = (d.get('error') or d.get('body') or d.get('errorMessage')
+              or d.get('reason') or json.dumps(d))
+    detail = ' '.join(str(detail).split())[:300]
+    label = 'ENV_ERROR' if d.get('statusCode') == 500 else (s or 'UNKNOWN')
+    print(f'{label}: {detail}')
 " 2>/dev/null || echo "PARSE_ERROR")
   rm -f "$CANARY_OUT"
 
@@ -537,6 +587,7 @@ deploy_eval_judge() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_EVAL_JUDGE" "$VERSION"
 }
 
 # ── Eval-rolling-mean function: reuses the main container image ──────────────
@@ -597,6 +648,7 @@ deploy_eval_rolling_mean() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_EVAL_ROLLING_MEAN" "$VERSION"
 }
 
 # ── deploy_rationale_clustering ─────────────────────────────────────────────
@@ -670,6 +722,7 @@ deploy_rationale_clustering() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$FUNCTION_RATIONALE_CLUSTERING" "$VERSION"
 }
 
 # ── Eval-judge batch chain: image-share + per-Lambda CMD override ───────────
@@ -751,6 +804,7 @@ _deploy_image_shared_lambda() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+  _verify_live_alias "$fn_name" "$VERSION"
 }
 
 deploy_eval_judge_batch() {

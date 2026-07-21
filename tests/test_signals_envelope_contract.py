@@ -170,10 +170,24 @@ def test_market_regime_thresholds():
     assert derive_market_regime(_sample_substrate(0.49)) == "neutral"
 
 
-def test_market_regime_defaults_neutral_when_substrate_missing(caplog):
-    assert derive_market_regime(None) == "neutral"
-    assert derive_market_regime({"composite": {}}) == "neutral"
-    assert derive_market_regime({"composite": {"intensity_z": "not-a-number"}}) == "neutral"
+def test_market_regime_fails_safe_to_bear_when_substrate_missing(monkeypatch):
+    # I2881: a missing / unreadable regime substrate must fail SAFE to 'bear'
+    # (keeps the executor's bear risk gates ON), NOT soft to 'neutral' (which
+    # silently disables them). Each no-signal path also fires a loud alert.
+    calls = []
+    monkeypatch.setattr(
+        "nousergon_lib.alerts.publish", lambda *a, **k: calls.append((a, k))
+    )
+    assert derive_market_regime(None) == "bear"
+    assert derive_market_regime({"composite": {}}) == "bear"
+    assert derive_market_regime({"composite": {"intensity_z": "not-a-number"}}) == "bear"
+    assert calls, "expected a loud alert when failing safe to bear"
+
+
+def test_market_regime_in_range_still_neutral():
+    # A genuine in-range intensity_z is legitimately neutral (unchanged).
+    assert derive_market_regime(_sample_substrate(0.0)) == "neutral"
+    assert derive_market_regime(_sample_substrate(0.49)) == "neutral"
 
 
 def test_market_regime_never_emits_risk_on_or_risk_off():

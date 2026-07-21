@@ -26,9 +26,15 @@ notify:
     parse_mode: Markdown
     disable_notification: false
     notify_on: [error, warning]
+# Shared DynamoDB dedup store (alpha-engine-config#2418): this Lambda's
+# /tmp is wiped between separate invocations, so a sqlite file there can
+# never accumulate the dedup state dedup_cooldown_minutes depends on —
+# every alert looked "new" and cooldowns silently never applied. DynamoDB
+# persists across invocations/instances, so dedup actually works.
 store:
-  type: sqlite
-  path: /tmp/flow_doctor.db
+  type: dynamodb
+  table_name: flow-doctor-store
+  region: us-east-1
 dedup_cooldown_minutes: 60
 dependencies: []
 rate_limits:
