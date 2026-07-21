@@ -881,6 +881,17 @@ def _call_openrouter_judge_llm(
     client = OpenAI(
         base_url=spec.resolved_base_url(),
         api_key=_resolve_openrouter_api_key(api_key),
+        # Explicit per-request bound + no SDK-internal retries: this
+        # function already runs its own bounded `max_retries`-attempt loop
+        # below (each iteration distinctly logged — leak guard vs schema
+        # validation). Without an explicit timeout the client falls back
+        # to the SDK default (10 min) stacked with its own default retry
+        # count, which can silently blow well past the "caps worst-case
+        # latency at N full model calls" invariant this module documents
+        # (observed live: a single hung OpenRouter request consumed an
+        # entire 8-minute CI job with zero output, config#2570).
+        timeout=60.0,
+        max_retries=0,
     )
 
     tool_schema = _build_rubric_tool_spec()
