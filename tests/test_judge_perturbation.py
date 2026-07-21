@@ -35,6 +35,7 @@ from evals.perturbation import (
     _unearned_material_change,
     _vacuous_moat,
     _verbosity_pad,
+    emit_perturbation_report,
     format_scorecard,
     run_perturbation_battery,
 )
@@ -270,3 +271,85 @@ class TestBatteryLogic:
         assert "Judge sensitivity" in md
         assert "1/1" in md
         assert "✅" in md
+
+
+# ── Weekly sensitivity scorecard emit (Phase B, config#752) ────────────────
+
+
+class _FakeS3:
+    """Captures put_object calls without touching AWS."""
+
+    def __init__(self):
+        self.puts: dict[str, bytes] = {}
+        self.content_types: dict[str, str] = {}
+
+    def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803
+        self.puts[Key] = Body
+        self.content_types[Key] = ContentType
+
+
+_PRECOMPUTED_REPORT = {
+    "judge_model": "claude-haiku-4-5-20251001",
+    "n": 2,
+    "n_caught": 1,
+    "caught_rate": 0.5,
+    "cases": [
+        {"name": "a", "rubric": "eval_rubric_sector_quant",
+         "target_dimension": "numerical_grounding", "ref_score": 5,
+         "corrupted_score": 1, "drop": 4, "caught": True,
+         "ref_mean": 4.5, "corrupted_mean": 3.0},
+        {"name": "b", "rubric": "eval_rubric_sector_qual",
+         "target_dimension": "reasoning_depth", "ref_score": 4,
+         "corrupted_score": 4, "drop": 0, "caught": False,
+         "ref_mean": 4.0, "corrupted_mean": 4.0},
+    ],
+}
+
+
+class TestEmitPerturbationReport:
+    def test_writes_dated_and_latest_json_and_md(self):
+        s3 = _FakeS3()
+        out = emit_perturbation_report(
+            report=copy.deepcopy(_PRECOMPUTED_REPORT),
+            s3_client=s3, report_date="2026-07-11", bucket="test-bucket",
+        )
+        assert set(out["report_keys"]) == set(s3.puts)
+        assert s3.puts.keys() >= {
+            "decision_artifacts/_perturbation/_report/2026-07-11/sensitivity.json",
+            "decision_artifacts/_perturbation/_report/2026-07-11/sensitivity.md",
+            "decision_artifacts/_perturbation/_report/latest/sensitivity.json",
+            "decision_artifacts/_perturbation/_report/latest/sensitivity.md",
+        }
+        # latest pointers mirror the dated copies byte-for-byte
+        dated_md = s3.puts["decision_artifacts/_perturbation/_report/2026-07-11/sensitivity.md"]
+        latest_md = s3.puts["decision_artifacts/_perturbation/_report/latest/sensitivity.md"]
+        assert dated_md == latest_md
+        assert b"Judge sensitivity" in latest_md
+
+    def test_content_types_and_provenance(self):
+        s3 = _FakeS3()
+        out = emit_perturbation_report(
+            report=copy.deepcopy(_PRECOMPUTED_REPORT),
+            s3_client=s3, report_date="2026-07-11", bucket="test-bucket",
+        )
+        for k, ct in s3.content_types.items():
+            assert ct == ("text/markdown" if k.endswith(".md") else "application/json")
+        assert out["report_date"] == "2026-07-11"
+        assert "generated_at" in out  # stamped for drift tracking
+
+    def test_runs_battery_when_no_report_injected(self):
+        # End-to-end: emit runs the battery itself with an injected fake judge
+        # (no live LLM), then writes the scorecard.
+        s3 = _FakeS3()
+        fake = _seq_judge(
+            {"numerical_grounding": 5, "ranking_coherence": 5},   # reference
+            {"numerical_grounding": 1, "ranking_coherence": 5},   # corrupted
+        )
+        # Restrict to a single corruption via monkeypatching CORRUPTIONS is
+        # unnecessary — the full battery runs fine offline with the fake judge.
+        out = emit_perturbation_report(
+            s3_client=s3, report_date="2026-07-11", bucket="test-bucket",
+            judge_fn=fake,
+        )
+        assert out["n"] == len(CORRUPTIONS)
+        assert len(s3.puts) == 4
