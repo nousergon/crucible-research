@@ -62,7 +62,7 @@ import boto3
 logger = logging.getLogger(__name__)
 
 
-SCANNER_VERSION = "v1.0"
+SCANNER_VERSION = "v2.0"
 _DEFAULT_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _CANDIDATES_PREFIX = "candidates"
 # Champion/challenger OBSERVE substrate (config#1221): challenger candidate-gen
@@ -344,7 +344,50 @@ def build_candidates_artifact(
         getattr(run_quant_filter, "_last_eval_log", None) or []
     )
 
-    # ── 5. Build artifact ─────────────────────────────────────────────────
+    # ── 5. Apply champion ranking (config#1186 live cutover) ───────────────
+    # The champion spec (momentum_sleeve) ranks the liquidity-eligible universe
+    # by mean(z(momentum_20d), z(return_60d)) instead of the legacy tech_score
+    # composite. Factor loadings are read from S3 (produced by the feature
+    # store pipeline). If unavailable (S3 miss, feature store gap), fall back
+    # to the legacy run_quant_filter ranking unchanged — the shadow path will
+    # catch the drift.
+    champion_re_ranked = False
+    _raw_eval_log = getattr(run_quant_filter, "_last_eval_log", None)
+    try:
+        from data.fetchers.feature_store_reader import read_latest_factor_loadings
+
+        _loadings = read_latest_factor_loadings()
+    except Exception:
+        _loadings = None
+
+    if _loadings and _raw_eval_log:
+        from data.scanner_specs import champion_spec
+
+        _champion = champion_spec()
+        if _champion and _champion.rank:
+            _params = _resolved_scanner_params()
+            _champion_tickers = _champion.rank(_raw_eval_log, _loadings, _params)
+            if _champion_tickers:
+                dv_tickers = [
+                    c["ticker"] for c in candidate_dicts
+                    if c.get("path") == "deep_value_pending"
+                ]
+                combined = list(_champion_tickers)
+                for t in dv_tickers:
+                    if t not in combined:
+                        combined.append(t)
+                scanner_tickers = combined
+                champion_re_ranked = True
+
+    if champion_re_ranked and _raw_eval_log:
+        champion_set = set(scanner_tickers)
+        for rec in _raw_eval_log:
+            if rec.get("ticker") in champion_set:
+                rec["quant_filter_pass"] = 1
+                rec.pop("filter_fail_reason", None)
+        eval_log = _json_safe_eval_log(_raw_eval_log)
+
+    # ── 6. Build artifact ─────────────────────────────────────────────────
     # Population = prior cycle's holdings list. Phase 1 reads it from the
     # prior signals.json::population; Phase 5 cutover will source it from
     # archive.manager.load_population directly. Empty list on cold-start.

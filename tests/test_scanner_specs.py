@@ -19,11 +19,12 @@ from data.scanner_specs import (  # noqa: E402
 
 def _eval_log():
     # A/B/D liquidity-eligible; C failed liquidity; E eligible but has no loading.
+    # tech_score included for the tech_score_momentum challenger rank function.
     return [
-        {"ticker": "A", "liquidity_pass": 1},
-        {"ticker": "B", "liquidity_pass": 1},
-        {"ticker": "C", "liquidity_pass": 0},
-        {"ticker": "D", "liquidity_pass": 1},
+        {"ticker": "A", "liquidity_pass": 1, "tech_score": 80.0},
+        {"ticker": "B", "liquidity_pass": 1, "tech_score": 70.0},
+        {"ticker": "C", "liquidity_pass": 0, "tech_score": 90.0},
+        {"ticker": "D", "liquidity_pass": 1, "tech_score": 60.0},
         {"ticker": "E", "liquidity_pass": 1},
     ]
 
@@ -73,14 +74,17 @@ def test_build_shadow_artifacts_schema_and_isolation():
     shadows = build_shadow_artifacts(
         _live_artifact(), _eval_log(), _loadings(), {"momentum_top_n": 2}
     )
-    assert "momentum_sleeve" in shadows, shadows
-    a = shadows["momentum_sleeve"]
+    # After the config#1186 live cutover, momentum_sleeve is the CHAMPION
+    # and runs in the live candidates/ path. The shadow path now builds the
+    # tech_score_momentum challenger for comparison.
+    assert "tech_score_momentum" in shadows, shadows
+    a = shadows["tech_score_momentum"]
     # Parallel-to-live schema so a leaderboard can read live + shadows uniformly.
     assert a["run_date"] == "2026-05-29"
-    assert a["scanner_version"] == "momentum_sleeve-v1"
+    assert a["scanner_version"] == "tech_score_momentum-v1.0"
     assert a["spec"] == {
-        "name": "momentum_sleeve", "kind": "challenger",
-        "ranking": scanner_specs.SCANNER_SPECS["momentum_sleeve"].description,
+        "name": "tech_score_momentum", "kind": "challenger",
+        "ranking": scanner_specs.SCANNER_SPECS["tech_score_momentum"].description,
     }
     assert a["scanner_tickers"] == ["A", "B"]
     # population carried from live; agent_input = population ∪ picks[:50].
@@ -105,10 +109,15 @@ def test_build_shadow_artifacts_is_failsoft_per_spec(monkeypatch):
         _live_artifact(), _eval_log(), _loadings(), {"momentum_top_n": 2}
     )
     assert "broken" not in shadows
-    assert "momentum_sleeve" in shadows
+    assert "tech_score_momentum" in shadows
 
 
 def test_registry_has_one_champion_and_challengers():
     champions = [s for s in scanner_specs.SCANNER_SPECS.values() if s.kind == "champion"]
-    assert len(champions) == 1 and champions[0].rank is None
+    # Post config#1186 live cutover: champion (momentum_sleeve) has a rank
+    # function (z-score blend), challengers also have rank functions.
+    assert len(champions) == 1
+    assert champions[0].name == "momentum_sleeve"
+    assert champions[0].rank is not None
     assert all(s.rank is not None for s in challenger_specs())
+    assert all(s.kind == "challenger" for s in challenger_specs())

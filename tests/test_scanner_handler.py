@@ -224,7 +224,9 @@ class TestHandler:
         # Champion/challenger OBSERVE shadows (config#1221): the handler writes
         # each challenger artifact to the isolated shadow prefix and records the
         # keys in summary.shadows — without disturbing the live OK path.
-        shadow_art = {"momentum_sleeve": {"run_date": "2026-05-29", "scanner_tickers": ["A"]}}
+        # Post config#1186 live cutover: the challenger is tech_score_momentum
+        # (the former champion, now running in shadow for comparison).
+        shadow_art = {"tech_score_momentum": {"run_date": "2026-05-29", "scanner_tickers": ["A"]}}
         with patch.object(handler_mod, "_ensure_init"), \
              patch("data.scanner_orchestrator.build_candidates_artifact",
                    return_value=_ok_artifact()), \
@@ -233,12 +235,12 @@ class TestHandler:
              patch("data.scanner_orchestrator.build_shadow_candidate_artifacts",
                    return_value=shadow_art), \
              patch("data.scanner_orchestrator.write_shadow_candidates_artifact",
-                   return_value="candidates_shadow/momentum_sleeve/2026-05-29/candidates.json"), \
+                   return_value="candidates_shadow/tech_score_momentum/2026-05-29/candidates.json"), \
              patch("boto3.client", return_value=MagicMock()):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["shadows"] == {
-            "momentum_sleeve": "candidates_shadow/momentum_sleeve/2026-05-29/candidates.json"
+            "tech_score_momentum": "candidates_shadow/tech_score_momentum/2026-05-29/candidates.json"
         }
         assert "shadow_error" not in result["summary"]
 

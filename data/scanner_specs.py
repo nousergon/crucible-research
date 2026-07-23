@@ -8,17 +8,16 @@ model-zoo uses for the M slot, and the standing pattern for every
 refinement-target module (champion serves live, >=1 challenger runs in shadow,
 both scored on realized outcomes, promotion manual + evidence-gated).
 
-- **Champion** (`tech_score_momentum`): the live momentum-only ``tech_score``
-  scanner. Its candidates are emitted by the live path
-  (``candidates/{date}/candidates.json``) — authoritative, untouched here.
-- **Challenger** (`momentum_sleeve`): ranks the SAME liquidity-eligible universe
-  by ``mean(z(momentum_20d), z(return_60d))`` and takes the top-N. This is the
-  candidate-gen the config#1186 reconciliation found beats the live scanner on
-  the scanner's OWN long-only objective with date-clustered significance
-  (lift +0.080, p=0.013) while being flat on the cross-sectional rank-IC #1142
-  neutralizes — i.e. the scanner SHOULD keep momentum even though the composite
-  does not. Emitted to ``candidates_shadow/{spec}/{date}/candidates.json`` and
-  scored forward; never touches the live pool until manually promoted.
+- **Champion** (``momentum_sleeve``): the LIVE scanner ranking factor. Ranks the
+  liquidity-eligible universe by ``mean(z(momentum_20d), z(return_60d))`` and
+  takes the top-N. This is the candidate-gen the config#1186 reconciliation
+  found beats the previous tech_score composite on the scanner's OWN long-only
+  objective with date-clustered significance (lift +0.080, p=0.013). Promoted
+  from shadow champion/challenger to live champion via Operator decision
+  2026-07-22 (Option 1) per config#1186 closes-when.
+- **Challenger** (``tech_score_momentum``): the PREVIOUS champion, now running
+  in shadow for comparison. Ranks by ``tech_score`` (RSI/MACD/MA/momentum
+  composite) over the same liquidity-eligible universe, count-matched top-N.
 
 A challenger reuses the live scanner's own gate decisions (the per-ticker
 ``_last_eval_log`` stashed by ``run_quant_filter``) — so the hard gates
@@ -84,29 +83,69 @@ class ScannerSpec:
     rank: Callable[[list[dict], dict | None, dict], list[str]] | None = None
 
 
+def _rank_tech_score(
+    eval_log: list[dict],
+    factor_loadings: dict[str, dict[str, float]] | None,
+    params: dict,
+) -> list[str]:
+    """Rank the liquidity-eligible universe by ``tech_score`` and return the
+    top-N tickers (count-matched to ``momentum_top_n``).
+
+    Mirrors the pre-cutover ``run_quant_filter`` sorting for the legacy
+    momentum path — RSI/MACD/MA/momentum composite score. Now runs in shadow
+    as a challenger for comparison against the momentum-sleeve champion.
+
+    Eligibility reuses the live scanner's gate decisions (``liquidity_pass``)
+    so the hard gates are held constant across specs. ``factor_loadings`` is
+    accepted for API compatibility but unused — ``tech_score`` is a single
+    composite, not a z-score blend.
+    """
+    top_n = params.get("momentum_top_n") or 60
+    if not eval_log:
+        return []
+    eligible = [r for r in eval_log if r.get("liquidity_pass") == 1]
+    scored: list[tuple[str, float]] = []
+    for rec in eligible:
+        ts = rec.get("tech_score")
+        if ts is None:
+            continue
+        scored.append((rec["ticker"], ts))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:top_n]]
+
+
 # The registry. Add new candidate-gen builds here as challengers; they are
 # scored forever in shadow with no further plumbing (config#1221).
 SCANNER_SPECS: dict[str, ScannerSpec] = {
-    "tech_score_momentum": ScannerSpec(
-        name="tech_score_momentum",
-        kind="champion",
-        version="v1.0",
-        description="live momentum-only tech_score scanner (run_quant_filter)",
-        rank=None,
-    ),
     "momentum_sleeve": ScannerSpec(
         name="momentum_sleeve",
-        kind="challenger",
+        kind="champion",
         version="v1",
         description="z(momentum_20d)+z(return_60d) over the liquidity-eligible "
         "universe, count-matched top-N (config#1186)",
         rank=_rank_momentum_sleeve,
+    ),
+    "tech_score_momentum": ScannerSpec(
+        name="tech_score_momentum",
+        kind="challenger",
+        version="v1.0",
+        description="momentum-only tech_score composite (RSI/MACD/MA) over the "
+        "liquidity-eligible universe, count-matched top-N (config#1186 shadow)",
+        rank=_rank_tech_score,
     ),
 }
 
 
 def challenger_specs() -> list[ScannerSpec]:
     return [s for s in SCANNER_SPECS.values() if s.kind == "challenger"]
+
+
+def champion_spec() -> ScannerSpec | None:
+    """Return the single champion spec (kind == "champion")."""
+    for s in SCANNER_SPECS.values():
+        if s.kind == "champion":
+            return s
+    return None
 
 
 def _shadow_artifact(

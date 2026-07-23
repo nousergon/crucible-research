@@ -250,7 +250,7 @@ class TestScannerLeaderboardProducer:
         entry = "2026-06-01"
         _put_json(s3, f"candidates/{entry}/candidates.json",
                   {"scanner_tickers": ["A", "B", "C", "D"]})
-        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
+        _put_json(s3, f"candidates_shadow/tech_score_momentum/{entry}/candidates.json",
                   {"scanner_tickers": ["D", "C", "B", "A"]})
 
         # daily_closes: entry-date closes + a matured horizon close 21 sessions on.
@@ -268,11 +268,11 @@ class TestScannerLeaderboardProducer:
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
         assert got["leaderboard_id"] == "scanner"
         assert got["date"] == "2026-06-27"
-        assert got["champion"] == "tech_score_momentum"
+        assert got["champion"] == "momentum_sleeve"
         names = {s["name"]: s for s in got["specs"]}
-        assert "tech_score_momentum" in names and "momentum_sleeve" in names
+        assert "momentum_sleeve" in names and "tech_score_momentum" in names
         # champion rank order matches realized returns → IC = 1.0 on the one date.
-        assert names["tech_score_momentum"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
+        assert names["momentum_sleeve"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
         assert got["n_dates"] == 1
 
     def test_fresh_date_ships_null_metrics(self, s3):
@@ -281,7 +281,7 @@ class TestScannerLeaderboardProducer:
         entry = "2026-06-20"
         _put_json(s3, f"candidates/{entry}/candidates.json",
                   {"scanner_tickers": ["A", "B"]})
-        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
+        _put_json(s3, f"candidates_shadow/tech_score_momentum/{entry}/candidates.json",
                   {"scanner_tickers": ["B", "A"]})
         _put_closes(s3, entry, {"A": 100, "B": 100})  # no horizon close → no join
 
