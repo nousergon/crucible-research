@@ -21,6 +21,10 @@ import logging
 
 from observe_alerts import publish_observe_alert
 from producers.registry import challenger_producers
+from producers.experiment_record import (
+    build_challenger_experiment_record,
+    write_challenger_experiment_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,8 @@ def run_challengers(
     written: dict[str, str] = {}
     errors: dict[str, str] = {}
     for spec in challenger_producers():
+        shadow_key: str | None = None
+        build_error: str | None = None
         try:
             payload = spec.build(
                 run_date, archive_manager, run_time=run_time, population=population,
@@ -50,6 +56,7 @@ def run_challengers(
                 spec.name, run_date, generated_at, payload,
             )
             written[spec.name] = key
+            shadow_key = key
         except Exception as exc:  # noqa: BLE001 — isolation only; gap RAISES below
             logger.error(
                 "[producers] challenger %s failed (other challengers still get "
@@ -57,6 +64,36 @@ def run_challengers(
                 spec.name, exc, exc_info=True,
             )
             errors[spec.name] = str(exc)
+            build_error = str(exc)
+
+        # experiment_record.v1 (alpha-engine-config#3077 Phase C) — a SEPARATE,
+        # fully isolated try/except from the shadow-signal write above. This
+        # emission is fail-SOFT by design: it must NEVER touch the FAIL-HARD
+        # ChallengerShadowGapError doctrine (config#1683) this module exists
+        # to enforce. A bug here logs + fires the same loud observe-alert
+        # path the shadow-gap check uses, then moves on — it never raises,
+        # and it never suppresses/masks the real gap detection below.
+        try:
+            record = build_challenger_experiment_record(
+                spec, run_date, shadow_signals_key=shadow_key, error=build_error,
+            )
+            write_challenger_experiment_record(archive_manager, spec.name, run_date, record)
+        except Exception as exc:  # noqa: BLE001 — fail-soft, isolated from shadow-write doctrine
+            logger.warning(
+                "[producers] experiment_record emission failed for challenger "
+                "%s (shadow-signal write above is unaffected by this): %s",
+                spec.name, exc, exc_info=True,
+            )
+            publish_observe_alert(
+                message=(
+                    f"[producers] experiment_record emission failed for "
+                    f"challenger {spec.name} on {run_date}: {exc}. The shadow "
+                    f"signals write itself is unaffected — this only concerns "
+                    f"the experiments/{spec.name}/records/ index."
+                ),
+                source="research:experiment_record",
+                dedup_key=f"experiment_record_gap:{spec.name}:{run_date}",
+            )
     logger.info(
         "[producers] challenger shadows: wrote %d (%s), %d failed (%s)",
         len(written), list(written), len(errors), list(errors),
