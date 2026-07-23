@@ -30,8 +30,6 @@ from __future__ import annotations
 import inspect
 from urllib.parse import parse_qs, urlsplit
 
-import pytest
-
 from graph.research_graph import (
     RESEARCH_BRIEFING_SLUG,
     RESEARCH_BRIEFING_TAB,

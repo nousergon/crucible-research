@@ -12,18 +12,17 @@ real API calls. Real-LLM smoke is deferred to the deploy canary.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from unittest.mock import MagicMock
 
 import boto3
 import pytest
 from moto import mock_aws
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -239,9 +238,9 @@ class TestBuildBatchPlan:
 
     def test_judge_only_routes_to_isolated_eval_prefix(self, mocked_s3):
         from evals.orchestrator import (
-            build_batch_plan,
-            JUDGE_ONLY_EVAL_PREFIX,
             JUDGE_ONLY_CW_NAMESPACE,
+            JUDGE_ONLY_EVAL_PREFIX,
+            build_batch_plan,
         )
 
         plan = build_batch_plan(
@@ -363,8 +362,10 @@ class TestPollBatch:
         Pydantic model that mirrors Anthropic's MessageBatch shape so
         the regression class can't recur.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from pydantic import BaseModel
+
         from evals.orchestrator import poll_batch
 
         class FakePydanticBatch(BaseModel):
@@ -379,9 +380,9 @@ class TestPollBatch:
             id="msgbatch_xyz",
             processing_status="ended",
             request_counts={"succeeded": 24, "errored": 0},
-            created_at=datetime(2026, 5, 7, 23, 30, tzinfo=timezone.utc),
-            ended_at=datetime(2026, 5, 7, 23, 35, tzinfo=timezone.utc),
-            expires_at=datetime(2026, 5, 8, 23, 30, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 7, 23, 30, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 7, 23, 35, tzinfo=UTC),
+            expires_at=datetime(2026, 5, 8, 23, 30, tzinfo=UTC),
         )
         fake_client = MagicMock()
         fake_client.messages.batches.retrieve.return_value = fake_batch
@@ -407,7 +408,9 @@ class TestProcessBatchResults:
         """Submit weekly plan → fake successful batch results → Process
         persists per-artifact eval JSONs at decision_artifacts/_eval/."""
         from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
         )
 
         plan = build_batch_plan(
@@ -460,10 +463,13 @@ class TestProcessBatchResults:
         """A Haiku result with a dimension <3 must trigger a synchronous
         Sonnet escalation call inside Process. ``evaluate_artifact`` is
         the call site for the tail; pin its invocation."""
-        from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
-        )
         from unittest.mock import patch
+
+        from evals.orchestrator import (
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
+        )
 
         plan = build_batch_plan(
             date="2026-05-09", bucket="alpha-engine-research",
@@ -494,7 +500,8 @@ class TestProcessBatchResults:
         # Stub the synchronous escalation call.
         from evals import orchestrator as orch
         from graph.state_schemas import (
-            RubricEvalArtifact, RubricDimensionScore,
+            RubricDimensionScore,
+            RubricEvalArtifact,
         )
 
         def fake_evaluate(artifact, *, judge_run_id, judge_model, judged_artifact_s3_key, **kw):
@@ -531,10 +538,13 @@ class TestProcessBatchResults:
         """force_sonnet_pass=True submits both tiers in the batch — the
         Process Lambda must NOT also run the synchronous escalation
         tail (would double-bill Sonnet on every borderline)."""
-        from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
-        )
         from unittest.mock import patch
+
+        from evals.orchestrator import (
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
+        )
 
         plan = build_batch_plan(
             date="2026-05-09", bucket="alpha-engine-research",
@@ -578,7 +588,9 @@ class TestProcessBatchResults:
 
     def test_errored_batch_result_is_recorded_as_failed(self, mocked_s3):
         from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
         )
 
         plan = build_batch_plan(
@@ -626,13 +638,17 @@ class TestProcessBatchResults:
         (malformed stringified dimension_scores) must get ONE synchronous
         evaluate_artifact retry — recovered evals persist, count, and leave
         the failed list EMPTY instead of silently thinning the corpus."""
-        from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
-        )
         from unittest.mock import patch
+
         from evals import orchestrator as orch
+        from evals.orchestrator import (
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
+        )
         from graph.state_schemas import (
-            RubricEvalArtifact, RubricDimensionScore,
+            RubricDimensionScore,
+            RubricEvalArtifact,
         )
 
         plan = build_batch_plan(
@@ -700,11 +716,14 @@ class TestProcessBatchResults:
         """If the sync retry ALSO fails, the item is terminal-failed with
         a stage naming the retry (fail-loud, run goes PARTIAL) — never
         silently dropped and never retried unboundedly."""
-        from evals.orchestrator import (
-            build_batch_plan, submit_batch, process_batch_results,
-        )
         from unittest.mock import patch
+
         from evals import orchestrator as orch
+        from evals.orchestrator import (
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
+        )
 
         plan = build_batch_plan(
             date="2026-05-09", bucket="alpha-engine-research",
@@ -755,8 +774,8 @@ class TestProcessBatchResults:
         in Submit (no batch slot consumed). Pin the persistence here
         so the rolling-mean alarm doesn't see a missing data point."""
         from evals.orchestrator import (
-            build_batch_plan,
             _persist_client_side_skips,
+            build_batch_plan,
         )
 
         plan = build_batch_plan(
@@ -794,8 +813,11 @@ class TestBatchChainIntegration:
         path produced. No real Anthropic call; just shape-validates the
         in-memory wiring."""
         from evals.orchestrator import (
-            build_batch_plan, submit_batch, poll_batch,
-            process_batch_results, _persist_client_side_skips,
+            _persist_client_side_skips,
+            build_batch_plan,
+            poll_batch,
+            process_batch_results,
+            submit_batch,
         )
 
         plan = build_batch_plan(

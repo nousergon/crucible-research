@@ -3,10 +3,9 @@ Tests for trading day detection and handler gate logic.
 Validates scheduler logic without triggering real AWS or LLM calls.
 """
 
-import importlib
 import datetime
-import pytest
-from unittest.mock import patch, MagicMock
+import importlib
+from unittest.mock import patch
 
 # 'lambda' is a reserved keyword; use importlib to load lambda.handler
 _lambda_handler = importlib.import_module("lambda.handler")

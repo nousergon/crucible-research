@@ -39,6 +39,12 @@ beautifulsoup4~=4.12
 # (data/fetchers/news_fetcher.py) — no direct lxml.etree/XML-parsing calls
 # of our own — so the 5->6 API surface change carries low local risk.
 lxml~=6.1
+# defusedxml (config#2532): hardened drop-in for xml.etree.ElementTree —
+# data/fetchers/insider_fetcher.py parses Form 4 XML fetched live from SEC
+# EDGAR (network response, not a local/trusted literal), so stdlib
+# ElementTree's unguarded entity resolution is a real XXE surface even
+# though the source is a reputable government endpoint.
+defusedxml~=0.7.1
 
 # Config / storage
 pyyaml~=6.0.3

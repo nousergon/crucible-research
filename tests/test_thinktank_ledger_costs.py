@@ -29,17 +29,17 @@ def _board(n: int = 10, none_scores: set[int] | None = None) -> dict:
 
 
 def _settings(**over) -> ThinktankSettings:
-    base = dict(
-        bucket="alpha-engine-research",
-        daily_new_names=5,
-        rank_ceiling=150,
-        sweep_chunk_size=25,
-        stale_after_days=30,
-        monthly_budget_usd_default=25.0,
-        budget_ssm_param="/thinktank/monthly_budget_usd",
-        providers={},
-        tiers={},
-    )
+    base = {
+        "bucket": "alpha-engine-research",
+        "daily_new_names": 5,
+        "rank_ceiling": 150,
+        "sweep_chunk_size": 25,
+        "stale_after_days": 30,
+        "monthly_budget_usd_default": 25.0,
+        "budget_ssm_param": "/thinktank/monthly_budget_usd",
+        "providers": {},
+        "tiers": {},
+    }
     base.update(over)
     return ThinktankSettings(**base)
 

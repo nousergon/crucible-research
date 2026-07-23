@@ -23,14 +23,11 @@ definition by sed and source THAT into a temporary harness script.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
-
 
 _DEPLOY_SH = Path(__file__).resolve().parent.parent / "infrastructure" / "deploy.sh"
 

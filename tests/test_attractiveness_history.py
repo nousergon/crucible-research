@@ -29,7 +29,7 @@ from scoring.attractiveness_history import (  # noqa: E402
 )
 from scoring.universe_board import _PILLAR_ORDER, build_universe_board  # noqa: E402
 
-_EQUAL = {p: 1 / 6 for p in _PILLAR_ORDER}
+_EQUAL = dict.fromkeys(_PILLAR_ORDER, 1 / 6)
 
 
 # ── In-memory S3 ─────────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ def test_extract_from_board():
     board = {"as_of": "2026-07-04", "stocks": [
         {"ticker": "AAPL", "attractiveness_raw": 0.5, "attractiveness_score": 88.0,
          "sector": "Information Technology", "industry": "Consumer Electronics",
-         "pillars": {p: 70.0 for p in _PILLAR_ORDER}},
+         "pillars": dict.fromkeys(_PILLAR_ORDER, 70.0)},
     ]}
     rows = extract_history_rows_from_board(board)
     assert rows[0]["ticker"] == "AAPL" and rows[0]["attractiveness_score"] == 88.0

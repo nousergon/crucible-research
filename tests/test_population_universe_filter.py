@@ -20,7 +20,6 @@ from data.population_selector import (
     compute_exits_and_open_slots,
 )
 
-
 DEFAULT_CONFIG = {
     "target_size": 25,
     "rotation": {

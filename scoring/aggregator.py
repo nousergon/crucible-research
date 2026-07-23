@@ -25,12 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 
 from config import (
-    WEIGHT_QUANT,
-    WEIGHT_QUAL,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
+    WEIGHT_QUAL,
+    WEIGHT_QUANT,
     check_s3_pointer_staleness,
 )
 
@@ -39,7 +40,8 @@ logger = logging.getLogger(__name__)
 _weights_cache: dict | None = None
 # Local cache persists last known optimal across Lambda cold-starts (via /tmp).
 _WEIGHTS_CACHE_PATH = os.environ.get(
-    "SCORING_WEIGHTS_CACHE", "/tmp/scoring_weights_cache.json"
+    "SCORING_WEIGHTS_CACHE",
+    os.path.join(tempfile.gettempdir(), "scoring_weights_cache.json"),
 )
 
 
@@ -192,7 +194,7 @@ def assign_cross_sectional_ranks(results: dict[str, dict]) -> None:
     prev_score: float | None = None
     rank = 0
     seq = 0  # 1-indexed sequence position; rank only advances on score drop
-    for ticker, result in sorted_items:
+    for _ticker, result in sorted_items:
         seq += 1
         score = result.get("final_score")
         try:

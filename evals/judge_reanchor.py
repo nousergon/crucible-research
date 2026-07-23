@@ -49,9 +49,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha1
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +76,12 @@ EVENT_TYPE_JUDGE_REANCHOR = "judge_reanchor"
 def log_judge_reanchor_marker(
     *,
     logical_key: str,
-    old_resolved_model: Optional[str],
+    old_resolved_model: str | None,
     new_resolved_model: str,
     reason: str,
     s3_client: Any = None,
-    now: Optional[datetime] = None,
-) -> Optional[str]:
+    now: datetime | None = None,
+) -> str | None:
     """Write one ``judge_reanchor`` changelog entry marking a judge-model
     regime break for ``logical_key``.
 
@@ -103,7 +103,7 @@ def log_judge_reanchor_marker(
     documenting. Returns the S3 key on success.
     """
     try:
-        ts = now or datetime.now(timezone.utc)
+        ts = now or datetime.now(UTC)
         ts_utc = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
         entry_date = ts.strftime("%Y-%m-%d")
         ts_id = ts_utc.replace(":", "-").rstrip("Z")
@@ -112,7 +112,8 @@ def log_judge_reanchor_marker(
         digest_input = (
             f"{logical_key}|{old_resolved_model}|{new_resolved_model}|{ts_utc}"
         ).encode()
-        event_hash = sha1(digest_input).hexdigest()[:7]
+        # Short deterministic dedup id, not a security digest.
+        event_hash = sha1(digest_input, usedforsecurity=False).hexdigest()[:7]
         event_id = f"{ts_id}_{actor}_{event_hash}"
 
         summary = (

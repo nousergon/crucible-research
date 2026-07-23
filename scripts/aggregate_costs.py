@@ -40,7 +40,7 @@ import logging
 import re
 import sys
 from datetime import date as date_type
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 import pandas as pd
@@ -71,7 +71,7 @@ _RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(\b|[-_])")
 _MAX_PLAUSIBLE_TOKENS_PER_ROW = 5_000_000
 
 
-def _is_plausible_cost_row(row: dict) -> tuple[bool, Optional[str]]:
+def _is_plausible_cost_row(row: dict) -> tuple[bool, str | None]:
     """Reject obvious test pollution before it reaches the daily parquet.
 
     Two structural invariants any real production row must satisfy:
@@ -153,9 +153,9 @@ def aggregate_day(
     bucket: str,
     target_date: date_type,
     *,
-    output_key_override: Optional[str] = None,
+    output_key_override: str | None = None,
     cw_client: Any | None = None,
-) -> Optional[dict]:
+) -> dict | None:
     """Read all JSONL files for ``target_date`` and write a parquet.
 
     Returns a summary dict with ``rows_in``, ``rows_out``, ``output_key``,
@@ -450,7 +450,7 @@ def print_summary(summary: dict, *, target_date: date_type) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Aggregate per-call cost JSONL files into a daily parquet.",
     )

@@ -60,7 +60,7 @@ class NeutralizationConfig:
     min_names: int = _DEFAULT_MIN_NAMES
 
     @classmethod
-    def from_dict(cls, d: dict | None) -> "NeutralizationConfig":
+    def from_dict(cls, d: dict | None) -> NeutralizationConfig:
         d = d or {}
         return cls(
             enabled=bool(d.get("enabled", False)),
@@ -89,7 +89,7 @@ def neutralize_scores(
         ticker -> neutralized score. Identity copy of ``scores`` whenever
         disabled or any precondition fails (fail-soft).
     """
-    out = {t: s for t, s in scores.items()}  # identity baseline (never lose a name)
+    out = dict(scores.items())  # identity baseline (never lose a name)
 
     if not config.enabled or not config.factors:
         return out
@@ -153,14 +153,14 @@ def neutralize_scores(
             else:
                 resid = resid - resid.mean() + yv.mean()
 
-        for t, r in zip(fit_tickers, resid):
+        for t, r in zip(fit_tickers, resid, strict=True):
             out[t] = float(round(r, 4))
         logger.info(
             "[neutralize] residualized %d/%d names against %s (rescale=%s)",
-            len(fit_tickers), len(scores), [f for f, k in zip(factors, keep) if k],
+            len(fit_tickers), len(scores), [f for f, k in zip(factors, keep, strict=True) if k],
             config.rescale,
         )
         return out
     except Exception as e:  # fail-soft: neutralization must never break scoring
         logger.warning("[neutralize] failed (%s) — identity passthrough", e)
-        return {t: s for t, s in scores.items()}
+        return dict(scores.items())

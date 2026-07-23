@@ -48,7 +48,7 @@ multiply by 100 explicitly at the render boundary (see
 from __future__ import annotations
 
 import sqlite3
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from nousergon_lib.quant.horizons import DEFAULT_POLICY, HorizonPolicy
 
@@ -60,10 +60,10 @@ class PrimaryOutcome(NamedTuple):
 
     symbol: str
     score_date: str
-    beat_spy: Optional[int]  # 0/1, SQLite has no native bool
-    stock_return: Optional[float]
-    spy_return: Optional[float]
-    log_alpha: Optional[float]
+    beat_spy: int | None  # 0/1, SQLite has no native bool
+    stock_return: float | None
+    spy_return: float | None
+    log_alpha: float | None
 
 
 def store_exists(conn: sqlite3.Connection) -> bool:
@@ -76,8 +76,8 @@ def store_exists(conn: sqlite3.Connection) -> bool:
 
 def load_primary_outcomes(
     conn: sqlite3.Connection,
-    score_date_start: Optional[str] = None,
-    score_date_end: Optional[str] = None,
+    score_date_start: str | None = None,
+    score_date_end: str | None = None,
     policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> dict[tuple[str, str], PrimaryOutcome]:
     """Load canonical-primary-horizon outcomes keyed by ``(symbol, score_date)``.
@@ -116,8 +116,11 @@ def load_primary_outcomes(
         clauses.append("score_date <= ?")
         params.append(score_date_end)
 
+    # `_TABLE` is a hardcoded module constant and `clauses` entries are hardcoded
+    # column-comparison literals (never date/horizon-value-derived); bound values
+    # travel via `params` below.
     sql = (
-        "SELECT symbol, score_date, beat_spy, stock_return, spy_return, log_alpha "
+        "SELECT symbol, score_date, beat_spy, stock_return, spy_return, log_alpha "  # noqa: S608
         f"FROM {_TABLE} WHERE {' AND '.join(clauses)}"
     )
     rows = conn.execute(sql, params).fetchall()

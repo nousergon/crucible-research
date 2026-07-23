@@ -410,10 +410,10 @@ def compute_composite_breakdown(
       * ALL inputs None           → score_failed=True, final_score=None.
     """
     from nousergon_lib.pillars import (
+        PILLARS,
         CompositeBreakdown,
         LegacyComponentBlend,
         PillarContribution,
-        PILLARS,
     )
 
     pw = dict(DEFAULT_PILLAR_WEIGHTS)

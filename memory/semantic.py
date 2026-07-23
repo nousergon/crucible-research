@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 
 from graph.state_schemas import ADVANCE_DECISIONS
@@ -42,6 +41,7 @@ def extract_semantic_memories(
     """
     from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
+
     from config import ANTHROPIC_API_KEY, PER_STOCK_MODEL
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
@@ -72,7 +72,7 @@ def extract_semantic_memories(
 
         tickers = [r.get("ticker", "?") for r in recs[:3]]
         bull_cases = [r.get("bull_case", "")[:100] for r in recs[:3]]
-        summary = "; ".join(f"{t}: {b}" for t, b in zip(tickers, bull_cases) if b)
+        summary = "; ".join(f"{t}: {b}" for t, b in zip(tickers, bull_cases, strict=True) if b)
 
         if not summary:
             continue

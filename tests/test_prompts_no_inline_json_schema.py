@@ -185,8 +185,8 @@ def test_macro_agent_format_passes_canonical_sectors() -> None:
     prompt's ``{sector_list_text}`` placeholder. Lock the wiring so a
     refactor that drops the kwarg surfaces here instead of crashing the
     LLM call at runtime."""
-    from config import ALL_SECTORS
     from agents.macro_agent import _PROMPT_TEMPLATE
+    from config import ALL_SECTORS
 
     rendered = _PROMPT_TEMPLATE.format(
         sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),

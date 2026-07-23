@@ -30,9 +30,6 @@ import os
 import sys
 from unittest.mock import patch
 
-import pandas as pd
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -74,7 +71,7 @@ def _synthetic_feature_store_rows(n_tickers: int = 100) -> dict[str, dict]:
 
 def _synthetic_daily_closes(tickers: list[str], price: float = 50.0) -> dict[str, float]:
     """Above MIN_PRICE for all tickers."""
-    return {t: price for t in tickers}
+    return dict.fromkeys(tickers, price)
 
 
 # ── Consumer-slot contract ────────────────────────────────────────────────
@@ -92,7 +89,7 @@ def test_orchestrator_reads_raw_column_into_avg_volume_slot():
 
     fs_rows = _synthetic_feature_store_rows(n_tickers=100)
     constituents = list(fs_rows.keys())
-    sector_map = {t: "Technology" for t in constituents}
+    sector_map = dict.fromkeys(constituents, "Technology")
 
     with (
         patch("data.fetchers.feature_store_reader.read_latest_features", return_value=fs_rows),
@@ -125,12 +122,12 @@ def test_scanner_liquidity_pass_count_is_high_on_raw_consumer():
     Before the fix, ~all tickers failed (avg_volume_20d ≈ 1.0 < 500_000).
     After the fix, ~all tickers pass (avg_volume_20d_raw ≈ 5M > 500_000).
     """
-    from data.scanner_orchestrator import _build_technical_scores_from_feature_store
     from data.scanner import run_quant_filter
+    from data.scanner_orchestrator import _build_technical_scores_from_feature_store
 
     fs_rows = _synthetic_feature_store_rows(n_tickers=100)
     constituents = list(fs_rows.keys())
-    sector_map = {t: "Technology" for t in constituents}
+    sector_map = dict.fromkeys(constituents, "Technology")
 
     with (
         patch("data.fetchers.feature_store_reader.read_latest_features", return_value=fs_rows),
@@ -173,8 +170,8 @@ def test_scanner_fails_loud_when_raw_column_missing():
     Per [[feedback_no_silent_fails]]: missing data => loud refuse, not
     quiet incorrect.
     """
-    from data.scanner_orchestrator import _build_technical_scores_from_feature_store
     from data.scanner import run_quant_filter
+    from data.scanner_orchestrator import _build_technical_scores_from_feature_store
 
     fs_rows = _synthetic_feature_store_rows(n_tickers=10)
     # Strip the raw column from every row — simulate pre-Phase-1 data.
@@ -182,7 +179,7 @@ def test_scanner_fails_loud_when_raw_column_missing():
         row.pop("avg_volume_20d_raw")
 
     constituents = list(fs_rows.keys())
-    sector_map = {t: "Technology" for t in constituents}
+    sector_map = dict.fromkeys(constituents, "Technology")
 
     with (
         patch("data.fetchers.feature_store_reader.read_latest_features", return_value=fs_rows),
@@ -229,7 +226,7 @@ def test_research_graph_consumer_slot_uses_raw_column():
     """
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     graph_path = os.path.join(repo_root, "graph", "research_graph.py")
-    with open(graph_path, "r", encoding="utf-8") as f:
+    with open(graph_path, encoding="utf-8") as f:
         src = f.read()
     assert 'fs_row.get("avg_volume_20d_raw")' in src, (
         "graph/research_graph.py no longer reads avg_volume_20d_raw from "
@@ -250,7 +247,7 @@ def test_scanner_orchestrator_consumer_slot_uses_raw_column():
     """Same source-level invariant for the standalone scanner Lambda."""
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     orch_path = os.path.join(repo_root, "data", "scanner_orchestrator.py")
-    with open(orch_path, "r", encoding="utf-8") as f:
+    with open(orch_path, encoding="utf-8") as f:
         src = f.read()
     assert 'fs_row.get("avg_volume_20d_raw")' in src, (
         "data/scanner_orchestrator.py no longer reads avg_volume_20d_raw "

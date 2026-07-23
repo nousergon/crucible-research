@@ -11,6 +11,9 @@ Pins two related changes:
    rather than truncating purely on ``open_slots``.
 """
 
+import json
+from pathlib import Path
+
 from agents.investment_committee.ic_cio import (
     _compute_advance_bounds,
     _fallback_selection,
@@ -178,11 +181,6 @@ def test_compute_advance_bounds_floor_never_exceeds_cap():
     assert (floor, cap) == (3, 3)
 
 
-def _decisions_to_text(decisions):
-    """Wrap a decisions list as the JSON the LLM would emit."""
-    return json.dumps({"decisions": decisions})
-
-
 def test_parse_cio_response_truncates_at_cap():
     """When the LLM rubric advances more than cap, truncate to cap."""
     candidates = [
@@ -194,7 +192,6 @@ def test_parse_cio_response_truncates_at_cap():
          "conviction": 80, "rationale": "rubric pass", "entry_thesis": None}
         for i in range(12)
     ]
-    text = _decisions_to_text(decisions)
     result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert len(result["advanced_tickers"]) == 10
     # First 10 in original ADVANCE order are kept
@@ -218,7 +215,6 @@ def test_parse_cio_response_force_advances_to_floor():
          "conviction": 0, "rationale": "weak catalyst", "entry_thesis": None}
         for i in range(15) if i != 5
     ])
-    text = _decisions_to_text(decisions)
     result = _post_process_cio_decisions(decisions, candidates, floor=3, cap=10)
 
     # Must hit floor: 1 rubric-advanced + 2 forced = 3
@@ -247,7 +243,6 @@ def test_parse_cio_response_no_force_when_rubric_meets_floor():
         {"ticker": "T1", "decision": "ADVANCE", "rank": 2, "conviction": 84,
          "rationale": "rubric", "entry_thesis": None},
     ]
-    text = _decisions_to_text(decisions)
     result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert result["advanced_tickers"] == ["T0", "T1"]
     forced = [
@@ -267,7 +262,6 @@ def test_parse_cio_response_passes_through_in_band():
          "conviction": 80, "rationale": "rubric", "entry_thesis": None}
         for i in range(5)
     ]
-    text = _decisions_to_text(decisions)
     result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert len(result["advanced_tickers"]) == 5
     assert result["advanced_tickers"] == [f"T{i}" for i in range(5)]
@@ -294,9 +288,6 @@ def test_fallback_selection_uses_floor_not_cap():
 # (15 BUY-rated, 6 HOLD-rated) and 27 buy_candidates (all ENTER, all BUY).
 # We reconstruct an upstream state and replay _build_signals_payload under
 # three CIO-advance scenarios.
-
-import json
-from pathlib import Path
 
 FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "signals_2026-04-24.json"

@@ -11,23 +11,29 @@ and sector_ratings (overweight / market_weight / underweight + rationale).
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
 )
-from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY, ALL_SECTORS, REGIME_GUARDRAILS, PRIOR_REPORT_MAX_CHARS
+from agents.prompt_loader import load_prompt
 from agents.token_guard import check_prompt_size
+from config import (
+    ALL_SECTORS,
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_STRATEGIC,
+    PRIOR_REPORT_MAX_CHARS,
+    REGIME_GUARDRAILS,
+    STRATEGIC_MODEL,
+)
 from graph.state_schemas import MacroCriticOutput, MacroEconomistRawOutput
 from strict_mode import is_strict_validation_enabled
+
+logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = load_prompt("macro_agent")
 
@@ -40,7 +46,7 @@ def _truncate_prior(text: str, max_chars: int | None = None) -> str:
     return "[...truncated...]\n" + text[-max_chars:]
 
 
-_DEFAULT_SECTOR_MODIFIERS = {s: 1.0 for s in ALL_SECTORS}
+_DEFAULT_SECTOR_MODIFIERS = dict.fromkeys(ALL_SECTORS, 1.0)
 
 _VALID_RATINGS = {"overweight", "market_weight", "underweight"}
 _OW_THRESHOLD = 1.08   # modifier >= this → overweight
@@ -190,7 +196,7 @@ def _format_drawdown_leg(substrate: dict) -> str:
     )
 
 
-def _format_regime_substrate(substrate: Optional[dict]) -> str:
+def _format_regime_substrate(substrate: dict | None) -> str:
     """Render the quantitative regime substrate into a compact prompt
     block for the LLM. Returns a fallback message when None.
 
@@ -282,12 +288,12 @@ def _format_regime_substrate(substrate: Optional[dict]) -> str:
 
 
 def run_macro_agent(
-    prior_report: Optional[str],
+    prior_report: str | None,
     prior_date: str,
     macro_data: dict,
-    api_key: Optional[str] = None,
-    regime_substrate: Optional[dict] = None,
-    prior_cycle_scorecard: Optional[str] = None,
+    api_key: str | None = None,
+    regime_substrate: dict | None = None,
+    prior_cycle_scorecard: str | None = None,
 ) -> dict:
     """
     Run the Macro & Market Environment Agent.
@@ -428,8 +434,9 @@ def run_macro_agent(
         )
 
     # parsed is guaranteed non-None at this point (either the LLM populated it
-    # or the lax-mode fallback above synthesized defaults).
-    assert parsed is not None
+    # or the lax-mode fallback above synthesized defaults). Internal
+    # type-narrowing assert, not a security boundary (config#2532).
+    assert parsed is not None  # noqa: S101
 
     # report_md preference order: parsed.report_md (LLM filled the field) →
     # raw-slice fallback (LLM emitted prose-then-JSON like the prior contract).
@@ -650,14 +657,14 @@ def run_macro_critic(
 
 
 def run_macro_agent_with_reflection(
-    prior_report: Optional[str],
+    prior_report: str | None,
     prior_date: str,
     macro_data: dict,
     max_iterations: int = 2,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     prior_snapshots: list[dict] | None = None,
-    regime_substrate: Optional[dict] = None,
-    prior_cycle_scorecard: Optional[str] = None,
+    regime_substrate: dict | None = None,
+    prior_cycle_scorecard: str | None = None,
 ) -> dict:
     """
     Run macro agent with self-critique reflection loop.

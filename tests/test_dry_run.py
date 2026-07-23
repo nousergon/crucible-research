@@ -21,8 +21,6 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -276,7 +274,8 @@ class TestBuildAfterInstallContract:
 
     def test_build_after_patch_captures_stubs_build_before_does_not(self):
         from typing import TypedDict
-        from langgraph.graph import StateGraph, START, END
+
+        from langgraph.graph import END, START, StateGraph
 
         class _DemoState(TypedDict, total=False):
             calls: list

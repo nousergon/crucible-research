@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from nousergon_lib.email_sender import send_email as _lib_send_email
+
 from config import AWS_REGION
 
 logger = logging.getLogger(__name__)

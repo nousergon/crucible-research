@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from alpha_engine_lib.secrets import get_secret
 
@@ -66,7 +66,7 @@ def emit_enabled() -> bool:
 
 # ── Pure boost math (no I/O — the unit-testable core) ────────────────────────
 
-def short_interest_adj_for(short_pct_float: Optional[float], params: dict) -> float:
+def short_interest_adj_for(short_pct_float: float | None, params: dict) -> float:
     """Applied short-interest boost for one ticker.
 
     ``short_pct_float`` is a percent (e.g. 5.0 == 5% of float short), matching
@@ -88,7 +88,7 @@ def short_interest_adj_for(short_pct_float: Optional[float], params: dict) -> fl
     return 0.0
 
 
-def institutional_boost_for(inst: Optional[dict], params: dict) -> float:
+def institutional_boost_for(inst: dict | None, params: dict) -> float:
     """Applied institutional-accumulation boost for one ticker.
 
     ``inst`` is one ``fetch_institutional_accumulation`` record
@@ -137,7 +137,7 @@ def _s3():
     return boto3.client("s3")
 
 
-def _latest_weekly_key(s3_client, bucket: str, run_date: str, filename: str) -> Optional[str]:
+def _latest_weekly_key(s3_client, bucket: str, run_date: str, filename: str) -> str | None:
     """Newest ``market_data/weekly/{date}/{filename}`` key with date <= run_date.
 
     Short-interest / market-data artifacts are keyed by their own weekly
@@ -147,7 +147,7 @@ def _latest_weekly_key(s3_client, bucket: str, run_date: str, filename: str) -> 
     prefix = f"{_MARKET_DATA_PREFIX}weekly/"
     target = (run_date or "")[:10]
     paginator = s3_client.get_paginator("list_objects_v2")
-    best: Optional[tuple[str, str]] = None
+    best: tuple[str, str] | None = None
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -163,7 +163,7 @@ def _latest_weekly_key(s3_client, bucket: str, run_date: str, filename: str) -> 
 
 
 def read_short_interest_map(
-    run_date: str, *, s3_client=None, bucket: Optional[str] = None
+    run_date: str, *, s3_client=None, bucket: str | None = None
 ) -> dict[str, dict]:
     """Per-ticker short-interest records for the newest weekly artifact <= run_date.
 
@@ -197,8 +197,8 @@ def read_institutional_map(
     *,
     params: dict,
     s3_client=None,
-    bucket: Optional[str] = None,
-    fetcher: Optional[Callable[..., dict]] = None,
+    bucket: str | None = None,
+    fetcher: Callable[..., dict] | None = None,
 ) -> dict[str, dict]:
     """Per-ticker 13F accumulation records.
 
@@ -218,7 +218,7 @@ def read_institutional_map(
         key = _latest_weekly_key(s3_client, bucket, run_date, "institutional_accumulation.json")
         if key:
             obj = s3_client.get_object(Bucket=bucket, Key=key)
-            recs = dict((json.loads(obj["Body"].read()).get("data") or {}))
+            recs = dict(json.loads(obj["Body"].read()).get("data") or {})
             if recs:
                 logger.info(
                     "[boost_signals] institutional_accumulation: %d tickers from s3://%s/%s",
@@ -256,9 +256,9 @@ def emit_boost_signals(
     signals_payload: dict,
     *,
     run_date: str,
-    params: Optional[dict] = None,
+    params: dict | None = None,
     s3_client=None,
-    bucket: Optional[str] = None,
+    bucket: str | None = None,
     force: bool = False,
 ) -> None:
     """Attach the two boost fields to the payload's ``universe`` + ``buy_candidates``.

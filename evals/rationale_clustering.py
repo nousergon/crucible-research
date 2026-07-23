@@ -58,8 +58,8 @@ import math
 import re
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import boto3
 from botocore.config import Config as _BotoConfig
@@ -452,7 +452,7 @@ def _list_artifact_keys_in_window(
     return keys
 
 
-def _agent_id_from_key(key: str) -> Optional[str]:
+def _agent_id_from_key(key: str) -> str | None:
     """Extract ``agent_id`` from an S3 key shaped
     ``decision_artifacts/{Y}/{M}/{D}/{agent_id}/{run_id}.json``.
     Returns None on unexpected layout (defensive)."""
@@ -515,7 +515,7 @@ def _build_per_agent_output(
         "n_clusters": len(clusters),
         "top3_concentration": concentration,
         "clusters": cluster_summaries,
-        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "computed_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -585,7 +585,7 @@ def _emit_concentration_metric(
 
 def compute_and_emit(
     *,
-    end_time: Optional[datetime] = None,
+    end_time: datetime | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     bucket: str = DEFAULT_BUCKET,
     capture_prefix: str = DEFAULT_CAPTURE_PREFIX,
@@ -593,8 +593,8 @@ def compute_and_emit(
     namespace: str = DEFAULT_NAMESPACE,
     metric_name: str = DEFAULT_METRIC_NAME,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-    s3_client: Optional[Any] = None,
-    cloudwatch_client: Optional[Any] = None,
+    s3_client: Any | None = None,
+    cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
     max_rationales_per_agent: int = DEFAULT_MAX_RATIONALES_PER_AGENT,
 ) -> dict[str, Any]:
@@ -616,7 +616,7 @@ def compute_and_emit(
         config=_BotoConfig(max_pool_connections=DEFAULT_LOAD_WORKERS * 2),
     )
     cw = cloudwatch_client or (boto3.client("cloudwatch") if emit_metrics else None)
-    end = end_time or datetime.now(timezone.utc)
+    end = end_time or datetime.now(UTC)
     window_start = end - timedelta(days=window_days)
 
     keys = _list_artifact_keys_in_window(
@@ -685,7 +685,7 @@ def compute_and_emit(
 
     def _fetch(
         item: tuple[str, str],
-    ) -> tuple[str, str, Optional[dict[str, Any]], Optional[str]]:
+    ) -> tuple[str, str, dict[str, Any] | None, str | None]:
         item_agent_id, item_key = item
         try:
             artifact = _load_artifact(s3, bucket=bucket, key=item_key)

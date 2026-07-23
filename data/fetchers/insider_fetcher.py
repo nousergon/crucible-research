@@ -22,11 +22,15 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from nousergon_lib.secrets import get_secret
-from typing import Optional
-from xml.etree import ElementTree
-
 import requests
+
+# defusedxml (config#2532): hardened drop-in for xml.etree.ElementTree — this
+# module parses Form 4 XML fetched live from SEC EDGAR (network response, not
+# a local/trusted literal), so stdlib ElementTree's unguarded entity
+# resolution is a real XXE surface even though the source is a reputable
+# government endpoint.
+from defusedxml import ElementTree
+from nousergon_lib.secrets import get_secret
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +111,7 @@ def _fetch_company_tickers(headers: dict) -> dict[str, str]:
     return _COMPANY_TICKERS_CACHE
 
 
-def _lookup_cik(ticker: str, headers: dict) -> Optional[str]:
+def _lookup_cik(ticker: str, headers: dict) -> str | None:
     """Look up CIK number for a ticker symbol via SEC EDGAR company tickers JSON."""
     cache = _fetch_company_tickers(headers)
     return cache.get(ticker.upper())
@@ -172,7 +176,8 @@ def _parse_form4_xml(
             if resp.status_code == 200 and resp.text.strip().startswith("<"):
                 xml_text = resp.text
                 break
-        except Exception:
+        except Exception as e:
+            log.debug("Form 4 XML fetch failed for %s: %s", url, e)
             continue
 
     if not xml_text:
@@ -243,7 +248,7 @@ def _parse_form4_xml(
 def fetch_insider_activity(
     tickers: list[str],
     lookback_days: int = 90,
-    reference_date: Optional[str] = None,
+    reference_date: str | None = None,
 ) -> dict[str, dict]:
     """
     Fetch insider trading activity for a list of tickers from SEC EDGAR.
@@ -308,7 +313,7 @@ def fetch_insider_activity(
 
             # Cluster detection: unique buyers in last 30 days
             buys_30d = [t for t in transactions if t["type"] == "BUY" and t["days_ago"] <= 30]
-            unique_buyers = len(set(t["insider"] for t in buys_30d))
+            unique_buyers = len({t["insider"] for t in buys_30d})
             total_buy_value = sum(t["value"] for t in buys_30d)
 
             # Net sentiment: ratio of buy value to total value

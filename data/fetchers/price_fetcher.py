@@ -23,17 +23,17 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import arcticdb as _arcticdb  # noqa: F401  Hard dep: matches predictor's
-                              # Phase 7a pattern. Imported here at module top
-                              # (BEFORE pandas) to prime arcticdb's bundled
-                              # aws-c-common allocator on macOS — the lib
-                              # chokepoint uses lazy import which would
-                              # otherwise let pyarrow's allocator load first
-                              # and segfault on first get_library() call.
-                        # If the Lambda image lacks arcticdb, fail loud at
-                        # cold start rather than silently degrading.
+
+# Phase 7a pattern. Imported here at module top
+# (BEFORE pandas) to prime arcticdb's bundled
+# aws-c-common allocator on macOS — the lib
+# chokepoint uses lazy import which would
+# otherwise let pyarrow's allocator load first
+# and segfault on first get_library() call.
+# If the Lambda image lacks arcticdb, fail loud at
+# cold start rather than silently degrading.
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class PriceFetchError(RuntimeError):
 DATA_SNAPSHOT_ID_UNKNOWN = "unknown"
 
 
-def _extract_arctic_version(res: object) -> Optional[int]:
+def _extract_arctic_version(res: object) -> int | None:
     """Best-effort read of ArcticDB ``VersionedItem.version``.
 
     Returns the integer snapshot version when the read returned a
@@ -252,8 +252,9 @@ def _load_constituents_from_s3() -> tuple[list[str], dict[str, str]]:
     means upstream didn't run, which is a pipeline failure, not a prompt
     to go scrape Wikipedia.
     """
-    import boto3
     import json
+
+    import boto3
 
     s3 = boto3.client("s3")
     try:
@@ -322,7 +323,7 @@ def fetch_sp500_sp400_tickers() -> list[str]:
 
 # ── Technical indicators (pure computation; no external calls) ───────────────
 
-def compute_technical_indicators(df: pd.DataFrame) -> Optional[dict]:
+def compute_technical_indicators(df: pd.DataFrame) -> dict | None:
     """
     Compute RSI(14), MACD signal, price vs MA50, price vs MA200,
     20-day momentum, and 20-day average volume from a price DataFrame.

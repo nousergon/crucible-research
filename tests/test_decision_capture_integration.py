@@ -22,22 +22,19 @@ state-capture-260429.md``.
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import boto3
 import pytest
 from moto import mock_aws
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     DecisionCaptureWriteError,
-    capture_decision,
     FullPromptContext,
     ModelMetadata,
+    capture_decision,
 )
-
 
 # ── Feature-flag gate ─────────────────────────────────────────────────────
 
@@ -438,7 +435,7 @@ class TestCaptureFiresWhenEnabled:
             input_data_summary=summary,
             agent_output={"macro_report": "test", "market_regime": "neutral"},
             s3_client=mocked_s3,
-            timestamp=datetime(2026, 4, 29, 22, 30, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 4, 29, 22, 30, tzinfo=UTC),
         )
 
         assert s3_key == "decision_artifacts/2026/04/29/macro_economist/test-run-001.json"
@@ -487,6 +484,7 @@ class TestCaptureHardFailsOnS3Error:
         botocore 1.43+.
         """
         from unittest.mock import patch
+
         from botocore.exceptions import ClientError
 
         monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")

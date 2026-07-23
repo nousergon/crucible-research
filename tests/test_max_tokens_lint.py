@@ -25,9 +25,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AGENTS_ROOT = _REPO_ROOT / "agents"
 _GRAPH_ROOT = _REPO_ROOT / "graph"
@@ -66,7 +63,11 @@ _ALLOWLIST: dict[str, set[int]] = {
     # ``run_macro_agent``'s return dict grew a ``"rendered_prompt"`` key
     # (+ explanatory comment, 12 lines total) above the critic function;
     # net +12. Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {578},
+    # then 578 → 585 by config#2532's ruff E402 fix: `logger =
+    # logging.getLogger(__name__)` moved below the top-level imports (was
+    # sitting between `import logging` and the rest, tripping E402); net
+    # +7. Same intentional 512-literal critic call, just relocated.
+    "agents/macro_agent.py": {585},
 }
 
 

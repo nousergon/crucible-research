@@ -22,8 +22,7 @@ Phase 2 (``@tool get_factor_profile``).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, asdict
-from typing import Optional
+from dataclasses import asdict, dataclass, field
 
 from scoring.composite import compute_factor_subscore
 
@@ -324,8 +323,8 @@ def build_pure_quant_focus_lookup(
     row-shape contract already documents — rather than raising and
     jeopardizing the board write (a secondary observability artifact).
     """
-    from config import FACTOR_BLEND_ENABLED, get_factor_blend_regime_weights
     from agents.sector_teams.team_config import SECTOR_TEAM_MAP
+    from config import FACTOR_BLEND_ENABLED, get_factor_blend_regime_weights
     from scoring.factor_scoring import read_factor_profiles_from_s3
 
     if not FACTOR_BLEND_ENABLED:

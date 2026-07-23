@@ -27,7 +27,7 @@ _DATES = ["2026-05-08", "2026-05-15", "2026-05-22", "2026-05-29", "2026-06-05"]
 def _history(series_by_ticker: dict[str, list], sector="Information Technology"):
     rows = []
     for ticker, ys in series_by_ticker.items():
-        for d, y in zip(_DATES, ys):
+        for d, y in zip(_DATES, ys, strict=True):
             rows.append({"as_of": d, "ticker": ticker, "attractiveness_raw": y, "sector": sector})
     return pd.DataFrame(rows)
 
@@ -74,7 +74,7 @@ def test_flags_rising_and_quality_gate():
     # min-points gate: a ticker with < min_points is excluded entirely.
     short = pd.DataFrame([{"as_of": d, "ticker": "SHORT", "attractiveness_raw": v,
                            "sector": "Information Technology"}
-                          for d, v in zip(_DATES[:3], [0.0, 0.5, 1.0])])
+                          for d, v in zip(_DATES[:3], [0.0, 0.5, 1.0], strict=True)])
     hist = pd.concat([_history({"UP": [-1.0, -0.5, 0.0, 0.5, 1.0]}), short], ignore_index=True)
     art = build_trajectory(hist, {"UP": 0.0}, {"Information Technology": 0.0},
                            run_date="2026-06-05", min_points=4)

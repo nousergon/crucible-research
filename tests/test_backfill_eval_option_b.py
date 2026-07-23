@@ -292,7 +292,7 @@ class TestBackfillCorpus:
                 mocked_s3, date="2026-05-06",
                 agent_id=agent, run_id="run-1",
             )
-        summary = backfill_corpus(
+        backfill_corpus(
             mocked_s3, bucket="alpha-engine-research", dry_run=False,
         )
         # Inspect the post-migration keys: all 5/06 evals must share

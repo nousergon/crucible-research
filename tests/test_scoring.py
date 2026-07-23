@@ -10,7 +10,7 @@ _score_momentum = _technical._score_momentum
 compute_technical_score = _technical.compute_technical_score
 compute_momentum_percentiles = _technical.compute_momentum_percentiles
 
-from scoring.composite import (
+from scoring.composite import (  # noqa: E402 — after the importorskip guard above
     PillarCoverageError,
     compute_composite_breakdown,
     compute_composite_score,
@@ -466,9 +466,7 @@ class TestCompositeBreakdownLegacyRegression:
         pillar_assessment["catalyst_horizon_modulation"] = 0
 
         # Half-and-half ramp: pillar_weights total 0.5, legacy total 0.5
-        pillar_w = {p: 0.5 / 6 for p in (
-            "quality", "value", "momentum", "growth", "stewardship", "defensiveness"
-        )}
+        pillar_w = dict.fromkeys(("quality", "value", "momentum", "growth", "stewardship", "defensiveness"), 0.5 / 6)
         legacy_w = {"w_legacy_quant": 0.175, "w_legacy_qual": 0.175, "w_factor": 0.150}
 
         new = compute_composite_breakdown(
@@ -687,9 +685,9 @@ class TestMacroOverlayKnob:
         # override the points (the production scoring.yaml sets 25.0) and is
         # where the DISABLE lands; the code default must stay frozen.
         from scoring.composite import (
-            MACRO_OVERLAY_ENABLED,
             MACRO_MAX_SHIFT_POINTS,
             MACRO_MODIFIER_RANGE,
+            MACRO_OVERLAY_ENABLED,
         )
         assert MACRO_OVERLAY_ENABLED is True
         assert abs(MACRO_MAX_SHIFT_POINTS - 10.0) < 1e-9

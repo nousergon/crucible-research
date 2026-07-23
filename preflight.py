@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC
 
 import pandas as pd
-
 from nousergon_lib.preflight import BasePreflight
 
 log = logging.getLogger(__name__)
@@ -93,13 +93,14 @@ class ResearchPreflight(BasePreflight):
         not the weekly research batch. Replaces the 7-calendar-day threshold
         that double-counted weekends/holidays as staleness.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
+
+        import arcticdb as adb
         from nousergon_lib.dates import (
             expected_last_close,
             is_fresh_in_trading_days,
             trading_days_stale,
         )
-        import arcticdb as adb
 
         region = os.environ.get("AWS_REGION", "us-east-1")
         uri = f"s3s://s3.{region}.amazonaws.com:{self.bucket}?path_prefix=arcticdb&aws_auth=true"
@@ -125,7 +126,7 @@ class ResearchPreflight(BasePreflight):
             )
 
         last_date = pd.Timestamp(df.index.max()).normalize().date()
-        today_iso = datetime.now(timezone.utc).date().isoformat()
+        today_iso = datetime.now(UTC).date().isoformat()
         if not is_fresh_in_trading_days(last_date, today_iso, max_stale=5):
             stale = trading_days_stale(last_date, today_iso)
             expected = expected_last_close(today_iso)

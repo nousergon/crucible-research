@@ -30,7 +30,7 @@ from __future__ import annotations
 import io
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from observe_alerts import publish_observe_alert
 from scoring.leaderboard_scoring import (
@@ -56,7 +56,7 @@ _SIGNALS_LIVE = "signals/{date}/signals.json"
 
 # ── S3 read helpers (mirror build_agent_quality._get_json) ────────────────────
 
-def _get_json(s3: Any, bucket: str, key: str) -> Optional[dict]:
+def _get_json(s3: Any, bucket: str, key: str) -> dict | None:
     from botocore.exceptions import ClientError
 
     try:
@@ -117,7 +117,7 @@ def _read_closes(s3: Any, bucket: str, date_str: str) -> dict[str, float]:
     return out
 
 
-def _horizon_date(close_dates: list[str], entry_date: str, horizon_days: int) -> Optional[str]:
+def _horizon_date(close_dates: list[str], entry_date: str, horizon_days: int) -> str | None:
     """The trading date ``horizon_days`` sessions AFTER ``entry_date`` in the
     available daily_closes calendar, or None if the horizon hasn't matured."""
     after = [d for d in close_dates if d > entry_date]
@@ -202,12 +202,12 @@ def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
         if isinstance(v, dict) and v.get("signal") == "ENTER" and v.get("score") is not None
     ]
     rows.sort(key=lambda r: r[1], reverse=True)
-    return SpecDay(ranked=[t for t, _ in rows], scores={t: s for t, s in rows})
+    return SpecDay(ranked=[t for t, _ in rows], scores=dict(rows))
 
 
 def _load_producer_specs(
     s3: Any, bucket: str, dates: list[str],
-) -> tuple[Optional[SpecHistory], list[SpecHistory]]:
+) -> tuple[SpecHistory | None, list[SpecHistory]]:
     """Champion (live ``signals/{date}/signals.json``) + every challenger
     (``signals_shadow/{producer}/{date}/signals.json``) as SpecHistories, each
     reduced to its ENTER picks ranked by score.
@@ -217,10 +217,10 @@ def _load_producer_specs(
     no successor champion spec registered yet — that registration is tracked
     separately). Callers must treat ``None`` as an honest "no champion to
     score", not an error."""
-    from producers.registry import champion_producer, challenger_producers
+    from producers.registry import challenger_producers, champion_producer
 
     champ_spec = champion_producer()
-    champion: Optional[SpecHistory] = None
+    champion: SpecHistory | None = None
     if champ_spec is not None:
         champion = SpecHistory(name=champ_spec.name, kind="champion")
         for d in dates:

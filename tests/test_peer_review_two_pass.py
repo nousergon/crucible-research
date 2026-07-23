@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from agents.sector_teams.peer_review import _joint_finalization
-from graph.state_schemas import JointSelectionOutput, JointFinalizationDecision
+from graph.state_schemas import JointFinalizationDecision, JointSelectionOutput
 
 
 class _FakeLLM:

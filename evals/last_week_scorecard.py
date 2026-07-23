@@ -54,9 +54,9 @@ import math
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
@@ -106,8 +106,8 @@ class SectorRow:
 
     sector: str
     n_signals: int
-    hit_rate_21d: Optional[float]
-    mean_log_alpha_21d: Optional[float]
+    hit_rate_21d: float | None
+    mean_log_alpha_21d: float | None
 
 
 @dataclass
@@ -137,9 +137,9 @@ class Scorecard:
     lookback_weeks: int
     n_resolved_predictions: int
     n_resolved_signals_21d: int
-    overall_predictor_hit_rate: Optional[float]
-    overall_signal_hit_rate_21d: Optional[float]
-    market_regime: Optional[str]
+    overall_predictor_hit_rate: float | None
+    overall_signal_hit_rate_21d: float | None
+    market_regime: str | None
     per_sector: list[SectorRow] = field(default_factory=list)
     top_surprises: list[TickerOutcome] = field(default_factory=list)
     top_confirmations: list[TickerOutcome] = field(default_factory=list)
@@ -148,7 +148,7 @@ class Scorecard:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Scorecard":
+    def from_dict(cls, d: dict) -> Scorecard:
         """Hydrate from a JSON-deserialized dict (round-trips ``to_dict()``).
 
         Used by the S3 loader to reconstruct a typed Scorecard from the
@@ -328,7 +328,7 @@ def _fetch_signal_outcomes(
     return result
 
 
-def _fetch_market_regime(conn: sqlite3.Connection, on_or_before: str) -> Optional[str]:
+def _fetch_market_regime(conn: sqlite3.Connection, on_or_before: str) -> str | None:
     """Latest market regime label at or before window end."""
     try:
         row = conn.execute(
@@ -428,13 +428,13 @@ def _build_surprise_lists(
 # ---------------------------------------------------------------------------
 
 
-def _fmt_pct(v: Optional[float]) -> str:
+def _fmt_pct(v: float | None) -> str:
     if v is None:
         return "—"
     return f"{v * 100:.0f}%"
 
 
-def _fmt_signed(v: Optional[float], decimals: int = 4) -> str:
+def _fmt_signed(v: float | None, decimals: int = 4) -> str:
     if v is None:
         return "—"
     return f"{v:+.{decimals}f}"
@@ -504,7 +504,7 @@ def emit_scorecard_to_s3(
     s3_client: Any,
     bucket: str,
     prefix: str = DEFAULT_SCORECARD_PREFIX,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
 ) -> dict:
     """Write `sc` to S3 under the canonical eval-artifacts partition.
 
@@ -565,7 +565,7 @@ def load_latest_scorecard(
     s3_client: Any,
     bucket: str,
     prefix: str = DEFAULT_SCORECARD_PREFIX,
-) -> Optional[Scorecard]:
+) -> Scorecard | None:
     """Fetch `{prefix}/latest.json` and hydrate to a Scorecard.
 
     Returns None on any failure (404 = Phase 1.B.2 not yet flag-on or
@@ -620,7 +620,7 @@ def load_latest_scorecard_text(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Build the prior-cycle realized-outcomes scorecard from "

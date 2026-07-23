@@ -29,7 +29,6 @@ import ast
 import pathlib
 import re
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FRESHNESS_NAME_PATTERN = re.compile(r"(fresh|stale|preflight|postflight)", re.IGNORECASE)
 

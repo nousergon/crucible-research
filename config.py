@@ -9,16 +9,18 @@ config/research_params.json, auto-tuned by the backtester weekly.
 import json
 import logging
 import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+
 import yaml
 
-from nousergon_lib.secrets import get_secret
 # Canonical experiment-package config resolver (alpha-engine-config#1157): the
 # lift of the five inline _find_config / load_config / config_loader copies into
 # the shared-lib chokepoint. _find_config below delegates to it.
 from nousergon_lib.config import resolve_experiment_config
+from nousergon_lib.secrets import get_secret
+
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
     """Locate real config yaml across local, CI, and Lambda environments.
@@ -527,7 +529,8 @@ TEAM_PICKS_PER_RUN: int = SECTOR_TEAMS_CFG.get("picks_per_run", 3)
 
 _RESEARCH_PARAMS_S3_KEY = "config/research_params.json"
 _RESEARCH_PARAMS_CACHE_PATH = os.environ.get(
-    "RESEARCH_PARAMS_CACHE", "/tmp/research_params_cache.json"
+    "RESEARCH_PARAMS_CACHE",
+    os.path.join(tempfile.gettempdir(), "research_params_cache.json"),
 )
 
 # YAML defaults
@@ -582,7 +585,7 @@ _RP_DEFAULTS: dict = {
 }
 
 # Module-level cache: populated once per cold-start by get_research_params().
-_research_params_cache: Optional[dict] = None
+_research_params_cache: dict | None = None
 
 # config#2891: the Saturday Evaluator (backtester research_optimizer.apply /
 # weight_optimizer.apply_weights) writes the weekly-tuned config pointers
@@ -597,9 +600,9 @@ _research_params_cache: Optional[dict] = None
 WEEKLY_CONFIG_STALE_HOURS = 24 * 7 * 2
 
 
-def check_s3_pointer_staleness(last_modified: Optional[datetime], s3_key: str,
+def check_s3_pointer_staleness(last_modified: datetime | None, s3_key: str,
                                *, max_age_hours: float = WEEKLY_CONFIG_STALE_HOURS,
-                               logger: Optional[logging.Logger] = None) -> None:
+                               logger: logging.Logger | None = None) -> None:
     """Best-effort WARN when a weekly-tuned S3 config pointer's
     ``last_modified`` is older than ``max_age_hours`` (config#2891). Never
     raises, never blocks the caller — a stale-signal degradation, not a gate."""
@@ -616,7 +619,7 @@ def check_s3_pointer_staleness(last_modified: Optional[datetime], s3_key: str,
         )
 
 
-def _load_research_params_from_s3() -> Optional[dict]:
+def _load_research_params_from_s3() -> dict | None:
     """
     Check S3 for backtester-updated research params.
 
@@ -627,7 +630,6 @@ def _load_research_params_from_s3() -> Optional[dict]:
     """
     try:
         import boto3
-        from botocore.exceptions import ClientError
 
         bucket = os.environ.get("RESEARCH_BUCKET", S3_BUCKET)
         s3 = boto3.client("s3")
@@ -698,7 +700,8 @@ def get_research_params() -> dict:
 # A regime absent from the override falls through to its scoring.yaml weights.
 _FACTOR_BLEND_PARAMS_S3_KEY = "config/factor_blend_params.json"
 _FACTOR_BLEND_PARAMS_CACHE_PATH = os.environ.get(
-    "FACTOR_BLEND_PARAMS_CACHE", "/tmp/factor_blend_params_cache.json"
+    "FACTOR_BLEND_PARAMS_CACHE",
+    os.path.join(tempfile.gettempdir(), "factor_blend_params_cache.json"),
 )
 
 # YAML cold-start default — the regime weights parsed from scoring.yaml above.
@@ -706,10 +709,10 @@ _FB_REGIME_DEFAULTS: dict = {
     regime: dict(weights) for regime, weights in FACTOR_BLEND_REGIME_WEIGHTS.items()
 }
 
-_factor_blend_regime_cache: Optional[dict] = None
+_factor_blend_regime_cache: dict | None = None
 
 
-def _load_factor_blend_regime_weights_from_s3() -> Optional[dict]:
+def _load_factor_blend_regime_weights_from_s3() -> dict | None:
     """Read config/factor_blend_params.json from S3, return its regime_weights.
 
     Fallback chain: S3 → local cache file (with 7-day age cap, mirroring
@@ -799,7 +802,8 @@ def rp(key: str):
 
 _SCANNER_PARAMS_S3_KEY = "config/scanner_params.json"
 _SCANNER_PARAMS_CACHE_PATH = os.environ.get(
-    "SCANNER_PARAMS_CACHE", "/tmp/scanner_params_cache.json"
+    "SCANNER_PARAMS_CACHE",
+    os.path.join(tempfile.gettempdir(), "scanner_params_cache.json"),
 )
 
 _SP_DEFAULTS: dict = {
@@ -817,7 +821,7 @@ _SP_DEFAULTS: dict = {
     "rotation_weak_pick_min_challenger_score": float(SCANNER_CFG.get("rotation_weak_pick_min_challenger_score", 65)),
 }
 
-_scanner_params_cache: Optional[dict] = None
+_scanner_params_cache: dict | None = None
 
 
 def get_scanner_params() -> dict:
@@ -843,8 +847,8 @@ def get_scanner_params() -> dict:
             try:
                 with open(_SCANNER_PARAMS_CACHE_PATH, "w") as f:
                     json.dump(params, f, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug("Could not write scanner params local cache: %s", e)
             _scanner_params_cache = {**_SP_DEFAULTS, **params}
             return _scanner_params_cache
     except Exception as e:
@@ -859,8 +863,8 @@ def get_scanner_params() -> dict:
             if params:
                 _scanner_params_cache = {**_SP_DEFAULTS, **params}
                 return _scanner_params_cache
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.debug("Could not read scanner params local cache: %s", e)
 
     _scanner_params_cache = _SP_DEFAULTS.copy()
     return _scanner_params_cache

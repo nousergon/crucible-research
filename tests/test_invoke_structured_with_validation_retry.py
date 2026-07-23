@@ -23,8 +23,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 
 def _resp(parsed=None, parsing_error=None, raw=None):
     """Mimic the dict shape ``with_structured_output(include_raw=True)`` returns."""
@@ -36,8 +34,9 @@ def _validation_error(message="mock validation failure"):
     from pydantic import ValidationError  # type: ignore[import]
     try:
         # Real ValidationError needs a model; raise + catch the easy way
-        from pydantic import BaseModel
         from typing import Literal
+
+        from pydantic import BaseModel
 
         class _M(BaseModel):
             confidence: Literal["low", "medium", "high"]
@@ -69,6 +68,7 @@ class TestHappyPath:
 class TestRecovery:
     def test_second_attempt_succeeds_after_validation_error(self, caplog):
         import logging
+
         from agents.langchain_utils import invoke_structured_with_validation_retry
 
         parsed_obj = object()
@@ -161,9 +161,10 @@ class TestForcedToolUseCorrectionPairing:
 
     def test_retry_turn_answers_tool_use_with_tool_result(self):
         from langchain_core.messages import ToolMessage
+
         from agents.langchain_utils import (
-            invoke_structured_with_validation_retry,
             find_orphan_tool_use_ids,
+            invoke_structured_with_validation_retry,
             validate_tool_use_pairing,
         )
 
@@ -200,9 +201,10 @@ class TestForcedToolUseCorrectionPairing:
 
     def test_multiple_tool_calls_all_answered(self):
         from langchain_core.messages import AIMessage, ToolMessage
+
         from agents.langchain_utils import (
-            invoke_structured_with_validation_retry,
             find_orphan_tool_use_ids,
+            invoke_structured_with_validation_retry,
         )
 
         parsed_obj = object()
@@ -235,6 +237,7 @@ class TestForcedToolUseCorrectionPairing:
 class TestTerminalFailure:
     def test_all_retries_exhaust_returns_last_response_with_parsing_error(self, caplog):
         import logging
+
         from agents.langchain_utils import invoke_structured_with_validation_retry
 
         ve = _validation_error()

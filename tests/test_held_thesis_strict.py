@@ -44,7 +44,6 @@ import pytest
 
 from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-
 _LEAKED_TOOL_XML = (
     '\n<parameter name="catalysts">- Q3 earnings beat\n'
     "- new defense contract awards\n- expansion into European "
@@ -253,8 +252,8 @@ def test_no_prior_thesis_still_raises(monkeypatch):
 def test_429_past_deadline_fails_fast_no_carry_forward(monkeypatch):
     """A 429 that survives the deadline-bounded wrapper propagates
     immediately (no parse re-roll spin, no carry-forward)."""
-    from agents.sector_teams import sector_team
     from agents import langchain_utils
+    from agents.sector_teams import sector_team
 
     monkeypatch.setattr(
         langchain_utils, "RATE_LIMIT_RETRY_DEADLINE_SECONDS", 0.01

@@ -48,9 +48,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from statistics import fmean
-from typing import Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     syy = sum((y - my) ** 2 for y in ys)
     if sxx <= 0.0 or syy <= 0.0:
         return None
-    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
     return sxy / math.sqrt(sxx * syy)
 
 

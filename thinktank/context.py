@@ -181,7 +181,7 @@ def _load_insider_transactions(store: Any, *, window_days: int = 90) -> dict[str
     in ``data.substrate.reader``, returning per-ticker dicts matching
     ``_INSIDER_ROLLUP_COLS`` for direct prompt consumption.
     """
-    from datetime import date, timedelta
+    from datetime import date
 
     from data.substrate.reader import read_insider_transactions_window
 

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HANDLER_PATH = _REPO_ROOT / "lambda" / "rationale_clustering_handler.py"
@@ -100,7 +99,7 @@ class TestHandler:
             )
 
         assert captured["end_time"] == datetime(
-            2026, 5, 9, 0, 0, tzinfo=timezone.utc,
+            2026, 5, 9, 0, 0, tzinfo=UTC,
         )
 
     def test_window_days_override(self, handler_mod):

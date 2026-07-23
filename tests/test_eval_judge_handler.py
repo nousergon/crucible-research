@@ -58,7 +58,6 @@ import importlib.util  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HANDLER_PATH = _REPO_ROOT / "lambda" / "eval_judge_handler.py"
 

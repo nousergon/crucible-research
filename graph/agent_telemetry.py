@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ def emit_agent_completion(
         return
 
     duration_ms = max(
-        0.0, (datetime.now(timezone.utc) - enter_time).total_seconds() * 1000.0,
+        0.0, (datetime.now(UTC) - enter_time).total_seconds() * 1000.0,
     )
     failures = 1.0 if exception_raised else 0.0
     dims = _dims(agent_id)

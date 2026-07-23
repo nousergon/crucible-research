@@ -31,7 +31,6 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -104,12 +103,11 @@ def test_ohlcv_fallback_passes_scanner_liquidity_gate():
     Mirrors the production fallback chain when feature-store rows are
     missing for a ticker.
     """
-    from data.fetchers.price_fetcher import compute_technical_indicators
     from data.scanner import run_quant_filter
 
     tickers = [f"T{i:03d}" for i in range(20)]
     price_data = {t: _synthetic_ohlcv(seed=i) for i, t in enumerate(tickers)}
-    sector_map = {t: "Technology" for t in tickers}
+    sector_map = dict.fromkeys(tickers, "Technology")
 
     # technical_scores empty → scanner falls through to OHLCV path.
     run_quant_filter(
@@ -179,7 +177,7 @@ def _scanner_thresholds() -> dict:
     the synthetic fixtures track config drift instead of hard-coding
     against sample values that don't match what CI sees.
     """
-    from config import get_scanner_params, MAX_ATR_PCT
+    from config import MAX_ATR_PCT, get_scanner_params
     sp = get_scanner_params()
     return {
         "tech_score_min": sp.get("tech_score_min", 60),
@@ -208,7 +206,7 @@ def test_full_scanner_pipeline_produces_realistic_pick_count():
 
     thr = _scanner_thresholds()
     tickers = [f"T{i:03d}" for i in range(100)]
-    sector_map = {t: "Technology" for t in tickers}
+    sector_map = dict.fromkeys(tickers, "Technology")
 
     # ATR comfortably below max_atr_pct (which is 25.0 in current prod
     # config but could change). Pick decimal that ×100 == max/2.
@@ -268,7 +266,7 @@ def test_scanner_failure_mode_volatility_gate_regression_caught():
     good_score = thr["tech_score_min"] + 15
 
     tickers = [f"T{i:03d}" for i in range(100)]
-    sector_map = {t: "Technology" for t in tickers}
+    sector_map = dict.fromkeys(tickers, "Technology")
 
     technical_scores: dict[str, dict] = {}
     for i, ticker in enumerate(tickers):
@@ -308,7 +306,7 @@ def test_scanner_failure_mode_liquidity_gate_regression_caught():
     good_score = thr["tech_score_min"] + 15
 
     tickers = [f"T{i:03d}" for i in range(20)]
-    sector_map = {t: "Technology" for t in tickers}
+    sector_map = dict.fromkeys(tickers, "Technology")
 
     technical_scores: dict[str, dict] = {}
     for i, ticker in enumerate(tickers):

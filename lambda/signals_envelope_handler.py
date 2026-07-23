@@ -71,6 +71,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 
 # Repo root on sys.path so ``from scoring.signals_envelope import ...``
 # resolves under Lambda's task layout. Mirrors the existing shared-image
@@ -110,7 +111,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
 
 

@@ -15,7 +15,6 @@ import pytest
 
 from config import _validate_pillar_emit_coherence
 
-
 _FAKE_PATH = Path("/fake/scoring.yaml")
 
 

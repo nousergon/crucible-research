@@ -114,13 +114,13 @@ def _technical_df():
 
 
 def _build(**overrides):
-    kwargs = dict(
-        factor_profiles=_factor_profiles(),
-        classification=_classification(),
-        technical_df=_technical_df(),
-        fundamental_df=_fundamental_df(),
-        gate_config=_GATE_CONFIG,
-    )
+    kwargs = {
+        "factor_profiles": _factor_profiles(),
+        "classification": _classification(),
+        "technical_df": _technical_df(),
+        "fundamental_df": _fundamental_df(),
+        "gate_config": _GATE_CONFIG,
+    }
     kwargs.update(overrides)
     return build_universe_board("2026-06-28", _scanner_evals(), **kwargs)
 

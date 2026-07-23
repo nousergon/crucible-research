@@ -18,7 +18,6 @@ import logging
 from nousergon_lib.pillars import QualitativePillarAssessment
 
 from agents.prompt_loader import load_prompt
-
 from thinktank import THESIS_KEY_TMPL, THESIS_LATEST_TMPL
 from thinktank.archive import save_moat_profile
 from thinktank.capture import emit_thesis_capture

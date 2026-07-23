@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC
 
 from nousergon_lib.decision_capture import (
     FullPromptContext,
@@ -54,10 +55,10 @@ def _enabled() -> bool:
 def _partition_timestamp(trading_day: str):
     """Wall-clock time-of-day on the TRADING day's date — controls the
     capture key's date partition while preserving intra-day ordering."""
-    from datetime import date, datetime, timezone
+    from datetime import date, datetime
 
     y, m, d = (int(x) for x in trading_day.split("-"))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return datetime.combine(date(y, m, d), now.timetz())
 
 

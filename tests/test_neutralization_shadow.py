@@ -19,7 +19,6 @@ import os
 import sys
 
 import numpy as np
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,7 +28,6 @@ from scoring.neutralization_shadow import (  # noqa: E402
     build_shadow_artifact,
     run_neutralization_shadow,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

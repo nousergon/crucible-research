@@ -21,7 +21,9 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
-from config import S3_BUCKET, AWS_REGION
+# `config` reads AWS_REGION/S3_BUCKET from os.environ at import time, so
+# load_dotenv() above must run first for a local .env override to take effect.
+from config import AWS_REGION, S3_BUCKET  # noqa: E402
 
 _DB_KEY = "research.db"
 _LOCAL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "research.db")

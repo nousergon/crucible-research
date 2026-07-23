@@ -542,7 +542,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert shadow["run_date"] == manifest3.calendar_date
         signals = shadow["signals"]
         assert set(signals) == {"T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6"}
-        for ticker, row in signals.items():
+        for row in signals.values():
             assert row["signal"] == "ENTER"
             assert isinstance(row["score"], float)
         # scores strictly descending in the same rank order as selections

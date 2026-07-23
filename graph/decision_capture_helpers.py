@@ -37,7 +37,7 @@ state-capture-260429.md``.
 from __future__ import annotations
 
 import os
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agents.sector_teams.sector_team import SectorTeamContext
@@ -68,7 +68,7 @@ def is_decision_capture_enabled() -> bool:
 
 def build_sector_quant_capture_payload(
     team_id: str,
-    ctx: "SectorTeamContext",
+    ctx: SectorTeamContext,
     *,
     team_tickers: list[str],
 ) -> tuple[dict[str, Any], str]:
@@ -102,7 +102,7 @@ def build_sector_quant_capture_payload(
 
 def build_sector_qual_capture_payload(
     team_id: str,
-    ctx: "SectorTeamContext",
+    ctx: SectorTeamContext,
     *,
     quant_top5: list[dict],
 ) -> tuple[dict[str, Any], str]:
@@ -158,7 +158,7 @@ def build_sector_qual_capture_payload(
 
 def build_sector_peer_review_capture_payload(
     team_id: str,
-    ctx: "SectorTeamContext",
+    ctx: SectorTeamContext,
     *,
     quant_top5: list[dict],
     qual_assessments: list[dict],
@@ -208,7 +208,7 @@ def build_sector_peer_review_capture_payload(
 def build_thesis_update_capture_payload(
     team_id: str,
     ticker: str,
-    ctx: "SectorTeamContext",
+    ctx: SectorTeamContext,
     *,
     triggers: list[str],
 ) -> tuple[dict[str, Any], str]:

@@ -241,6 +241,7 @@ def test_zero_tool_call_team_soft_fails_by_default(caplog):
     block_on_zero_tool_calls=False (default), the validator logs a
     WARNING and emission proceeds — soft-fail mode for the soak window."""
     import logging
+
     from graph.research_graph import _validate_signals_payload
 
     payload = {
@@ -315,6 +316,7 @@ def test_zero_tool_call_skipped_when_team_id_missing(caplog):
     looked up against the counts dict; gate skips it silently rather
     than false-flagging."""
     import logging
+
     from graph.research_graph import _validate_signals_payload
 
     payload = {

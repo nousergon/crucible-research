@@ -46,7 +46,8 @@ import logging
 import os
 import random
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 log = logging.getLogger(__name__)
 
@@ -160,8 +161,8 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
         api_status = getattr(anthropic, "APIStatusError", None)
         if api_status is not None and isinstance(exc, api_status):
             return getattr(exc, "status_code", None) == 429
-    except Exception:  # pragma: no cover — anthropic always importable here
-        pass
+    except Exception as e:  # pragma: no cover — anthropic always importable here
+        log.debug("anthropic rate-limit sniff failed: %s", e)
     if getattr(exc, "status_code", None) == 429:
         return True
     msg = str(exc).lower()
@@ -195,7 +196,7 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     return max(0.0, min(secs, _BACKOFF_CAP_SECONDS))
 
 
-def invoke_with_rate_limit_retry(
+def invoke_with_rate_limit_retry[T](
     fn: Callable[[], _T],
     *,
     label: str,
@@ -252,8 +253,8 @@ def invoke_with_rate_limit_retry(
                     _BACKOFF_CAP_SECONDS,
                 )
             # Decorrelated jitter so parallel teams don't re-burst in
-            # lockstep when the TPM window resets.
-            delay += random.uniform(0.0, min(delay, 5.0))
+            # lockstep when the TPM window resets — not security-sensitive.
+            delay += random.uniform(0.0, min(delay, 5.0))  # noqa: S311
             # Deadline check: if even a minimal sleep would land us past
             # the deadline, give up now and propagate the 429. The
             # caller's hard-fail rule turns this into status:ERROR.
@@ -279,8 +280,10 @@ def invoke_with_rate_limit_retry(
                 elapsed, deadline_seconds,
             )
             time.sleep(delay)
-    # Unreachable — the loop either returns or raises.
-    assert last_exc is not None  # pragma: no cover
+    # Unreachable — the loop either returns or raises. Internal type-narrowing
+    # assert, not a security boundary; -O stripping just surfaces a TypeError
+    # on the next line instead (config#2532 producer-path assert policy).
+    assert last_exc is not None  # noqa: S101 pragma: no cover
     raise last_exc  # pragma: no cover
 
 
@@ -332,7 +335,7 @@ def _is_recoverable_tool_use_400(exc: BaseException) -> bool:
     )
 
 
-def invoke_react_with_recovery(
+def invoke_react_with_recovery[T](
     invoke_thunk: Callable[[], _T],
     *,
     label: str,

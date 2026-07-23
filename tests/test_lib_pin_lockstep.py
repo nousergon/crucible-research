@@ -61,9 +61,9 @@ def test_requirements_and_dockerfile_pins_match():
     }
     unique = set(pins.values())
     assert len(unique) == 1, (
-        f"nousergon-lib pin drift across deploy artifacts:\n"
+        "nousergon-lib pin drift across deploy artifacts:\n"
         + "\n".join(f"  {name}: {pin}" for name, pin in pins.items())
         + "\n\nAll three must move in lockstep — bumping requirements.txt "
-        f"alone does NOT propagate to the Lambda image because the Dockerfile "
-        f"strips the lib pin from requirements.txt before pip install."
+        "alone does NOT propagate to the Lambda image because the Dockerfile "
+        "strips the lib pin from requirements.txt before pip install."
     )
