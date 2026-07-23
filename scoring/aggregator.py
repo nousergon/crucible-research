@@ -32,6 +32,7 @@ from config import (
     RATING_SELL_THRESHOLD,
     WEIGHT_QUAL,
     WEIGHT_QUANT,
+    check_s3_pointer_staleness,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ def _load_weights_from_s3() -> dict | None:
     try:
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=key)
+        # config#2891: independent consumer-side staleness signal — WARN-only,
+        # complements the central config_scoring_weights freshness-monitor row.
+        check_s3_pointer_staleness(obj.get("LastModified"), key, logger=logger)
         data = json.loads(obj["Body"].read())
         weights = {
             "quant": float(data["quant"]),

@@ -211,6 +211,52 @@ def handler(event, context):
         envelope, run_date, target=target, bucket=bucket, s3_client=s3,
     )
 
+    # ── Ported secondary artifacts (config-I3290) ─────────────────────────
+    # research_consolidated_morning + scanner_universe_trajectory used to be
+    # written from inside the old multi-agent archive_writer node
+    # (graph/research_graph.py), which config#2515 removed from the weekly
+    # SF entirely. Both artifacts still have live consumers (dashboard
+    # Research Briefing Archive / Attractiveness Trends views, the
+    # backtester's attractiveness_eval IC grading) so they are ported here
+    # as post-steps, gated to a real production run (never on a shadow/test
+    # cycle) and fail-soft — a secondary-artifact failure must never sink
+    # the primary signals.json deliverable just written above.
+    if target == "production":
+        from scoring.morning_brief import build_morning_brief_markdown, write_morning_brief
+
+        try:
+            brief_md = build_morning_brief_markdown(envelope)
+            write_morning_brief(run_date, brief_md, bucket=bucket, s3_client=s3)
+        except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+            logger.warning(
+                "[signals_envelope_handler] morning brief write FAILED "
+                "(non-fatal — signals.json unaffected): %s", e,
+            )
+            from observe_alerts import publish_observe_alert
+            publish_observe_alert(
+                f"morning brief write FAILED for {run_date} (non-fatal, "
+                f"signals.json already persisted): {e}",
+                source="signals_envelope_handler:morning_brief",
+                dedup_key=f"morning_brief_write_fail:{run_date}",
+            )
+
+        from scoring.attractiveness_trajectory import compute_and_write_trajectory
+
+        try:
+            compute_and_write_trajectory(run_date, bucket=bucket, s3_client=s3)
+        except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+            logger.warning(
+                "[signals_envelope_handler] attractiveness trajectory write "
+                "FAILED (non-fatal — signals.json unaffected): %s", e,
+            )
+            from observe_alerts import publish_observe_alert
+            publish_observe_alert(
+                f"attractiveness trajectory write FAILED for {run_date} "
+                f"(non-fatal, signals.json already persisted): {e}",
+                source="signals_envelope_handler:trajectory",
+                dedup_key=f"trajectory_write_fail:{run_date}",
+            )
+
     logger.info(
         "[signals_envelope_handler] done run_date=%s target=%s dated_key=%s "
         "universe=%d market_regime=%s",

@@ -36,9 +36,13 @@ and — Phase B — a weekly scorecard.
 from __future__ import annotations
 
 import copy
+import json
+import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from statistics import mean
 from typing import Any
 
@@ -49,6 +53,16 @@ from nousergon_lib.decision_capture import (
 )
 
 from evals.judge import DEFAULT_JUDGE_MODEL, evaluate_artifact, evaluate_artifact_openrouter
+
+logger = logging.getLogger(__name__)
+
+# Weekly sensitivity scorecard (Phase B, config#752). Mirrors
+# calibration_kappa's report layout: research owns the render, the backtester
+# evaluator email embeds ``latest/sensitivity.md`` verbatim. Same bucket env
+# override as calibration_kappa so a single deploy config drives both.
+_RESEARCH_BUCKET = os.environ.get("CHANGELOG_BUCKET", "alpha-engine-research")
+_REPORT_PREFIX = "decision_artifacts/_perturbation/_report/"
+
 
 # ── Reference fixtures ─────────────────────────────────────────────────────
 #
@@ -644,3 +658,67 @@ def format_scorecard(report: dict[str, Any]) -> str:
             f"{arrow} | {'✅' if c['caught'] else '⚠️ MISSED'} |"
         )
     return "\n".join(lines)
+
+
+def emit_perturbation_report(
+    *,
+    bucket: Optional[str] = None,
+    s3_client: Any = None,
+    report_date: Optional[str] = None,
+    report: Optional[dict[str, Any]] = None,
+    judge_model: str = DEFAULT_JUDGE_MODEL,
+    api_key: Optional[str] = None,
+    judge_fn: Optional[Callable[..., dict[str, int]]] = None,
+) -> dict[str, Any]:
+    """Run (or accept a precomputed) perturbation battery and write the weekly
+    sensitivity scorecard to
+    ``_perturbation/_report/{date}/sensitivity.{json,md}`` plus stable
+    ``latest/`` pointers — Phase B of config#752.
+
+    This is the between-PR drift catcher: Phase A's paths-filtered CI gate
+    catches per-PR judge regressions, but silent model/API drift between PRs
+    only shows up when the battery is re-run on a cadence. Mirrors
+    :func:`calibration_kappa.emit_calibration_report`: research owns the
+    render (:func:`format_scorecard`), the backtester evaluator email embeds
+    ``latest/sensitivity.md`` verbatim so it never has to date-walk.
+
+    ``report`` may be injected precomputed (tests / re-emit); otherwise the
+    battery is run live via :func:`run_perturbation_battery` (needs Anthropic
+    access — hence a handler on the eval-judge image, not the no-LLM
+    rolling-mean Lambda). ``judge_fn`` is injectable for hermetic tests.
+    Written on EVERY run so the email always has a current artifact.
+    """
+    import boto3  # deferred — keep the module import-light for CI/unit callers
+
+    bkt = bucket or _RESEARCH_BUCKET
+    client = s3_client or boto3.client("s3")
+    now = datetime.now(timezone.utc).isoformat()
+    report_date = report_date or now[:10]
+
+    if report is None:
+        report = run_perturbation_battery(
+            judge_model=judge_model, api_key=api_key, judge_fn=judge_fn,
+        )
+    report = {**report, "generated_at": now, "report_date": report_date}
+
+    json_key = f"{_REPORT_PREFIX}{report_date}/sensitivity.json"
+    md_key = f"{_REPORT_PREFIX}{report_date}/sensitivity.md"
+    latest_json_key = f"{_REPORT_PREFIX}latest/sensitivity.json"
+    latest_md_key = f"{_REPORT_PREFIX}latest/sensitivity.md"
+
+    body = json.dumps(report, indent=2, default=str).encode("utf-8")
+    md = format_scorecard(report).encode("utf-8")
+    for key, payload, ctype in (
+        (json_key, body, "application/json"),
+        (md_key, md, "text/markdown"),
+        (latest_json_key, body, "application/json"),
+        (latest_md_key, md, "text/markdown"),
+    ):
+        client.put_object(Bucket=bkt, Key=key, Body=payload, ContentType=ctype)
+
+    report["report_keys"] = [json_key, md_key, latest_json_key, latest_md_key]
+    logger.info(
+        "[perturbation] caught=%d/%d model=%s → s3://%s/%s",
+        report["n_caught"], report["n"], report["judge_model"], bkt, json_key,
+    )
+    return report
