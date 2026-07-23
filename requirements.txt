@@ -120,7 +120,7 @@ pytz~=2024.1
 # SQLite is stdlib; no extra package needed
 
 # Dev / testing
-pytest~=8.2
+pytest~=9.1
 pytest-asyncio~=0.23
 # Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
 # followed symlinks when rewriting .env files (arbitrary local file
