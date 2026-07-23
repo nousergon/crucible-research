@@ -137,6 +137,10 @@ class TestBuildCandidatesArtifact:
                 "data.scanner.run_quant_filter",
                 return_value=quant_result,
             ),
+            "read_latest_factor_loadings": patch(
+                "data.fetchers.feature_store_reader.read_latest_factor_loadings",
+                return_value=None,
+            ),
             "_read_prior_signals_universe_tickers": patch(
                 "data.scanner_orchestrator._read_prior_signals_universe_tickers",
                 return_value=(

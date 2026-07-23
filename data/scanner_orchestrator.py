@@ -62,7 +62,7 @@ import boto3
 logger = logging.getLogger(__name__)
 
 
-SCANNER_VERSION = "v1.0"
+SCANNER_VERSION = "v2.0"
 _DEFAULT_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _CANDIDATES_PREFIX = "candidates"
 # Champion/challenger OBSERVE substrate (config#1221): challenger candidate-gen
@@ -343,6 +343,45 @@ def build_candidates_artifact(
     eval_log = _json_safe_eval_log(
         getattr(run_quant_filter, "_last_eval_log", None) or []
     )
+
+    # ── 4b. config#1186 momentum-sleeve cutover (2026-07-22 Option A) ──────
+    # Replace the technical composite (RSI/MACD/MA) ranking with the
+    # shadow-validated momentum sleeve z(momentum_20d)+z(return_60d) formula.
+    # The per-ticker gate decisions from run_quant_filter (liquidity_pass,
+    # volatility_pass) are held CONSTANT — only the ranking signal changes.
+    # Falls back to the original tech_score ranking if factor loadings or
+    # the sleeve ranker is unavailable (graceful degradation, never raises).
+    try:
+        from data.fetchers.feature_store_reader import read_latest_factor_loadings
+        from data.scanner_specs import _rank_momentum_sleeve
+
+        _factor_loadings = read_latest_factor_loadings()
+        if _factor_loadings and eval_log:
+            _params = _resolved_scanner_params()
+            _ms_tickers = _rank_momentum_sleeve(
+                eval_log, _factor_loadings, _params,
+            )
+            if _ms_tickers:
+                scanner_tickers = _ms_tickers
+                # Re-mark quant_filter_pass per momentum sleeve ordering
+                # (was set by run_quant_filter's tech_score ranking).
+                _ms_set = set(_ms_tickers)
+                for rec in eval_log:
+                    rec["quant_filter_pass"] = (
+                        1 if rec["ticker"] in _ms_set else 0
+                    )
+                    if rec["ticker"] not in _ms_set and not rec.get("filter_fail_reason"):
+                        rec["filter_fail_reason"] = "rank_cutoff"
+                logger.info(
+                    "[scanner_orchestrator] re-ranked by momentum sleeve "
+                    "z(momentum_20d)+z(return_60d): %d candidates (config#1186)",
+                    len(scanner_tickers),
+                )
+    except Exception as _exc:
+        logger.warning(
+            "[scanner_orchestrator] momentum sleeve re-ranking unavailable "
+            "(falling back to tech_score ranking): %s", _exc,
+        )
 
     # ── 5. Build artifact ─────────────────────────────────────────────────
     # Population = prior cycle's holdings list. Phase 1 reads it from the
