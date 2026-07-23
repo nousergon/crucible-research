@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           path: alpha-engine-research
 
@@ -41,7 +41,7 @@ jobs:
             echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
