@@ -15,7 +15,7 @@ from io import BytesIO
 from unittest.mock import MagicMock
 
 import config
-from config import check_s3_pointer_staleness, WEEKLY_CONFIG_STALE_HOURS
+from config import WEEKLY_CONFIG_STALE_HOURS, check_s3_pointer_staleness
 
 
 def _make_s3_response(body: dict, last_modified) -> dict:

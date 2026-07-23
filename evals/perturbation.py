@@ -42,7 +42,7 @@ import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from statistics import mean
 from typing import Any
 
@@ -662,13 +662,13 @@ def format_scorecard(report: dict[str, Any]) -> str:
 
 def emit_perturbation_report(
     *,
-    bucket: Optional[str] = None,
+    bucket: str | None = None,
     s3_client: Any = None,
-    report_date: Optional[str] = None,
-    report: Optional[dict[str, Any]] = None,
+    report_date: str | None = None,
+    report: dict[str, Any] | None = None,
     judge_model: str = DEFAULT_JUDGE_MODEL,
-    api_key: Optional[str] = None,
-    judge_fn: Optional[Callable[..., dict[str, int]]] = None,
+    api_key: str | None = None,
+    judge_fn: Callable[..., dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Run (or accept a precomputed) perturbation battery and write the weekly
     sensitivity scorecard to
@@ -692,7 +692,7 @@ def emit_perturbation_report(
 
     bkt = bucket or _RESEARCH_BUCKET
     client = s3_client or boto3.client("s3")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     report_date = report_date or now[:10]
 
     if report is None:

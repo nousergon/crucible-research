@@ -600,9 +600,9 @@ _research_params_cache: dict | None = None
 WEEKLY_CONFIG_STALE_HOURS = 24 * 7 * 2
 
 
-def check_s3_pointer_staleness(last_modified: Optional[datetime], s3_key: str,
+def check_s3_pointer_staleness(last_modified: datetime | None, s3_key: str,
                                *, max_age_hours: float = WEEKLY_CONFIG_STALE_HOURS,
-                               logger: Optional[logging.Logger] = None) -> None:
+                               logger: logging.Logger | None = None) -> None:
     """Best-effort WARN when a weekly-tuned S3 config pointer's
     ``last_modified`` is older than ``max_age_hours`` (config#2891). Never
     raises, never blocks the caller — a stale-signal degradation, not a gate."""

@@ -467,8 +467,8 @@ def handler(event, context):
     # paths (return before any S3 / secrets).
     if dry_run_llm:
         from archive.manager import ArchiveManager
-        from graph.research_graph import build_graph, create_initial_state
         from dry_run import install_dry_run_stubs
+        from graph.research_graph import build_graph, create_initial_state
         _dry_run_date = str(most_recent_trading_day(datetime.date.today()))
         logger.info(
             "dry_run_llm=True: boot/import/wiring validation only "

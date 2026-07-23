@@ -37,3 +37,7 @@ ignore = ["E501", "S603"]
 # subprocesses (S607) are fixture setup, not producer-path risk. Fail-loud
 # rule (config#2532) is scoped to producer/writer paths — these are not those.
 "tests/**" = ["S101", "S105", "S106", "S311", "S607"]
+# Lambda handlers: sys.path manipulation + _install_ls_patch() before other
+# imports (E402) and XDG_CACHE_HAME=/tmp (S108) are intentional Lambda
+# patterns inherited from the codebase, not introduced by this PR.
+"lambda/perturbation_battery_handler.py" = ["E402", "S108"]
