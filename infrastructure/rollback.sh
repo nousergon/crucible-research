@@ -7,10 +7,18 @@ set -euo pipefail
 LAMBDA_FUNCTION="alpha-engine-research-runner"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
-CURRENT=$(aws lambda get-alias \
+# Resolve the version the 'live' alias currently points at via
+# ``get-function --qualifier live`` (Configuration.Version), NOT
+# ``get-alias``: the github-actions-lambda-deploy role is granted
+# lambda:GetFunction (deploy.sh's _verify_live_alias already relies on it)
+# but NOT lambda:GetAlias — so the get-alias form crashed the rollback with
+# AccessDeniedException, leaving a canary-failed version LIVE and un-rolled-
+# back (2026-07-21 incident). GetFunction with an alias qualifier returns
+# that alias's resolved numeric version identically.
+CURRENT=$(aws lambda get-function \
     --function-name "$LAMBDA_FUNCTION" \
-    --name live \
-    --query "FunctionVersion" --output text \
+    --qualifier live \
+    --query "Configuration.Version" --output text \
     --region "$AWS_REGION")
 
 if [ "$CURRENT" -le 1 ]; then

@@ -9,6 +9,7 @@ config/research_params.json, auto-tuned by the backtester weekly.
 import json
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 import yaml
@@ -583,6 +584,37 @@ _RP_DEFAULTS: dict = {
 # Module-level cache: populated once per cold-start by get_research_params().
 _research_params_cache: Optional[dict] = None
 
+# config#2891: the Saturday Evaluator (backtester research_optimizer.apply /
+# weight_optimizer.apply_weights) writes the weekly-tuned config pointers
+# below; a silently-failed or stalled write leaves a cold-started research
+# consumer reading an arbitrarily old config with no signal. WARN (never
+# block a run) once a pointer is older than 2 weekly cycles — mirrors
+# ARTIFACT_REGISTRY.yaml's own default grace_period_cycles=2 for the central
+# config_research_params/config_scoring_weights freshness-monitor rows this
+# assertion complements as an independent consumer-side signal (config#1724
+# doctrine), not a replacement for them. Shared by this module's own
+# research-params loader and scoring/aggregator.py's scoring-weights loader.
+WEEKLY_CONFIG_STALE_HOURS = 24 * 7 * 2
+
+
+def check_s3_pointer_staleness(last_modified: Optional[datetime], s3_key: str,
+                               *, max_age_hours: float = WEEKLY_CONFIG_STALE_HOURS,
+                               logger: Optional[logging.Logger] = None) -> None:
+    """Best-effort WARN when a weekly-tuned S3 config pointer's
+    ``last_modified`` is older than ``max_age_hours`` (config#2891). Never
+    raises, never blocks the caller — a stale-signal degradation, not a gate."""
+    if last_modified is None:
+        return
+    log = logger or _logger
+    age_hours = (datetime.now(UTC) - last_modified).total_seconds() / 3600.0
+    if age_hours > max_age_hours:
+        log.error(
+            "STALE %s: last modified %.1fh ago (> %.0fh / 2 weekly cycles) — "
+            "the Saturday Evaluator may have silently failed or stalled; "
+            "this consumer may be running on a stale tuned config (config#2891)",
+            s3_key, age_hours, max_age_hours,
+        )
+
 
 def _load_research_params_from_s3() -> Optional[dict]:
     """
@@ -600,6 +632,7 @@ def _load_research_params_from_s3() -> Optional[dict]:
         bucket = os.environ.get("RESEARCH_BUCKET", S3_BUCKET)
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=_RESEARCH_PARAMS_S3_KEY)
+        check_s3_pointer_staleness(obj.get("LastModified"), _RESEARCH_PARAMS_S3_KEY)
         data = json.loads(obj["Body"].read())
 
         # Only load known keys, skip metadata like updated_at
