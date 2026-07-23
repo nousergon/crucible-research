@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
@@ -47,6 +49,28 @@ _JSON_INSTRUCTION = (
     "\n\nRespond with ONLY a single JSON object matching this JSON Schema — "
     "no prose, no markdown fences:\n{schema}"
 )
+
+# Two DISTINCT transient-failure classes, each retried on its own budget,
+# separate from the ONE bounded schema-corrective retry below (config#3072):
+# a 5xx/connection blip or a non-JSON provider body (rate-limit/error page)
+# is provider flakiness, not a model mistake — re-issuing the SAME request
+# fresh (no corrective message) is the right remedy, with jittered backoff
+# so a transient blip isn't retried in a tight loop.
+_HTTP_RETRY_ATTEMPTS = 3
+_NON_JSON_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 2.0
+
+
+def _backoff_sleep(base_delay: float, attempt: int) -> None:
+    time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))
+
+
+def _transient_provider_errors() -> tuple[type[Exception], ...]:
+    # Imported lazily so the module stays importable without the openai dep
+    # (mirrors ``_client_for``'s lazy OpenAI import below).
+    from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+
+    return (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
 
 
 class ThinktankLLMError(RuntimeError):
@@ -164,57 +188,86 @@ class ThinktankClient:
         last_error: Exception | None = None
         raw_text = ""
         total_in = total_out = 0
-        for attempt in range(2):  # initial + ONE bounded corrective retry
-            response = client.chat.completions.create(messages=messages, **kwargs)
+        non_json_retries_left = _NON_JSON_RETRY_ATTEMPTS - 1
+        schema_retries_left = 1  # ONE bounded corrective retry, unchanged
+        while True:
+            response = self._create_completion(
+                client, messages, kwargs, tier_name=tier.name, agent_id=agent_id
+            )
             raw_text = (response.choices[0].message.content or "").strip()
             usage = getattr(response, "usage", None)
             in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
             out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
             total_in += in_tok
             total_out += out_tok
+
             try:
-                parsed = response_model.model_validate(_extract_json(raw_text))
-                cost = self._record(
-                    tier,
-                    agent_id=agent_id,
-                    sft_meta=sft_meta,
-                    messages=messages,
-                    kwargs=kwargs,
-                    raw_text=raw_text,
-                    parsed=parsed,
-                    input_tokens=total_in,
-                    output_tokens=total_out,
-                    prompt_id=prompt_id,
-                    prompt_version=prompt_version,
-                )
-                return LLMCallResult(
-                    parsed=parsed,
-                    raw_text=raw_text,
-                    model=tier.model,
-                    tier=tier.name,
-                    input_tokens=total_in,
-                    output_tokens=total_out,
-                    cost_usd=cost,
-                )
-            except (ValidationError, ValueError) as exc:
+                extracted = _extract_json(raw_text)
+            except ValueError as exc:
+                # Provider returned a body with no valid JSON in it (a
+                # rate-limit page / transient error body) — provider
+                # flakiness, not a model mistake. Retry with a FRESH call
+                # (no corrective message appended) on its own budget.
+                last_error = exc
+                if non_json_retries_left > 0:
+                    non_json_retries_left -= 1
+                    logger.warning(
+                        "thinktank tier=%s agent=%s non-JSON provider body "
+                        "(retries left %d): %s",
+                        tier.name, agent_id, non_json_retries_left, exc,
+                    )
+                    _backoff_sleep(_RETRY_BASE_DELAY_S, _NON_JSON_RETRY_ATTEMPTS - 2 - non_json_retries_left)
+                    continue
+                break
+
+            try:
+                parsed = response_model.model_validate(extracted)
+            except ValidationError as exc:
+                # Valid JSON, wrong shape — a genuine model mistake. Feed
+                # the error back for ONE corrective retry (unchanged from
+                # the original design).
                 last_error = exc
                 logger.warning(
-                    "thinktank tier=%s agent=%s attempt=%d failed validation: %s",
-                    tier.name,
-                    agent_id,
-                    attempt + 1,
-                    exc,
+                    "thinktank tier=%s agent=%s failed schema validation: %s",
+                    tier.name, agent_id, exc,
                 )
-                messages = messages + [
-                    {"role": "assistant", "content": raw_text},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous response failed schema validation with: "
-                            f"{exc}\nReturn ONLY the corrected JSON object."
-                        ),
-                    },
-                ]
+                if schema_retries_left > 0:
+                    schema_retries_left -= 1
+                    messages = messages + [
+                        {"role": "assistant", "content": raw_text},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous response failed schema validation with: "
+                                f"{exc}\nReturn ONLY the corrected JSON object."
+                            ),
+                        },
+                    ]
+                    continue
+                break
+
+            cost = self._record(
+                tier,
+                agent_id=agent_id,
+                sft_meta=sft_meta,
+                messages=messages,
+                kwargs=kwargs,
+                raw_text=raw_text,
+                parsed=parsed,
+                input_tokens=total_in,
+                output_tokens=total_out,
+                prompt_id=prompt_id,
+                prompt_version=prompt_version,
+            )
+            return LLMCallResult(
+                parsed=parsed,
+                raw_text=raw_text,
+                model=tier.model,
+                tier=tier.name,
+                input_tokens=total_in,
+                output_tokens=total_out,
+                cost_usd=cost,
+            )
 
         # Record spend for the failed attempts too — tokens were consumed.
         self._record(
@@ -232,8 +285,32 @@ class ThinktankClient:
         )
         raise ThinktankLLMError(
             f"tier={tier.name} model={tier.model} agent={agent_id}: response failed "
-            f"schema validation after bounded retry: {last_error}"
+            f"after bounded retries: {last_error}"
         )
+
+    def _create_completion(
+        self, client: Any, messages: list[dict[str, str]], kwargs: dict[str, Any],
+        *, tier_name: str, agent_id: str,
+    ) -> Any:
+        """One provider call, retried with jittered backoff on transient
+        errors (timeout / connection reset / 5xx / rate-limit) — provider
+        flakiness, not a model mistake, so it's retried fresh rather than
+        burning the schema-corrective budget in ``complete``."""
+        errors = _transient_provider_errors()
+        last_exc: Exception | None = None
+        for attempt in range(_HTTP_RETRY_ATTEMPTS):
+            try:
+                return client.chat.completions.create(messages=messages, **kwargs)
+            except errors as exc:
+                last_exc = exc
+                logger.warning(
+                    "thinktank tier=%s agent=%s transient provider error "
+                    "(attempt %d/%d): %s",
+                    tier_name, agent_id, attempt + 1, _HTTP_RETRY_ATTEMPTS, exc,
+                )
+                if attempt < _HTTP_RETRY_ATTEMPTS - 1:
+                    _backoff_sleep(_RETRY_BASE_DELAY_S, attempt)
+        raise last_exc
 
     # ── accounting + SFT staging ─────────────────────────────────────────────
 
