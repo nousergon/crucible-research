@@ -134,6 +134,12 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # config#1393). One PUT site each.
     "scoring/attractiveness_history.py": 1,
     "scoring/attractiveness_trajectory.py": 1,
+    # research_consolidated_morning (config-I3290 port). PUT site moved here
+    # from the retired archive/manager.py::save_consolidated_report — same
+    # S3 key (consolidated/{run_date}/morning.md), already registered in
+    # ARTIFACT_REGISTRY.yaml under research_consolidated_morning. Fail-soft
+    # post-step in signals_envelope_handler.py; one PUT site.
+    "scoring/morning_brief.py": 1,
     "scripts/aggregate_costs.py": 1,
     # Distillation SFT-corpus stats artifact
     # (decision_artifacts/distillation/corpus_stats/{date}.json + latest.json).
