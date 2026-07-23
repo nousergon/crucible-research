@@ -50,11 +50,11 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest pytest-cov
 
       - name: Run tests
         working-directory: alpha-engine-research
-        run: pytest tests/ -v
+        run: pytest tests/ -v --cov=. --cov-report=term-missing
         env:
           PYTHONPATH: .
 
