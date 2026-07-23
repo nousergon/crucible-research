@@ -29,6 +29,7 @@ FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
+FUNCTION_PERTURBATION_BATTERY="alpha-engine-research-perturbation-battery"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -867,6 +868,20 @@ deploy_signals_envelope() {
   _deploy_image_shared_lambda "$FUNCTION_SIGNALS_ENVELOPE" "signals_envelope_handler" 300 1024
 }
 
+# Weekly judge-sensitivity scorecard Lambda — config#752 Phase B (Brian's
+# 2026-07-22 operator ruling: provision this + the SF wiring). Shared image
+# with the main runner — specifically the eval-judge CMD family, because the
+# synthetic-perturbation battery makes live Anthropic calls (the no-LLM
+# eval-rolling-mean Lambda can't host it); CMD override sets the entry to
+# perturbation_battery_handler.handler. Timeout 900s (Lambda max) + memory
+# 1024MB match deploy_eval_judge — the closest analog workload (reference +
+# N corrupted variants, each judged). Invoked by the Saturday SF's
+# PerturbationBattery state (nousergon-data infrastructure/step_function.json),
+# sequenced alongside the other eval-judge-chain observability stages.
+deploy_perturbation_battery() {
+  _deploy_image_shared_lambda "$FUNCTION_PERTURBATION_BATTERY" "perturbation_battery_handler" 900 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -880,9 +895,10 @@ case "$TARGET" in
   scanner)               deploy_scanner ;;
   thinktank)             deploy_thinktank ;;
   signals_envelope)      deploy_signals_envelope ;;
+  perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|perturbation_battery|both|all]"; exit 1 ;;
 esac
 
 echo ""

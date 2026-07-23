@@ -235,6 +235,22 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh signals_envelope
 
+      # Weekly judge-sensitivity scorecard Lambda — alpha-engine-config#752
+      # Phase B (Brian's 2026-07-22 operator ruling). Same image-share as
+      # eval-judge / rationale-clustering, CMD override sets the entry to
+      # perturbation_battery_handler.handler. Auto-deployed on every push so
+      # battery/rubric changes in evals/perturbation.py propagate without a
+      # manual step, matching every other shared-image Lambda's precedent
+      # (the class of bug this guards against: config#993 / the
+      # eval_rolling_mean 5-week-rot incident). The ci-deploy-guard test
+      # (tests/test_deploy_targets_invoked_by_workflow.py) enforces this
+      # step's existence.
+      - name: Deploy perturbation-battery Lambda (alpha-engine-research-perturbation-battery)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh perturbation_battery
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
