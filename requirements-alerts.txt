@@ -4,7 +4,7 @@
 # the L1067 surveillance rewrite — daemon-published S3 snapshots replaced
 # yfinance as the intraday price source.
 # boto3 is provided by the Lambda runtime
-pytz~=2024.1
+pytz~=2026.2
 exchange-calendars~=4.5
 pyyaml~=6.0.3
 feedparser~=6.0.11
