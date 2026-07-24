@@ -54,6 +54,11 @@ CHALLENGER_SELECTION_LATEST_KEY = "thinktank/challenger_selection/latest.json"
 CHALLENGER_SHADOW_SIGNALS_KEY_TMPL = "signals_shadow/thinktank_coverage/{trading_day}/signals.json"
 MANIFEST_KEY_TMPL = "thinktank/runs/{trading_day}/manifest_{run_id}.json"
 COSTS_KEY_TMPL = "thinktank/costs/{month}.json"
+# Bounded-parallel gap_fill fan-out (config#3072): one checkpoint object per
+# (trading_day, ticker), written ONLY by that ticker's BUILD worker — the
+# per-ticker key namespace is what makes concurrent Map-state workers
+# race-free (see thinktank/gap_fill_fanout.py's module docstring).
+GAP_FILL_CHECKPOINT_KEY_TMPL = "thinktank/_gap_fill_checkpoints/{trading_day}/{ticker}.json"
 # config#2678: per-ticker moat-assessment time series, INSIDE the
 # thinktank/ namespace — Think Tank's own equivalent of the legacy
 # archive/manager.py::save_moat_profile (archive/universe/{ticker}/...),

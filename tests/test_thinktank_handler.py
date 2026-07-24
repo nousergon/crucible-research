@@ -135,6 +135,55 @@ class TestSuccessPath:
         run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
 
 
+class TestGapFillFanout:
+    """config#3072 component C: {"mode": "gap_fill_plan"|"gap_fill_build"|
+    "gap_fill_finalize"} routes to the fan-out phases, never run_daily."""
+
+    def test_gap_fill_plan_routes_to_plan_gap_fill(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("thinktank.gap_fill_fanout.plan_gap_fill") as plan, \
+             patch("thinktank.run.run_daily") as run_daily:
+            plan.return_value = {"run_id": "gf1", "trading_day": "2026-07-18", "tickers": ["A", "B"]}
+            result = handler_mod.handler({"mode": "gap_fill_plan"}, None)
+        run_daily.assert_not_called()
+        assert plan.call_args.kwargs["run_id"]
+        assert result == plan.return_value
+
+    def test_gap_fill_build_routes_to_build_gap_fill_unit(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("thinktank.gap_fill_fanout.build_gap_fill_unit") as build, \
+             patch("thinktank.run.run_daily") as run_daily:
+            build.return_value = {"ticker": "A", "thesis_version": 1}
+            event = {
+                "mode": "gap_fill_build", "run_id": "gf1",
+                "trading_day": "2026-07-18", "calendar_date": "2026-07-18",
+                "ticker": "A",
+            }
+            result = handler_mod.handler(event, None)
+        run_daily.assert_not_called()
+        build.assert_called_once_with(
+            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18", ticker="A",
+        )
+        assert result == {"status": "OK", "checkpoint": build.return_value}
+
+    def test_gap_fill_finalize_routes_to_finalize_gap_fill(self, handler_mod):
+        manifest = _manifest_mock()
+        manifest.mode = "gap_fill"
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("thinktank.gap_fill_fanout.finalize_gap_fill", return_value=manifest) as fin, \
+             patch("thinktank.run.run_daily") as run_daily:
+            event = {
+                "mode": "gap_fill_finalize", "run_id": "gf1",
+                "trading_day": "2026-07-18", "calendar_date": "2026-07-18",
+            }
+            result = handler_mod.handler(event, None)
+        run_daily.assert_not_called()
+        fin.assert_called_once_with(
+            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18",
+        )
+        assert result == {"status": "OK", "manifest": manifest.model_dump.return_value}
+
+
 class TestRaiseOnFailure:
     def test_run_daily_failure_propagates(self, handler_mod):
         """The core contract: NO error-dict conversion. See module doc."""
