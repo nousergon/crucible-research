@@ -33,10 +33,11 @@ engages EventBridge's two built-in async retries. For the SF's
 actual raised Lambda error — a normal return value (even an error-shaped
 dict) is a *successful* Task completion and would never route through
 the non-blocking Catch. Either way, a retried run re-selects intake
-against the ledger written so far; the worst case is a duplicate thesis
-version (never a silent skip, since the coverage ledger only persists
-once at the end of a run — a mid-run failure never partially commits),
-and the SSM budget guard caps spend.
+against the ledger written so far: since config#3072, the coverage
+ledger is checkpointed after EVERY thesis write (not just once at the
+end), so a mid-run failure/timeout commits every unit completed so far
+and a retry only rebuilds the remaining gap — never restarts the whole
+batch from ticker 1 — and the SSM budget guard caps spend.
 
 Event shape (all fields optional):
 
@@ -49,6 +50,20 @@ Event shape (all fields optional):
 
 Returns ``{"status": "OK", "manifest": {...}}`` on success (or the
 dry-path variants); raises on any failure.
+
+Bounded-parallel gap_fill fan-out (config#3072, component C): three
+ADDITIONAL modes, wired by the SF as
+``ThinkTankGapFillPlan -> ThinkTankGapFillBuild (Map) -> ThinkTankGapFillFinalize``
+instead of a single ``mode=gap_fill`` invocation, so the batch's wall-clock
+collapses from sum(theses) to ~slowest-thesis * ceil(gap/MaxConcurrency)
+instead of being bounded by one Lambda's 900s ceiling. See
+``thinktank/gap_fill_fanout.py`` for the race-safety design.
+
+    {"mode": "gap_fill_plan"}
+    {"mode": "gap_fill_build", "run_id": "...", "trading_day": "...",
+     "calendar_date": "...", "ticker": "XYZ"}
+    {"mode": "gap_fill_finalize", "run_id": "...", "trading_day": "...",
+     "calendar_date": "..."}
 """
 
 from __future__ import annotations
@@ -127,6 +142,10 @@ def handler(event, context):
 
     _ensure_init()
 
+    fanout_mode = event.get("mode") if isinstance(event, dict) else None
+    if fanout_mode in ("gap_fill_plan", "gap_fill_build", "gap_fill_finalize"):
+        return _handle_gap_fill_fanout(fanout_mode, event)
+
     from thinktank.run import run_daily
 
     plan_only = bool(event.get("dry_run")) if isinstance(event, dict) else False
@@ -157,6 +176,56 @@ def handler(event, context):
         manifest.theme_updates_written,
         manifest.total_cost_usd,
         manifest.budget_month_spent_usd,
+        manifest.budget_month_limit_usd,
+    )
+    return {"status": "OK", "manifest": manifest.model_dump()}
+
+
+def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
+    """config#3072 component C: the three gap_fill fan-out phases an SF Map
+    state drives (see ``thinktank/gap_fill_fanout.py``)."""
+    import uuid
+
+    from thinktank.gap_fill_fanout import (
+        build_gap_fill_unit,
+        finalize_gap_fill,
+        plan_gap_fill,
+    )
+
+    if mode == "gap_fill_plan":
+        run_id = event.get("run_id") or uuid.uuid4().hex[:12]
+        plan = plan_gap_fill(run_id=run_id)
+        logger.info(
+            "[thinktank_handler] gap_fill_plan run_id=%s trading_day=%s "
+            "tickers=%d",
+            plan["run_id"], plan["trading_day"], len(plan["tickers"]),
+        )
+        return plan
+
+    if mode == "gap_fill_build":
+        checkpoint = build_gap_fill_unit(
+            run_id=event["run_id"],
+            trading_day=event["trading_day"],
+            calendar_date=event["calendar_date"],
+            ticker=event["ticker"],
+        )
+        logger.info(
+            "[thinktank_handler] gap_fill_build run_id=%s ticker=%s "
+            "thesis_version=%s",
+            event["run_id"], event["ticker"], checkpoint.get("thesis_version"),
+        )
+        return {"status": "OK", "checkpoint": checkpoint}
+
+    manifest = finalize_gap_fill(
+        run_id=event["run_id"],
+        trading_day=event["trading_day"],
+        calendar_date=event["calendar_date"],
+    )
+    logger.info(
+        "[thinktank_handler] gap_fill_finalize run_id=%s trading_day=%s "
+        "theses=%d cost=$%.4f month=$%.2f/$%.2f",
+        manifest.run_id, manifest.trading_day, manifest.theses_written,
+        manifest.total_cost_usd, manifest.budget_month_spent_usd,
         manifest.budget_month_limit_usd,
     )
     return {"status": "OK", "manifest": manifest.model_dump()}
