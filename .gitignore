@@ -53,6 +53,7 @@ run.log
 # config.py is now a loader only — proprietary values are in alpha-engine-config (private repo)
 
 CLAUDE.md
+AGENTS.md
 
 # Gitleaks config (symlink to shared config)
 .gitleaks.toml
