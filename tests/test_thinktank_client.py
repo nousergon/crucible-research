@@ -86,8 +86,11 @@ def test_markdown_fenced_json_is_tolerated(monkeypatch):
 
 
 def test_bounded_retry_recovers_once(monkeypatch):
+    # Valid JSON, wrong shape (missing `score`) — a genuine model mistake,
+    # so it takes the ONE bounded schema-corrective retry.
     client, fake = _client(
-        ["not json at all", json.dumps({"answer": "fixed", "score": 2})], monkeypatch
+        [json.dumps({"answer": "bad"}), json.dumps({"answer": "fixed", "score": 2})],
+        monkeypatch,
     )
     result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert result.parsed.answer == "fixed"
@@ -97,12 +100,96 @@ def test_bounded_retry_recovers_once(monkeypatch):
 
 
 def test_fails_loud_after_bounded_retry(monkeypatch):
-    client, fake = _client(["nope", "still nope"], monkeypatch)
+    client, fake = _client(
+        [json.dumps({"answer": "bad"}), json.dumps({"answer": "still bad"})], monkeypatch
+    )
     with pytest.raises(ThinktankLLMError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert len(fake.calls) == 2
     # spend from failed attempts is still metered
     assert client.total_cost_usd() > 0
+
+
+def test_non_json_body_retries_fresh_then_succeeds(monkeypatch):
+    # config#3072: a non-JSON provider body (rate-limit/error page) is
+    # provider flakiness, not a model mistake — retried with a FRESH call
+    # (no corrective "failed schema validation" message appended), on its
+    # own budget separate from the schema-corrective retry.
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    client, fake = _client(
+        ["not json at all", "<html>rate limited</html>", json.dumps({"answer": "ok", "score": 3})],
+        monkeypatch,
+    )
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert result.parsed.answer == "ok"
+    assert len(fake.calls) == 3
+    for call in fake.calls:
+        assert "failed schema validation" not in call["messages"][-1]["content"]
+
+
+def test_fails_loud_after_non_json_retries_exhausted(monkeypatch):
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    client, fake = _client(["garbage one", "garbage two", "garbage three"], monkeypatch)
+    with pytest.raises(ThinktankLLMError):
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert len(fake.calls) == 3
+
+
+def test_transient_provider_error_retried_with_backoff(monkeypatch):
+    from openai import APIConnectionError
+
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    class _FlakyCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise APIConnectionError(request=SimpleNamespace())
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"answer": "ok", "score": 9}))
+                )],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+            )
+
+    fake = _FlakyCompletions()
+    holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+    client = ThinktankClient(
+        settings=_settings(), run_id="testrun",
+        client_factory=lambda provider, key: holder,
+    )
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert result.parsed.answer == "ok"
+    assert fake.calls == 3
+
+
+def test_fails_loud_after_transient_retries_exhausted(monkeypatch):
+    from openai import APIConnectionError
+
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    class _AlwaysFlaky:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            raise APIConnectionError(request=SimpleNamespace())
+
+    fake = _AlwaysFlaky()
+    holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+    client = ThinktankClient(
+        settings=_settings(), run_id="testrun",
+        client_factory=lambda provider, key: holder,
+    )
+    with pytest.raises(Exception):
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert fake.calls == 3
 
 
 def test_sft_flush_gated_by_capture_flag(monkeypatch):
