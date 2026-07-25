@@ -167,4 +167,10 @@ COPY lambda/thinktank_handler.py ${LAMBDA_TASK_ROOT}/thinktank_handler.py
 # regime substrate), invoked by the weekly SF's SignalsEnvelope state.
 COPY lambda/signals_envelope_handler.py ${LAMBDA_TASK_ROOT}/signals_envelope_handler.py
 
+# OpenRouter shadow judge Lambda (crucible-research#470) — same shared-image
+# pattern, deploy.sh sets CMD ["openrouter_shadow_handler.handler"]. Thin
+# no-agent wrapper around evals.openrouter_shadow.run_shadow_judge_over_date,
+# invoked by the grooming SF for shadow-schedule comparison runs.
+COPY lambda/openrouter_shadow_handler.py ${LAMBDA_TASK_ROOT}/openrouter_shadow_handler.py
+
 CMD ["handler.handler"]
