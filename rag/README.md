@@ -49,7 +49,7 @@ The lib re-exports `retrieve`, `ingest_document`, `document_exists`, `embed_text
 | Component | Monthly |
 |-----------|---------|
 | Neon pgvector + FTS (free tier) | $0 |
-| Voyage embeddings (~25 stocks × weekly) | ~$0.10 |
+| Voyage embeddings (~903 stocks × weekly) | ~$3.60 |
 
 ## Eval harness
 

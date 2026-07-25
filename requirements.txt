@@ -82,7 +82,17 @@ pydantic~=2.13
 # writes to nousergon_lib.health (Deliverable + derive_status + write_health).
 # Cross-sectional 6-pillar attractiveness chokepoint (nousergon_lib.quant.attractiveness,
 # lib#164 / v0.88.0) — shared with Metron Holdings + universe_board backfill.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0
+# Bumped 0.88.0 -> 0.124.3 (alpha-engine-config#3077 Phase C): needs the
+# experiment_record.v1 + experiment.v1 contract schemas (nousergon-lib#172,
+# shipped v0.94.0) for the new per-challenger experiment_record emission
+# (producers/experiment_record.py). Matches crucible-evaluator's pin exactly
+# (same schema version fleet-wide). The only breaking change in this range
+# (nousergon-lib#197, v0.113.0: removed the deprecated alpha_engine_lib ->
+# nousergon_lib import alias shim) had exactly one straggler left in this
+# repo — scoring/boost_signals.py's `from alpha_engine_lib.secrets import
+# get_secret` — fixed in the same PR to `from nousergon_lib.secrets import
+# get_secret` (matching every other call site in this repo already).
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
