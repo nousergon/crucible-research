@@ -42,7 +42,7 @@ re-bills or re-does an already-completed unit.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
 
@@ -196,7 +196,7 @@ def build_gap_fill_unit(
         "sector": thesis.sector,
         "attractiveness_rank": thesis.attractiveness_rank,
         "total_cost_usd": client.total_cost_usd(),
-        "built_at": datetime.now(timezone.utc).isoformat(),
+        "built_at": datetime.now(UTC).isoformat(),
     }
     store.put_json(_checkpoint_key(trading_day, ticker), checkpoint)
     client.flush_sft(store.s3, store.bucket, trading_day)
@@ -237,7 +237,7 @@ def finalize_gap_fill(
         mode="gap_fill",
         trading_day=trading_day,
         calendar_date=calendar_date,
-        started_at=datetime.now(timezone.utc).isoformat(),
+        started_at=datetime.now(UTC).isoformat(),
     )
 
     ledger = load_ledger(store)
@@ -342,7 +342,7 @@ def finalize_gap_fill(
     )
     manifest.budget_month_spent_usd = cost_ledger.spent_usd
     manifest.budget_month_limit_usd = guard.limit_usd()
-    manifest.finished_at = datetime.now(timezone.utc).isoformat()
+    manifest.finished_at = datetime.now(UTC).isoformat()
     from thinktank import MANIFEST_KEY_TMPL
 
     store.put_json(

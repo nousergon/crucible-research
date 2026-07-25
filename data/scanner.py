@@ -13,33 +13,30 @@ caller to exclude specific tickers if needed (e.g., recently removed stocks).
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
 
 import pandas as pd
 
 from config import (
+    DEEP_VALUE_MAX_ATR_PCT,
+    DEEP_VALUE_MAX_CANDIDATES,
+    DEEP_VALUE_MAX_RSI,
+    DEEP_VALUE_PATH_ENABLED,
+    MAX_ATR_PCT,
     MIN_AVG_VOLUME,
     MIN_PRICE,
-    DEEP_VALUE_PATH_ENABLED,
-    DEEP_VALUE_MAX_RSI,
-    DEEP_VALUE_MAX_CANDIDATES,
-    MAX_ATR_PCT,
-    DEEP_VALUE_MAX_ATR_PCT,
     get_scanner_params,
 )
 from data.fetchers.price_fetcher import (
-    fetch_sp500_sp400_tickers,
-    fetch_price_data,
     compute_technical_indicators,
+    fetch_sp500_sp400_tickers,
 )
 from scoring.technical import compute_technical_score
-
-import logging
 
 logger = logging.getLogger(__name__)
 
 
-def get_scanner_universe(exclude_tickers: Optional[list[str]] = None) -> list[str]:
+def get_scanner_universe(exclude_tickers: list[str] | None = None) -> list[str]:
     """
     Return the full scanner candidate universe (S&P 500 + S&P 400).
 
@@ -330,7 +327,7 @@ def evaluate_candidate_rotation(
         (new_active_candidates, rotation_events)
         rotation_events: list of {out_ticker, in_ticker, reason}
     """
-    from datetime import datetime, date
+    from datetime import date, datetime
 
     _sp = get_scanner_params()
     _default_delta = _sp["rotation_default_required_delta"]

@@ -159,7 +159,7 @@ class TestSetupLoggingAttach:
     def test_enabled_attaches_flow_doctor_handler(
         self, stub_flow_doctor_env, reset_root_logger, temp_flow_doctor_yaml
     ):
-        from nousergon_lib.logging import setup_logging, get_flow_doctor
+        from nousergon_lib.logging import get_flow_doctor, setup_logging
         setup_logging(
             "research-test-enabled",
             flow_doctor_yaml=temp_flow_doctor_yaml,

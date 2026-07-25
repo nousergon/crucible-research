@@ -10,6 +10,7 @@ before finalization, mirroring the macro-agent reflection loop. These tests pin:
 """
 
 import pytest
+from pydantic import ValidationError
 
 from agents.investment_committee import ic_cio
 from agents.investment_committee.ic_cio import (
@@ -43,7 +44,7 @@ class TestCIOCriticOutput:
         assert v.action == "revise" and v.flagged_tickers == ["BBB"]
 
     def test_rejects_bad_action(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             CIOCriticOutput(action="maybe")
 
 
@@ -146,15 +147,15 @@ class TestRunCioCritic:
 
 class TestRunCioWithReflection:
     def _base_kwargs(self):
-        return dict(
-            candidates=_candidates(),
-            macro_context={"market_regime": "neutral", "macro_report": ""},
-            sector_ratings={},
-            current_population=[],
-            open_slots=5,
-            exits=[],
-            run_date="2026-06-15",
-        )
+        return {
+            "candidates": _candidates(),
+            "macro_context": {"market_regime": "neutral", "macro_report": ""},
+            "sector_ratings": {},
+            "current_population": [],
+            "open_slots": 5,
+            "exits": [],
+            "run_date": "2026-06-15",
+        }
 
     def test_accept_does_not_rerun(self, monkeypatch):
         calls = {"cio": 0}

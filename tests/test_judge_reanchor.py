@@ -9,7 +9,7 @@ future change should follow.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 
@@ -24,7 +24,7 @@ class TestLogJudgeReanchorMarker:
             new_resolved_model="deepseek/deepseek-v4-flash",
             reason="config#2575 item 7 promotion (test)",
             s3_client=s3,
-            now=datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC),
         )
 
         assert key is not None
@@ -79,7 +79,7 @@ class TestLogJudgeReanchorMarker:
         so a retried write overwrites rather than duplicates."""
         from evals.judge_reanchor import log_judge_reanchor_marker
 
-        now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
         s3_a, s3_b = MagicMock(), MagicMock()
         key_a = log_judge_reanchor_marker(
             logical_key="openrouter-shadow", old_resolved_model=None,

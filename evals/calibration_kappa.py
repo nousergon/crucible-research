@@ -52,8 +52,9 @@ import json
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 import boto3
 
@@ -82,7 +83,7 @@ SCHEMA_VERSION = "1.0.0"
 # ── Pure compute ─────────────────────────────────────────────────────────
 
 
-def _coerce_score(value: Any) -> Optional[int]:
+def _coerce_score(value: Any) -> int | None:
     """Return an int 1..N_CLASSES, or None when the score is absent /
     out of range. Operator may leave a blind score unset (None); judge
     scores are always present but we stay defensive."""
@@ -214,7 +215,7 @@ def _summarize_pairs(pairs: list[tuple[int, int]]) -> dict[str, Any]:
     }
 
 
-def _nan_to_none(x: float) -> Optional[float]:
+def _nan_to_none(x: float) -> float | None:
     """JSON has no NaN — render undefined κ/α as null."""
     return None if x != x else round(x, 4)
 
@@ -222,7 +223,7 @@ def _nan_to_none(x: float) -> Optional[float]:
 def compute_calibration_report(
     reviews: Iterable[dict],
     *,
-    generated_at: Optional[str] = None,
+    generated_at: str | None = None,
     min_reviews_per_cell: int = MIN_REVIEWS_PER_CELL,
 ) -> dict[str, Any]:
     """Pure compute — no network. Turn raw review records into the κ report.
@@ -352,7 +353,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+    return datetime.now(UTC).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
     )
 

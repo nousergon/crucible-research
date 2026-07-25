@@ -1,7 +1,6 @@
 """Edge case tests for composite scoring."""
 
-import pytest
-from scoring.composite import compute_composite_score, score_to_rating, normalize_conviction
+from scoring.composite import compute_composite_score, normalize_conviction, score_to_rating
 
 
 class TestCompositeEdgeCases:

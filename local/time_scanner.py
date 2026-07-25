@@ -11,19 +11,23 @@ Outputs timing for 150, 300, 500, and full universe sizes.
 If 500 tickers completes in < 120s, the full ~900 should be safe for Lambda (600s timeout).
 """
 
-import sys
 import os
+import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
-import yfinance as yf
-from data.fetchers.price_fetcher import fetch_sp500_sp400_tickers, compute_technical_indicators
-from scoring.technical import compute_technical_score
-from config import UNIVERSE_TICKERS
+# Imported after load_dotenv() above so a local .env override of
+# config-time env vars (e.g. S3_BUCKET/AWS_REGION) takes effect.
+import yfinance as yf  # noqa: E402
+
+from config import UNIVERSE_TICKERS  # noqa: E402
+from data.fetchers.price_fetcher import compute_technical_indicators, fetch_sp500_sp400_tickers  # noqa: E402
+from scoring.technical import compute_technical_score  # noqa: E402
 
 
 def time_download(tickers: list[str], label: str) -> float:
@@ -53,8 +57,8 @@ def time_download(tickers: list[str], label: str) -> float:
                 if indicators:
                     compute_technical_score(indicators, market_regime="neutral")
                     scored += 1
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  skip {ticker}: {e}", flush=True)
         t2 = time.time()
         print(f"  Scoring:   {t2 - t1:.1f}s ({scored} tickers scored)", flush=True)
         print(f"  Total:     {t2 - t0:.1f}s", flush=True)

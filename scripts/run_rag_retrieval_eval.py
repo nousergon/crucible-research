@@ -85,14 +85,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 from evals.rag_retrieval import (  # noqa: E402
     CATEGORIES,
-    Condition,
     DEFAULT_CONDITIONS,
     DEFAULT_K_VALUES,
+    Condition,
     EvalQuery,
     render_markdown_report,
     run_eval,
 )
-
 
 logging.basicConfig(
     level=logging.INFO,

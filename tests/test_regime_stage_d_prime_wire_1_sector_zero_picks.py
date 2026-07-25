@@ -18,13 +18,11 @@ from unittest.mock import patch
 
 import pytest
 
-
 from agents.sector_teams.peer_review import (
     _apply_regime_pick_gate,
     _candidate_composite_score,
     regime_conditional_min_score,
 )
-
 
 # ---------------------------------------------------------------------------
 # regime_conditional_min_score
@@ -204,6 +202,7 @@ class TestSectorTeamContextHasIntensityZField:
         intensity_z so the sector_team_node → peer_review path can
         thread it through. Default None handles pre-deploy state."""
         import dataclasses
+
         from agents.sector_teams.sector_team import SectorTeamContext
         fields = {f.name: f for f in dataclasses.fields(SectorTeamContext)}
         assert "regime_intensity_z" in fields

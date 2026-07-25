@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -41,9 +42,12 @@ LATEST_EXPERIMENT_RECORD_FILENAME = "latest.json"
 def _local_git_sha() -> str | None:
     """Best-effort local ``git rev-parse HEAD`` (dev/test fallback when
     ``ALPHA_ENGINE_CODE_SHA`` is unset). Never raises."""
+    _git = shutil.which("git")
+    if _git is None:
+        return None
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [_git, "rev-parse", "HEAD"],
             cwd=Path(__file__).resolve().parent.parent,
             capture_output=True,
             text=True,

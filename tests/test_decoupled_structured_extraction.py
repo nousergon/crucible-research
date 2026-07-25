@@ -28,7 +28,6 @@ import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from langgraph.errors import GraphRecursionError
 
 
@@ -36,7 +35,7 @@ from langgraph.errors import GraphRecursionError
 def fresh_modules():
     """Force-reload analyst modules to defeat MagicMock pollution from
     test_dry_run.py's sentinel pattern (cross-test order dependency)."""
-    from agents.sector_teams import quant_analyst, qual_analyst, sector_team
+    from agents.sector_teams import qual_analyst, quant_analyst, sector_team
     importlib.reload(quant_analyst)
     importlib.reload(qual_analyst)
     importlib.reload(sector_team)

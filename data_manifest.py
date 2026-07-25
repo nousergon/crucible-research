@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 
@@ -30,7 +30,7 @@ def write_data_manifest(
     payload = {
         "module": module_name,
         "run_date": run_date,
-        "written_at": datetime.now(timezone.utc).isoformat(),
+        "written_at": datetime.now(UTC).isoformat(),
         **manifest,
     }
     try:

@@ -94,7 +94,7 @@ class TestQuantCorruptions:
     def test_verbosity_pad_is_longer_but_still_ungrounded(self):
         ref = _quant()
         out = _verbosity_pad(_quant())
-        for rp, op in zip(ref["ranked_picks"], out["ranked_picks"]):
+        for rp, op in zip(ref["ranked_picks"], out["ranked_picks"], strict=True):
             assert len(op["rationale"]) > len(rp["rationale"]), "should be longer"
             assert not _NUM.search(op["rationale"]), "still no real numbers"
             assert op["key_metrics"] == {}
@@ -104,7 +104,7 @@ class TestQualCorruptions:
     def test_strip_citation_grounding_removes_specific_facts(self):
         ref = _qual()
         out = _strip_citation_grounding(_qual())
-        for ra, oa in zip(ref["assessments"], out["assessments"]):
+        for ra, oa in zip(ref["assessments"], out["assessments"], strict=True):
             assert oa["bull_case"] != ra["bull_case"]
             assert not _NUM.search(oa["bull_case"])
             assert not _NUM.search(oa["bear_case"])
@@ -118,7 +118,7 @@ class TestQualCorruptions:
     def test_misalign_evidence_inflates_score_vs_thin_bull(self):
         ref = _qual()
         out = _misalign_evidence(_qual())
-        for ra, oa in zip(ref["assessments"], out["assessments"]):
+        for ra, oa in zip(ref["assessments"], out["assessments"], strict=True):
             assert oa["qual_score"] > ra["qual_score"]
             # bull weakened, bear (substantive) preserved → misalignment
             assert len(oa["bull_case"]) < len(ra["bull_case"])

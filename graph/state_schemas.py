@@ -29,8 +29,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 # LLM-output schemas live in alpha-engine-lib so the replay harness in
 # alpha-engine-backtester can validate against the canonical contract
 # without a heavy cross-repo dep on this repo. Lifted 2026-05-05 (lib
@@ -58,6 +56,7 @@ from nousergon_lib.agent_schemas import (
     RubricDimensionScore,
     RubricEvalLLMOutput,
 )
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
     # Re-exported from alpha_engine_lib.agent_schemas for backward

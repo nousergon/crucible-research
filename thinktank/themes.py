@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 
 from agents.prompt_loader import load_prompt
-
 from thinktank import THEME_KEY_TMPL, THEME_LATEST_TMPL
 from thinktank.capture import emit_theme_capture
 from thinktank.client import ThinktankClient

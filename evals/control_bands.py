@@ -60,19 +60,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from hashlib import sha1
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
 from evals.metrics import DEFAULT_NAMESPACE
-# Second consumer of the rolling-mean CloudWatch + changelog substrate.
-# Reused rather than re-implemented; lifting these to a shared
-# ``evals/_cw_metrics.py`` is a noted follow-up (second-adoption
-# consolidation signal) — kept out of this PR to bound its blast radius.
 from evals.rolling_mean import (
-    DERIVED_METRIC_NAME as SOURCE_METRIC_NAME,
     _CHANGELOG_BUCKET,
     _CHANGELOG_PREFIX,
     _CHANGELOG_SCHEMA_VERSION,
@@ -80,6 +75,14 @@ from evals.rolling_mean import (
     _dims_to_dict,
     _get_metric_data_all,
     _list_metric_combos,
+)
+
+# Second consumer of the rolling-mean CloudWatch + changelog substrate.
+# Reused rather than re-implemented; lifting these to a shared
+# ``evals/_cw_metrics.py`` is a noted follow-up (second-adoption
+# consolidation signal) — kept out of this PR to bound its blast radius.
+from evals.rolling_mean import (
+    DERIVED_METRIC_NAME as SOURCE_METRIC_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,16 +223,16 @@ class ControlBandResult:
 
     status: str
     n_points: int
-    center: Optional[float] = None
-    sigma: Optional[float] = None
-    lcl: Optional[float] = None
-    ucl: Optional[float] = None
-    latest: Optional[float] = None
-    latest_z: Optional[float] = None      # None when sigma == 0
+    center: float | None = None
+    sigma: float | None = None
+    lcl: float | None = None
+    ucl: float | None = None
+    latest: float | None = None
+    latest_z: float | None = None      # None when sigma == 0
     shewhart_low: bool = False            # latest < LCL (regression)
     shewhart_high: bool = False           # latest > UCL (observability)
-    cusum_c_minus: Optional[float] = None
-    cusum_c_plus: Optional[float] = None
+    cusum_c_minus: float | None = None
+    cusum_c_plus: float | None = None
     cusum_low: bool = False               # downward drift (regression)
     cusum_high: bool = False              # upward drift (observability)
     reasons: list[str] = field(default_factory=list)
@@ -317,7 +320,7 @@ def evaluate_series(
     # limits. sigma > 0 here, so the z-score is well-defined.
     shewhart_low = latest < lcl
     shewhart_high = latest > ucl
-    latest_z: Optional[float] = (latest - center) / sigma
+    latest_z: float | None = (latest - center) / sigma
 
     # CUSUM accumulates over the Phase-II monitoring points ONLY, from a
     # zero start — never over the baseline points used to fit the center
@@ -377,7 +380,7 @@ def _weekly_series_by_combo(
     metric_data_results: list[dict[str, Any]],
     combos: list[list[dict[str, str]]],
     *,
-    reset_before: Optional[datetime] = None,
+    reset_before: datetime | None = None,
 ) -> dict[int, list[float]]:
     """Map combo index → its weekly series, oldest-first.
 
@@ -394,7 +397,7 @@ def _weekly_series_by_combo(
         if result is None:
             series_by_combo[idx] = []
             continue
-        pairs = list(zip(result.get("Timestamps", []), result.get("Values", [])))
+        pairs = list(zip(result.get("Timestamps", []), result.get("Values", []), strict=True))
         if reset_before is not None:
             pairs = [(t, v) for t, v in pairs if t >= reset_before]
         pairs.sort(key=lambda tv: tv[0])  # chronological
@@ -407,13 +410,13 @@ def _weekly_series_by_combo(
 
 def compute_and_emit_control_bands(
     *,
-    end_time: Optional[datetime] = None,
+    end_time: datetime | None = None,
     namespace: str = DEFAULT_NAMESPACE,
     source_metric: str = SOURCE_METRIC_NAME,
     min_history: int = DEFAULT_MIN_HISTORY,
-    reset_before: Optional[datetime] = None,
-    cloudwatch_client: Optional[Any] = None,
-    s3_client: Optional[Any] = None,
+    reset_before: datetime | None = None,
+    cloudwatch_client: Any | None = None,
+    s3_client: Any | None = None,
 ) -> dict[str, Any]:
     """Evaluate control bands per combo and emit metrics + breach entries.
 
@@ -432,7 +435,7 @@ def compute_and_emit_control_bands(
     """
     cw = cloudwatch_client or boto3.client("cloudwatch")
     s3 = s3_client or boto3.client("s3")
-    end = end_time or datetime.now(timezone.utc)
+    end = end_time or datetime.now(UTC)
     start = end - timedelta(days=LOOKBACK_WEEKS * 7)
 
     combos = _list_metric_combos(
@@ -574,7 +577,7 @@ def _emit_control_breach_entry(
     window_start: datetime,
     window_end: datetime,
     s3_client: Any,
-) -> Optional[str]:
+) -> str | None:
     """Write one ``eval_score_control_breach`` entry to the system-wide
     changelog corpus (mirrors rolling_mean._emit_regression_entry).
 
@@ -597,7 +600,8 @@ def _emit_control_breach_entry(
             f"{agent_id}|{criterion}|{judge_model}|"
             f"{window_start.isoformat()}|{window_end.isoformat()}|control"
         ).encode()
-        event_hash = sha1(digest_input).hexdigest()[:7]
+        # Short deterministic dedup id, not a security digest.
+        event_hash = sha1(digest_input, usedforsecurity=False).hexdigest()[:7]
         event_id = f"{ts_id}_{actor}_{event_hash}"
 
         summary = (

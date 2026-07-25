@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from typing import Optional
 
 
 def article_hash(headline: str, source: str) -> str:

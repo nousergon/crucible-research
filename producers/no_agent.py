@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from scoring.composite import compute_composite_score, normalize_conviction
+from scoring.composite import compute_composite_score
 
 logger = logging.getLogger(__name__)
 

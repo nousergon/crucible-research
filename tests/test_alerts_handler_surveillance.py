@@ -16,7 +16,6 @@ import datetime
 import json
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,7 +28,6 @@ sys.path.insert(0, str(_REPO_ROOT / "lambda"))
 sys.path.insert(0, str(_REPO_ROOT))
 
 import alerts_handler as ah  # noqa: E402
-
 
 # ── _heartbeat_stale ────────────────────────────────────────────────────────
 
@@ -53,7 +51,7 @@ class TestHeartbeatStale:
         assert "malformed" in reason.lower()
 
     def test_fresh_heartbeat_is_not_stale(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         ts = now.isoformat().replace("+00:00", "") + "Z"
         is_stale, reason = ah._heartbeat_stale(
             {"timestamp": ts}, stale_threshold_sec=180,
@@ -62,7 +60,7 @@ class TestHeartbeatStale:
         assert reason == ""
 
     def test_old_heartbeat_is_stale(self):
-        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=400)
+        old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=400)
         ts = old.isoformat().replace("+00:00", "") + "Z"
         is_stale, reason = ah._heartbeat_stale(
             {"timestamp": ts}, stale_threshold_sec=180,
@@ -72,7 +70,7 @@ class TestHeartbeatStale:
 
     def test_threshold_boundary(self):
         # 100s old, threshold 180s → not stale
-        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=100)
+        old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=100)
         ts = old.isoformat().replace("+00:00", "") + "Z"
         is_stale, _ = ah._heartbeat_stale(
             {"timestamp": ts}, stale_threshold_sec=180,
@@ -219,7 +217,7 @@ class TestReadS3Json:
 
 @pytest.fixture
 def fresh_heartbeat_payload():
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     return {
         "timestamp": now.isoformat().replace("+00:00", "") + "Z",
         "ib_connected": True,
@@ -231,7 +229,7 @@ def fresh_heartbeat_payload():
 
 @pytest.fixture
 def stale_heartbeat_payload():
-    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=500)
+    old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=500)
     return {
         "timestamp": old.isoformat().replace("+00:00", "") + "Z",
         "ib_connected": True,
@@ -331,7 +329,7 @@ class TestHandlerIntegration:
                 "GOOG": {"last": 175.0},
             },
         }
-        s3 = _wire_s3_mock(
+        _wire_s3_mock(
             mock_boto3_client,
             heartbeat=fresh_heartbeat_payload,
             latest_prices=latest_prices,

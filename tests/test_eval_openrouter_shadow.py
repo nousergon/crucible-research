@@ -23,9 +23,7 @@ import pytest
 from moto import mock_aws
 
 from graph.state_schemas import RubricDimensionScore, RubricEvalArtifact
-
 from tests.test_eval_orchestrator import _make_capture, _make_eval
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 

@@ -31,8 +31,7 @@ import logging
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
 import boto3
 
@@ -110,7 +109,7 @@ def main() -> int:
     args = p.parse_args()
 
     s3 = boto3.client("s3")
-    run_time = datetime.now(timezone.utc).isoformat()
+    run_time = datetime.now(UTC).isoformat()
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
         local_db = tf.name

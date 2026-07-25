@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
@@ -71,10 +71,10 @@ def run_shadow_judge_over_date(
     date: str,
     bucket: str = _BUCKET_DEFAULT,
     judge_model: str = OPENROUTER_SHADOW.logical_key,
-    s3_client: Optional[Any] = None,
-    cloudwatch_client: Optional[Any] = None,
+    s3_client: Any | None = None,
+    cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """Score every captured artifact under ``date`` with the OpenRouter
     shadow-judge tier and persist the verdicts. Returns a summary dict
@@ -273,7 +273,7 @@ def compute_shadow_agreement(
     bucket: str = _BUCKET_DEFAULT,
     primary_judge_model: str = HAIKU.logical_key,
     shadow_judge_model: str = OPENROUTER_SHADOW.logical_key,
-    s3_client: Optional[Any] = None,
+    s3_client: Any | None = None,
 ) -> list[DimensionAgreement]:
     """Agreement between the OpenRouter shadow judge and the PRIMARY
     judge (Haiku by default — the tier that runs on every artifact,

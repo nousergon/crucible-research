@@ -26,7 +26,7 @@ pre-blend value for audit/divergence display.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from thinktank import RATINGS_KEY_TMPL, RATINGS_LATEST_KEY
 from thinktank.analyst import load_latest_thesis
@@ -100,7 +100,7 @@ def update_ratings_board(
         del board.rows[ticker]
 
     board.trading_day = trading_day
-    board.updated_at = datetime.now(timezone.utc).isoformat()
+    board.updated_at = datetime.now(UTC).isoformat()
     payload = board.model_dump()
     store.put_json(RATINGS_KEY_TMPL.format(trading_day=trading_day), payload)
     store.put_json(RATINGS_LATEST_KEY, payload)

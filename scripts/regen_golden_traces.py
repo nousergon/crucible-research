@@ -32,14 +32,15 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from evals import trajectory
-from evals.golden_trace import (
+# Imported after the sys.path.insert above — ``evals`` is only importable
+# once the repo root is on sys.path when this script is invoked directly.
+from evals import trajectory  # noqa: E402
+from evals.golden_trace import (  # noqa: E402
     EVAL_PIPELINE_PATH,
-    GRAPH_TOPOLOGY_PATH,
     GOLDEN_SCHEMA_VERSION,
+    GRAPH_TOPOLOGY_PATH,
     current_pin,
 )
-
 
 # Representative agent_id per rubric (must map via
 # evals.judge.resolve_rubric_for_agent).
@@ -124,6 +125,7 @@ def _authored_parse_case() -> dict:
 def _live_parse_case() -> dict:
     """Capture a real judge response on the sector_quant golden."""
     from nousergon_lib.decision_capture import DecisionArtifact
+
     from evals.judge import evaluate_artifact
 
     artifact = DecisionArtifact(

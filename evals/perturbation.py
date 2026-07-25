@@ -40,10 +40,11 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from statistics import mean
-from typing import Any, Callable, Optional
+from typing import Any
 
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
@@ -353,7 +354,6 @@ def _break_ranking_coherence(out: dict) -> dict:
     incoherence is purely score-vs-rank-vs-narrative. Targets
     `ranking_coherence`."""
     picks = out.get("ranked_picks", [])
-    n = len(picks)
     # e.g. 3 picks → [60, 72, 84]; first-listed gets the worst score.
     for i, p in enumerate(picks):
         p["quant_score"] = 60 + i * 12
@@ -545,7 +545,7 @@ def build_artifact(agent_id: str, agent_output: dict,
 
 
 def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
-                   api_key: Optional[str]) -> dict[str, int]:
+                   api_key: str | None) -> dict[str, int]:
     """Live-judge adapter: score an artifact → {dimension: score}.
 
     ``api_key`` is an OpenRouter key since alpha-engine-config-I2997
@@ -556,7 +556,7 @@ def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
 
 
 def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
-                     api_key: Optional[str]) -> dict[str, int]:
+                     api_key: str | None) -> dict[str, int]:
     """OpenRouter shadow-judge adapter (config#2575 item 6) — same
     ``judge_fn`` call shape as ``_default_judge`` but routes through
     ``evals.judge.evaluate_artifact_openrouter`` (the shadow-tagged,
@@ -578,10 +578,10 @@ def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
 def run_perturbation_battery(
     *,
     judge_model: str = DEFAULT_JUDGE_MODEL,
-    api_key: Optional[str] = None,
-    corruptions: Optional[list[Corruption]] = None,
+    api_key: str | None = None,
+    corruptions: list[Corruption] | None = None,
     min_drop: int = 1,
-    judge_fn: Optional[Callable[..., dict[str, int]]] = None,
+    judge_fn: Callable[..., dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Run the perturbation battery and return a sensitivity report.
 
@@ -662,13 +662,13 @@ def format_scorecard(report: dict[str, Any]) -> str:
 
 def emit_perturbation_report(
     *,
-    bucket: Optional[str] = None,
+    bucket: str | None = None,
     s3_client: Any = None,
-    report_date: Optional[str] = None,
-    report: Optional[dict[str, Any]] = None,
+    report_date: str | None = None,
+    report: dict[str, Any] | None = None,
     judge_model: str = DEFAULT_JUDGE_MODEL,
-    api_key: Optional[str] = None,
-    judge_fn: Optional[Callable[..., dict[str, int]]] = None,
+    api_key: str | None = None,
+    judge_fn: Callable[..., dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Run (or accept a precomputed) perturbation battery and write the weekly
     sensitivity scorecard to
@@ -692,7 +692,7 @@ def emit_perturbation_report(
 
     bkt = bucket or _RESEARCH_BUCKET
     client = s3_client or boto3.client("s3")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     report_date = report_date or now[:10]
 
     if report is None:

@@ -22,7 +22,6 @@ No LLM involved.
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
 
 from config import RATING_BUY_THRESHOLD
 
@@ -32,7 +31,7 @@ def record_new_buy_scores(
     today: str,
     investment_theses: dict[str, dict],
     price_data: dict,
-    market_regime: Optional[str] = None,
+    market_regime: str | None = None,
 ) -> None:
     """
     At end of run: record any ticker scored >= BUY_THRESHOLD today into score_performance.

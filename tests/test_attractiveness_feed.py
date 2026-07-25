@@ -29,7 +29,7 @@ def _profiles(n: int = 20) -> dict:
     out = {}
     for i in range(n):
         v = float(100 - i * (100.0 / n))   # T0 highest … T{n-1} lowest
-        out[f"T{i}"] = {"sector": "Tech", **{p: v for p in pillars}}
+        out[f"T{i}"] = {"sector": "Tech", **dict.fromkeys(pillars, v)}
     return out
 
 

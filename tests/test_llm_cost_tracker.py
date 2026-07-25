@@ -24,8 +24,7 @@ Locks down:
 from __future__ import annotations
 
 import json
-import os
-from datetime import date
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -33,10 +32,6 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
-
-from nousergon_lib.cost import PriceCard, PriceTable
-from nousergon_lib.decision_capture import FullPromptContext, ModelMetadata
-
 
 # ── Test fixtures ─────────────────────────────────────────────────────────
 
@@ -262,7 +257,9 @@ class TestCostTelemetryCallback:
 
     def test_callback_accumulates_into_active_frame(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, _current_frame,
+            CostTelemetryCallback,
+            _current_frame,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -288,7 +285,7 @@ class TestCostTelemetryCallback:
 
 class TestTrackLlmCostBasics:
     def test_frame_pops_on_exit(self, patched_pricing_path):
-        from graph.llm_cost_tracker import track_llm_cost, _frame_stack
+        from graph.llm_cost_tracker import _frame_stack, track_llm_cost
 
         assert _frame_stack.get() == []
         with track_llm_cost(agent_id="agent_a", model_name_fallback="claude-haiku-4-5"):
@@ -297,7 +294,9 @@ class TestTrackLlmCostBasics:
 
     def test_metadata_stashed_on_exit(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -324,7 +323,9 @@ class TestTrackLlmCostBasics:
 
     def test_pop_metadata_clears_entry(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -344,7 +345,7 @@ class TestTrackLlmCostBasics:
     def test_no_calls_yields_zero_token_metadata(self, patched_pricing_path):
         """Frame closes with zero calls — tokens stay 0 but metadata is still
         stashed (carries the agent_id/run_type context for the capture)."""
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         with track_llm_cost(agent_id="silent_agent", model_name_fallback="claude-haiku-4-5"):
             pass  # No LLM calls.
@@ -363,7 +364,9 @@ class TestTrackLlmCostBasics:
 class TestMultiCallAccumulation:
     def test_three_calls_aggregated(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -384,10 +387,12 @@ class TestMultiCallAccumulation:
 
 class TestPromptPropagation:
     def test_prompt_id_and_version_stamped(self, patched_pricing_path, tmp_path):
-        from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
-        )
         from agents.prompt_loader import LoadedPrompt
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
+        )
 
         prompt = LoadedPrompt(
             name="cio_decision",
@@ -423,8 +428,8 @@ class TestPromptPropagation:
         (literal ``{placeholder}`` text), never what was actually sent to
         the LLM via ``HumanMessage(content=...)``.
         """
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
         from agents.prompt_loader import LoadedPrompt
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         template = LoadedPrompt(
             name="ic_cio_evaluation",
@@ -460,8 +465,8 @@ class TestPromptPropagation:
         instead assign ``frame.rendered_prompt`` before the block exits;
         this must be picked up at frame-exit the same as the kwarg form.
         """
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
         from agents.prompt_loader import LoadedPrompt
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         template = LoadedPrompt(
             name="macro_agent",
@@ -493,8 +498,8 @@ class TestPromptPropagation:
         canonical rendered string) keep the pre-fix fallback behavior —
         ``user_prompt`` from ``prompt.text``.
         """
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
         from agents.prompt_loader import LoadedPrompt
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         template = LoadedPrompt(
             name="quant_analyst_user",
@@ -518,7 +523,7 @@ class TestPromptPropagation:
         """Neither ``prompt`` nor ``rendered_prompt`` supplied — placeholder
         message names the agent, matching pre-fix behavior.
         """
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         with track_llm_cost(
             agent_id="agent_bare", model_name_fallback="claude-haiku-4-5",
@@ -534,7 +539,7 @@ class TestPromptPropagation:
 
 class TestRunType:
     def test_default_weekly_research(self, patched_pricing_path):
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         with track_llm_cost(agent_id="default_run", model_name_fallback="claude-haiku-4-5"):
             pass
@@ -542,7 +547,7 @@ class TestRunType:
         assert meta.run_type == "weekly_research"
 
     def test_explicit_morning(self, patched_pricing_path):
-        from graph.llm_cost_tracker import track_llm_cost, pop_metadata_for
+        from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 
         with track_llm_cost(
             agent_id="morning_agent",
@@ -559,7 +564,7 @@ class TestRunType:
 
 class TestExceptionPath:
     def test_frame_pops_when_body_raises(self, patched_pricing_path):
-        from graph.llm_cost_tracker import track_llm_cost, _frame_stack
+        from graph.llm_cost_tracker import _frame_stack, track_llm_cost
 
         with pytest.raises(ValueError, match="boom"):
             with track_llm_cost(agent_id="raiser", model_name_fallback="claude-haiku-4-5"):
@@ -673,7 +678,8 @@ class TestPerCallRowAccumulation:
     def test_callback_appends_per_call_row(self, patched_pricing_path):
         """Each on_llm_end fires appends one row to frame.per_call_rows."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -691,7 +697,8 @@ class TestPerCallRowAccumulation:
 
     def test_per_call_row_carries_timestamp(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -712,7 +719,8 @@ class TestJsonlFlushHappyPath:
         self, mocked_s3, capture_enabled, patched_pricing_path,
     ):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -765,7 +773,8 @@ class TestJsonlFlushHappyPath:
         self, mocked_s3, capture_enabled, patched_pricing_path,
     ):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -793,7 +802,8 @@ class TestJsonlFlushGating:
         self, mocked_s3, capture_disabled, patched_pricing_path,
     ):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -834,7 +844,9 @@ class TestJsonlFlushGating:
         """Without run_id we can't compute the partition key — flush is
         skipped (in-process metadata stash still works)."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -860,8 +872,9 @@ class TestJsonlFlushHardFail:
         """When the env flag is on AND S3 unreachable, the flush raises
         instead of silently swallowing per ``feedback_no_silent_fails``."""
         from graph.llm_cost_tracker import (
-            CostRawWriteError, CostTelemetryCallback, track_llm_cost,
-            _flush_cost_rows_to_s3, _Frame,
+            CostRawWriteError,
+            _flush_cost_rows_to_s3,
+            _Frame,
         )
 
         # Construct a frame with one row and call the flush helper directly
@@ -872,7 +885,7 @@ class TestJsonlFlushHardFail:
             "PutObject",
         )
 
-        from datetime import datetime, timezone
+        from datetime import datetime
         frame = _Frame(
             agent_id="ic_cio",
             sector_team_id=None,
@@ -880,7 +893,7 @@ class TestJsonlFlushHardFail:
             run_type="weekly_research",
             prompt=None,
             run_id="2026-05-02",
-            enter_time=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            enter_time=datetime(2026, 5, 2, tzinfo=UTC),
             per_call_rows=[{
                 "schema_version": 1,
                 "timestamp": "2026-05-02T13:30:00+00:00",
@@ -897,11 +910,12 @@ class TestJsonlFlushHardFail:
 
 class TestS3KeyBuilder:
     def test_key_format(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from graph.llm_cost_tracker import _build_cost_raw_s3_key
 
         key = _build_cost_raw_s3_key(
-            capture_dt=datetime(2026, 5, 2, 13, 30, tzinfo=timezone.utc),
+            capture_dt=datetime(2026, 5, 2, 13, 30, tzinfo=UTC),
             run_id="2026-05-02",
             agent_id="sector_team:technology",
         )
@@ -955,7 +969,9 @@ class TestRunBudgetCeilingResolution:
 class TestRunCostAccumulator:
     def test_single_frame_accumulates(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, get_run_cost,
+            CostTelemetryCallback,
+            get_run_cost,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -969,7 +985,9 @@ class TestRunCostAccumulator:
 
     def test_multiple_frames_one_run_sum(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, get_run_cost,
+            CostTelemetryCallback,
+            get_run_cost,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -988,7 +1006,9 @@ class TestRunCostAccumulator:
 
     def test_separate_runs_isolated(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost, get_run_cost,
+            CostTelemetryCallback,
+            get_run_cost,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1014,7 +1034,8 @@ class TestRunBudgetCeilingEnforcement:
     def test_under_ceiling_does_not_raise(self, monkeypatch, patched_pricing_path):
         """1M input tokens at $1/M = $1.00 < $5 ceiling → no raise."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "5.00")
@@ -1031,7 +1052,9 @@ class TestRunBudgetCeilingEnforcement:
     ):
         """10M input tokens × $1/M = $10 > $5 ceiling → raise."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+            CostTelemetryCallback,
+            RunBudgetExceededError,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "5.00")
@@ -1053,7 +1076,9 @@ class TestRunBudgetCeilingEnforcement:
         """Three frames each $0.50 < $1 ceiling individually; cumulative
         $1.50 > $1 trips the ceiling on the 3rd frame's exit."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+            CostTelemetryCallback,
+            RunBudgetExceededError,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "1.00")
@@ -1084,7 +1109,8 @@ class TestRunBudgetCeilingEnforcement:
     ):
         """ALPHA_ENGINE_RUN_BUDGET_USD=0 turns off enforcement."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "0")
@@ -1102,7 +1128,8 @@ class TestRunBudgetCeilingEnforcement:
         check is skipped (the diagnostic cost-on-frame is still computed
         and stashed)."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "0.01")  # tiny
@@ -1121,8 +1148,11 @@ class TestRunBudgetCeilingEnforcement:
         so operators can diagnose the offending calls on S3."""
         import boto3
         from moto import mock_aws
+
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+            CostTelemetryCallback,
+            RunBudgetExceededError,
+            track_llm_cost,
         )
 
         monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "1.00")
@@ -1202,6 +1232,7 @@ class TestFrameExitToleratesMissingPriceCard:
 
     def test_unknown_model_does_not_raise(self, monkeypatch, tmp_path):
         import yaml
+
         from graph import llm_cost_tracker
         from graph.llm_cost_tracker import track_llm_cost
 
@@ -1235,6 +1266,7 @@ class TestSnapshotSuffixMatchesFamilyCard:
 
     def test_snapshot_pinned_haiku_matches_family_card(self, monkeypatch, tmp_path):
         import yaml
+
         from graph import llm_cost_tracker
         from graph.llm_cost_tracker import _load_price_table, _normalize_model_for_pricing
 
@@ -1254,13 +1286,13 @@ class TestSnapshotSuffixMatchesFamilyCard:
         )
         llm_cost_tracker._reset_price_table_for_tests()
 
-        from datetime import datetime, timezone
+        from datetime import datetime
         table = _load_price_table()
         snapshot_name = "claude-haiku-4-5-20251001"
         family_name = _normalize_model_for_pricing(snapshot_name)
         # The family lookup MUST succeed — locks the contract that
         # normalization yields a string the table actually has a card for.
-        card = table.get(family_name, datetime(2026, 5, 2, tzinfo=timezone.utc))
+        card = table.get(family_name, datetime(2026, 5, 2, tzinfo=UTC))
         assert card.model_name == "claude-haiku-4-5"
 
 
@@ -1327,7 +1359,8 @@ class TestServerToolUseCapture:
 
     def test_frame_accumulates_tool_request_counts(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1348,7 +1381,8 @@ class TestServerToolUseCapture:
 
     def test_per_call_row_carries_tool_request_counts(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1366,7 +1400,9 @@ class TestServerToolUseCapture:
 
     def test_metadata_stashes_tool_request_counts(self, patched_pricing_path):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1386,7 +1422,9 @@ class TestServerToolUseCapture:
         """A frame with 100 web_search requests should land 100 × $10/1k
         = $1.00 of tool fee in addition to the token cost."""
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1413,7 +1451,9 @@ class TestServerToolUseCapture:
         """
         from graph import llm_cost_tracker
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, pop_metadata_for, track_llm_cost,
+            CostTelemetryCallback,
+            pop_metadata_for,
+            track_llm_cost,
         )
 
         monkeypatch.setattr(
@@ -1444,7 +1484,8 @@ class TestPerCallRowToolFeePricing:
         self, mocked_s3, capture_enabled, patched_pricing_path,
     ):
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, track_llm_cost,
+            CostTelemetryCallback,
+            track_llm_cost,
         )
 
         cb = CostTelemetryCallback()
@@ -1677,7 +1718,9 @@ class TestSftCapture:
     ):
         from graph import llm_cost_tracker
         from graph.llm_cost_tracker import (
-            CostTelemetryCallback, SftCaptureWriteError, track_llm_cost,
+            CostTelemetryCallback,
+            SftCaptureWriteError,
+            track_llm_cost,
         )
 
         # Neutralize the cost flush (it runs first at frame exit) so we
@@ -1702,12 +1745,12 @@ class TestSftCapture:
                 cb.on_llm_end(_make_ai_response(input_tokens=1, output_tokens=1), run_id="c")
 
     def test_sft_key_format(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from graph.llm_cost_tracker import _build_sft_raw_s3_key
 
         key = _build_sft_raw_s3_key(
-            capture_dt=datetime(2026, 6, 20, tzinfo=timezone.utc),
+            capture_dt=datetime(2026, 6, 20, tzinfo=UTC),
             run_id="2026-06-20",
             agent_id="sector_team:technology",
         )

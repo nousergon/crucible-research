@@ -11,15 +11,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Reuse the contract field sets the champion is pinned to — the whole point is
 # that a challenger producer is contract-identical, only its BELIEF differs.
-from tests.test_signals_producer_contract import (  # noqa: E402
-    _REQUIRED_PER_ITEM,
-    _REQUIRED_TOP_LEVEL,
-)
 from producers.no_agent import build_no_agent_signals  # noqa: E402
 from producers.registry import (  # noqa: E402
     RESEARCH_PRODUCERS,
-    champion_producer,
     challenger_producers,
+    champion_producer,
+)
+from tests.test_signals_producer_contract import (  # noqa: E402
+    _REQUIRED_PER_ITEM,
+    _REQUIRED_TOP_LEVEL,
 )
 
 

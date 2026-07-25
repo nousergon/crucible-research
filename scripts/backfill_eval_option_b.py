@@ -40,7 +40,7 @@ import logging
 import sys
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +49,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import boto3
-from botocore.exceptions import ClientError
+import boto3  # noqa: E402
+from botocore.exceptions import ClientError  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     s3 = boto3.client("s3")
-    run_time = datetime.now(timezone.utc).isoformat()
+    run_time = datetime.now(UTC).isoformat()
 
     if not args.dry_run:
         # Pre-write backup snapshot — copies the entire _eval/ corpus
