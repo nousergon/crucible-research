@@ -31,7 +31,7 @@ pandas~=2.2
 numpy~=1.26
 requests~=2.34
 feedparser~=6.0.11
-beautifulsoup4~=4.12
+beautifulsoup4~=4.15
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
 # resolution could read local files under the old resolve_entities=True
 # default; lxml 6.1.0 flips the default to resolve_entities='internal').
