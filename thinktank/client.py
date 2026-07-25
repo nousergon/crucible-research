@@ -62,7 +62,7 @@ _RETRY_BASE_DELAY_S = 2.0
 
 
 def _backoff_sleep(base_delay: float, attempt: int) -> None:
-    time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))
+    time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))  # noqa: S311
 
 
 def _transient_provider_errors() -> tuple[type[Exception], ...]:
