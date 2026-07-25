@@ -30,6 +30,7 @@ FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 FUNCTION_OPENROUTER_SHADOW="alpha-engine-research-openrouter-shadow"
+FUNCTION_PERTURBATION_BATTERY="alpha-engine-research-perturbation-battery"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -403,16 +404,25 @@ build_and_deploy_main() {
 
   # Handler returns {"status": "OK|SKIPPED|ERROR"} or {"statusCode": 500} on env var failure.
   # Accept OK or SKIPPED (wrong_time / already_run / market_holiday are expected).
+  # On any non-pass, SURFACE THE REAL DETAIL rather than a bare 'UNKNOWN':
+  # the handler's ERROR return carries the message under ``error`` (outer
+  # except) — NOT ``errorMessage`` — and the 500 env path under ``body``;
+  # reading only ``errorMessage`` collapsed every genuine canary failure to
+  # an opaque 'UNKNOWN', making the rollback un-diagnosable (2026-07-21
+  # incident). ``errorMessage`` is still consulted for a Lambda-runtime
+  # unhandled crash, and the raw payload is the last-resort fallback.
   CANARY_STATUS=$(python3 -c "
 import json, sys
 d = json.load(open('$CANARY_OUT'))
 s = d.get('status', '')
 if s in ('OK', 'SKIPPED'):
     print(s)
-elif d.get('statusCode') == 500:
-    print('ENV_ERROR')
 else:
-    print(d.get('errorMessage', 'UNKNOWN'))
+    detail = (d.get('error') or d.get('body') or d.get('errorMessage')
+              or d.get('reason') or json.dumps(d))
+    detail = ' '.join(str(detail).split())[:300]
+    label = 'ENV_ERROR' if d.get('statusCode') == 500 else (s or 'UNKNOWN')
+    print(f'{label}: {detail}')
 " 2>/dev/null || echo "PARSE_ERROR")
   rm -f "$CANARY_OUT"
 
@@ -877,6 +887,20 @@ deploy_openrouter_shadow() {
   _deploy_image_shared_lambda "$FUNCTION_OPENROUTER_SHADOW" "openrouter_shadow_handler" 900 1024
 }
 
+# Weekly judge-sensitivity scorecard Lambda — config#752 Phase B (Brian's
+# 2026-07-22 operator ruling: provision this + the SF wiring). Shared image
+# with the main runner — specifically the eval-judge CMD family, because the
+# synthetic-perturbation battery makes live Anthropic calls (the no-LLM
+# eval-rolling-mean Lambda can't host it); CMD override sets the entry to
+# perturbation_battery_handler.handler. Timeout 900s (Lambda max) + memory
+# 1024MB match deploy_eval_judge — the closest analog workload (reference +
+# N corrupted variants, each judged). Invoked by the Saturday SF's
+# PerturbationBattery state (nousergon-data infrastructure/step_function.json),
+# sequenced alongside the other eval-judge-chain observability stages.
+deploy_perturbation_battery() {
+  _deploy_image_shared_lambda "$FUNCTION_PERTURBATION_BATTERY" "perturbation_battery_handler" 900 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -891,9 +915,10 @@ case "$TARGET" in
   thinktank)             deploy_thinktank ;;
   signals_envelope)      deploy_signals_envelope ;;
   openrouter_shadow)     deploy_openrouter_shadow ;;
+  perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_openrouter_shadow ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|openrouter_shadow|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
 esac
 
 echo ""

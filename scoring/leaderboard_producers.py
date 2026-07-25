@@ -345,14 +345,20 @@ def build_producer_leaderboard(
             # No kind=="champion" producer registered (config-I2993:
             # agentic_sector_teams retired 2026-07-12, no successor champion
             # spec registered yet). This is an honest, expected state post-
-            # retirement, not a failure — WARN and return a distinguishable
-            # status rather than raising or fabricating a champion row.
+            # retirement, not a failure — WARN and PROCEED (alpha-engine
+            # -config-I2998): score_leaderboard degrades gracefully to
+            # champion-free metrics (realized_rank_ic, topn_alpha_vs_benchmark)
+            # for every challenger rather than refusing to write the artifact
+            # at all. A live champion_promotion.py consumer (crucible
+            # -backtester) needs THIS leaderboard to keep existing even with
+            # no registered champion — silently writing nothing here was
+            # exactly the "both arms simultaneously no-contest" defect
+            # I2998 was filed to close.
             logger.warning(
                 "[leaderboard] no producer registered kind==\"champion\" in "
-                "RESEARCH_PRODUCERS — skipping producer leaderboard for %s "
-                "(config-I2993).", date_str,
+                "RESEARCH_PRODUCERS — scoring producer leaderboard for %s "
+                "with champion-free metrics only (config-I2993/I2998).", date_str,
             )
-            return {"status": "no_champion_registered"}
         realized = _resolve_realized_returns(s3, bucket, dates, horizon_days)
         leaderboard = score_leaderboard(
             champion, challengers, realized, top_n=top_n, horizon_days=horizon_days,

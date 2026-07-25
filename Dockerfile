@@ -42,7 +42,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
@@ -142,6 +142,16 @@ COPY lambda/aggregate_costs_handler.py ${LAMBDA_TASK_ROOT}/aggregate_costs_handl
 # runs its internal scanner. Phase 5 (later) cuts Research over to read
 # the artifact + retires the internal scanner.
 COPY lambda/scanner_handler.py ${LAMBDA_TASK_ROOT}/scanner_handler.py
+
+# Weekly judge-sensitivity scorecard Lambda (Phase B, config#752) — same
+# image, CMD override to ["perturbation_battery_handler.handler"]. Runs the
+# synthetic-perturbation battery on the Saturday SF cadence and writes
+# decision_artifacts/_perturbation/_report/{date,latest}/sensitivity.{json,md}
+# for the backtester evaluator email. Needs the eval-judge image because the
+# battery makes live Anthropic calls (the no-LLM rolling-mean Lambda can't host
+# it). Provisioned in AWS as alpha-engine-research-perturbation-battery with a
+# --image-config CMD override, like the other eval-judge handlers above.
+COPY lambda/perturbation_battery_handler.py ${LAMBDA_TASK_ROOT}/perturbation_battery_handler.py
 
 # Daily think-tank Lambda — same image, CMD override to
 # ["thinktank_handler.handler"]. Runs `thinktank.run.run_daily()` on the

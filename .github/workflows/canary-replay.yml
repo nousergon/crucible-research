@@ -34,17 +34,6 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
 
-# One in-flight canary per PR: iterative pushes to an actively-developed
-# branch superseded each other 29 times on 2026-07-16 alone (21 on this
-# repo), and every launched replay ran the data probe's full-corpus pgvector
-# read against production Neon — the amplification that exhausted the
-# project's monthly data-transfer quota (config-I2780). The newest head is
-# the only one whose verdict matters; cancel the stale poll and let the
-# dispatcher's server-side dedupe decline the stale launch.
-concurrency:
-  group: canary-replay-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   id-token: write
   contents: read
@@ -87,6 +76,28 @@ jobs:
   canary:
     needs: label
     if: needs.label.outputs.weekly_critical == 'true' || contains(github.event.pull_request.labels.*.name, 'canary:replay')
+    # One in-flight canary DISPATCH per PR: iterative pushes to an
+    # actively-developed branch superseded each other 29 times on
+    # 2026-07-16 alone (21 on this repo), and every launched replay ran the
+    # data probe's full-corpus pgvector read against production Neon — the
+    # amplification that exhausted the project's monthly data-transfer
+    # quota (config-I2780). The newest head is the only one whose verdict
+    # matters; cancel the stale poll and let the dispatcher's server-side
+    # dedupe decline the stale launch.
+    #
+    # Scoped to THIS job, not the workflow as a whole (config#2570 residual
+    # — a workflow-level group let an unrelated `labeled` event's run (which
+    # always skips both jobs here, guarded above) CANCEL an already-running
+    # `synchronize` run's `canary` job outright, before it could converge to
+    # its own correct SKIPPED conclusion — cancellation fired regardless of
+    # what the labeled-run's own `if:` guards decided, since GitHub claims
+    # the concurrency group at run start, before job-level `if:` is
+    # evaluated. The cheap, always-fast `label` job never needs to
+    # participate in this group; only `canary`'s expensive dispatch+poll
+    # does).
+    concurrency:
+      group: canary-replay-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

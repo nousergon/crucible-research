@@ -103,9 +103,12 @@ def test_launcher_stages_private_research_config_for_the_box():
     the prompt_loader/config.py HOME-sibling search path, with deploy.sh
     parity hard-fails on both sides (config#1687 pre-rehearsal review)."""
     sh = _SCRIPT.read_text()
-    # Dispatcher side: source check hard-fails without prompts, then stages
-    # ONE tarball (single-key GetObject on the spot; no ListBucket needed).
-    assert 'RESEARCH_CONFIG_SRC="/home/ec2-user/alpha-engine-config/research"' in sh
+    # Dispatcher side: source resolution is package-first (config#3066 —
+    # mirrors deploy.sh's experiments/<id>/research before legacy research/),
+    # source check hard-fails without prompts, then stages ONE tarball
+    # (single-key GetObject on the spot; no ListBucket needed).
+    assert 'experiments/${ALPHA_ENGINE_EXPERIMENT_ID}/research' in sh
+    assert '"/home/ec2-user/alpha-engine-config"' in sh
     assert "research prompts not found" in sh
     assert "research-config.tgz" in sh
     # Box side: extract to search path #1 and verify prompts landed.

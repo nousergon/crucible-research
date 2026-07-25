@@ -306,3 +306,94 @@ class TestRaiseOnFailure:
 
         text = _HANDLER_PATH.read_text(encoding="utf-8")
         assert not re.search(r'return\s*\{\s*"status":\s*"ERROR"', text)
+
+
+class TestSecondaryArtifacts:
+    """config-I3290 port: research_consolidated_morning + scanner_universe_
+    trajectory, written as post-steps gated to a real production run,
+    fail-soft (must never sink the primary signals.json deliverable)."""
+
+    def test_production_target_writes_morning_brief_and_trajectory(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief") as build_brief, \
+             patch("scoring.morning_brief.write_morning_brief") as write_brief, \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory") as write_traj:
+            handler_mod.handler({"run_date": "2026-07-14", "target": "production"}, None)
+
+        build_brief.assert_called_once_with(_envelope())
+        write_brief.assert_called_once()
+        assert write_brief.call_args.args[0] == "2026-07-14"
+        write_traj.assert_called_once()
+        assert write_traj.call_args.args[0] == "2026-07-14"
+
+    def test_shadow_target_skips_both(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")), \
+             patch("scoring.morning_brief.build_morning_brief_markdown") as build_brief, \
+             patch("scoring.morning_brief.write_morning_brief") as write_brief, \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory") as write_traj:
+            handler_mod.handler({"run_date": "2026-07-14", "target": "shadow"}, None)
+
+        build_brief.assert_not_called()
+        write_brief.assert_not_called()
+        write_traj.assert_not_called()
+
+    def test_morning_brief_failure_is_fail_soft(self, handler_mod):
+        """A brief-write failure must not propagate — signals.json is
+        already persisted by this point."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+             ), \
+             patch(
+                 "scoring.morning_brief.build_morning_brief_markdown",
+                 side_effect=RuntimeError("boom"),
+             ), \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory"), \
+             patch("observe_alerts.publish_observe_alert") as alert:
+            result = handler_mod.handler(
+                {"run_date": "2026-07-14", "target": "production"}, None,
+            )
+
+        assert result["status"] == "OK"
+        assert result["dated_key"] == "signals/2026-07-14/signals.json"
+        alert.assert_called_once()
+
+    def test_trajectory_failure_is_fail_soft(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+             ), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief"), \
+             patch(
+                 "scoring.attractiveness_trajectory.compute_and_write_trajectory",
+                 side_effect=RuntimeError("boom"),
+             ), \
+             patch("observe_alerts.publish_observe_alert") as alert:
+            result = handler_mod.handler(
+                {"run_date": "2026-07-14", "target": "production"}, None,
+            )
+
+        assert result["status"] == "OK"
+        assert result["dated_key"] == "signals/2026-07-14/signals.json"
+        alert.assert_called_once()

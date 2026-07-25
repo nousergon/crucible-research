@@ -883,6 +883,17 @@ def _call_openrouter_judge_llm(
     client = OpenAI(
         base_url=spec.resolved_base_url(),
         api_key=_resolve_openrouter_api_key(api_key),
+        # Same 180s convention as thinktank/client.py's OpenAI construction.
+        # max_retries=0: the SDK's own retry-on-transport-error would stack
+        # underneath this function's own bounded attempt loop (max_retries
+        # attempts, above) and silently blow past the "3 full model calls"
+        # worst-case-latency bound documented on MAX_OPENROUTER_JUDGE_RETRIES.
+        # Without an explicit timeout, a hung OpenRouter response blocks on
+        # the SDK's 600s default — past the judge-perturbation-smoke
+        # workflow's 8-minute job timeout — killing the job with zero
+        # diagnostic output instead of a clear TimeoutError.
+        timeout=180.0,
+        max_retries=0,
     )
 
     tool_schema = _build_rubric_tool_spec()
