@@ -13,6 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import uuid
+from datetime import date
 
 from langchain_core.tools import tool
 
@@ -20,6 +23,76 @@ log = logging.getLogger(__name__)
 
 _S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _MARKET_DATA_PREFIX = "market_data/"
+
+# ── RAG retrieval label capture (config-I736) ─────────────────────────────
+# Every query_filings() call writes its retrieval results to S3 so the
+# domain-finetune workstream (I736) can mine implicit-feedback labels:
+#   positive = chunks cited in downstream theses
+#   negative = retrieved but never cited
+# Gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED (same gate as thinktank
+# capture).  Write failures are logged + swallowed — never crash the analyst.
+
+_RAG_CAPTURE_ENABLED = os.environ.get(
+    "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", ""
+).lower() in ("1", "true", "yes")
+
+
+def _capture_rag_retrieval(
+    ticker: str,
+    query: str,
+    doc_types: list[str],
+    method: str,
+    vector_weight: float,
+    top_k: int,
+    rerank: str,
+    results: list,
+) -> None:
+    """Write retrieval results to S3 for downstream label mining (I736)."""
+    if not _RAG_CAPTURE_ENABLED:
+        return
+    try:
+        import boto3
+
+        trading_day = date.today().isoformat()
+        run_id = uuid.uuid4().hex[:12]
+        key = (
+            f"decision_artifacts/_rag_retrieval/{trading_day}/"
+            f"{ticker}/{run_id}.json"
+        )
+        record = {
+            "ticker": ticker,
+            "query": query,
+            "doc_types": doc_types,
+            "method": method,
+            "vector_weight": vector_weight,
+            "top_k": top_k,
+            "rerank": rerank,
+            "captured_at_utc": time.time(),
+            "chunks": [
+                {
+                    "chunk_id": r.chunk_id,
+                    "doc_type": getattr(r, "doc_type", None),
+                    "filed_date": str(getattr(r, "filed_date", "")) if getattr(r, "filed_date", None) else None,
+                    "section_label": getattr(r, "section_label", None),
+                    "content_preview": getattr(r, "content", "")[:512],
+                    "vector_score": r.vector_score,
+                    "keyword_score": r.keyword_score,
+                    "combined_score": r.combined_score,
+                    "rerank_score": getattr(r, "rerank_score", None),
+                }
+                for r in results
+            ],
+        }
+        s3 = boto3.client("s3")
+        s3.put_object(
+            Bucket=_S3_BUCKET,
+            Key=key,
+            Body=json.dumps(record, default=str),
+            ContentType="application/json",
+        )
+        log.debug("RAG capture: wrote %d chunks to s3://%s/%s", len(results), _S3_BUCKET, key)
+    except Exception:
+        log.warning("RAG capture: S3 write failed (non-fatal)", exc_info=True)
 
 # Rerank configuration (L1303 ROADMAP — alpha-engine-lib v0.11.0 primitive).
 # Default empty string ≡ disabled, preserving the hybrid-only path
@@ -390,6 +463,17 @@ def create_qual_tools(context: dict) -> list:
                     }
                     for r in results
                 ],
+            )
+            # config-I736: capture retrieval results for domain-finetune label mining
+            _capture_rag_retrieval(
+                ticker=ticker,
+                query=query,
+                doc_types=[d.strip() for d in doc_types.split(",")],
+                method="hybrid",
+                vector_weight=0.7,
+                top_k=8,
+                rerank=_RAG_RERANK or "none",
+                results=results,
             )
             formatted = []
             for r in results:
