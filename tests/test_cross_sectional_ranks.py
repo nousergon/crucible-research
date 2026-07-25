@@ -15,8 +15,6 @@ Pins:
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from scoring.aggregator import assign_cross_sectional_ranks

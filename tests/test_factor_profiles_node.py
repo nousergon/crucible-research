@@ -29,7 +29,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GRAPH_PATH = REPO_ROOT / "graph" / "research_graph.py"
 

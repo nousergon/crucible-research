@@ -1,12 +1,12 @@
 """Tests for trajectory validation constants and logic."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from evals.trajectory import (
-    REQUIRED_NODES,
-    ORDERING_CONSTRAINTS,
     EXPECTED_SECTOR_TEAM_COUNT,
+    ORDERING_CONSTRAINTS,
+    REQUIRED_NODES,
     validate_trajectory,
 )
 
@@ -61,8 +61,8 @@ def _stub_run(trace_id: str = "trace-1") -> MagicMock:
     """Stub root run with end_time so duration computes cleanly."""
     run = MagicMock()
     run.trace_id = trace_id
-    run.start_time = datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
-    run.end_time = datetime(2026, 4, 27, 12, 5, 0, tzinfo=timezone.utc)
+    run.start_time = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
+    run.end_time = datetime(2026, 4, 27, 12, 5, 0, tzinfo=UTC)
     return run
 
 
@@ -70,7 +70,7 @@ def _stub_child(name: str, *, ts_offset_s: float = 0.0) -> MagicMock:
     child = MagicMock()
     child.name = name
     child.start_time = datetime(
-        2026, 4, 27, 12, 1, 0, tzinfo=timezone.utc,
+        2026, 4, 27, 12, 1, 0, tzinfo=UTC,
     ).replace(second=int(ts_offset_s))
     return child
 

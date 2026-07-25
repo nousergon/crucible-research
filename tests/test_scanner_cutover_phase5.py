@@ -15,7 +15,6 @@ import json
 
 import pytest
 
-
 # ── _resolve_agent_input_set ────────────────────────────────────────────────
 
 class _FakeAM:
@@ -174,6 +173,7 @@ def test_sector_team_screens_agent_input_set_not_full_universe():
     tests) — guards against a revert to ctx.scanner_universe.
     """
     from pathlib import Path
+
     from agents.sector_teams.sector_team import SectorTeamContext
 
     src = (Path(__file__).resolve().parent.parent

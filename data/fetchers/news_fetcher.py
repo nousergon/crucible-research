@@ -8,8 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import feedparser
 import requests
@@ -75,16 +74,16 @@ def fetch_yahoo_news(
         logger.warning("Yahoo RSS parse failed for %s: %s", ticker, e)
         return []
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     articles = []
 
     for entry in feed.entries[:max_articles]:
         try:
             pub = entry.get("published_parsed") or entry.get("updated_parsed")
             if pub:
-                pub_dt = datetime(*pub[:6], tzinfo=timezone.utc)
+                pub_dt = datetime(*pub[:6], tzinfo=UTC)
             else:
-                pub_dt = datetime.now(timezone.utc)
+                pub_dt = datetime.now(UTC)
 
             if pub_dt < cutoff:
                 continue
@@ -118,8 +117,8 @@ def fetch_edgar_8k(ticker: str, days: int = 2) -> list[dict]:
     Fetch recent 8-K filings from SEC EDGAR for a ticker.
     Returns list of dicts: {title, date, url, filing_type}
     """
-    end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    start_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    end_date = datetime.now(UTC).strftime("%Y-%m-%d")
+    start_date = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
 
     url = _EDGAR_8K_URL.format(ticker=ticker, start_date=start_date, end_date=end_date)
     try:

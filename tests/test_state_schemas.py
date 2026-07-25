@@ -30,7 +30,6 @@ from graph.state_schemas import (
     ToolCall,
 )
 
-
 # ── ToolCall ──────────────────────────────────────────────────────────────
 
 
@@ -573,7 +572,8 @@ class TestJointFinalizationOutput:
 
     def test_full(self):
         from graph.state_schemas import (
-            JointFinalizationDecision, JointFinalizationOutput,
+            JointFinalizationDecision,
+            JointFinalizationOutput,
         )
         j = JointFinalizationOutput(
             selected_decisions=[
@@ -747,6 +747,7 @@ class TestJointFinalizationOutputStringDefense:
         whose contents are valid JSON for the expected list."""
         import json
         import logging
+
         from graph.state_schemas import JointFinalizationOutput
 
         payload = json.dumps([
@@ -778,6 +779,7 @@ class TestJointFinalizationOutputStringDefense:
         normal Pydantic list-type error — failure mode stays loud."""
         import pytest
         from pydantic import ValidationError
+
         from graph.state_schemas import JointFinalizationOutput
 
         with pytest.raises(ValidationError, match="list_type|valid list"):
@@ -791,6 +793,7 @@ class TestJointFinalizationOutputStringDefense:
         to silently rescue — list-type error fires normally."""
         import pytest
         from pydantic import ValidationError
+
         from graph.state_schemas import JointFinalizationOutput
 
         with pytest.raises(ValidationError, match="list_type|valid list"):
@@ -818,6 +821,7 @@ class TestJointFinalizationOutputStringDefense:
         fall-through behavior can't regress to a silent rescue."""
         import pytest
         from pydantic import ValidationError
+
         from graph.state_schemas import JointFinalizationOutput
 
         truncated = (
@@ -836,6 +840,7 @@ class TestJointFinalizationOutputStringDefense:
         spurious extra closing braces. Should still raise loud."""
         import pytest
         from pydantic import ValidationError
+
         from graph.state_schemas import JointFinalizationOutput
 
         malformed = '[\n  {\n    "ticker": "X",\n    "rationale": null\n}\n}\n'

@@ -87,8 +87,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
-
-from nousergon_lib.contracts import ContractViolation, conformance_errors, validate
+from nousergon_lib.contracts import ContractViolation, conformance_errors
 
 from scoring.signals_envelope import (
     build_sector_modifiers,
@@ -216,7 +215,7 @@ def test_sector_modifiers_neutral_for_every_board_sector():
     board = _sample_board()
     sectors = sorted({s["sector"] for s in board["stocks"]})
     modifiers = build_sector_modifiers(sectors)
-    assert modifiers == {s: 1.0 for s in sectors}
+    assert modifiers == dict.fromkeys(sectors, 1.0)
 
 
 def test_universe_entries_are_neutral_and_carry_real_score():

@@ -42,7 +42,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.88.0" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
@@ -166,5 +166,11 @@ COPY lambda/thinktank_handler.py ${LAMBDA_TASK_ROOT}/thinktank_handler.py
 # no-agent producer of the executor-facing signals.json (universe board +
 # regime substrate), invoked by the weekly SF's SignalsEnvelope state.
 COPY lambda/signals_envelope_handler.py ${LAMBDA_TASK_ROOT}/signals_envelope_handler.py
+
+# OpenRouter shadow judge Lambda (crucible-research#470) — same shared-image
+# pattern, deploy.sh sets CMD ["openrouter_shadow_handler.handler"]. Thin
+# no-agent wrapper around evals.openrouter_shadow.run_shadow_judge_over_date,
+# invoked by the grooming SF for shadow-schedule comparison runs.
+COPY lambda/openrouter_shadow_handler.py ${LAMBDA_TASK_ROOT}/openrouter_shadow_handler.py
 
 CMD ["handler.handler"]

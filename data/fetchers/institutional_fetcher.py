@@ -22,7 +22,6 @@ import logging
 import time
 
 from nousergon_lib.secrets import get_secret
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ def fetch_institutional_accumulation(
         return {t: _empty_result() for t in tickers}
 
     try:
-        from edgar import set_identity, Company
+        from edgar import Company, set_identity
         set_identity(identity)
     except ImportError:
         logger.warning("edgartools not installed — skipping 13F institutional data")

@@ -42,7 +42,7 @@ import logging
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Make ``archive`` importable when invoked as `python scripts/...` from
@@ -52,8 +52,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import boto3
-from botocore.exceptions import ClientError
+import boto3  # noqa: E402
+from botocore.exceptions import ClientError  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -165,10 +165,13 @@ def backfill_one_row(
     if dry_run:
         return True
 
+    # `col` is always one of 5 hardcoded literal column names from the `updates`
+    # list built above (quant_score/qual_score/conviction/sector_modifier/
+    # market_regime) — never context/row-derived; bound values travel via `values`.
     set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
     values = [v for _, v in updates] + [symbol, score_date]
     conn.execute(
-        f"UPDATE score_performance SET {set_clause} "
+        f"UPDATE score_performance SET {set_clause} "  # noqa: S608
         f"WHERE symbol = ? AND score_date = ?",
         values,
     )
@@ -243,7 +246,7 @@ def main() -> int:
     args = p.parse_args()
 
     s3 = boto3.client("s3")
-    run_time = datetime.now(timezone.utc).isoformat()
+    run_time = datetime.now(UTC).isoformat()
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
         local_db = tf.name

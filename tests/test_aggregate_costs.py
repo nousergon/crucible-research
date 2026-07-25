@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date, datetime, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import date
 
 import boto3
 import pandas as pd
 import pytest
 from moto import mock_aws
-
 
 _BUCKET = "alpha-engine-research"
 
@@ -210,7 +209,7 @@ class TestEmptyDay:
         assert summary is None
 
     def test_cli_returns_nonzero_on_empty_day(self, s3, capsys):
-        from scripts.aggregate_costs import main
+        pass
         # Note: CLI uses default boto3.client; without dependency injection
         # we'd need to mock that. Skip the CLI-level empty-day assertion;
         # logic-level empty-day is covered above.
@@ -466,8 +465,9 @@ class TestPerAgentCwMetrics:
     """
 
     def test_emits_weekly_cost_per_agent(self, s3):
-        from scripts.aggregate_costs import aggregate_day
         from unittest.mock import MagicMock
+
+        from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
         _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl", [
@@ -497,8 +497,9 @@ class TestPerAgentCwMetrics:
         assert weekly_costs[(("agent_id", "executor:eod_narrative"),)] == pytest.approx(0.0045)
 
     def test_cache_hit_ratio_metric_emitted_when_cache_activity(self, s3):
-        from scripts.aggregate_costs import aggregate_day
         from unittest.mock import MagicMock
+
+        from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
         row = _make_row(
@@ -517,8 +518,9 @@ class TestPerAgentCwMetrics:
         assert cache_hit["Unit"] == "Percent"
 
     def test_tool_fee_requests_metric_per_tool(self, s3):
-        from scripts.aggregate_costs import aggregate_day
         from unittest.mock import MagicMock
+
+        from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
         row = _make_row(
@@ -545,8 +547,9 @@ class TestPerAgentCwMetrics:
         is the observability layer ON TOP of the parquet write. CW
         failure must NOT take down the parquet (which IS the load-
         bearing artifact)."""
-        from scripts.aggregate_costs import aggregate_day
         from unittest.mock import MagicMock
+
+        from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
         cw.put_metric_data.side_effect = RuntimeError("ThrottlingException")
@@ -568,8 +571,9 @@ class TestPerAgentCwMetrics:
     def test_empty_df_skips_cw_emit(self, s3):
         """Zero-row partition → no metric emit (avoids empty put_metric_data
         calls that CloudWatch would reject anyway)."""
-        from scripts.aggregate_costs import aggregate_day
         from unittest.mock import MagicMock
+
+        from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
         # No JSONL files → aggregate_day returns None before emit.

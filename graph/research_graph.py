@@ -48,67 +48,96 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Annotated, Any, Callable, NamedTuple, Optional, TypedDict
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Annotated, Any, NamedTuple, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
+from nousergon_lib.decision_capture import (
+    DecisionCaptureWriteError,
+    FullPromptContext,
+    ModelMetadata,
+    capture_decision,
+)
 from pydantic import ValidationError
 
+from agents.investment_committee.ic_cio import (
+    _PROMPT_DEBLENDED,
+    _PROMPT_DEFAULT,
+    build_sector_neutral_quality_map,
+    run_cio,
+    run_cio_with_reflection,
+)
+from agents.macro_agent import run_macro_agent_with_reflection
+from agents.prompt_loader import load_prompt
+from agents.sector_teams.sector_team import SectorTeamContext, run_sector_team
+from agents.sector_teams.team_config import (
+    ALL_TEAM_IDS,
+    SECTOR_TEAM_MAP,
+    compute_team_slots,
+    get_team_tickers,
+)
+from archive.manager import ArchiveManager
+from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 from config import (
+    ADAPTIVE_SLOT_ALLOCATION_ENABLED,
+    ATTRACTIVENESS_FEED_ENABLED,
+    ATTRACTIVENESS_FEED_TOP_N,
+    CIO_CRITIC_ENABLED,
+    CIO_DEBLENDED_ORCHESTRATION,
+    CIO_FORCE_FILL_CONVICTION_FLOOR,
     CIO_MAX_NEW_ENTRANTS,
     CIO_MIN_NEW_ENTRANTS,
-    CIO_FORCE_FILL_CONVICTION_FLOOR,
     CIO_NEW_ENTRANT_ALERT_FLOOR,
-    CIO_DEBLENDED_ORCHESTRATION,
-    ADAPTIVE_SLOT_ALLOCATION_ENABLED,
-    CIO_CRITIC_ENABLED,
+    FACTOR_BLEND_ENABLED,
+    FACTOR_BLEND_WEIGHT,
+    FACTOR_QUALITY_FLOOR_ENABLED,
+    FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
+    FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
+    FOCUS_LIST_DEFAULT_TEAM_SIZE,
+    FOCUS_LIST_GATING_ENABLED,
+    FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES,
+    MACRO_MAX_SHIFT_POINTS,
+    MACRO_MODIFIER_RANGE,
+    MACRO_OVERLAY_ENABLED,
+    MAX_QUARANTINED_TICKERS,
+    NEUTRALIZATION_FACTORS,
+    NEUTRALIZATION_LIVE_ENABLED,
+    PILLAR_COMPOSITE_LEGACY_BLEND,
+    PILLAR_COMPOSITE_WEIGHTS,
+    PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
     SECTOR_COHERENCE_GATE_ENABLED,
     SECTOR_COHERENCE_UW_MIN_SCORE,
-    MAX_QUARANTINED_TICKERS,
-    FACTOR_BLEND_ENABLED,
-    FACTOR_BLEND_WEIGHT,
     get_factor_blend_regime_weights,
-    ATTRACTIVENESS_FEED_ENABLED,
-    ATTRACTIVENESS_FEED_TOP_N,
-    FACTOR_QUALITY_FLOOR_ENABLED,
-    FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
-    FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
-    FOCUS_LIST_DEFAULT_TEAM_SIZE,
-    FOCUS_LIST_GATING_ENABLED,
-    FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES,
-    PILLAR_COMPOSITE_WEIGHTS,
-    PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT,
-    PILLAR_COMPOSITE_LEGACY_BLEND,
-    MACRO_OVERLAY_ENABLED,
-    MACRO_MAX_SHIFT_POINTS,
-    MACRO_MODIFIER_RANGE,
-    NEUTRALIZATION_LIVE_ENABLED,
-    NEUTRALIZATION_FACTORS,
 )
-from agents.sector_teams.team_config import (
-    ALL_TEAM_IDS,
-    TEAM_SECTORS,
-    SECTOR_TEAM_MAP,
-    compute_team_slots,
-    get_team_tickers,
-)
-from agents.sector_teams.sector_team import run_sector_team, SectorTeamContext
-from agents.macro_agent import run_macro_agent_with_reflection
-from agents.investment_committee.ic_cio import (
-    run_cio,
-    run_cio_with_reflection,
-    build_sector_neutral_quality_map,
-    _PROMPT_DEFAULT,
-    _PROMPT_DEBLENDED,
-)
-from agents.prompt_loader import load_prompt
 from data.population_selector import (
-    compute_exits_and_open_slots,
     apply_ic_entries,
+    compute_exits_and_open_slots,
+)
+from graph.decision_capture_helpers import (
+    build_cio_capture_payload,
+    build_macro_economist_capture_payload,
+    build_sector_peer_review_capture_payload,
+    build_sector_qual_capture_payload,
+    build_sector_quant_capture_payload,
+    build_thesis_update_capture_payload,
+    derive_run_id,
+    is_decision_capture_enabled,
+)
+from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
+from graph.reducers import merge_typed_dicts, reject_on_conflict, take_last
+from graph.state_schemas import (
+    ADVANCE_DECISIONS,
+    CIODecision,
+    ExitEvent,
+    InvestmentThesis,
+    PopulationRotationEvent,
+    SectorTeamOutput,
+    ThesisUpdate,
 )
 from scoring.composite import (
     compute_composite_breakdown,
@@ -127,37 +156,7 @@ from scoring.focus_list import (
     compute_focus_scores,
     summarize_focus_list,
 )
-from archive.manager import ArchiveManager
-from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
-
-from nousergon_lib.decision_capture import (
-    DecisionCaptureWriteError,
-    FullPromptContext,
-    ModelMetadata,
-    capture_decision,
-)
-
-from graph.reducers import take_last, merge_typed_dicts, reject_on_conflict
-from graph.decision_capture_helpers import (
-    build_cio_capture_payload,
-    build_macro_economist_capture_payload,
-    build_sector_peer_review_capture_payload,
-    build_sector_qual_capture_payload,
-    build_sector_quant_capture_payload,
-    build_thesis_update_capture_payload,
-    derive_run_id,
-    is_decision_capture_enabled,
-)
-from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
-from graph.state_schemas import (
-    ADVANCE_DECISIONS,
-    CIODecision,
-    ExitEvent,
-    InvestmentThesis,
-    PopulationRotationEvent,
-    SectorTeamOutput,
-    ThesisUpdate,
-)
+from strict_mode import is_strict_validation_enabled as _strict_validation_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +243,8 @@ def _capture_if_enabled(
         full_prompt_context = FullPromptContext(
             system_prompt=f"<see config/prompts/{model_name_key}*.txt at run time; "
                           f"call site not yet wired through track_llm_cost>",
-            user_prompt=f"<rendered from input_data_snapshot at run time; "
-                        f"call site not yet wired through track_llm_cost>",
+            user_prompt="<rendered from input_data_snapshot at run time; "
+                        "call site not yet wired through track_llm_cost>",
         )
 
     try:
@@ -277,12 +276,10 @@ def _capture_if_enabled(
 
 # ── Schema validation helper (warn-mode → hard-fail toggle) ──────────────────
 
-
-from strict_mode import is_strict_validation_enabled as _strict_validation_enabled
 # Backward-compat: ``_strict_validation_enabled`` is the previous name in
-# this file's API surface. Re-exported via the alias above so existing
-# call sites and tests continue to work; new sites should import from
-# ``strict_mode`` directly.
+# this file's API surface. Re-exported via the alias above (see the top-level
+# import from ``strict_mode``) so existing call sites and tests continue to
+# work; new sites should import from ``strict_mode`` directly.
 
 
 def _validate(
@@ -405,7 +402,7 @@ class ResearchState(TypedDict, total=False):
     # the agent's ReAct prompt. ``None`` is graceful — macro agent falls
     # back to its prior LLM + post-LLM-guardrail behavior. The macro
     # agent remains the FINAL regime authority either way.
-    regime_substrate: Annotated[Optional[dict], take_last]
+    regime_substrate: Annotated[dict | None, take_last]
 
     # Prior-cycle realized-outcomes scorecard (Phase 2.A.3 of the
     # research-feedback sidecar arc). Loaded by ``load_scorecard_node``
@@ -416,7 +413,7 @@ class ResearchState(TypedDict, total=False):
     # gitignored prompt-template edit gates whether the LLM actually
     # sees the scorecard text; until then the kwarg is silently unused
     # by ``str.format``. Mirrors the regime_substrate pattern above.
-    prior_cycle_scorecard_text: Annotated[Optional[str], take_last]
+    prior_cycle_scorecard_text: Annotated[str | None, take_last]
 
     episodic_memories: Annotated[dict[str, list], take_last]
     semantic_memories: Annotated[dict[str, list], take_last]
@@ -590,9 +587,10 @@ def _read_institutional_substrate(
     loud.
     """
     from datetime import date as _date
-    from data.substrate.reader import read_substrate_for_population
 
     import boto3
+
+    from data.substrate.reader import read_substrate_for_population
     s3 = boto3.client("s3")
     try:
         as_of = _date.fromisoformat(run_date[:10])
@@ -656,7 +654,7 @@ class AgentInputSetResolution(NamedTuple):
 
 
 def _resolve_agent_input_set(
-    am: "ArchiveManager",
+    am: ArchiveManager,
     run_date: str,
     scanner_universe: list[str],
     population_tickers: list[str],
@@ -722,10 +720,12 @@ def _resolve_agent_input_set(
 
 def fetch_data(state: ResearchState) -> dict:
     """Load all shared data needed by sector teams, macro, and exit evaluator."""
+    from data.fetchers.macro_fetcher import compute_market_breadth, fetch_macro_data
     from data.fetchers.price_fetcher import (
-        fetch_price_data, fetch_sp500_sp400_with_sectors, compute_technical_indicators,
+        compute_technical_indicators,
+        fetch_price_data,
+        fetch_sp500_sp400_with_sectors,
     )
-    from data.fetchers.macro_fetcher import fetch_macro_data, compute_market_breadth
     from scoring.technical import compute_technical_score
 
     run_date = state["run_date"]
@@ -932,7 +932,7 @@ def fetch_data(state: ResearchState) -> dict:
         above_50d, total_50d = 0, 0
         above_200d, total_200d = 0, 0
         advancers, decliners = 0, 0
-        for ticker, ts in technical_scores.items():
+        for _ticker, ts in technical_scores.items():
             pv50 = ts.get("price_vs_ma50")
             pv200 = ts.get("price_vs_ma200")
             mom5d = ts.get("momentum_5d")
@@ -1182,6 +1182,7 @@ def load_scorecard_node(state: ResearchState) -> dict:
     bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
     try:
         import boto3
+
         from evals.last_week_scorecard import load_latest_scorecard_text
         text = load_latest_scorecard_text(
             s3_client=boto3.client("s3"),
@@ -2514,8 +2515,8 @@ def _resolve_run_date_for_dedup(investment_theses: dict) -> str:
         rd = thesis.get("run_date")
         if rd:
             return str(rd)
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from datetime import datetime
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def cio_node(state: ResearchState) -> dict:
@@ -2609,26 +2610,26 @@ def cio_node(state: ResearchState) -> dict:
         "market_regime": state.get("market_regime", "neutral"),
         "macro_report": state.get("macro_report", ""),
     }
-    _cio_call_kwargs = dict(
-        candidates=candidates,
-        macro_context=_macro_context,
-        sector_ratings=state.get("sector_ratings", {}),
-        current_population=state.get("remaining_population", []),
-        open_slots=state.get("open_slots", 0),
-        exits=state.get("exits", []),
-        run_date=state.get("run_date", ""),
-        prior_decisions=prior_ic,
-        max_new_entrants=CIO_MAX_NEW_ENTRANTS,
-        min_new_entrants=CIO_MIN_NEW_ENTRANTS,
-        force_fill_conviction_floor=CIO_FORCE_FILL_CONVICTION_FLOOR,
+    _cio_call_kwargs = {
+        "candidates": candidates,
+        "macro_context": _macro_context,
+        "sector_ratings": state.get("sector_ratings", {}),
+        "current_population": state.get("remaining_population", []),
+        "open_slots": state.get("open_slots", 0),
+        "exits": state.get("exits", []),
+        "run_date": state.get("run_date", ""),
+        "prior_decisions": prior_ic,
+        "max_new_entrants": CIO_MAX_NEW_ENTRANTS,
+        "min_new_entrants": CIO_MIN_NEW_ENTRANTS,
+        "force_fill_conviction_floor": CIO_FORCE_FILL_CONVICTION_FLOOR,
         # Phase 2.A.3: scorecard text loaded upstream by
         # load_scorecard_node. Empty string when producer's flag
         # is off / artifact missing — CIO falls back to pre-Phase-2
         # behavior (no prior-cycle outcome data in its prompt).
-        prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
-        deblended=_deblended,
-        sector_neutral_quality=_sector_neutral_quality,
-    )
+        "prior_cycle_scorecard": state.get("prior_cycle_scorecard_text"),
+        "deblended": _deblended,
+        "sector_neutral_quality": _sector_neutral_quality,
+    }
 
     _cio_reflection_log = None
     # Cost-telemetry scope wraps the CIO Anthropic call(s). When the IC critic
@@ -3481,8 +3482,8 @@ def _secondary_work_deadline_exhausted(state: ResearchState) -> tuple[bool, floa
     try:
         start = datetime.fromisoformat(run_time)
         if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+            start = start.replace(tzinfo=UTC)
+        elapsed = (datetime.now(UTC) - start).total_seconds()
     except (TypeError, ValueError):
         return (False, 0.0)
     return (elapsed >= budget, elapsed)
@@ -4391,8 +4392,8 @@ def email_sender(state: ResearchState) -> dict:
     it verbatim via ``ArchiveManager.save_consolidated_report`` before this
     node ever runs.
     """
-    from emailer.sender import send_email
     from config import EMAIL_RECIPIENTS, EMAIL_SENDER
+    from emailer.sender import send_email
 
     logger.info("[email_sender] starting")
     consolidated = state.get("consolidated_report", "")
@@ -5097,7 +5098,7 @@ def create_initial_state(
 ) -> ResearchState:
     return ResearchState(
         run_date=run_date,
-        run_time=datetime.now(timezone.utc).isoformat(),
+        run_time=datetime.now(UTC).isoformat(),
         archive_manager=archive_manager,
         is_early_close=is_early_close,
         email_sent=False,

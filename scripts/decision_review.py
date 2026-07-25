@@ -45,7 +45,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
 # Canonical "this CIO decision admits the ticker into the population"
 # predicate. The CIO emits both "ADVANCE" (rubric) and the floor-fill
@@ -74,7 +74,7 @@ def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
     connection)."""
     cur = conn.execute(sql, params)
     cols = [c[0] for c in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
 
 def _has_decision_tables(conn: sqlite3.Connection) -> bool:
@@ -88,18 +88,19 @@ def _has_decision_tables(conn: sqlite3.Connection) -> bool:
     return all(t in names for t in _DECISION_TABLES)
 
 
-def latest_eval_date(conn: sqlite3.Connection) -> Optional[str]:
+def latest_eval_date(conn: sqlite3.Connection) -> str | None:
     """Most recent ``eval_date`` across the decision tables, or None if the
     DB has no decision rows yet."""
     dates: list[str] = []
     for table in _DECISION_TABLES:
-        rows = _rows(conn, f"SELECT MAX(eval_date) AS d FROM {table}")
+        # `table` iterates the hardcoded `_DECISION_TABLES` tuple, never external input.
+        rows = _rows(conn, f"SELECT MAX(eval_date) AS d FROM {table}")  # noqa: S608
         if rows and rows[0]["d"]:
             dates.append(rows[0]["d"])
     return max(dates) if dates else None
 
 
-def _resolve_date(conn: sqlite3.Connection, eval_date: Optional[str]) -> Optional[str]:
+def _resolve_date(conn: sqlite3.Connection, eval_date: str | None) -> str | None:
     return eval_date or latest_eval_date(conn)
 
 
@@ -120,7 +121,7 @@ def _parse_rule_tags(raw: Any) -> list[str]:
 
 
 def review_ticker(
-    conn: sqlite3.Connection, ticker: str, eval_date: Optional[str] = None
+    conn: sqlite3.Connection, ticker: str, eval_date: str | None = None
 ) -> dict:
     """Everything the pipeline recorded about ``ticker`` on ``eval_date``.
 
@@ -194,7 +195,7 @@ def _team_recommended_context(
 
 
 def explain_why_not(
-    conn: sqlite3.Connection, ticker: str, eval_date: Optional[str] = None
+    conn: sqlite3.Connection, ticker: str, eval_date: str | None = None
 ) -> dict:
     """Walk the decision funnel and report where ``ticker`` was dropped.
 
@@ -327,7 +328,7 @@ def explain_why_not(
     }
 
 
-def review_date(conn: sqlite3.Connection, eval_date: Optional[str] = None) -> dict:
+def review_date(conn: sqlite3.Connection, eval_date: str | None = None) -> dict:
     """Funnel summary for one cycle: counts at each stage + the chosen set."""
     date = _resolve_date(conn, eval_date)
     scanned = _rows(
@@ -392,7 +393,7 @@ _TEAM_AGENT_TEMPLATES = (
 )
 
 
-def _ticker_team_id(review: dict) -> Optional[str]:
+def _ticker_team_id(review: dict) -> str | None:
     """Best-effort team_id for a ticker from its review rows."""
     for t in review.get("team_candidates") or []:
         if t.get("team_id"):
@@ -413,7 +414,8 @@ def fetch_decision_artifacts(eval_date: str, agent_ids: list[str]) -> dict:
     list the agent's prefix for the day and take the most recent object."""
     try:
         import boto3  # lazy
-        from config import S3_BUCKET, AWS_REGION  # lazy — avoids SSM in tests
+
+        from config import AWS_REGION, S3_BUCKET  # lazy — avoids SSM in tests
     except Exception:  # pragma: no cover — defensive (no creds/config locally)
         return {}
 
@@ -430,7 +432,8 @@ def fetch_decision_artifacts(eval_date: str, agent_ids: list[str]) -> dict:
             newest = max(objs, key=lambda o: o["LastModified"])
             body = s3.get_object(Bucket=S3_BUCKET, Key=newest["Key"])["Body"].read()
             out[agent_id] = json.loads(body)
-        except Exception:  # pragma: no cover — per-agent best-effort
+        except Exception as e:  # pragma: no cover — per-agent best-effort
+            print(f"(skipping {agent_id}: {e})", file=sys.stderr)
             continue
     return out
 
@@ -438,7 +441,7 @@ def fetch_decision_artifacts(eval_date: str, agent_ids: list[str]) -> dict:
 def gather_evidence(
     conn: sqlite3.Connection,
     ticker: str,
-    eval_date: Optional[str] = None,
+    eval_date: str | None = None,
     *,
     with_artifacts: bool = False,
 ) -> dict:
@@ -468,7 +471,7 @@ def has_evidence(evidence: dict) -> bool:
 
 
 def build_qa_prompt(
-    ticker: str, eval_date: Optional[str], question: str, evidence: dict
+    ticker: str, eval_date: str | None, question: str, evidence: dict
 ) -> tuple[str, str]:
     """Construct (system, user) messages for the grounded fallback answer."""
     system = (
@@ -505,6 +508,7 @@ def _default_llm_fn(model: str):
     def _call(system: str, user: str) -> str:
         from langchain_anthropic import ChatAnthropic  # lazy
         from langchain_core.messages import HumanMessage, SystemMessage  # lazy
+
         from config import ANTHROPIC_API_KEY  # lazy — avoids SSM in tests
 
         llm = ChatAnthropic(
@@ -522,10 +526,10 @@ def answer_question(
     conn: sqlite3.Connection,
     ticker: str,
     question: str,
-    eval_date: Optional[str] = None,
+    eval_date: str | None = None,
     *,
     with_artifacts: bool = False,
-    model: Optional[str] = None,
+    model: str | None = None,
     llm_fn=None,
 ) -> dict:
     """Grounded LLM fallback. Skips the LLM entirely when nothing is recorded
@@ -578,7 +582,7 @@ def _default_strategic_model() -> str:
 # ── DB source resolution ───────────────────────────────────────────────────
 
 
-def open_db(db_path: Optional[str], pull: bool) -> sqlite3.Connection:
+def open_db(db_path: str | None, pull: bool) -> sqlite3.Connection:
     """Open the research.db connection.
 
     ``--db PATH`` opens that file directly. Otherwise, with ``--pull`` (or
@@ -598,7 +602,8 @@ def open_db(db_path: Optional[str], pull: bool) -> sqlite3.Connection:
 
     # Pull from S3.
     import boto3  # lazy
-    from config import S3_BUCKET, AWS_REGION  # lazy — avoids SSM in tests
+
+    from config import AWS_REGION, S3_BUCKET  # lazy — avoids SSM in tests
 
     tmp = os.path.join(tempfile.gettempdir(), "research_review.db")
     s3 = boto3.client("s3", region_name=AWS_REGION)
@@ -779,7 +784,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     conn = open_db(args.db, args.pull)
     try:

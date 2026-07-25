@@ -9,21 +9,31 @@ different sectors naturally use different tools and thresholds.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUANT_MAX_ITERATIONS
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+    invoke_anthropic_safe,
+    invoke_react_with_recovery,
+    is_step_budget_exhausted_sentinel,
+    make_tool_use_repair_hook,
+)
+from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
+from agents.langchain_utils import get_final_text as _get_final_text
+from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
 from agents.sector_teams.react_budget import (
-    _REACT_SYNTHESIS_MARGIN_ROUNDS,
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,  # noqa: F401 — re-exported for guard tests (see qual_analyst.py's comment)
     workload_derived_recursion_limit,
 )
-from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, MAX_TICKERS_IN_PROMPT
+from agents.sector_teams.team_config import MAX_TICKERS_IN_PROMPT, QUANT_TOP_N, TEAM_SCREENING_PARAMS
+from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUANT_MAX_ITERATIONS
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
@@ -154,10 +164,10 @@ def run_quant_analyst(
     price_data: dict,
     technical_scores: dict,
     run_date: str,
-    api_key: Optional[str] = None,
-    _retry_preamble: Optional[str] = None,
-    focus_list: Optional[list[dict]] = None,
-    override_tickers: Optional[list[str]] = None,
+    api_key: str | None = None,
+    _retry_preamble: str | None = None,
+    focus_list: list[dict] | None = None,
+    override_tickers: list[str] | None = None,
 ) -> dict:
     """
     Run the quant analyst ReAct agent for a sector team.
@@ -419,7 +429,8 @@ def run_quant_analyst(
                 raise RuntimeError(msg)
             log.warning("%s — falling back to empty picks (lax mode)", msg)
             parsed = QuantAnalystOutput()
-        assert parsed is not None
+        # Internal type-narrowing assert, not a security boundary (config#2532).
+        assert parsed is not None  # noqa: S101
         # Convert QuantPick Pydantic models to dicts for downstream
         # consumers (peer_review, score_aggregator) that use dict-access.
         picks = [p.model_dump() for p in parsed.ranked_picks]
@@ -469,7 +480,7 @@ def run_quant_analyst(
             "transcript": _serialize_transcript(messages),
         }
 
-    except GraphRecursionError as e:
+    except GraphRecursionError:
         # Budget exhausted before the agent reached a stop condition.
         # Treat as a degraded-but-non-fatal outcome: this team contributes
         # zero picks but doesn't crash the SF — score_aggregator will see
@@ -546,9 +557,9 @@ def run_quant_analyst_with_retry(
     price_data: dict,
     technical_scores: dict,
     run_date: str,
-    api_key: Optional[str] = None,
-    focus_list: Optional[list[dict]] = None,
-    override_tickers: Optional[list[str]] = None,
+    api_key: str | None = None,
+    focus_list: list[dict] | None = None,
+    override_tickers: list[str] | None = None,
 ) -> dict:
     """Wrap ``run_quant_analyst`` with one-shot retry on empty picks.
 
@@ -672,18 +683,6 @@ def _build_system_prompt(
         market_regime=market_regime,
     )
 
-
-from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
-from agents.langchain_utils import get_final_text as _get_final_text
-from agents.langchain_utils import serialize_transcript as _serialize_transcript
-from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_anthropic_safe,
-    invoke_react_with_recovery,
-    is_step_budget_exhausted_sentinel,
-    make_tool_use_repair_hook,
-)
 
 # Cap the analyst's prose answer persisted into the decision artifact for
 # retrospective "why" review (L4567). The transcript is bounded inside

@@ -26,7 +26,6 @@ import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from langgraph.errors import GraphRecursionError
 
 
@@ -35,7 +34,7 @@ def fresh_modules():
     """Force-reload the analyst modules. ``test_dry_run.py``'s sentinel
     pattern can leave MagicMocks in place for cross-test runs in some
     pytest orders; reloading guarantees we test the real functions."""
-    from agents.sector_teams import quant_analyst, qual_analyst, sector_team
+    from agents.sector_teams import qual_analyst, quant_analyst, sector_team
     importlib.reload(quant_analyst)
     importlib.reload(qual_analyst)
     importlib.reload(sector_team)
@@ -57,8 +56,8 @@ def test_quant_recursion_limit_is_workload_derived():
     tools) exceeded the tuned budget and returned 0 picks (partial) after
     40 legitimate, non-repeating research calls."""
     from agents.sector_teams.quant_analyst import (
-        _quant_recursion_limit,
         _REACT_SYNTHESIS_MARGIN_ROUNDS,
+        _quant_recursion_limit,
     )
     from config import QUANT_MAX_ITERATIONS
 
@@ -91,19 +90,25 @@ def test_quant_and_qual_share_the_workload_budget_chokepoint():
     superstep math that could drift and re-open the config#1822 class on the
     next sibling. Locks the chokepoint: each analyst's binding equals the
     shared helper with its own configured floor."""
-    from agents.sector_teams.react_budget import (
-        workload_derived_recursion_limit,
-        _REACT_SYNTHESIS_MARGIN_ROUNDS as SHARED_MARGIN,
-    )
-    from agents.sector_teams.quant_analyst import (
-        _quant_recursion_limit,
-        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUANT_MARGIN,
+    from agents.sector_teams.qual_analyst import (
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUAL_MARGIN,
     )
     from agents.sector_teams.qual_analyst import (
         _qual_recursion_limit,
-        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUAL_MARGIN,
     )
-    from config import QUANT_MAX_ITERATIONS, QUAL_MAX_ITERATIONS
+    from agents.sector_teams.quant_analyst import (
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as QUANT_MARGIN,
+    )
+    from agents.sector_teams.quant_analyst import (
+        _quant_recursion_limit,
+    )
+    from agents.sector_teams.react_budget import (
+        _REACT_SYNTHESIS_MARGIN_ROUNDS as SHARED_MARGIN,
+    )
+    from agents.sector_teams.react_budget import (
+        workload_derived_recursion_limit,
+    )
+    from config import QUAL_MAX_ITERATIONS, QUANT_MAX_ITERATIONS
 
     # Both analysts re-export the SAME margin object from the chokepoint.
     assert QUANT_MARGIN is SHARED_MARGIN
@@ -128,8 +133,8 @@ def test_qual_recursion_limit_is_workload_derived():
     the 2026-07-11 failure where 5 picks × 13 tools exceeded the tuned
     budget and 4 qual teams returned 0 assessments (partial)."""
     from agents.sector_teams.qual_analyst import (
-        _qual_recursion_limit,
         _REACT_SYNTHESIS_MARGIN_ROUNDS,
+        _qual_recursion_limit,
     )
     from config import QUAL_MAX_ITERATIONS
 

@@ -8,7 +8,6 @@ responses. Handles nested objects, escaped quotes, and malformed outputs.
 from __future__ import annotations
 
 import json
-import re
 import logging
 
 logger = logging.getLogger(__name__)

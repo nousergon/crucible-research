@@ -235,6 +235,14 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh signals_envelope
 
+      # OpenRouter shadow-judge scheduled runner — alpha-engine-config#2934.
+      # Same image-share pattern as eval-judge/thinktank, CMD override sets
+      # the entry to openrouter_shadow_handler.handler. Invoked ONLY by the
+      # EventBridge rule infrastructure/setup-openrouter-shadow-schedule.sh
+      # creates — never by the production Batches-API SF chain. Auto-deployed
+      # on every push so evals/openrouter_shadow.py changes propagate without
+      # a manual step, matching every other shared-image Lambda's precedent
+
       # Weekly judge-sensitivity scorecard Lambda — alpha-engine-config#752
       # Phase B (Brian's 2026-07-22 operator ruling). Same image-share as
       # eval-judge / rationale-clustering, CMD override sets the entry to
@@ -245,6 +253,12 @@ jobs:
       # eval_rolling_mean 5-week-rot incident). The ci-deploy-guard test
       # (tests/test_deploy_targets_invoked_by_workflow.py) enforces this
       # step's existence.
+      - name: Deploy openrouter-shadow Lambda (alpha-engine-research-openrouter-shadow)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh openrouter_shadow
+
       - name: Deploy perturbation-battery Lambda (alpha-engine-research-perturbation-battery)
         working-directory: alpha-engine-research
         env:
@@ -278,5 +292,5 @@ jobs:
   notify-main-failure:
     needs: [deploy]
     if: ${{ failure() && github.ref == 'refs/heads/main' }}
-    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@a3b11aee34f243da6cfc77d98fdfc9899d1d3f84 # main
+    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@fb3093e99422451ee2466d30812949d26ba6272c # main
     secrets: inherit

@@ -10,27 +10,43 @@ May identify 0-1 additional candidates that quant missed.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-from nousergon_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
+from nousergon_lib.pillars import QualitativePillarAssessment
 from pydantic import BaseModel, ConfigDict, Field
 
+from agents.langchain_utils import (
+    SECTOR_TEAM_LLM_MAX_RETRIES,
+    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+    invoke_react_with_recovery,
+    invoke_structured_with_validation_retry,
+    is_step_budget_exhausted_sentinel,
+    make_tool_use_repair_hook,
+)
+from agents.langchain_utils import (
+    extract_tool_calls as _extract_tool_calls,
+)
+from agents.langchain_utils import (
+    get_final_text as _get_final_text,
+)
+from agents.langchain_utils import (
+    serialize_transcript as _serialize_transcript,
+)
+from agents.prompt_loader import load_prompt
+from agents.sector_teams.qual_tools import create_qual_tools
+from agents.sector_teams.react_budget import (
+    _REACT_SYNTHESIS_MARGIN_ROUNDS,  # noqa: F401 — re-exported for guard tests, see comment below
+    workload_derived_recursion_limit,
+)
 from config import (
     ANTHROPIC_API_KEY,
     MAX_TOKENS_STRATEGIC,
     PER_STOCK_MODEL,
     PILLAR_EMIT_ENABLED,
     QUAL_MAX_ITERATIONS,
-)
-from agents.prompt_loader import load_prompt
-from agents.sector_teams.qual_tools import create_qual_tools
-from agents.sector_teams.react_budget import (
-    _REACT_SYNTHESIS_MARGIN_ROUNDS,
-    workload_derived_recursion_limit,
 )
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
@@ -98,8 +114,8 @@ def run_qual_analyst(
     prior_theses: dict[str, dict],
     market_regime: str,
     run_date: str,
-    api_key: Optional[str] = None,
-    price_data: Optional[dict] = None,
+    api_key: str | None = None,
+    price_data: dict | None = None,
     episodic_memories: dict[str, list] | None = None,
     semantic_memories: dict[str, list] | None = None,
 ) -> dict:
@@ -301,7 +317,8 @@ def run_qual_analyst(
                 raise RuntimeError(msg)
             log.warning("%s — falling back to empty assessments (lax mode)", msg)
             parsed = QualAnalystOutput()
-        assert parsed is not None
+        # Internal type-narrowing assert, not a security boundary (config#2532).
+        assert parsed is not None  # noqa: S101
         # Convert QualAssessment Pydantic models to dicts for downstream
         # peer_review consumption (which uses dict-access patterns).
         assessments = [a.model_dump() for a in parsed.assessments]
@@ -349,7 +366,7 @@ def run_qual_analyst(
             "transcript": _serialize_transcript(messages),
         }
 
-    except GraphRecursionError as e:
+    except GraphRecursionError:
         # Budget exhausted before the agent reached a stop condition.
         # Mirrors quant_analyst's policy: degraded-but-non-fatal — this
         # team contributes zero assessments but doesn't crash the SF.
@@ -474,26 +491,13 @@ def _extract_pillar_assessments(
             f"{type(parsing_error).__name__}: {parsing_error}"
         )
         raise RuntimeError(msg)
-    assert parsed is not None
+    # Internal type-narrowing assert, not a security boundary (config#2532).
+    assert parsed is not None  # noqa: S101
     return {
         item.ticker: item.pillar_assessment.model_dump()
         for item in parsed.items
     }
 
-
-from agents.langchain_utils import (
-    extract_tool_calls as _extract_tool_calls,
-    get_final_text as _get_final_text,
-    serialize_transcript as _serialize_transcript,
-)
-from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_react_with_recovery,
-    invoke_structured_with_validation_retry,
-    is_step_budget_exhausted_sentinel,
-    make_tool_use_repair_hook,
-)
 
 # Cap the analyst's prose answer persisted into the decision artifact for
 # retrospective "why" review (L4567); the transcript is bounded inside

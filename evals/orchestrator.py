@@ -37,26 +37,24 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 import boto3
-
 from nousergon_lib.decision_capture import DecisionArtifact
 
 from agents.prompt_loader import load_prompt
 from evals.judge import (
     DEFAULT_EVAL_PREFIX,
     DEFAULT_MAX_TOKENS,
+    _make_skip_eval_artifact,
     build_batch_request,
-    build_eval_s3_key,
     decode_custom_id,
     encode_custom_id,
     evaluate_artifact,
     parse_batch_message,
     persist_eval_artifact,
     resolve_rubric_for_agent,
-    _make_skip_eval_artifact,
 )
 from evals.judge_models import request_model_for
 from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
@@ -211,7 +209,8 @@ def load_already_judged_keys(
         key = f"decision_artifacts/_eval_by_capture/{d}/manifest.json"
         try:
             raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-        except Exception:  # noqa: BLE001 — absent manifest = nothing judged yet
+        except Exception as e:  # noqa: BLE001 — absent manifest = nothing judged yet
+            logger.debug("[batch_plan] no eval manifest at %s: %s", key, e)
             continue
         try:
             manifest = json.loads(raw)
@@ -245,8 +244,8 @@ def evaluate_corpus(
     haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
     dry_run: bool = False,
     judge_only: bool = False,
-    s3_client: Optional[Any] = None,
-    cloudwatch_client: Optional[Any] = None,
+    s3_client: Any | None = None,
+    cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
 ) -> dict[str, Any]:
     """Score every captured artifact under ``date`` per the two-tier
@@ -500,10 +499,10 @@ def build_batch_plan(
     sonnet_model: str = DEFAULT_SONNET_MODEL,
     force_sonnet_pass: bool = False,
     judge_only: bool = False,
-    s3_client: Optional[Any] = None,
+    s3_client: Any | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    extra_dates: Optional[list[str]] = None,
-    agent_id_prefixes: Optional[list[str]] = None,
+    extra_dates: list[str] | None = None,
+    agent_id_prefixes: list[str] | None = None,
 ) -> dict[str, Any]:
     """List captures, resolve rubrics, and build the (request_payload,
     plan_entries) pair for the Submit Lambda.
@@ -770,7 +769,7 @@ def submit_batch(
     plan: dict[str, Any],
     *,
     anthropic_client: Any,
-    s3_client: Optional[Any] = None,
+    s3_client: Any | None = None,
 ) -> dict[str, Any]:
     """Submit the plan as one Anthropic message batch and persist the
     plan manifest to S3 keyed by the returned batch_id.
@@ -892,8 +891,8 @@ def process_batch_results(
     plan_s3_key: str,
     bucket: str = _BUCKET_DEFAULT,
     anthropic_client: Any = None,
-    s3_client: Optional[Any] = None,
-    cloudwatch_client: Optional[Any] = None,
+    s3_client: Any | None = None,
+    cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
     haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
 ) -> dict[str, Any]:
@@ -993,9 +992,9 @@ def process_batch_results(
                 # encode/decode is canonical. Record as failure with
                 # decoded best-effort metadata.
                 try:
-                    decoded_agent, decoded_run, decoded_model = decode_custom_id(cid)
+                    decoded_agent, _decoded_run, _decoded_model = decode_custom_id(cid)
                 except ValueError:
-                    decoded_agent, decoded_run, decoded_model = (
+                    decoded_agent, _decoded_run, _decoded_model = (
                         "<unknown>", "<unknown>", "<unknown>",
                     )
                 failed.append({
@@ -1062,7 +1061,7 @@ def process_batch_results(
             eval_artifact = RubricEvalArtifact(
                 run_id=entry["run_id"],
                 judge_run_id=judge_run_id,
-                timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 judged_agent_id=entry["agent_id"],
                 judged_artifact_s3_key=entry["capture_s3_key"],
                 rubric_id=entry["rubric_id"],

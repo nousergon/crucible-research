@@ -14,13 +14,14 @@ import pytest
 ArchiveManager = pytest.importorskip(
     "archive.manager", reason="archive.manager requires gitignored config"
 ).ArchiveManager
+from unittest.mock import MagicMock  # noqa: E402
+
 from archive.tool_usage_analysis import (  # noqa: E402
     TEAM_RESOURCE_TICKER,
     aggregate_tool_usage_by_sector,
     sector_label_for_team,
     team_id_from_agent,
 )
-from unittest.mock import MagicMock  # noqa: E402
 
 
 @pytest.fixture

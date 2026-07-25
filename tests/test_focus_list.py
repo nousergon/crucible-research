@@ -6,14 +6,13 @@ Phase 1c factor composites + Phase 3 blend formula. Pure helper tests
 — no S3, no graph, no agent.
 """
 
-import pytest
-
 from unittest.mock import patch
+
+import pytest
 
 from scoring.focus_list import (
     FOCUS_LIST_DEFAULT_SIZE,
     FOCUS_LIST_HARD_CAP,
-    FOCUS_LIST_MIN_SECTOR_SIZE,
     FocusListEntry,
     _assign_stance,
     build_focus_list,
@@ -22,7 +21,6 @@ from scoring.focus_list import (
     compute_focus_scores,
     summarize_focus_list,
 )
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -211,7 +209,7 @@ def test_build_focus_list_empty_scores_returns_empty_per_team(sector_team_map):
     """Empty input → every team gets an empty list (not missing keys)."""
     result = build_focus_list({}, sector_team_map)
     assert set(result.keys()) == set(sector_team_map.values())
-    for team_id, entries in result.items():
+    for entries in result.values():
         assert entries == []
 
 

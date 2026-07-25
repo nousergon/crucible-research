@@ -105,18 +105,22 @@ import io
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
+from nousergon_lib.quant.attractiveness import (
+    DEFAULT_PILLAR_WEIGHTS,
+    compute_cross_sectional_attractiveness,
+    normalize_pillar_weights,
+)
+from nousergon_lib.quant.attractiveness import (
+    PILLAR_ORDER as _PILLAR_ORDER,
+)
+from nousergon_lib.quant.attractiveness import (
+    attractiveness_from_factor_profiles as _attractiveness_from_factor_profiles,
+)
 from nousergon_lib.quant.transaction_cost import (
     TransactionCostModel,
     tradeability_percentiles,
-)
-from nousergon_lib.quant.attractiveness import (
-    DEFAULT_PILLAR_WEIGHTS,
-    PILLAR_ORDER as _PILLAR_ORDER,
-    attractiveness_from_factor_profiles as _attractiveness_from_factor_profiles,
-    compute_cross_sectional_attractiveness,
-    normalize_pillar_weights,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,7 +246,7 @@ def compute_tradeability(
             sigma[ticker] = vol_pct
     ref_sigma = statistics.median(sigma.values()) if sigma else None
 
-    cost_bps: dict[str, Optional[float]] = {}
+    cost_bps: dict[str, float | None] = {}
     for ticker in metrics_by_ticker:
         adv = adv_usd.get(ticker)
         if adv is None:  # no ADV coverage → no honest cost estimate (gap, not floor)
@@ -267,7 +271,7 @@ def compute_tradeability(
     }
 
 
-def _num(v: Any, multiplier: float = 1.0) -> Optional[float]:
+def _num(v: Any, multiplier: float = 1.0) -> float | None:
     """Coerce to a finite float (applying ``multiplier``) or None. NaN / inf /
     non-numeric → None (a coverage gap, never a fabricated value)."""
     try:
@@ -308,18 +312,18 @@ def _load_pillar_weights(bucket: str | None, s3_client: Any) -> dict[str, float]
         return _equal_weights()
 
 
-def _resolve_gate_config() -> Optional[dict]:
+def _resolve_gate_config() -> dict | None:
     """Resolve the scanner gate thresholds USED THIS CYCLE from the same config
     source the scanner reads (``get_scanner_params()`` S3-tuned overrides +
     module constants in ``config.py``). Single source of truth — no cross-module
     state threading. Fail-soft to None (gate trace thresholds degrade to null)."""
     try:
         from config import (
-            get_scanner_params,
-            DEEP_VALUE_PATH_ENABLED,
-            DEEP_VALUE_MAX_RSI,
             DEEP_VALUE_MAX_ATR_PCT,
             DEEP_VALUE_MAX_CANDIDATES,
+            DEEP_VALUE_MAX_RSI,
+            DEEP_VALUE_PATH_ENABLED,
+            get_scanner_params,
         )
 
         sp = get_scanner_params()
@@ -340,7 +344,7 @@ def _resolve_gate_config() -> Optional[dict]:
         return None
 
 
-def _gate_trace(row: dict, gate_config: Optional[dict]) -> tuple[list[dict], str]:
+def _gate_trace(row: dict, gate_config: dict | None) -> tuple[list[dict], str]:
     """Reconstruct the per-stock funnel trace (each gate: value vs threshold,
     pass/fail) + the terminal ``gate_stage``, from the recorded scanner-eval
     values + the resolved ``gate_config``. Transparent and deterministic — the
@@ -357,7 +361,6 @@ def _gate_trace(row: dict, gate_config: Optional[dict]) -> tuple[list[dict], str
     price = _num(row.get("current_price"))
     atr_pct = _num(row.get("atr_pct"))
     tech_score = _num(row.get("tech_score"))
-    price_vs_ma200 = _num(row.get("price_vs_ma200"))
     passed = int(row.get("quant_filter_pass", 0) or 0) == 1
     fail_reason = row.get("filter_fail_reason")
 
@@ -419,8 +422,8 @@ def build_universe_board(
     *,
     factor_profiles: dict | None = None,
     classification: dict | None = None,
-    technical_df: "Any" = None,
-    fundamental_df: "Any" = None,
+    technical_df: Any = None,
+    fundamental_df: Any = None,
     pillar_weights: dict | None = None,
     gate_config: dict | None = None,
     tradeability_config: dict | None = None,
@@ -512,7 +515,7 @@ def build_universe_board(
             if f"{_PILLAR_TO_FACTOR_KEY[pillar][:-6]}_n" in profile
         }
 
-        metrics: dict[str, Optional[float]] = {
+        metrics: dict[str, float | None] = {
             "current_price": _num(row.get("current_price")),
         }
         for col, field, mult in _FUNDAMENTAL_METRICS:
@@ -626,7 +629,8 @@ def _read_factor_profiles(run_date: str, bucket: str | None, s3_client: Any) -> 
         try:
             obj = s3.get_object(Bucket=b, Key=key)
             return json.loads(obj["Body"].read())
-        except Exception:
+        except Exception as e:
+            logger.debug("[universe_board] factor profile key %s unreadable: %s", key, e)
             continue
     logger.warning("[universe_board] no factor profiles readable for %s — pillars will be null", run_date)
     return None
@@ -661,7 +665,7 @@ def _read_parquet(name: str, run_date: str, bucket: str | None, s3_client: Any):
         return None
 
 
-def _index_parquet(df: "Any") -> dict[str, dict]:
+def _index_parquet(df: Any) -> dict[str, dict]:
     """``{ticker: {col: value}}`` from a feature-store DataFrame (empty when
     df is None / has no ``ticker`` column)."""
     if df is None or not hasattr(df, "columns") or "ticker" not in df.columns:

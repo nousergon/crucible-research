@@ -5,10 +5,8 @@ Plan: ~/Development/alpha-engine-docs/private/factor-substrate-260513.md (Phase 
 Sibling unit: tests/test_factor_scoring.py (Phase 1c upstream module).
 """
 
-import pytest
 
 from scoring.composite import compute_composite_score, compute_factor_subscore
-
 
 _FULL_PROFILE = {
     "sector": "Technology",

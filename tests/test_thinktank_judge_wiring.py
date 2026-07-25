@@ -8,10 +8,8 @@ extra_dates), and plan building over captured thinktank artifacts.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import boto3
-import pytest
 from moto import mock_aws
 
 from evals.judge import resolve_rubric_for_agent

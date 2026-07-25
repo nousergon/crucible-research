@@ -10,7 +10,6 @@ the same PR.
 Plan: ~/Development/alpha-engine-docs/private/factor-substrate-260513.md (Phase 4).
 """
 
-import pytest
 
 from graph.research_graph import _build_signals_payload
 

@@ -49,7 +49,7 @@ def compute_market_breadth(price_data: dict[str, pd.DataFrame]) -> dict:
     advancers = 0
     decliners = 0
 
-    for ticker, df in price_data.items():
+    for _ticker, df in price_data.items():
         if df is None or df.empty or len(df) < 10:
             continue
 

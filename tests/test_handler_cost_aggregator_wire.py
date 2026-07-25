@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 _HANDLER_PATH = Path(__file__).parent.parent / "lambda" / "handler.py"
 
 
@@ -95,9 +94,9 @@ def test_scripts_package_is_importable():
     aggressive Docker COPY filter that strips empty directories."""
     pkg_init = _HANDLER_PATH.parent.parent / "scripts" / "__init__.py"
     assert pkg_init.exists(), (
-        f"scripts/__init__.py must exist as the explicit package marker. "
-        f"Without it the Lambda runtime can hit ModuleNotFoundError on "
-        f"``from scripts.aggregate_costs import aggregate_day``."
+        "scripts/__init__.py must exist as the explicit package marker. "
+        "Without it the Lambda runtime can hit ModuleNotFoundError on "
+        "``from scripts.aggregate_costs import aggregate_day``."
     )
 
 

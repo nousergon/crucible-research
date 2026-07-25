@@ -12,6 +12,7 @@ record_new_buy_scores (the BUY-signal recorder) remains.
 """
 
 import sqlite3
+
 import pytest
 
 _pt = pytest.importorskip("scoring.performance_tracker", reason="scoring.performance_tracker is gitignored")

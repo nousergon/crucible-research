@@ -30,7 +30,7 @@ def _assessment(scores: dict[str, int], catalyst: int = 0) -> QualitativePillarA
     )
 
 
-_UNIFORM_50 = {p: 50 for p in ("quality", "value", "momentum", "growth", "stewardship", "defensiveness")}
+_UNIFORM_50 = dict.fromkeys(("quality", "value", "momentum", "growth", "stewardship", "defensiveness"), 50)
 
 
 def test_pillar_composite_score_is_uniform_mean_plus_catalyst():
@@ -59,7 +59,7 @@ def test_blend_rating_matching_composite_is_a_no_op():
 
 def test_blend_rating_moves_toward_composite_by_blend_weight():
     # raw=50, composite=90 (all pillars 90) -> blended = 0.85*50 + 0.15*90 = 56.0
-    assessment = _assessment({p: 90 for p in _UNIFORM_50})
+    assessment = _assessment(dict.fromkeys(_UNIFORM_50, 90))
     expected_unclamped = round((1 - PILLAR_BLEND_WEIGHT) * 50 + PILLAR_BLEND_WEIGHT * 90)
     assert blend_rating(50, assessment) == expected_unclamped == 56
 
@@ -71,17 +71,17 @@ def test_blend_rating_never_exceeds_max_rating_change():
     # stay in that relationship; a future PILLAR_BLEND_WEIGHT bump without
     # also revisiting MAX_RATING_CHANGE would make this guardrail bite for
     # real rather than just bound the theoretical max.
-    assessment = _assessment({p: 0 for p in _UNIFORM_50})
+    assessment = _assessment(dict.fromkeys(_UNIFORM_50, 0))
     blended = blend_rating(100, assessment)
     assert abs(blended - 100) == MAX_RATING_CHANGE
 
-    assessment_low = _assessment({p: 100 for p in _UNIFORM_50})
+    assessment_low = _assessment(dict.fromkeys(_UNIFORM_50, 100))
     blended_low = blend_rating(0, assessment_low)
     assert abs(blended_low - 0) == MAX_RATING_CHANGE
 
 
 def test_blend_rating_stays_within_0_100_bounds():
-    assessment = _assessment({p: 100 for p in _UNIFORM_50}, catalyst=20)
+    assessment = _assessment(dict.fromkeys(_UNIFORM_50, 100), catalyst=20)
     assert blend_rating(95, assessment) <= 100
-    assessment_low = _assessment({p: 0 for p in _UNIFORM_50}, catalyst=-20)
+    assessment_low = _assessment(dict.fromkeys(_UNIFORM_50, 0), catalyst=-20)
     assert blend_rating(5, assessment_low) >= 0

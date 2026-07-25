@@ -30,9 +30,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
-
-
 # ── REGIME_VALUES enum ───────────────────────────────────────────────────
 
 

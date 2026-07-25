@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 log = logging.getLogger(__name__)
 
@@ -663,7 +663,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         # Record migration as applied
         conn.execute(
             "INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
-            (version, desc, datetime.now(timezone.utc).isoformat()),
+            (version, desc, datetime.now(UTC).isoformat()),
         )
 
     conn.commit()
