@@ -51,7 +51,7 @@ import logging
 import os
 from typing import Callable, Optional
 
-from alpha_engine_lib.secrets import get_secret
+from nousergon_lib.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
