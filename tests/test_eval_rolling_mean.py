@@ -12,7 +12,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -152,8 +152,8 @@ class TestGetMetricDataAll:
             ],
         }
 
-        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 1, tzinfo=UTC)
+        end = datetime(2026, 5, 29, tzinfo=UTC)
         out = _get_metric_data_all(cw, queries, start, end)
 
         # Three calls, every chunk ≤ 500.
@@ -186,8 +186,8 @@ class TestGetMetricDataAll:
         cw = MagicMock()
         cw.get_metric_data.side_effect = responses
 
-        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 1, tzinfo=UTC)
+        end = datetime(2026, 5, 29, tzinfo=UTC)
         out = _get_metric_data_all(cw, queries, start, end)
 
         assert cw.get_metric_data.call_count == 3
@@ -207,8 +207,8 @@ class TestGetMetricDataAll:
             "MetricDataResults": [{"Id": q["Id"], "Values": [4.0]} for q in queries],
         }
 
-        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 1, tzinfo=UTC)
+        end = datetime(2026, 5, 29, tzinfo=UTC)
         out = _get_metric_data_all(cw, queries, start, end)
 
         # Exactly one call, no NextToken, all results returned.
@@ -289,7 +289,7 @@ class TestComputeAndEmit4wMean:
             2: [4.5],
         })
 
-        end = datetime(2026, 6, 6, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 6, 6, 0, 0, tzinfo=UTC)
         result = compute_and_emit_4w_mean(end_time=end, cloudwatch_client=cw)
 
         assert result["combos_discovered"] == 3
@@ -350,12 +350,12 @@ class TestComputeAndEmit4wMean:
         assert result["failed"] == []
 
     def test_window_is_28_days_ending_at_end_time(self):
-        from evals.rolling_mean import compute_and_emit_4w_mean, ROLLING_WINDOW_DAYS
+        from evals.rolling_mean import ROLLING_WINDOW_DAYS, compute_and_emit_4w_mean
 
         combos = [_dims("a", "c1")]
         cw = _make_cw_with_combos(combos, values_by_idx={0: [4.0]})
 
-        end = datetime(2026, 6, 6, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 6, 6, 0, 0, tzinfo=UTC)
         compute_and_emit_4w_mean(end_time=end, cloudwatch_client=cw)
 
         # Inspect the GetMetricData call's StartTime/EndTime.
@@ -545,6 +545,7 @@ class TestRegressionAutoEmit:
         """Auto-emitted entry carries every schema-1.0.0 field + the
         eval_regression diagnostic block."""
         import json as _json
+
         from evals.rolling_mean import compute_and_emit_4w_mean
 
         combos = [_dims("sector_quant", "calibration", "claude-haiku-4-5")]
@@ -616,7 +617,7 @@ class TestRegressionAutoEmit:
         same event_id hash (overwrite, not duplicate)."""
         from evals.rolling_mean import _emit_regression_entry
 
-        end = datetime(2026, 5, 9, 0, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 9, 0, 0, 0, tzinfo=UTC)
         start = end - timedelta(days=28)
         dims = _dims("sector_quant", "calibration")
 

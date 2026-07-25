@@ -48,16 +48,16 @@ def _eval_log():
 
 
 def _rows(**overrides):
-    kwargs = dict(
-        scanner_universe=["PASS", "LIQ", "VOL", "BELOW", "RANK", "NODATA"],
-        extra_override_tickers=[],
-        technical_scores={},
-        sector_map={"PASS": "Tech", "LIQ": "Tech", "VOL": "Health",
+    kwargs = {
+        "scanner_universe": ["PASS", "LIQ", "VOL", "BELOW", "RANK", "NODATA"],
+        "extra_override_tickers": [],
+        "technical_scores": {},
+        "sector_map": {"PASS": "Tech", "LIQ": "Tech", "VOL": "Health",
                     "BELOW": "Health", "RANK": "Energy", "NODATA": "Energy"},
-        scanner_eval_log=_eval_log(),
-        focus_lookup={},
-        run_date="2026-06-26",
-    )
+        "scanner_eval_log": _eval_log(),
+        "focus_lookup": {},
+        "run_date": "2026-06-26",
+    }
     kwargs.update(overrides)
     rows = _build_scanner_eval_rows(**kwargs)
     return {r["ticker"]: r for r in rows}

@@ -48,14 +48,14 @@ from ``now_dual()``; for backfill pass both explicitly.
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import logging
 import os
 import sys
 from collections import Counter
+from datetime import UTC
 from datetime import date as date_type
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
@@ -88,13 +88,13 @@ _AGENTS_NAMESPACE = "AlphaEngine/Agents"
 
 def _day_window(run_date: date_type):
     """UTC [00:00, +1d) window for the run day's CW aggregation."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    start = datetime(run_date.year, run_date.month, run_date.day, tzinfo=timezone.utc)
+    start = datetime(run_date.year, run_date.month, run_date.day, tzinfo=UTC)
     return start, start + timedelta(days=1)
 
 
-def _agent_validation_failure_rate(cw: Any, run_date: date_type) -> Optional[dict]:
+def _agent_validation_failure_rate(cw: Any, run_date: date_type) -> dict | None:
     """Fleet agent validation-failure rate over the run day, PROD-only (config#1154).
 
     ``sum(Failures) / sum(Invocations)`` across every ``agent_id`` with
@@ -178,7 +178,7 @@ def _per_agent_stat(cw: Any, metric: str, agent_ids: list[str], stat: str,
     return out
 
 
-def _retry_storm_count(cw: Any, run_date: date_type) -> Optional[dict]:
+def _retry_storm_count(cw: Any, run_date: date_type) -> dict | None:
     """# of agents that hit their retry ceiling, PROD-only (config#1149).
 
     An agent "reached the ceiling" when it fired a retry that did NOT recover —
@@ -197,7 +197,7 @@ def _retry_storm_count(cw: Any, run_date: date_type) -> Optional[dict]:
     return {"value": storm, "n": len(agents)}
 
 
-def _agent_latency_p95(cw: Any, run_date: date_type) -> Optional[dict]:
+def _agent_latency_p95(cw: Any, run_date: date_type) -> dict | None:
     """Worst per-agent-type p95 wall-clock (ms), PROD-only (config#1149).
 
     CW gives a p95 PER agent_id; the report-card value is the MAX across agent
@@ -214,7 +214,7 @@ def _agent_latency_p95(cw: Any, run_date: date_type) -> Optional[dict]:
     return {"value": round(max(per_agent_max), 1), "n": len(p95s)}
 
 
-def _get_json(s3: Any, bucket: str, key: str) -> Optional[dict]:
+def _get_json(s3: Any, bucket: str, key: str) -> dict | None:
     """Read one JSON object, or None if absent. Raises on any other S3 error."""
     from botocore.exceptions import ClientError
 
@@ -227,7 +227,7 @@ def _get_json(s3: Any, bucket: str, key: str) -> Optional[dict]:
     return json.loads(resp["Body"].read())
 
 
-def _total_cost_usd(s3: Any, bucket: str, run_date: date_type) -> Optional[float]:
+def _total_cost_usd(s3: Any, bucket: str, run_date: date_type) -> float | None:
     """Sum ``cost_usd`` over the run's _cost_raw JSONL (None if no rows)."""
     prefix = f"{_COST_RAW_PREFIX}/{run_date.isoformat()}/"
     keys = _list_jsonl_keys(s3, bucket, prefix)
@@ -242,7 +242,7 @@ def _total_cost_usd(s3: Any, bucket: str, run_date: date_type) -> Optional[float
     return float(sum(float(r.get("cost_usd") or 0.0) for r in clean))
 
 
-def _load_signals(s3: Any, bucket: str, date_str: str) -> Optional[dict]:
+def _load_signals(s3: Any, bucket: str, date_str: str) -> dict | None:
     """The run's per-ticker signals dict ({ticker: {...}}), or None."""
     doc = _get_json(s3, bucket, f"signals/{date_str}/signals.json")
     if not doc:
@@ -282,7 +282,7 @@ def build_agent_quality(
     bucket: str,
     target_date: date_type,
     *,
-    run_date: Optional[date_type] = None,
+    run_date: date_type | None = None,
     cw: Any = None,
     outcomes_conn: Any = None,
 ) -> dict:
@@ -407,7 +407,7 @@ def _parse_date(s: str) -> date_type:
     return date_type.fromisoformat(s)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the report-card agent_quality.json artifact.")
     parser.add_argument("--bucket", default=_DEFAULT_BUCKET)
     parser.add_argument("--date", required=True, type=_parse_date,

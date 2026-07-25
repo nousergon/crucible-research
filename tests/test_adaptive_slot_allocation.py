@@ -5,13 +5,12 @@ eligible-pick count ±1 by historical accuracy, gated on a min observation count
 and degrading gracefully (byte-identical to static) when data is absent.
 """
 
-import pytest
 
 from agents.sector_teams.team_config import (
     ADAPTIVE_SLOT_MIN_OBS,
+    ALL_TEAM_IDS,
     _accuracy_adjustment,
     compute_team_slots,
-    ALL_TEAM_IDS,
 )
 
 

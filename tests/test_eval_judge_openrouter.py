@@ -24,7 +24,6 @@ import pytest
 
 from evals.judge_models import OPENROUTER_SHADOW
 from graph.state_schemas import RubricEvalArtifact
-
 from tests.test_eval_judge import _make_artifact, _make_llm_output
 
 
@@ -205,6 +204,7 @@ class TestEvaluateArtifactOpenRouter:
 
     def test_default_judge_model_is_openrouter_shadow_logical_key(self):
         import inspect
+
         from evals.judge import evaluate_artifact_openrouter
 
         sig = inspect.signature(evaluate_artifact_openrouter)

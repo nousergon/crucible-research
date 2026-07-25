@@ -12,7 +12,6 @@ See §5.1 for full scoring methodology.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from config import TECHNICAL_CFG
 
@@ -23,7 +22,7 @@ _WEIGHT_SUM_TOLERANCE = 1e-3
 _warned_overrides: set[str] = set()
 
 
-def _resolve_team_id(team_id: Optional[str], sector: Optional[str]) -> Optional[str]:
+def _resolve_team_id(team_id: str | None, sector: str | None) -> str | None:
     """Return canonical team_id, resolving from a GICS sector name if needed.
 
     Caller may pass team_id directly (canonical: technology / healthcare /
@@ -44,7 +43,7 @@ def _resolve_team_id(team_id: Optional[str], sector: Optional[str]) -> Optional[
     return SECTOR_TEAM_MAP.get(sector)
 
 
-def _resolve_composite_weights(team_id: Optional[str]) -> dict:
+def _resolve_composite_weights(team_id: str | None) -> dict:
     """Return composite_weights for the given team_id, falling back to global.
 
     Sector-level overrides live under `technical.composite_weights_per_sector`
@@ -120,7 +119,7 @@ def _score_macd(macd_cross: float, macd_above_zero: bool) -> float:
     return macd_cfg["no_cross_above_zero"] if macd_above_zero else macd_cfg["no_cross_below_zero"]
 
 
-def _score_price_vs_ma(pct_diff: Optional[float]) -> float:
+def _score_price_vs_ma(pct_diff: float | None) -> float:
     """
     Score price relative to a moving average.
 
@@ -163,7 +162,7 @@ def _score_price_vs_ma(pct_diff: Optional[float]) -> float:
     return max(lower_floor_score, lower_anchor_score - (abs(pct_diff) - abs(lower_anchor_pct)) * lower_decay)
 
 
-def _score_momentum(momentum_20d: Optional[float], percentile_rank: Optional[float] = None) -> float:
+def _score_momentum(momentum_20d: float | None, percentile_rank: float | None = None) -> float:
     """
     Score 20-day momentum.
     Ideally uses percentile rank within S&P 500 universe (0–100).
@@ -189,7 +188,7 @@ def _score_momentum(momentum_20d: Optional[float], percentile_rank: Optional[flo
 def compute_technical_sub_scores(
     indicators: dict,
     market_regime: str = "neutral",
-    momentum_percentile: Optional[float] = None,
+    momentum_percentile: float | None = None,
 ) -> dict:
     """Return the 5 per-signal sub-scores that feed compute_technical_score.
 
@@ -231,10 +230,10 @@ def compute_technical_sub_scores(
 def compute_technical_score(
     indicators: dict,
     market_regime: str = "neutral",
-    momentum_percentile: Optional[float] = None,
+    momentum_percentile: float | None = None,
     *,
-    sector: Optional[str] = None,
-    team_id: Optional[str] = None,
+    sector: str | None = None,
+    team_id: str | None = None,
 ) -> float:
     """
     Compute weighted composite technical score (0–100).
@@ -302,7 +301,7 @@ def compute_technical_score(
 
 
 def compute_momentum_percentiles(
-    momentum_data: dict[str, Optional[float]],
+    momentum_data: dict[str, float | None],
 ) -> dict[str, float]:
     """
     Compute percentile ranks for 20d momentum across a universe of tickers.
@@ -312,13 +311,13 @@ def compute_momentum_percentiles(
 
     valid = [(t, m) for t, m in momentum_data.items() if m is not None]
     if not valid:
-        return {t: 50.0 for t in momentum_data}
+        return dict.fromkeys(momentum_data, 50.0)
 
-    tickers, values = zip(*valid)
+    tickers, values = zip(*valid, strict=True)
     values_arr = np.array(values, dtype=float)
     ranks = (values_arr.argsort().argsort() / max(len(values_arr) - 1, 1)) * 100
 
-    result = {t: round(float(r), 1) for t, r in zip(tickers, ranks)}
+    result = {t: round(float(r), 1) for t, r in zip(tickers, ranks, strict=True)}
     # Fill any missing (None momentum) with 50
     for t in momentum_data:
         result.setdefault(t, 50.0)

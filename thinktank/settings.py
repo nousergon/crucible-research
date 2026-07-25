@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
-
 from nousergon_lib.config import resolve_experiment_config
 
 logger = logging.getLogger(__name__)

@@ -54,7 +54,7 @@ import io
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -161,8 +161,8 @@ def _build_technical_scores_from_feature_store(
     [[feedback_no_silent_fails]] the miss is loudly logged.
     """
     from data.fetchers.feature_store_reader import (
-        read_latest_features,
         read_latest_daily_closes,
+        read_latest_features,
     )
     from scoring.technical import compute_technical_score
 
@@ -264,7 +264,10 @@ def _resolved_scanner_params() -> dict:
     ``get_scanner_params()`` so the artifact records the EXACT parameters
     used this cycle (S3-configurable, auto-tuned by backtester)."""
     from config import (
-        MIN_AVG_VOLUME, MIN_PRICE, MAX_ATR_PCT, get_scanner_params,
+        MAX_ATR_PCT,
+        MIN_AVG_VOLUME,
+        MIN_PRICE,
+        get_scanner_params,
     )
 
     sp = get_scanner_params()
@@ -349,7 +352,6 @@ def build_candidates_artifact(
     # prior signals.json::population; Phase 5 cutover will source it from
     # archive.manager.load_population directly. Empty list on cold-start.
     population_tickers = list(prior_population)
-    pop_set = set(population_tickers)
     # agent_input_set = population ∪ top-50 scanner picks (the Research
     # Lambda's existing convention at research_graph.py:734).
     agent_input_set = list(
@@ -376,7 +378,7 @@ def build_candidates_artifact(
     artifact = {
         "run_date": run_date,
         "scanner_version": SCANNER_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "population_tickers": population_tickers,
         "scanner_tickers": scanner_tickers,
         "agent_input_set": agent_input_set,
@@ -441,8 +443,8 @@ def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
     input (no eval log, no loadings) yields ``{}`` rather than raising — the
     shadow substrate must NEVER jeopardize the live candidates.json.
     """
-    from data.scanner import run_quant_filter
     from data.fetchers.feature_store_reader import read_latest_factor_loadings
+    from data.scanner import run_quant_filter
     from data.scanner_specs import build_shadow_artifacts
 
     eval_log = getattr(run_quant_filter, "_last_eval_log", None)

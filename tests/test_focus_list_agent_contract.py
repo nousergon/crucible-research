@@ -14,12 +14,10 @@ Composes with:
     additive — both arcs add SectorTeamContext fields independently)
 """
 
-import json
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
-
 
 # ── compute_focus_list_node ─────────────────────────────────────────────────
 

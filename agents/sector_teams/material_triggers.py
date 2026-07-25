@@ -9,7 +9,7 @@ trigger get a thesis update Haiku call; others preserve their prior thesis.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +63,9 @@ def check_material_triggers(
                     tr_values = []
                     for i in range(-14, 0):
                         h = float(high.iloc[i])
-                        l = float(low.iloc[i])
-                        c_prev = float(close.iloc[i - 1]) if abs(i - 1) < len(close) else l
-                        tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
+                        lo = float(low.iloc[i])
+                        c_prev = float(close.iloc[i - 1]) if abs(i - 1) < len(close) else lo
+                        tr = max(h - lo, abs(h - c_prev), abs(lo - c_prev))
                         tr_values.append(tr)
                     atr = sum(tr_values) / len(tr_values) if tr_values else 0
 
@@ -97,8 +97,8 @@ def check_material_triggers(
                     days_since = (rd - ed).days
                     if 0 <= days_since <= EARNINGS_PROXIMITY_DAYS:
                         triggers.append("recent_earnings")
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Earnings proximity check failed: %s", e)
 
     # 5. Insider cluster activity
     if insider_data:

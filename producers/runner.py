@@ -20,11 +20,11 @@ from __future__ import annotations
 import logging
 
 from observe_alerts import publish_observe_alert
-from producers.registry import challenger_producers
 from producers.experiment_record import (
     build_challenger_experiment_record,
     write_challenger_experiment_record,
 )
+from producers.registry import challenger_producers
 
 logger = logging.getLogger(__name__)
 

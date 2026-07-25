@@ -11,11 +11,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
-from tests.test_signals_producer_contract import (  # noqa: E402
-    _REQUIRED_PER_ITEM,
-    _REQUIRED_TOP_LEVEL,
-)
+from producers.registry import RESEARCH_PRODUCERS  # noqa: E402
 from producers.single_agent import (  # noqa: E402
     CHALLENGER_MODEL,
     RankingProducerOutput,
@@ -23,7 +21,10 @@ from producers.single_agent import (  # noqa: E402
     build_single_agent_signals,
     run_single_agent_producer,
 )
-from producers.registry import RESEARCH_PRODUCERS  # noqa: E402
+from tests.test_signals_producer_contract import (  # noqa: E402
+    _REQUIRED_PER_ITEM,
+    _REQUIRED_TOP_LEVEL,
+)
 
 
 def _inputs():
@@ -87,12 +88,13 @@ def test_gate_and_provenance():
 
 def test_ranking_output_schema_rejects_empty():
     RankingProducerOutput(assessments=[{"ticker": "X", "qual_score": 50}])  # ok
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RankingProducerOutput(assessments=[])  # min_length=1
 
 
 def test_run_injects_assess_fn(monkeypatch):
     from unittest.mock import MagicMock
+
     import data.fetchers.price_fetcher as pf
     import data.scanner_orchestrator as so
 

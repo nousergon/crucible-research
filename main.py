@@ -5,8 +5,8 @@ Delegates to local/run.py for full-featured CLI.
 Usage: python main.py [--date YYYY-MM-DD] [--local] [--no-s3] [--offline] [--stub-llm]
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

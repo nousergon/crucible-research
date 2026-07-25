@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
-
-import pytest
 
 from graph.state_schemas import (
     RubricDimensionScore,
@@ -99,7 +97,7 @@ class TestEmitEvalMetric:
         # Datetime, with the tz set so CloudWatch interprets it correctly.
         assert isinstance(ts, datetime)
         assert ts.tzinfo is not None
-        assert ts == datetime(2026, 4, 25, 3, 14, tzinfo=timezone.utc)
+        assert ts == datetime(2026, 4, 25, 3, 14, tzinfo=UTC)
 
     def test_namespace_and_metric_name_overridable(self):
         from evals.metrics import emit_eval_metric

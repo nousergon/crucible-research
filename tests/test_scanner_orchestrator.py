@@ -149,7 +149,7 @@ class TestBuildCandidatesArtifact:
         """Helper: apply all patches as context managers."""
         from contextlib import ExitStack
         stack = ExitStack()
-        for name, p in patches.items():
+        for p in patches.values():
             stack.enter_context(p)
         return stack
 
@@ -157,10 +157,10 @@ class TestBuildCandidatesArtifact:
         from data.scanner_orchestrator import build_candidates_artifact
 
         constituents = [f"T{i}" for i in range(900)]  # ≥800 floor
-        sector_map = {t: "Technology" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Technology")
         # All tickers in feature store — single-source-of-truth happy path.
         fs_features = {t: {"rsi_14": 55.0, "atr_14_pct": 0.02} for t in constituents}
-        daily_closes = {t: 100.0 for t in constituents}
+        daily_closes = dict.fromkeys(constituents, 100.0)
         quant_result = [{"ticker": f"T{i}"} for i in range(60)]
 
         patches = self._setup_patches(
@@ -206,9 +206,9 @@ class TestBuildCandidatesArtifact:
         from data.scanner_orchestrator import build_candidates_artifact
 
         constituents = [f"T{i}" for i in range(900)]
-        sector_map = {t: "Technology" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Technology")
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
-        daily_closes = {t: 100.0 for t in constituents}
+        daily_closes = dict.fromkeys(constituents, 100.0)
         # This cycle's scanner: T0..T9
         quant_result = [{"ticker": f"T{i}"} for i in range(10)]
 
@@ -238,7 +238,7 @@ class TestBuildCandidatesArtifact:
         from data.scanner_orchestrator import build_candidates_artifact
 
         constituents = [f"T{i}" for i in range(900)]
-        sector_map = {t: "Technology" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Technology")
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
 
         # No prior signals.json — diff fields should be empty + flag set.
@@ -261,7 +261,8 @@ class TestBuildCandidatesArtifact:
 
     def test_raises_when_constituents_below_floor(self):
         from data.scanner_orchestrator import (
-            build_candidates_artifact, ScannerOrchestratorError,
+            ScannerOrchestratorError,
+            build_candidates_artifact,
         )
 
         # Too few constituents — orchestrator must refuse rather than
@@ -282,11 +283,12 @@ class TestBuildCandidatesArtifact:
 
     def test_raises_when_feature_store_empty(self):
         from data.scanner_orchestrator import (
-            build_candidates_artifact, ScannerOrchestratorError,
+            ScannerOrchestratorError,
+            build_candidates_artifact,
         )
 
         constituents = [f"T{i}" for i in range(900)]
-        sector_map = {t: "Tech" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Tech")
         # Empty feature store — upstream DataPhase1 didn't run.
         patches = self._setup_patches(
             constituents=constituents, sector_map=sector_map,
@@ -304,7 +306,7 @@ class TestBuildCandidatesArtifact:
         from data.scanner_orchestrator import build_candidates_artifact
 
         constituents = [f"T{i}" for i in range(900)]
-        sector_map = {t: "Tech" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Tech")
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
         patches = self._setup_patches(
             constituents=constituents, sector_map=sector_map,
@@ -350,7 +352,7 @@ class TestScannerEvalLogPassthrough:
         from data.scanner_orchestrator import build_candidates_artifact
 
         constituents = [f"T{i}" for i in range(900)]
-        sector_map = {t: "Technology" for t in constituents}
+        sector_map = dict.fromkeys(constituents, "Technology")
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
 
         patches = self._setup_patches(
@@ -399,6 +401,7 @@ class TestScannerEvalLogPassthrough:
         must still produce a JSON-serializable artifact (write_candidates_artifact
         calls json.dumps on it)."""
         import numpy as np
+
         from data.scanner_orchestrator import write_candidates_artifact
 
         eval_log = [
@@ -429,8 +432,8 @@ class TestScannerEvalLogPassthrough:
         """End-to-end: build -> write -> read back via
         ArchiveManager.load_candidates_json must preserve scanner_eval_log
         byte-for-byte (the eval-log entries are plain JSON scalars)."""
-        from data.scanner_orchestrator import write_candidates_artifact
         from archive.manager import ArchiveManager
+        from data.scanner_orchestrator import write_candidates_artifact
 
         eval_log = [
             {"ticker": "T0", "quant_filter_pass": 1, "scan_path": "momentum",

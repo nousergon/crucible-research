@@ -8,15 +8,13 @@ loads the v1.5.0 template.
 """
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from agents.investment_committee.ic_cio import (
-    _pct_rank,
     _build_cio_prompt,
-    compute_sector_neutral_quality,
+    _pct_rank,
     build_sector_neutral_quality_map,
+    compute_sector_neutral_quality,
 )
 
 
@@ -123,14 +121,14 @@ def test_load_prior_sector_scores_db_error_is_graceful():
 
 
 def _prompt_kwargs():
-    return dict(
-        macro_context={"market_regime": "neutral"},
-        sector_ratings={"Tech": {"rating": "overweight", "modifier": 1.1}},
-        population=[],
-        open_slots=3,
-        exits=[],
-        run_date="2026-06-08",
-    )
+    return {
+        "macro_context": {"market_regime": "neutral"},
+        "sector_ratings": {"Tech": {"rating": "overweight", "modifier": 1.1}},
+        "population": [],
+        "open_slots": 3,
+        "exits": [],
+        "run_date": "2026-06-08",
+    }
 
 
 class _FakePrompt:

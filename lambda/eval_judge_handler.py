@@ -45,6 +45,7 @@ import datetime
 import logging
 import os
 import sys
+import tempfile
 
 # Repo root on sys.path so ``from evals.orchestrator import ...``
 # resolves under Lambda's invocation layout.
@@ -55,13 +56,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # tracer surface and would hit the same orjson-on-Timestamp crash
 # without it.
 from graph.langsmith_pandas_patch import install as _install_ls_patch
+
 _install_ls_patch()
 
 # Structured logging + flow-doctor singleton from alpha-engine-lib,
 # matching the main research handler. exclude_patterns kept empty —
 # the canonical lib pattern (mirrors lambda/handler.py:58) forces an
 # explicit decision once real ERROR-level noise is observed.
-from nousergon_lib.logging import monitor_handler, setup_logging
+# Imported after the sys.path.insert above — this Lambda entrypoint isn't
+# on sys.path until that line runs (mirrors lambda/handler.py's pattern).
+from nousergon_lib.logging import monitor_handler, setup_logging  # noqa: E402
+
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -90,7 +95,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
 
 

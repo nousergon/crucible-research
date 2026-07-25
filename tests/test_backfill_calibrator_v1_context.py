@@ -33,7 +33,6 @@ from scripts.backfill_calibrator_v1_context import (
     fetch_signals_payload,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 

@@ -26,11 +26,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from evals.rag_retrieval import (
-    CATEGORIES,
+# Imported after the sys.path.insert above — needed when this file is run
+# directly rather than via pytest's rootdir-relative discovery.
+from evals.rag_retrieval import (  # noqa: E402
     DEFAULT_CONDITIONS,
-    DEFAULT_K_VALUES,
-    AggregateRow,
     Condition,
     EvalQuery,
     QueryResult,
@@ -40,7 +39,6 @@ from evals.rag_retrieval import (
     render_markdown_report,
     run_eval,
 )
-
 
 # ── recall_at_k ─────────────────────────────────────────────────────────────
 

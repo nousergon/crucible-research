@@ -31,10 +31,9 @@ notes) and PR 4's curation step populates it before the report runs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date
-from typing import Callable, Iterable, Sequence
-
 
 # ── Test set schema ─────────────────────────────────────────────────────────
 
@@ -356,9 +355,10 @@ def _render_recommendation(
         b = cat_rows.get(best_name, AggregateRow(best_name, 0, {})).mean_recall.get(decision_k, 0.0)
         gated_lifts.append(f"- {cat}: {b - v:+.3f}")
     if gated_lifts:
-        lines.append("\n**Gated-category lifts (vs vector, recall@%d):**\n%s" % (
-            decision_k, "\n".join(gated_lifts)
-        ))
+        lines.append(
+            f"\n**Gated-category lifts (vs vector, recall@{decision_k}):**\n"
+            + "\n".join(gated_lifts)
+        )
     lines.append(
         "\n_PR 5 should adopt the winning condition's `vector_weight` "
         "as the default in `agents/sector_teams/qual_tools.py::query_filings`."

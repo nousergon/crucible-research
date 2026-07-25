@@ -98,6 +98,7 @@ def test_manifest_hash_is_deterministic_for_same_producer_and_code_sha():
 
 def test_each_registered_challenger_id_conforms_to_schema():
     from nousergon_lib import contracts
+
     from producers.registry import challenger_producers
 
     for spec in challenger_producers():

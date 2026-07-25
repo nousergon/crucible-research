@@ -25,7 +25,6 @@ from scoring.factor_scoring import (
     write_factor_profiles_to_s3,
 )
 
-
 # ── _within_sector_pct_rank ─────────────────────────────────────────────────
 
 
@@ -480,7 +479,7 @@ class TestPillarComposites:
             "pb_ratio": [4.0, 3.0, 2.0],
             "fcf_yield": [0.04, 0.05, 0.06],
         })
-        sector_map = {t: "Tech" for t in tickers}
+        sector_map = dict.fromkeys(tickers, "Tech")
         out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
 
         # Legacy 4 composites populate normally — Phase 3b is non-breaking.
@@ -524,7 +523,7 @@ class TestPillarComposites:
             # Only revenue_growth_3y of the 5 Phase 3a fields is present.
             "revenue_growth_3y": [0.30, 0.15, 0.05],
         })
-        sector_map = {t: "Tech" for t in tickers}
+        sector_map = dict.fromkeys(tickers, "Tech")
         out = compute_factor_composites(tech, fund, sector_map).set_index("ticker")
         # growth_score populates from the 1 available component (weight
         # reallocates 100% to revenue_growth_3y). sustainable_growth_rate

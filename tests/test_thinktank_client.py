@@ -187,7 +187,7 @@ def test_fails_loud_after_transient_retries_exhausted(monkeypatch):
         settings=_settings(), run_id="testrun",
         client_factory=lambda provider, key: holder,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(APIConnectionError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert fake.calls == 3
 

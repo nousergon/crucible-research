@@ -15,31 +15,31 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config import (
-    ANTHROPIC_API_KEY,
-    MAX_TOKENS_STRATEGIC,
-    PER_STOCK_MODEL,
-    TEAM_PICKS_PER_RUN,
-)
-from agents.sector_teams.team_config import (
-    TEAM_SECTORS, TEAM_SCREENING_PARAMS, get_team_tickers,
-)
-from agents.prompt_loader import load_prompt
 from agents.langchain_utils import (
     SECTOR_TEAM_LLM_MAX_RETRIES,
     SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_structured_with_validation_retry,
 )
-from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
-from agents.sector_teams.qual_analyst import run_qual_analyst
-from agents.sector_teams.peer_review import run_peer_review
+from agents.prompt_loader import load_prompt
 from agents.sector_teams.material_triggers import check_material_triggers
-from thesis.structured import build_structured_thesis, format_structured_thesis_for_prompt
+from agents.sector_teams.peer_review import run_peer_review
+from agents.sector_teams.qual_analyst import run_qual_analyst
+from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
+from agents.sector_teams.team_config import (
+    TEAM_SECTORS,
+    get_team_tickers,
+)
+from config import (
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_STRATEGIC,
+    PER_STOCK_MODEL,
+)
+
 # Per-sub-agent cost-tracker scopes. Each sub-agent call below opens its
 # own ``track_llm_cost`` frame keyed by the SAME agent_id the paired
 # ``_capture_if_enabled`` call in ``research_graph.sector_team_node`` uses
@@ -50,6 +50,7 @@ from thesis.structured import build_structured_thesis, format_structured_thesis_
 # recompute resolves even when the callback can't read model_name off the
 # response shape.
 from graph.llm_cost_tracker import track_llm_cost
+from thesis.structured import format_structured_thesis_for_prompt
 
 log = logging.getLogger(__name__)
 

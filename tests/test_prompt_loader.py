@@ -8,8 +8,7 @@ the LangSmith metadata propagation work read these fields directly.
 
 from __future__ import annotations
 
-import os
-import shutil
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -230,5 +229,5 @@ def test_loaded_prompt_is_frozen_dataclass(tmp_path):
     )
     loaded = load_prompt("frozen")
 
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         loaded.version = "9.9.9"  # type: ignore[misc]

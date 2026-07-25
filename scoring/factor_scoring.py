@@ -68,7 +68,6 @@ import json
 import logging
 import os
 from datetime import date as _date
-from typing import Optional
 
 import pandas as pd
 
@@ -378,7 +377,6 @@ def compute_factor_composites(
     #   sustainable_growth_rate = roe × (1 - payout_ratio)
     merged = _add_derived_factors(merged)
 
-    out_rows: list[dict] = []
     for composite, components in _COMPOSITE_DEFS.items():
         # Compute within-sector percentile rank for each component
         component_ranks: list[tuple[str, float, pd.Series]] = []
@@ -462,7 +460,7 @@ def write_factor_profiles_to_s3(
 
 
 def read_factor_profiles_from_s3(
-    run_date: Optional[str] = None,
+    run_date: str | None = None,
     bucket: str | None = None,
 ) -> dict[str, dict] | None:
     """Read factor profiles from S3.

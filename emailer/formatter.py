@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html>
@@ -72,7 +71,7 @@ def _md_to_html(md: str) -> str:
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             # Detect separator row
             if all(re.match(r"[-:]+$", c.replace(" ", "")) for c in cells if c):
-                html_lines.append("<thead><tr>" + "".join(f"<th></th>" for _ in cells) + "</tr></thead><tbody>")
+                html_lines.append("<thead><tr>" + "".join("<th></th>" for _ in cells) + "</tr></thead><tbody>")
                 continue
             tag = "th" if html_lines and "<table>" in html_lines[-1] else "td"
             row = "".join(f"<{tag}>{_inline_md(c)}</{tag}>" for c in cells)

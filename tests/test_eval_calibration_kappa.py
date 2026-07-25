@@ -19,7 +19,6 @@ from evals.calibration_kappa import (
     render_markdown,
 )
 
-
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
@@ -33,11 +32,11 @@ def _review(rubric_id: str, dims: list[tuple[str, int | None, int, int | None]])
             {
                 "dimension": d,
                 "blind_score": b,
-                "llm_score": l,
-                "final_score": f if f is not None else (b if b is not None else l),
+                "llm_score": llm,
+                "final_score": f if f is not None else (b if b is not None else llm),
                 "revised": (f is not None and f != b),
             }
-            for (d, b, l, f) in dims
+            for (d, b, llm, f) in dims
         ],
         "overall_note": "",
     }

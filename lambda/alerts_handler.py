@@ -49,7 +49,6 @@ import logging
 import os
 import sys
 import tempfile
-from typing import Optional
 
 import boto3
 import pytz
@@ -65,6 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # See lambda/handler.py for the full rationale. flow-doctor.yaml ships
 # in the Lambda task root (Dockerfile.alerts COPY).
 from nousergon_lib.logging import monitor_handler, setup_logging
+
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -81,7 +81,11 @@ setup_logging(
 
 logger = logging.getLogger(__name__)
 
-from config import (
+# `config` is imported here (rather than in the top-level import block) because
+# it must come after the `sys.path.insert` above — this Lambda entrypoint isn't
+# on sys.path until that line runs. See lambda/handler.py for the identical
+# pattern + full rationale.
+from config import (  # noqa: E402
     AWS_REGION,
     PRICE_MOVE_THRESHOLD_PCT,
     S3_BUCKET,
@@ -120,7 +124,7 @@ def _in_cooldown(ticker: str) -> bool:
     return elapsed.total_seconds() < _COOLDOWN_MINUTES * 60
 
 
-def _read_s3_json(s3, bucket: str, key: str) -> Optional[dict]:
+def _read_s3_json(s3, bucket: str, key: str) -> dict | None:
     """Best-effort S3 JSON read. Returns None on miss/error (logged)."""
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -151,11 +155,11 @@ def _heartbeat_stale(heartbeat: dict | None, stale_threshold_sec: int) -> tuple[
     try:
         # Accept both "Z" suffix and "+00:00" forms; daemon writes "Z".
         ts = datetime.datetime.fromisoformat(ts_str.rstrip("Z")).replace(
-            tzinfo=datetime.timezone.utc,
+            tzinfo=datetime.UTC,
         )
     except ValueError:
         return True, f"malformed heartbeat timestamp: {ts_str!r}"
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_utc = datetime.datetime.now(datetime.UTC)
     age_sec = (now_utc - ts).total_seconds()
     if age_sec > stale_threshold_sec:
         return True, (
@@ -212,7 +216,7 @@ def _get_population_tickers_from_db(db_path: str) -> list[str]:
 
 def _check_universe_drift(
     research_universe: set[str], subscribed_tickers: list[str]
-) -> Optional[str]:
+) -> str | None:
     """Compare research universe against daemon's subscribed set.
 
     Returns a finding string if research_universe ⊄ subscribed_tickers
