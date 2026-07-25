@@ -41,3 +41,23 @@ ignore = ["E501", "S603"]
 # imports (E402) and XDG_CACHE_HAME=/tmp (S108) are intentional Lambda
 # patterns inherited from the codebase, not introduced by this PR.
 "lambda/perturbation_battery_handler.py" = ["E402", "S108"]
+
+[build-system]
+requires = ["setuptools"]
+
+[project]
+name = "crucible-research"
+dynamic = ["version"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*", "venv/*"]
+
+[tool.coverage.report]
+# Ratchet floor — placeholder. Full suite could not be measured on this ARM runner
+# (arcticdb has no ARM Linux wheel). Raise to the actual measured value once CI
+# has run on an x86_64 runner and confirmed the real coverage level.
+fail_under = 0
