@@ -230,7 +230,10 @@ judged_agent_id is long (e.g. ``thesis_update:technology:AAPL``)."""
 
 
 def encode_custom_id(
-    *, judged_agent_id: str, run_id: str, judge_model: str,
+    *,
+    judged_agent_id: str,
+    run_id: str,
+    judge_model: str,
 ) -> str:
     """Encode (judged_agent_id, run_id, judge_model) → batch custom_id.
 
@@ -242,7 +245,9 @@ def encode_custom_id(
     Delegates to ``krepis.judge.encode_custom_id`` (config#2575 lift).
     """
     return _lib_encode_custom_id(
-        subject_id=judged_agent_id, run_id=run_id, judge_model=judge_model,
+        subject_id=judged_agent_id,
+        run_id=run_id,
+        judge_model=judge_model,
         tag_by_logical=_JUDGE_MODEL_TAG,
     )
 
@@ -269,7 +274,8 @@ def decode_custom_id(custom_id: str) -> tuple[str, str, str]:
 
 
 def _render_rubric(
-    artifact: DecisionArtifact, loaded_prompt: LoadedPrompt,
+    artifact: DecisionArtifact,
+    loaded_prompt: LoadedPrompt,
 ) -> str:
     """Render the rubric template against the artifact's payload.
 
@@ -351,7 +357,8 @@ def _make_skip_eval_artifact(
         rubric_version=rubric_version,
         judge_model=judge_model,
         dimension_scores=[],
-        overall_reasoning=overall_reasoning or default_reasoning.get(
+        overall_reasoning=overall_reasoning
+        or default_reasoning.get(
             skip_reason,
             f"Judge short-circuited: {skip_reason}.",
         ),
@@ -412,20 +419,14 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
         # fetch_analyst_consensus's returned shape (the FMP endpoints that
         # populated them 402'd for every ticker on the current plan).
         # earnings_surprises is the only field left to check.
-        analyst_is_substantive = (
-            isinstance(analyst, dict)
-            and bool(analyst.get("earnings_surprises"))
-        )
+        analyst_is_substantive = isinstance(analyst, dict) and bool(analyst.get("earnings_surprises"))
         return not prior_summary and not news_articles and not analyst_is_substantive
 
     if agent_id.startswith("sector_quant:"):
         # Degenerate iff sector is empty AND technical_scores are
         # empty. Use ``sector_tickers`` list length as the authoritative
         # signal — older snapshots may not have ``sector_tickers_count``.
-        has_tickers = bool(
-            snap.get("sector_tickers")
-            or int(snap.get("sector_tickers_count") or 0) > 0
-        )
+        has_tickers = bool(snap.get("sector_tickers") or int(snap.get("sector_tickers_count") or 0) > 0)
         has_scores = bool(snap.get("technical_scores_team"))
         return not (has_tickers or has_scores)
 
@@ -438,10 +439,7 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
         return not has_tickers
 
     if agent_id.startswith("sector_peer_review:"):
-        return (
-            not (snap.get("quant_picks") or [])
-            and not (snap.get("qual_picks") or [])
-        )
+        return not (snap.get("quant_picks") or []) and not (snap.get("qual_picks") or [])
 
     # macro_economist + ic_cio + anything else: never degenerate.
     return False
@@ -759,8 +757,11 @@ def evaluate_artifact(
     logger.info(
         "[eval_judge] persisted-cost agent_id=%s judge_model=%s "
         "request_model=%s resolved_model=%s provider_cost_usd=%.6f",
-        artifact.agent_id, judge_model, request_model,
-        call_result.resolved_model, call_result.total_usd,
+        artifact.agent_id,
+        judge_model,
+        request_model,
+        call_result.resolved_model,
+        call_result.total_usd,
     )
 
     return RubricEvalArtifact(
@@ -896,14 +897,16 @@ def _call_openrouter_judge_llm(
 
     tool_schema = _build_rubric_tool_spec()
     tool_name = tool_schema["name"]
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": tool_schema["name"],
-            "description": tool_schema["description"],
-            "parameters": tool_schema["input_schema"],
-        },
-    }]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool_schema["name"],
+                "description": tool_schema["description"],
+                "parameters": tool_schema["input_schema"],
+            },
+        }
+    ]
 
     last_error: BaseException | None = None
     llm_output: RubricEvalLLMOutput | None = None
@@ -927,11 +930,44 @@ def _call_openrouter_judge_llm(
             last_error = exc
             logger.warning(
                 "%s:%s attempt %d/%d transport error: %s",
-                log_prefix, agent_id, attempt, max_retries, exc,
+                log_prefix,
+                agent_id,
+                attempt,
+                max_retries,
+                exc,
             )
             continue
 
-        choice = resp.choices[0]
+        # OpenRouter signals an upstream provider failure IN THE BODY of a 200
+        # response: `choices` comes back null (or empty) with an `error` object
+        # alongside it. The SDK constructs the object happily, so this is not a
+        # transport exception and the except above never sees it.
+        #
+        # `resp.choices[0]` then raised TypeError: 'NoneType' object is not
+        # subscriptable — OUTSIDE the retry loop's guard, killing the whole
+        # batch on one transient upstream hiccup, with the provider's own error
+        # message discarded unread. This is the failure that has been reddening
+        # the judge perturbation smoke since 2026-07-25.
+        #
+        # Treat it as what it is: a retryable provider error, on the same
+        # bounded-retry path as a transport error, and surface the payload.
+        choices = getattr(resp, "choices", None)
+        if not choices:
+            provider_error = getattr(resp, "error", None)
+            last_error = RuntimeError(
+                f"provider returned no choices (error={provider_error!r}, id={getattr(resp, 'id', None)!r})"
+            )
+            logger.warning(
+                "%s:%s attempt %d/%d provider error: %s",
+                log_prefix,
+                agent_id,
+                attempt,
+                max_retries,
+                last_error,
+            )
+            continue
+
+        choice = choices[0]
         resolved_model = getattr(resp, "model", None) or resolved_model
         usage = getattr(resp, "usage", None)
         cost = getattr(usage, "cost", None) if usage is not None else None
@@ -946,25 +982,33 @@ def _call_openrouter_judge_llm(
             # must be diagnosable separately from ordinary schema-validation
             # retries, not folded into the same generic "attempt failed" line.
             logger.warning(
-                "%s:%s leak_guard_triggered attempt=%d/%d "
-                "reason=%s finish_reason=%s request_model=%s",
-                log_prefix, agent_id, attempt, max_retries,
-                exc.reason, exc.finish_reason, spec.model,
+                "%s:%s leak_guard_triggered attempt=%d/%d reason=%s finish_reason=%s request_model=%s",
+                log_prefix,
+                agent_id,
+                attempt,
+                max_retries,
+                exc.reason,
+                exc.finish_reason,
+                spec.model,
             )
             continue
 
         tool_calls = choice.message.tool_calls or []
         matching = next(
-            (tc for tc in tool_calls if tc.function.name == tool_name), None,
+            (tc for tc in tool_calls if tc.function.name == tool_name),
+            None,
         )
         if matching is None:
             last_error = ValueError(
-                f"no {tool_name!r} tool call in OpenRouter response "
-                f"(finish_reason={choice.finish_reason!r})"
+                f"no {tool_name!r} tool call in OpenRouter response (finish_reason={choice.finish_reason!r})"
             )
             logger.warning(
                 "%s:%s attempt %d/%d: %s",
-                log_prefix, agent_id, attempt, max_retries, last_error,
+                log_prefix,
+                agent_id,
+                attempt,
+                max_retries,
+                last_error,
             )
             continue
 
@@ -977,7 +1021,11 @@ def _call_openrouter_judge_llm(
             last_error = exc
             logger.warning(
                 "%s:%s attempt %d/%d schema validation failed: %s",
-                log_prefix, agent_id, attempt, max_retries, exc,
+                log_prefix,
+                agent_id,
+                attempt,
+                max_retries,
+                exc,
             )
             continue
 
@@ -991,7 +1039,9 @@ def _call_openrouter_judge_llm(
         )
 
     return _OpenRouterJudgeCallResult(
-        llm_output=llm_output, resolved_model=resolved_model, total_usd=total_usd,
+        llm_output=llm_output,
+        resolved_model=resolved_model,
+        total_usd=total_usd,
     )
 
 
@@ -1085,7 +1135,9 @@ def evaluate_artifact_openrouter(
         "[eval_judge_openrouter] persisted-cost agent_id=%s request_model=%s "
         "resolved_model=%s provider_cost_usd=%.6f (shadow-only, no "
         "decision authority — config#2575)",
-        artifact.agent_id, request_model, call_result.resolved_model,
+        artifact.agent_id,
+        request_model,
+        call_result.resolved_model,
         call_result.total_usd,
     )
 
@@ -1167,7 +1219,10 @@ def _capture_date_from_s3_key(judged_artifact_s3_key: str | None) -> str | None:
 
 
 def _eval_basename(
-    *, judged_agent_id: str, run_id: str, judge_model: str,
+    *,
+    judged_agent_id: str,
+    run_id: str,
+    judge_model: str,
 ) -> str:
     """Per-file basename for one eval artifact inside a judge batch.
 
@@ -1235,7 +1290,9 @@ def build_eval_s3_key(
             "construction in that batch."
         )
     basename = _eval_basename(
-        judged_agent_id=judged_agent_id, run_id=run_id, judge_model=judge_model,
+        judged_agent_id=judged_agent_id,
+        run_id=run_id,
+        judge_model=judge_model,
     )
     return eval_artifact_key(prefix, judge_run_id, basename=basename)
 
@@ -1265,10 +1322,7 @@ def build_legacy_eval_s3_key(
         raise ValueError("build_legacy_eval_s3_key requires judge_run_id.")
     ts = timestamp or datetime.now(UTC)
     date_partition = ts.strftime("%Y-%m-%d")
-    return (
-        f"{prefix}{date_partition}/{judge_run_id}/"
-        f"{judged_agent_id}.{run_id}.{judge_model}.json"
-    )
+    return f"{prefix}{date_partition}/{judge_run_id}/{judged_agent_id}.{run_id}.{judge_model}.json"
 
 
 def persist_eval_artifact(
@@ -1312,8 +1366,10 @@ def persist_eval_artifact(
     s3.put_object(Bucket=bucket, Key=key, Body=body)
     logger.info(
         "[eval_judge] persisted eval for agent_id=%s rubric=%s judge=%s → %s",
-        artifact.judged_agent_id, artifact.rubric_id,
-        artifact.judge_model, key,
+        artifact.judged_agent_id,
+        artifact.rubric_id,
+        artifact.judge_model,
+        key,
     )
     if update_latest:
         # Operator-UX sidecar mirror. Best-effort: the dated artifact is
@@ -1338,6 +1394,9 @@ def persist_eval_artifact(
                 "[eval_judge] latest sidecar mirror failed at s3://%s/%s — "
                 "dated artifact %s is the durable record; sidecar is "
                 "rebuildable",
-                bucket, sidecar_key, key, exc_info=True,
+                bucket,
+                sidecar_key,
+                key,
+                exc_info=True,
             )
     return key
