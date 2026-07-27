@@ -77,8 +77,10 @@ class TestDryPath:
         """dry_run_llm must return before _ensure_init / the runner call —
         no S3/CloudWatch, no LLM. The Friday shell-run keystone contract
         (shared evals.lambda_dry.is_dry substrate)."""
-        with patch.object(handler_mod, "_ensure_init") as init, \
-             patch("evals.openrouter_shadow.run_shadow_judge_over_date") as run:
+        with (
+            patch.object(handler_mod, "_ensure_init") as init,
+            patch("evals.openrouter_shadow.run_shadow_judge_over_date") as run,
+        ):
             result = handler_mod.handler({"dry_run_llm": True}, None)
         assert result == {"status": "OK", "dry_run": True}
         init.assert_not_called()
@@ -88,14 +90,14 @@ class TestDryPath:
 class TestArgumentTranslation:
     def test_explicit_date_and_bucket_passed_through(self, handler_mod):
         summary = _summary_mock()
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch(
-                 "evals.openrouter_shadow.run_shadow_judge_over_date",
-                 return_value=summary,
-             ) as run:
-            result = handler_mod.handler(
-                {"date": "2026-07-18", "bucket": "some-other-bucket"}, None
-            )
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "evals.openrouter_shadow.run_shadow_judge_over_date",
+                return_value=summary,
+            ) as run,
+        ):
+            result = handler_mod.handler({"date": "2026-07-18", "bucket": "some-other-bucket"}, None)
         run.assert_called_once_with(date="2026-07-18", bucket="some-other-bucket")
         assert result == {"status": "OK", "summary": summary}
 
@@ -104,11 +106,13 @@ class TestArgumentTranslation:
         targets Saturday's just-closed capture partition."""
         summary = _summary_mock()
         expected_date = str(datetime.date.today() - datetime.timedelta(days=1))
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch(
-                 "evals.openrouter_shadow.run_shadow_judge_over_date",
-                 return_value=summary,
-             ) as run:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "evals.openrouter_shadow.run_shadow_judge_over_date",
+                return_value=summary,
+            ) as run,
+        ):
             handler_mod.handler({}, None)
         run.assert_called_once_with(date=expected_date, bucket="alpha-engine-research")
 
@@ -118,11 +122,13 @@ class TestArgumentTranslation:
         resolution."""
         summary = _summary_mock()
         expected_date = str(datetime.date.today() - datetime.timedelta(days=1))
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch(
-                 "evals.openrouter_shadow.run_shadow_judge_over_date",
-                 return_value=summary,
-             ) as run:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "evals.openrouter_shadow.run_shadow_judge_over_date",
+                return_value=summary,
+            ) as run,
+        ):
             result = handler_mod.handler(None, None)
         run.assert_called_once_with(date=expected_date, bucket="alpha-engine-research")
         assert result["status"] == "OK"
@@ -130,11 +136,13 @@ class TestArgumentTranslation:
     def test_missing_bucket_defaults_to_env_or_constant(self, handler_mod, monkeypatch):
         monkeypatch.setenv("RESEARCH_BUCKET", "env-bucket")
         summary = _summary_mock()
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch(
-                 "evals.openrouter_shadow.run_shadow_judge_over_date",
-                 return_value=summary,
-             ) as run:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "evals.openrouter_shadow.run_shadow_judge_over_date",
+                return_value=summary,
+            ) as run,
+        ):
             handler_mod.handler({"date": "2026-07-18"}, None)
         run.assert_called_once_with(date="2026-07-18", bucket="env-bucket")
 
@@ -142,11 +150,13 @@ class TestArgumentTranslation:
 class TestRaiseOnFailure:
     def test_run_shadow_judge_failure_propagates(self, handler_mod):
         """The core contract: NO error-dict conversion. See module doc."""
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch(
-                 "evals.openrouter_shadow.run_shadow_judge_over_date",
-                 side_effect=RuntimeError("boom"),
-             ):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "evals.openrouter_shadow.run_shadow_judge_over_date",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
             with pytest.raises(RuntimeError, match="boom"):
                 handler_mod.handler({"date": "2026-07-18"}, None)
 
@@ -173,5 +183,6 @@ class TestColdStartInit:
         monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
         handler_mod._ensure_init()
         import os
+        import tempfile
 
-        assert os.environ["XDG_CACHE_HOME"] == "/tmp"
+        assert os.environ["XDG_CACHE_HOME"] == tempfile.gettempdir()
