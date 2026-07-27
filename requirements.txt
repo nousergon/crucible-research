@@ -126,7 +126,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # which ship starting 0.16.0. BLOCKED until the companion krepis PR merges
 # + PyPI publish completes — same gate:dependency linkage pattern as the
 # 0.13.0 bump above.
-krepis>=0.16.0
+# krepis floor raised to 0.20.0: scripts/measure_cache_prefixes.py now sources
+# per-model cache minimums from krepis.cache_minimums (shipped as package data)
+# instead of a hand-maintained dict, which had drifted -- two of four entries
+# were wrong, both too high, so the script declined caching for prefixes that
+# would have cached. See krepis-PR72.
+krepis>=0.20.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13

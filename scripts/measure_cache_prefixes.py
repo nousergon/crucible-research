@@ -6,9 +6,10 @@ whether the prefix clears the model-specific cache minimum before any
 won't engage caching — no error, just ``cache_creation_input_tokens: 0``
 forever — so this audit must run before merging any caching changes.
 
-Model cache minimums (per Anthropic prompt-caching docs):
-  - Haiku-4-5 / Opus tier:  4096 tokens
-  - Sonnet-4-6:             2048 tokens
+Model cache minimums come from ``krepis.cache_minimums`` (>= 0.20.0) --
+they are NOT monotonic across generations and tier does not predict them
+(Opus 5 is 512, Opus 4.7 is 2048, Haiku 4.5 is 4096 -- the highest, on the
+tier where mechanical work routes). Never infer one; look it up.
 
 Call sites measured:
 
@@ -54,16 +55,50 @@ if str(_REPO_ROOT) not in sys.path:
 import anthropic  # noqa: E402
 from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
+
+class _KrepisCacheMinimums:
+    """Mapping-shaped view over ``krepis.cache_minimums``.
+
+    Keeps the existing ``_CACHE_MIN_BY_MODEL[model]`` call sites unchanged
+    while removing the hand-maintained table behind them. Raises rather than
+    returning a default for an unknown model -- this script's whole purpose
+    is deciding whether a prefix clears the threshold, and guessing the
+    threshold would defeat it.
+    """
+
+    def __getitem__(self, model: str) -> int:
+        from krepis.cache_minimums import require_cache_minimum
+
+        return require_cache_minimum(model)
+
+    def get(self, model: str, default: int | None = None) -> int | None:
+        from krepis.cache_minimums import cache_minimum
+
+        value = cache_minimum(model)
+        return default if value is None else value
+
+
 # ── Model-specific cache minimums (tokens) ────────────────────────────────
-# Per Anthropic prompt-caching docs: any prefix below this silently won't
-# cache. Kept inline so the script doesn't depend on a config repo for
-# what is a fixed, documented API constraint.
-_CACHE_MIN_BY_MODEL: dict[str, int] = {
-    "claude-haiku-4-5": 4096,
-    "claude-opus-4-7": 4096,
-    "claude-opus-4-6": 4096,
-    "claude-sonnet-4-6": 2048,
-}
+# Sourced from ``krepis.cache_minimums`` (krepis >= 0.20.0), which ships the
+# published per-model values as package data.
+#
+# This WAS a hand-maintained dict here, on the reasoning that a fixed,
+# documented API constraint shouldn't drag in a config-repo dependency. The
+# reasoning was sound -- this repo is public and the fleet registry is
+# private -- but the copy drifted, and a 2026-07-27 audit found two of its
+# four entries wrong: opus-4-7 as 4096 (actual 2048) and sonnet-4-6 as 2048
+# (actual 1024).
+#
+# BOTH ERRED HIGH, which is the direction that costs silently: this script
+# then reports "prefix does not clear the minimum" for prefixes that would
+# in fact cache, and caching is declined with nothing to notice afterwards
+# -- no marker, no error, no zero-hit-rate signal. The three Phase-4
+# deferrals below (peer_review, macro_agent, eval_judge) are all Sonnet-4-6
+# and were judged against the inflated 2048.
+#
+# krepis is a public, pip-installable package and already a dependency, so
+# it satisfies the original constraint without the drift surface.
+_CACHE_MIN_BY_MODEL = _KrepisCacheMinimums()
 
 
 @dataclass
@@ -192,10 +227,7 @@ def measure_sector_qual(client: anthropic.Anthropic) -> PrefixMeasurement:
     except ImportError:
         PILLAR_EMIT_ENABLED = False
 
-    prompt_name = (
-        "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED
-        else "qual_analyst_system"
-    )
+    prompt_name = "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED else "qual_analyst_system"
     system_text = load_prompt(prompt_name).format(
         team_title="Technology",
         n_picks=5,
@@ -255,7 +287,10 @@ def measure_peer_review_selection(
     )
     model = "claude-haiku-4-5"
     tokens = _count(
-        client, model=model, system_text="", user_text=rendered,
+        client,
+        model=model,
+        system_text="",
+        user_text=rendered,
         tool_specs=[],
     )
     return PrefixMeasurement(
@@ -284,18 +319,33 @@ def measure_macro_analyst(client: anthropic.Anthropic) -> PrefixMeasurement:
         prior_date="2026-05-18",
         prior_report="(volatile per-call — placeholder)",
         regime_substrate="(volatile per-call — placeholder)",
-        fed_funds="4.5", t2yr="4.8", t10yr="4.4",
-        curve_slope="-40", vix="18", spy_30d="2.0",
-        qqq_30d="3.0", iwm_30d="1.0", oil="78.0",
-        gold="2400", copper="4.5", cpi_yoy="3.0",
-        unemployment="4.0", consumer_sentiment="65",
-        initial_claims="220000", hy_oas="350",
-        pct_above_50d="55", pct_above_200d="60",
-        adv_dec_ratio="1.1", upcoming_releases="(volatile)",
+        fed_funds="4.5",
+        t2yr="4.8",
+        t10yr="4.4",
+        curve_slope="-40",
+        vix="18",
+        spy_30d="2.0",
+        qqq_30d="3.0",
+        iwm_30d="1.0",
+        oil="78.0",
+        gold="2400",
+        copper="4.5",
+        cpi_yoy="3.0",
+        unemployment="4.0",
+        consumer_sentiment="65",
+        initial_claims="220000",
+        hy_oas="350",
+        pct_above_50d="55",
+        pct_above_200d="60",
+        adv_dec_ratio="1.1",
+        upcoming_releases="(volatile)",
     )
     model = "claude-sonnet-4-6"
     tokens = _count(
-        client, model=model, system_text="", user_text=rendered,
+        client,
+        model=model,
+        system_text="",
+        user_text=rendered,
         tool_specs=[],
     )
     return PrefixMeasurement(
@@ -315,7 +365,8 @@ def measure_macro_analyst(client: anthropic.Anthropic) -> PrefixMeasurement:
 
 
 def measure_eval_judge(
-    client: anthropic.Anthropic, rubric_name: str,
+    client: anthropic.Anthropic,
+    rubric_name: str,
 ) -> PrefixMeasurement:
     """One eval-judge rubric. Default judge model is Haiku-4-5."""
     from agents.prompt_loader import load_prompt
@@ -326,7 +377,10 @@ def measure_eval_judge(
     )
     model = "claude-haiku-4-5"
     tokens = _count(
-        client, model=model, system_text="", user_text=rendered,
+        client,
+        model=model,
+        system_text="",
+        user_text=rendered,
         tool_specs=[],
     )
     return PrefixMeasurement(
@@ -402,8 +456,7 @@ def main() -> int:
 
     # Phase 4 (deferred) — measured now for sizing.
     for label, fn in [
-        ("peer_review_joint_selection",
-         lambda: measure_peer_review_selection(client)),
+        ("peer_review_joint_selection", lambda: measure_peer_review_selection(client)),
         ("macro_agent_analyst", lambda: measure_macro_analyst(client)),
     ]:
         m = _try_measure(label, fn)
