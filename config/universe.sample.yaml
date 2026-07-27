@@ -111,8 +111,20 @@ schedule:
   run_on_early_close: true
 
 llm:
-  per_stock_model: claude-haiku-4-5-20251001   # news + research agents
-  strategic_model: claude-sonnet-4-6            # scanner ranking, macro, consolidator
+  # CAPABILITY CLASSES, not concrete models. The registry decides which model
+  # a class means (model-portability-policy I1); naming a model here would put
+  # a selection fact in a consumer's config.
+  #   low  = mechanical/deterministic   med = scoped reasoning
+  #   high = frontier judgment          ultra = maximum capability
+  per_stock_class: low        # news + research agents
+  strategic_class: med        # scanner ranking, macro, consolidator
   max_tokens_per_stock: 800
   max_tokens_strategic: 4096
   concurrent_agents: 10
+
+  # Where class names are resolved. On a host running the LiteLLM router this
+  # is the router; in Lambda, which cannot reach 127.0.0.1, it is OpenRouter.
+  # Same shape thinktank already uses (ProviderSpec.base_url) — the endpoint is
+  # a DEPLOYMENT fact, the class is not.
+  router_base_url: http://127.0.0.1:8980/v1
+  router_key_secret: LITELLM_MASTER_KEY

@@ -12,23 +12,20 @@ from __future__ import annotations
 
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
+    make_agent_llm,
 )
 from agents.prompt_loader import load_prompt
 from agents.token_guard import check_prompt_size
 from config import (
     ALL_SECTORS,
-    ANTHROPIC_API_KEY,
     MAX_TOKENS_STRATEGIC,
     PRIOR_REPORT_MAX_CHARS,
     REGIME_GUARDRAILS,
-    STRATEGIC_MODEL,
+    STRATEGIC_CLASS,
 )
 from graph.state_schemas import MacroCriticOutput, MacroEconomistRawOutput
 from strict_mode import is_strict_validation_enabled
@@ -36,6 +33,7 @@ from strict_mode import is_strict_validation_enabled
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = load_prompt("macro_agent")
+
 
 def _truncate_prior(text: str, max_chars: int | None = None) -> str:
     """Truncate prior report to last max_chars characters to manage prompt size."""
@@ -49,8 +47,8 @@ def _truncate_prior(text: str, max_chars: int | None = None) -> str:
 _DEFAULT_SECTOR_MODIFIERS = dict.fromkeys(ALL_SECTORS, 1.0)
 
 _VALID_RATINGS = {"overweight", "market_weight", "underweight"}
-_OW_THRESHOLD = 1.08   # modifier >= this → overweight
-_UW_THRESHOLD = 0.92   # modifier <= this → underweight
+_OW_THRESHOLD = 1.08  # modifier >= this → overweight
+_UW_THRESHOLD = 0.92  # modifier <= this → underweight
 
 
 def _find_json_block(text: str, key: str = '"market_regime"') -> tuple[int, int]:
@@ -62,7 +60,7 @@ def _find_json_block(text: str, key: str = '"market_regime"') -> tuple[int, int]
     key_pos = text.find(key)
     if key_pos == -1:
         return -1, -1
-    brace_pos = text.rfind('{', 0, key_pos)
+    brace_pos = text.rfind("{", 0, key_pos)
     if brace_pos == -1:
         return -1, -1
     depth = 0
@@ -72,7 +70,7 @@ def _find_json_block(text: str, key: str = '"market_regime"') -> tuple[int, int]
         if escape_next:
             escape_next = False
             continue
-        if ch == '\\' and in_string:
+        if ch == "\\" and in_string:
             escape_next = True
             continue
         if ch == '"':
@@ -80,9 +78,9 @@ def _find_json_block(text: str, key: str = '"market_regime"') -> tuple[int, int]
             continue
         if in_string:
             continue
-        if ch == '{':
+        if ch == "{":
             depth += 1
-        elif ch == '}':
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 return brace_pos, i
@@ -137,11 +135,7 @@ def _format_drawdown_leg(substrate: dict) -> str:
     excess = dd.get("excess") or {}
     spy_dd = spy.get("drawdown")
     spy_tier = spy.get("tier", "N/A")
-    spy_off = (
-        f"{-float(spy_dd) * 100:.1f}% off its trailing peak"
-        if isinstance(spy_dd, (int, float))
-        else "depth N/A"
-    )
+    spy_off = f"{-float(spy_dd) * 100:.1f}% off its trailing peak" if isinstance(spy_dd, (int, float)) else "depth N/A"
 
     if excess.get("available"):
         nav_dd = excess.get("nav_drawdown")
@@ -156,23 +150,17 @@ def _format_drawdown_leg(substrate: dict) -> str:
             if isinstance(depth, (int, float))
             else "excess depth N/A"
         )
-        excess_line = (
-            f"    - book: {nav_off}; {depth_str} "
-            f"(tier = {excess.get('tier', 'N/A')})\n"
-        )
+        excess_line = f"    - book: {nav_off}; {depth_str} (tier = {excess.get('tier', 'N/A')})\n"
     else:
         excess_line = (
-            "    - book-vs-market excess: UNAVAILABLE (paper NAV "
-            "short/gappy or not wired) — the SPY leg still acts.\n"
+            "    - book-vs-market excess: UNAVAILABLE (paper NAV short/gappy or not wired) — the SPY leg still acts.\n"
         )
 
     eff = substrate.get("effective_regime") or {}
     if isinstance(eff, dict):
         eff_label = eff.get("effective_regime", "N/A")
         drivers = eff.get("drivers", {}) or {}
-        driver_str = ", ".join(
-            f"{k}={v}" for k, v in drivers.items() if v
-        ) or "none escalating"
+        driver_str = ", ".join(f"{k}={v}" for k, v in drivers.items() if v) or "none escalating"
     else:
         # latest.json sidecar carries effective_regime as a bare string
         eff_label = eff if isinstance(eff, str) else "N/A"
@@ -226,11 +214,11 @@ def _format_regime_substrate(substrate: dict | None) -> str:
 
     guard_lines: list[str] = []
     for flag, label in [
-        ("vix_bear_breached",        "VIX BEAR threshold breached"),
-        ("vix_caution_breached",     "VIX CAUTION threshold breached"),
-        ("spy_30d_bear_breached",    "SPY 30d BEAR threshold breached"),
+        ("vix_bear_breached", "VIX BEAR threshold breached"),
+        ("vix_caution_breached", "VIX CAUTION threshold breached"),
+        ("spy_30d_bear_breached", "SPY 30d BEAR threshold breached"),
         ("spy_30d_caution_breached", "SPY 30d CAUTION threshold breached"),
-        ("hy_oas_caution_breached",  "HY OAS CAUTION threshold breached"),
+        ("hy_oas_caution_breached", "HY OAS CAUTION threshold breached"),
     ]:
         if guardrails.get(flag):
             guard_lines.append(f"    - {label}")
@@ -239,8 +227,7 @@ def _format_regime_substrate(substrate: dict | None) -> str:
     floor = guardrails.get("active_severity_floor")
 
     per_feat_lines = [
-        f"    - {feat}: z={z:+.2f}"
-        for feat, z in sorted(per_feat_z.items(), key=lambda kv: -abs(kv[1]))[:6]
+        f"    - {feat}: z={z:+.2f}" for feat, z in sorted(per_feat_z.items(), key=lambda kv: -abs(kv[1]))[:6]
     ]
     if not per_feat_lines:
         per_feat_lines.append("    - (no per-feature z-scores available)")
@@ -254,9 +241,9 @@ def _format_regime_substrate(substrate: dict | None) -> str:
         "You remain the FINAL authority on the regime call.\n"
         "\n"
         f"  HMM 3-state posterior (Hamilton-Kim filter, filter-only — no look-ahead):\n"
-        f"    - P(bear)    = {_fmt(probs.get('bear'),    '.2f')}\n"
+        f"    - P(bear)    = {_fmt(probs.get('bear'), '.2f')}\n"
         f"    - P(neutral) = {_fmt(probs.get('neutral'), '.2f')}\n"
-        f"    - P(bull)    = {_fmt(probs.get('bull'),    '.2f')}\n"
+        f"    - P(bull)    = {_fmt(probs.get('bull'), '.2f')}\n"
         f"    - argmax = {hmm.get('argmax', 'N/A')}\n"
         f"    - filter run-length = "
         f"{hmm.get('weeks_in_current_state', 'N/A')} week(s) "
@@ -268,16 +255,14 @@ def _format_regime_substrate(substrate: dict | None) -> str:
         f"  Composite intensity (AQR-style risk-on/risk-off, positive = risk-on):\n"
         f"    - intensity_z = {_fmt(composite.get('intensity_z'), '+.2f')}  "
         f"({composite.get('implied_severity', 'N/A')})\n"
-        f"  Top driving features (|z| sorted, max 6):\n"
-        + "\n".join(per_feat_lines) + "\n"
+        f"  Top driving features (|z| sorted, max 6):\n" + "\n".join(per_feat_lines) + "\n"
         "\n"
         f"  Change-point signal (Adams & MacKay 2007 BOCPD):\n"
         f"    - change_signal = {bocpd.get('change_signal', False)}, "
         f"confidence = {_fmt(bocpd.get('change_confidence'), '.2f')}, "
         f"max_runlength_prob = {_fmt(bocpd.get('max_runlength_prob'), '.2f')}\n"
         "\n"
-        f"  Severity-escalator guardrails (mirror your post-LLM gate):\n"
-        + "\n".join(guard_lines) + "\n"
+        f"  Severity-escalator guardrails (mirror your post-LLM gate):\n" + "\n".join(guard_lines) + "\n"
         f"    - active_severity_floor = {floor if floor else 'none'}\n"
         "\n"
         "Substrate metadata:\n"
@@ -317,12 +302,9 @@ def run_macro_agent(
     # path stays leaf-side of graph/* (research_graph imports macro_agent).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-    llm = ChatAnthropic(
-        model=STRATEGIC_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=STRATEGIC_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -395,9 +377,7 @@ def run_macro_agent(
     # field directly. include_raw=True captures parse failures as a
     # ``parsing_error`` rather than raising; the strict-mode gate below raises
     # explicitly to match the "no silent fallbacks" rule.
-    structured_llm = llm.with_structured_output(
-        MacroEconomistRawOutput, include_raw=True
-    )
+    structured_llm = llm.with_structured_output(MacroEconomistRawOutput, include_raw=True)
     # ALL-AGENTS-STRICT (Brian, 2026-05-16): the macro economist is one
     # of the agents in scope. Deadline-bounded (~75 min) 429 retry so
     # an org TPM ceiling is ridden out; if it persists past the
@@ -414,17 +394,10 @@ def run_macro_agent(
     raw_message = response.get("raw")
     parsed: MacroEconomistRawOutput | None = response.get("parsed")
     parsing_error = response.get("parsing_error")
-    full_text = (
-        raw_message.content
-        if raw_message is not None and hasattr(raw_message, "content")
-        else ""
-    )
+    full_text = raw_message.content if raw_message is not None and hasattr(raw_message, "content") else ""
 
     if parsing_error is not None:
-        msg = (
-            f"[macro_agent] structured-output parse failed: "
-            f"{type(parsing_error).__name__}: {parsing_error}"
-        )
+        msg = f"[macro_agent] structured-output parse failed: {type(parsing_error).__name__}: {parsing_error}"
         if is_strict_validation_enabled():
             raise RuntimeError(msg)
         logger.warning("%s — falling back to defaults (lax mode)", msg)
@@ -446,7 +419,7 @@ def run_macro_agent(
     if not report_md and full_text:
         _start, _end = _find_json_block(full_text)
         if _start != -1:
-            report_md = (full_text[:_start] + full_text[_end + 1:]).strip()
+            report_md = (full_text[:_start] + full_text[_end + 1 :]).strip()
         else:
             report_md = full_text.strip()
 
@@ -555,7 +528,11 @@ def _validate_regime(llm_regime: str, macro_data: dict) -> str:
                 forced_regime = "bear"
                 logger.warning(
                     "[regime_guardrail] OVERRIDE %s → bear: VIX=%.1f>%d AND SPY_30d=%.1f%%<%s%%",
-                    llm_regime, vix, bear_vix, spy_30d, bear_spy,
+                    llm_regime,
+                    vix,
+                    bear_vix,
+                    spy_30d,
+                    bear_spy,
                 )
                 return forced_regime
 
@@ -579,12 +556,13 @@ def run_macro_critic(
     """
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-    llm = ChatAnthropic(
-        model=STRATEGIC_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=512,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+    llm = make_agent_llm(
+        model_class=STRATEGIC_CLASS,
+        # max-tokens-allowlist: critic emits a small structured object
+        # (action + critique + suggested_regime). Both tier constants are
+        # oversized for it; holding 512 keeps truncation visible if the
+        # critic ever starts generating verbose output.
+        max_tokens=512,  # max-tokens-allowlist
         callbacks=[get_cost_telemetry_callback()],
     )
     macro_json = initial_result.get("macro_json", {})
@@ -640,15 +618,14 @@ def run_macro_critic(
             result["suggested_regime"] = verdict.suggested_regime
         logger.info(
             "[macro_critic] action=%s critique=%s",
-            verdict.action, (verdict.critique or "")[:80],
+            verdict.action,
+            (verdict.critique or "")[:80],
         )
         return result
     except Exception as e:
         if is_strict_validation_enabled():
             raise
-        logger.warning(
-            "[macro_critic] LLM call failed: %s — accepting initial result", e
-        )
+        logger.warning("[macro_critic] LLM call failed: %s — accepting initial result", e)
 
     return {
         "action": "accept",
@@ -719,12 +696,16 @@ def run_macro_agent_with_reflection(
         reflection_log["critique_text"] = critic_result.get("critique", "")
 
         if critic_result.get("action") != "revise":
-            logger.info("[macro_reflection] iteration %d: critic accepted regime=%s",
-                         iteration, result["market_regime"])
+            logger.info(
+                "[macro_reflection] iteration %d: critic accepted regime=%s", iteration, result["market_regime"]
+            )
             break
 
-        logger.info("[macro_reflection] iteration %d: critic requests revision — %s",
-                     iteration, critic_result.get("critique", "")[:80])
+        logger.info(
+            "[macro_reflection] iteration %d: critic requests revision — %s",
+            iteration,
+            critic_result.get("critique", "")[:80],
+        )
 
         critique_context = (
             f"\n\nCRITIC FEEDBACK (from prior iteration):\n{critic_result['critique']}\n"
@@ -747,7 +728,11 @@ def run_macro_agent_with_reflection(
     result["reflection_log"] = reflection_log
 
     if reflection_log["iterations"] > 1:
-        logger.info("[macro_reflection] %s → %s after %d iterations",
-                     initial_regime, result["market_regime"], reflection_log["iterations"])
+        logger.info(
+            "[macro_reflection] %s → %s after %d iterations",
+            initial_regime,
+            result["market_regime"],
+            reflection_log["iterations"],
+        )
 
     return result

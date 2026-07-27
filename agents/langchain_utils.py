@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 # ``.invoke()``.
 SECTOR_TEAM_LLM_MAX_RETRIES = 8
 
+
 # ── All-agents-strict deadline (Brian, 2026-05-16) ────────────────────────
 # Overall wall-clock budget for persistent 429 retry of a SINGLE
 # ``.invoke()``. This is the "long retry mechanism" the directive asks
@@ -83,8 +84,8 @@ def _resolve_deadline_seconds() -> float:
         secs = float(raw)
     except (TypeError, ValueError):
         log.warning(
-            "[rate_limit_retry] RATE_LIMIT_RETRY_DEADLINE_SECONDS=%r "
-            "unparseable — using 75 min default", raw,
+            "[rate_limit_retry] RATE_LIMIT_RETRY_DEADLINE_SECONDS=%r unparseable — using 75 min default",
+            raw,
         )
         return 75.0 * 60.0
     # Clamp: never < 5 min (too short to ride a TPM window) and never
@@ -125,8 +126,8 @@ def _resolve_request_timeout_seconds() -> float:
         secs = float(raw)
     except (TypeError, ValueError):
         log.warning(
-            "[llm_request_timeout] SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS=%r "
-            "unparseable — using 300 s default", raw,
+            "[llm_request_timeout] SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS=%r unparseable — using 300 s default",
+            raw,
         )
         return 300.0
     return max(30.0, min(secs, 20.0 * 60.0))
@@ -142,6 +143,72 @@ _BACKOFF_BASE_SECONDS = 4.0
 _BACKOFF_CAP_SECONDS = 60.0
 
 _T = TypeVar("_T")
+
+
+# ── the ONE chat-model constructor for every research agent ──────────────
+#
+# Before this, seven files constructed ChatAnthropic directly — eleven sites,
+# each naming a model, each holding its own retry/timeout config, none of them
+# reachable by the registry, the router, fallback chains, or the DLP egress
+# proxy. That is a whole plane of the platform bypassed
+# (model-portability-policy I1/I2/I3).
+#
+# One factory, addressed by CAPABILITY CLASS. The registry decides which model
+# a class means; this decides nothing about models at all.
+#
+# WHY ChatOpenAI RATHER THAN A krepis.llm MIGRATION. These call sites are
+# LangGraph ReAct loops — multi-turn, tool-calling. krepis.llm exposes
+# complete/structured/complete_grounded and no agentic-loop surface, so moving
+# to it would mean rewriting seven agents onto a single-shot API: a large,
+# behaviour-changing migration for no correctness gain. A ChatOpenAI bound to
+# an OpenAI-compatible endpoint keeps the loops, the tool calling and
+# with_structured_output byte-identical, and gains the platform.
+#
+# WHY THE ENDPOINT IS CONFIG. On a host running the LiteLLM router this points
+# at the router and inherits fallback chains and DLP scanning. In Lambda —
+# which cannot reach 127.0.0.1 — it points at OpenRouter, exactly as thinktank
+# already resolves ProviderSpec.base_url. The class is a selection fact and
+# belongs to the registry; the endpoint is a deployment fact and belongs to
+# config. Note that the Lambda path therefore does NOT gain egress-proxy DLP:
+# that gap is pre-existing and fleet-wide for Lambda, not specific to these
+# call sites, and it is not closed here.
+
+
+def make_agent_llm(
+    *,
+    model_class: str,
+    max_tokens: int,
+    api_key: str | None = None,
+    callbacks: list | None = None,
+    **extra,
+):
+    """Return a chat model for *model_class* ("low"/"med"/"high"/"ultra").
+
+    Preserves the retry and timeout budgets every agent previously set by
+    hand — dropping those silently would change failure behaviour under load
+    while looking like a pure refactor.
+    """
+    from langchain_openai import ChatOpenAI
+
+    # Local imports: keeps this module importable without the LLM deps, which
+    # matters because it is also imported by tooling that never makes a call.
+    from nousergon_lib.secrets import get_secret
+
+    from config import ROUTER_BASE_URL, ROUTER_KEY_SECRET
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
+    key = api_key or get_secret(ROUTER_KEY_SECRET, required=False, default="") or "unused"
+
+    return ChatOpenAI(
+        model=model_class,
+        base_url=ROUTER_BASE_URL,
+        api_key=key,
+        max_tokens=max_tokens,
+        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+        timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+        callbacks=callbacks if callbacks is not None else [get_cost_telemetry_callback()],
+        **extra,
+    )
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -267,17 +334,22 @@ def invoke_with_rate_limit_retry[T](
                     "email / DB write); already-succeeded agents stay "
                     "persisted so an SF redrive only re-attempts the "
                     "still-missing ones.",
-                    label, deadline_seconds / 60.0, elapsed, attempt,
+                    label,
+                    deadline_seconds / 60.0,
+                    elapsed,
+                    attempt,
                 )
                 raise
             log.warning(
                 "[rate_limit_retry:%s] Haiku/Sonnet 429 (org TPM "
                 "ceiling) attempt %d — backing off %.1fs (%s); %.0fs of "
                 "%.0fs deadline elapsed",
-                label, attempt, delay,
-                "retry-after header" if hint is not None
-                else "exponential",
-                elapsed, deadline_seconds,
+                label,
+                attempt,
+                delay,
+                "retry-after header" if hint is not None else "exponential",
+                elapsed,
+                deadline_seconds,
             )
             time.sleep(delay)
     # Unreachable — the loop either returns or raises. Internal type-narrowing
@@ -321,18 +393,10 @@ def _is_recoverable_tool_use_400(exc: BaseException) -> bool:
     """
     status = getattr(exc, "status_code", None)
     low = str(exc).lower()
-    is_400 = (
-        status == 400
-        or "error code: 400" in low
-        or "invalid_request_error" in low
-    )
+    is_400 = status == 400 or "error code: 400" in low or "invalid_request_error" in low
     if not is_400:
         return False
-    return (
-        "tool_use" in low
-        and "tool_result" in low
-        and "were found without" in low
-    )
+    return "tool_use" in low and "tool_result" in low and "were found without" in low
 
 
 def invoke_react_with_recovery[T](
@@ -370,7 +434,10 @@ def invoke_react_with_recovery[T](
                 "[react_recovery:%s] malformed tool_use/tool_result history "
                 "400 (attempt %d/%d) — re-rolling a fresh ReAct invocation "
                 "from clean state: %s",
-                label, attempt, max_retries + 1, exc,
+                label,
+                attempt,
+                max_retries + 1,
+                exc,
             )
 
 
@@ -461,10 +528,7 @@ def validate_tool_use_pairing(messages: list) -> None:
     ``repair_tool_use_pairing``)."""
     orphans = find_orphan_tool_use_ids(messages)
     if orphans:
-        raise ValueError(
-            "malformed message history: tool_use id(s) without a following "
-            f"tool_result block: {orphans}"
-        )
+        raise ValueError(f"malformed message history: tool_use id(s) without a following tool_result block: {orphans}")
 
 
 def repair_tool_use_pairing(messages: list) -> tuple[list, list[str]]:
@@ -538,7 +602,9 @@ def make_tool_use_repair_hook(*, label: str):
                 "LLM-input view before send (ids=%s) — pre-send pairing repair "
                 "prevented an Anthropic 'tool_use without tool_result' 400 "
                 "(config#1065). Persisted graph state is unchanged.",
-                label, len(dropped), dropped,
+                label,
+                len(dropped),
+                dropped,
             )
         return {"llm_input_messages": repaired}
 
@@ -637,7 +703,9 @@ def invoke_anthropic_safe(
             "send-time pairing chokepoint prevented an Anthropic 'tool_use "
             "without tool_result' 400 (config#2255). No tool_result was "
             "fabricated; a genuine parse/validation failure still propagates.",
-            label, len(dropped), dropped,
+            label,
+            len(dropped),
+            dropped,
         )
     return invoke_with_rate_limit_retry(
         lambda: handle.invoke(repaired, **invoke_kwargs),
@@ -869,9 +937,9 @@ def invoke_structured_with_validation_retry(
         if parsing_error is None:
             if attempt > 0:
                 log.info(
-                    "[%s] structured-output succeeded after %d validation-retry "
-                    "attempt(s)",
-                    label, attempt,
+                    "[%s] structured-output succeeded after %d validation-retry attempt(s)",
+                    label,
+                    attempt,
                 )
             return final_resp
 
@@ -882,16 +950,15 @@ def invoke_structured_with_validation_retry(
         # per-attempt diagnostic evals/judge.py kept in its bespoke loop before
         # it migrated onto this chokepoint (config#2237); centralising it here
         # gives every caller the same diagnostics rather than duplicating it.
-        raw_head = (
-            str(final_resp.get("raw"))[:300]
-            if final_resp.get("raw") is not None
-            else "(no raw)"
-        )
+        raw_head = str(final_resp.get("raw"))[:300] if final_resp.get("raw") is not None else "(no raw)"
         log.warning(
-            "[%s] structured-output parse attempt %d/%d failed: %s: %s; "
-            "raw head=%r",
-            label, attempt + 1, max_retries + 1,
-            type(parsing_error).__name__, parsing_error, raw_head,
+            "[%s] structured-output parse attempt %d/%d failed: %s: %s; raw head=%r",
+            label,
+            attempt + 1,
+            max_retries + 1,
+            type(parsing_error).__name__,
+            parsing_error,
+            raw_head,
         )
 
         # Decide whether to retry.
@@ -899,7 +966,9 @@ def invoke_structured_with_validation_retry(
             log.warning(
                 "[%s] structured-output failed after %d validation-retry "
                 "attempt(s) — propagating last ValidationError: %s",
-                label, max_retries, parsing_error,
+                label,
+                max_retries,
+                parsing_error,
             )
             return final_resp
 
@@ -932,24 +1001,17 @@ def invoke_structured_with_validation_retry(
         # a ToolMessage/tool_result carrying the violation — this keeps the
         # tool_use/tool_result pairing valid AND feeds the schema error back so
         # the model re-emits a corrected tool call.
-        tool_call_ids = (
-            [tid for tid in _ai_tool_call_ids(raw) if tid] if raw is not None else []
-        )
+        tool_call_ids = [tid for tid in _ai_tool_call_ids(raw) if tid] if raw is not None else []
         if raw is not None and tool_call_ids:
             # One tool_result per tool_use id in the failed turn (structured
             # output emits a single call, but pair them all defensively — every
             # tool_use MUST be answered or the 400 recurs).
-            correction_msgs = [
-                ToolMessage(content=correction_text, tool_call_id=tid)
-                for tid in tool_call_ids
-            ]
+            correction_msgs = [ToolMessage(content=correction_text, tool_call_id=tid) for tid in tool_call_ids]
             current_messages = list(messages) + [raw, *correction_msgs]
         elif raw is not None:
             # Plain-text structured output (no tool_use block in ``raw``) — a
             # HumanMessage correction is already well-formed, no pairing needed.
-            current_messages = list(messages) + [
-                raw, HumanMessage(content=correction_text)
-            ]
+            current_messages = list(messages) + [raw, HumanMessage(content=correction_text)]
         else:
             current_messages = list(messages) + [HumanMessage(content=correction_text)]
 
@@ -962,8 +1024,11 @@ def invoke_structured_with_validation_retry(
         log.info(
             "[%s] structured-output parse failed on attempt %d/%d "
             "(%s: %s) — re-prompting with schema-violation context",
-            label, attempt + 1, max_retries + 1,
-            type(parsing_error).__name__, parsing_error,
+            label,
+            attempt + 1,
+            max_retries + 1,
+            type(parsing_error).__name__,
+            parsing_error,
         )
 
     return final_resp  # pragma: no cover — loop always returns
@@ -975,15 +1040,19 @@ def extract_tool_calls(messages: list) -> list[dict]:
     for msg in messages:
         if hasattr(msg, "tool_calls"):
             for tc in msg.tool_calls:
-                calls.append({
-                    "tool": tc.get("name", ""),
-                    "input_summary": str(tc.get("args", {}))[:200],
-                })
+                calls.append(
+                    {
+                        "tool": tc.get("name", ""),
+                        "input_summary": str(tc.get("args", {}))[:200],
+                    }
+                )
         elif hasattr(msg, "type") and msg.type == "tool":
-            calls.append({
-                "tool": getattr(msg, "name", "unknown"),
-                "status": "executed",
-            })
+            calls.append(
+                {
+                    "tool": getattr(msg, "name", "unknown"),
+                    "status": "executed",
+                }
+            )
     return calls
 
 
@@ -1027,9 +1096,7 @@ def get_final_text(messages: list) -> str:
 # That is exactly the "vanishes instead of surfacing" failure the issue
 # calls out: score_aggregator's ALL-AGENTS-STRICT gate only inspects
 # ``error`` and ``partial`` — this failure mode set neither.
-LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL = (
-    "Sorry, need more steps to process this request."
-)
+LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL = "Sorry, need more steps to process this request."
 
 
 def is_step_budget_exhausted_sentinel(final_text: str | None) -> bool:
@@ -1040,9 +1107,7 @@ def is_step_budget_exhausted_sentinel(final_text: str | None) -> bool:
     literal owned by langgraph, not agent-authored prose that might
     legitimately reference running out of time/steps.
     """
-    return bool(final_text) and final_text.strip() == (
-        LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL
-    )
+    return bool(final_text) and final_text.strip() == (LANGGRAPH_STEP_BUDGET_EXHAUSTED_SENTINEL)
 
 
 # ── Bounded transcript serialization (decision-review / L4567) ────────────────
@@ -1119,15 +1184,11 @@ def serialize_transcript(
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             entry["tool_calls"] = [
-                {"name": tc.get("name", ""), "args": str(tc.get("args", {}))[:200]}
-                for tc in tool_calls
+                {"name": tc.get("name", ""), "args": str(tc.get("args", {}))[:200]} for tc in tool_calls
             ]
         entry_size = len(text) + sum(len(str(v)) for v in entry.get("tool_calls", []))
         if total + entry_size > max_total_chars and out:
-            out.append(
-                {"_truncated": f"{len(messages) - i} message(s) omitted "
-                               f"(transcript size cap)"}
-            )
+            out.append({"_truncated": f"{len(messages) - i} message(s) omitted (transcript size cap)"})
             break
         out.append(entry)
         total += entry_size

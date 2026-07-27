@@ -16,16 +16,14 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
+    make_agent_llm,
 )
 from agents.prompt_loader import load_prompt
 from config import (
-    ANTHROPIC_API_KEY,
     MAX_TOKENS_PER_STOCK,
     MAX_TOKENS_STRATEGIC,
-    PER_STOCK_MODEL,
+    PER_STOCK_CLASS,
     TEAM_PICKS_PER_RUN,
 )
 from graph.llm_cost_tracker import get_cost_telemetry_callback
@@ -74,21 +72,16 @@ def run_peer_review(
             "peer_review_rationale": str,
         }
     """
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=MAX_TOKENS_PER_STOCK,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
     # Step 1: If qual added a candidate, quant reviews it
     additional_accepted = False
     if additional_candidate and additional_candidate.get("ticker"):
-        additional_accepted = _quant_reviews_addition(
-            llm, team_id, additional_candidate, technical_scores
-        )
+        additional_accepted = _quant_reviews_addition(llm, team_id, additional_candidate, technical_scores)
 
     # Step 2: Joint finalization — select final 2-3
     all_candidates = _merge_candidates(quant_picks, qual_assessments, additional_candidate, additional_accepted)
@@ -123,7 +116,10 @@ def run_peer_review(
     # implementation has always read intensity_z. Off by default until
     # SECTOR_REGIME_PICK_GATE_ENABLED.
     gated_picks = _apply_regime_pick_gate(
-        result["picks"], market_regime, regime_intensity_z, team_id,
+        result["picks"],
+        market_regime,
+        regime_intensity_z,
+        team_id,
     )
 
     return {
@@ -166,6 +162,7 @@ def regime_conditional_min_score(
         SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE,
         SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE,
     )
+
     base = SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE if base_min_score is None else base_min_score
     scale = SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE if intensity_scale is None else intensity_scale
     if intensity_z is None:
@@ -226,11 +223,12 @@ def _apply_regime_pick_gate(
 
     if filtered_out:
         log.info(
-            "[peer_review:%s] regime gate (regime=%s, intensity_z=%s, threshold=%.1f) "
-            "filtered %d pick(s): %s",
-            team_id, market_regime,
+            "[peer_review:%s] regime gate (regime=%s, intensity_z=%s, threshold=%.1f) filtered %d pick(s): %s",
+            team_id,
+            market_regime,
             f"{intensity_z:+.2f}" if intensity_z is not None else "None",
-            threshold, len(filtered_out),
+            threshold,
+            len(filtered_out),
             ", ".join(f"{t}({s:.1f})" for t, s in filtered_out),
         )
     return kept
@@ -287,9 +285,7 @@ def _quant_reviews_addition(
     except Exception as e:
         if is_strict_validation_enabled():
             raise
-        log.warning(
-            "[peer_review:%s] quant review of %s failed: %s", team_id, ticker, e
-        )
+        log.warning("[peer_review:%s] quant review of %s failed: %s", team_id, ticker, e)
 
     return False
 
@@ -308,49 +304,53 @@ def _merge_candidates(
     for qp in quant_picks:
         ticker = qp["ticker"]
         qa = qual_by_ticker.get(ticker, {})
-        merged.append({
-            "ticker": ticker,
-            # No ``, 0`` default — a missing quant_score means the quant
-            # analyst's pick didn't carry a score (schema drop / partial
-            # extraction), NOT a genuine 0/100 rating. Silently coercing
-            # to 0 makes a missing input look like a worst-case score,
-            # which then flows into compute_composite_breakdown as real
-            # data (root cause of L4525 "Score 0.0" — config#680). Mirrors
-            # qual_score's existing None-on-missing convention below.
-            "quant_score": qp.get("quant_score"),
-            "quant_rationale": qp.get("rationale", ""),
-            "qual_score": qa.get("qual_score"),
-            "bull_case": qa.get("bull_case", ""),
-            "bear_case": qa.get("bear_case", ""),
-            "catalysts": qa.get("catalysts", []),
-            # Option A 2026-04-30: agent-format conviction is int 0-100 or
-            # None. The string default ``"medium"`` is gone — qual analyst
-            # emits int per qual_analyst_user.txt v1.1.0. None means qual
-            # didn't emit a conviction for this ticker; downstream
-            # normalize_conviction maps None → "stable".
-            "conviction": qa.get("conviction"),
-            "resources_used": qa.get("resources_used", []),
-        })
+        merged.append(
+            {
+                "ticker": ticker,
+                # No ``, 0`` default — a missing quant_score means the quant
+                # analyst's pick didn't carry a score (schema drop / partial
+                # extraction), NOT a genuine 0/100 rating. Silently coercing
+                # to 0 makes a missing input look like a worst-case score,
+                # which then flows into compute_composite_breakdown as real
+                # data (root cause of L4525 "Score 0.0" — config#680). Mirrors
+                # qual_score's existing None-on-missing convention below.
+                "quant_score": qp.get("quant_score"),
+                "quant_rationale": qp.get("rationale", ""),
+                "qual_score": qa.get("qual_score"),
+                "bull_case": qa.get("bull_case", ""),
+                "bear_case": qa.get("bear_case", ""),
+                "catalysts": qa.get("catalysts", []),
+                # Option A 2026-04-30: agent-format conviction is int 0-100 or
+                # None. The string default ``"medium"`` is gone — qual analyst
+                # emits int per qual_analyst_user.txt v1.1.0. None means qual
+                # didn't emit a conviction for this ticker; downstream
+                # normalize_conviction maps None → "stable".
+                "conviction": qa.get("conviction"),
+                "resources_used": qa.get("resources_used", []),
+            }
+        )
 
     # Add the additional candidate if accepted
     if additional_accepted and additional and additional.get("ticker"):
         ticker = additional["ticker"]
         if ticker not in {m["ticker"] for m in merged}:
-            merged.append({
-                "ticker": ticker,
-                # Same no-coercion convention as the merged loop above —
-                # missing quant_score stays None, never a silent 0.
-                "quant_score": additional.get("quant_score"),
-                "quant_rationale": "",
-                "qual_score": additional.get("qual_score"),
-                "bull_case": additional.get("rationale", ""),
-                "bear_case": "",
-                "catalysts": [],
-                # Same int-or-None convention as the merged loop above.
-                "conviction": additional.get("conviction"),
-                "resources_used": [],
-                "is_qual_addition": True,
-            })
+            merged.append(
+                {
+                    "ticker": ticker,
+                    # Same no-coercion convention as the merged loop above —
+                    # missing quant_score stays None, never a silent 0.
+                    "quant_score": additional.get("quant_score"),
+                    "quant_rationale": "",
+                    "qual_score": additional.get("qual_score"),
+                    "bull_case": additional.get("rationale", ""),
+                    "bear_case": "",
+                    "catalysts": [],
+                    # Same int-or-None convention as the merged loop above.
+                    "conviction": additional.get("conviction"),
+                    "resources_used": [],
+                    "is_qual_addition": True,
+                }
+            )
 
     return merged
 
@@ -394,12 +394,19 @@ def _joint_finalization(
     # output. Even though the new schema is small (~200 tokens),
     # MAX_TOKENS_STRATEGIC is the right ceiling: it leaves slack for
     # team_rationale verbosity and matches the prior call shape.
-    finalization_llm = ChatAnthropic(
-        model=llm.model,
-        anthropic_api_key=llm.anthropic_api_key,
+    # Same capability class as the caller's llm, a wider token budget. Reads
+    # the class from the passed instance rather than re-deriving it, so a
+    # caller that overrode the class still gets ONE class for both passes —
+    # a two-pass call that silently changed model between passes would make
+    # pass-2 rationales incomparable to pass-1 selections.
+    #
+    # ChatOpenAI exposes it as `model_name`; the old ChatAnthropic exposed
+    # `model`. getattr covers both so this survives the judge/canary
+    # migration landing later.
+    _caller_class = getattr(llm, "model_name", None) or getattr(llm, "model", PER_STOCK_CLASS)
+    finalization_llm = make_agent_llm(
+        model_class=_caller_class,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=llm.callbacks,
     )
 
@@ -431,7 +438,8 @@ def _joint_finalization(
             raise
         log.warning(
             "[peer_review:%s] Pass 1 (selection) failed: %s — applying combined-score fallback",
-            team_id, e,
+            team_id,
+            e,
         )
 
     if selection is None or not selection.selected_tickers:
@@ -458,9 +466,7 @@ def _joint_finalization(
     # Selection succeeded — clamp to TEAM_PICKS_PER_RUN, drop tickers
     # not in the candidate set (LLM hallucination guard).
     candidate_by_ticker = {c["ticker"]: c for c in candidates}
-    selected = [
-        t for t in selection.selected_tickers if t in candidate_by_ticker
-    ][:TEAM_PICKS_PER_RUN]
+    selected = [t for t in selection.selected_tickers if t in candidate_by_ticker][:TEAM_PICKS_PER_RUN]
 
     # ── Pass 2: per-ticker rationale ─────────────────────────────────
     rationale_prompt = load_prompt("peer_review_per_ticker_rationale")
@@ -501,7 +507,9 @@ def _joint_finalization(
                 raise
             log.warning(
                 "[peer_review:%s] Pass 2 rationale failed for %s: %s",
-                team_id, ticker, e,
+                team_id,
+                ticker,
+                e,
             )
             rationale_by_ticker[ticker] = ""
 
