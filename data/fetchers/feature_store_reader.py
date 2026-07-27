@@ -9,10 +9,8 @@ Falls back gracefully (returns empty dict) if the feature store is unavailable.
 from __future__ import annotations
 
 import io
-import json
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
@@ -45,7 +45,7 @@ def emit_eval_metric(
     *,
     namespace: str = DEFAULT_NAMESPACE,
     metric_name: str = DEFAULT_METRIC_NAME,
-    cloudwatch_client: Optional[Any] = None,
+    cloudwatch_client: Any | None = None,
 ) -> int:
     """Emit one CloudWatch datapoint per rubric dimension. Returns the
     number of datapoints sent (matches len(eval_artifact.dimension_scores)).

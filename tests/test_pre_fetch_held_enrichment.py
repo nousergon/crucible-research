@@ -11,10 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from graph.research_graph import _pre_fetch_held_enrichment
-
 
 # ── News pre-fetch ──────────────────────────────────────────────────────
 

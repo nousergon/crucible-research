@@ -7,8 +7,8 @@ only verify that each research mode calls the expected primitives.
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 from unittest.mock import patch
 
 import pytest

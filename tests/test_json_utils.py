@@ -1,7 +1,6 @@
 """Tests for shared JSON extraction utilities."""
 
-import pytest
-from agents.json_utils import extract_json_object, extract_json_array
+from agents.json_utils import extract_json_array, extract_json_object
 
 
 class TestExtractJsonObject:

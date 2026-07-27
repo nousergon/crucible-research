@@ -22,8 +22,8 @@ from __future__ import annotations
 import pytest
 
 from agents.sector_teams.team_config import ALL_TEAM_IDS
-from graph.research_graph import score_aggregator, _build_signals_payload
 from config import MAX_QUARANTINED_TICKERS
+from graph.research_graph import _build_signals_payload, score_aggregator
 
 
 def _state(team_outputs: dict) -> dict:

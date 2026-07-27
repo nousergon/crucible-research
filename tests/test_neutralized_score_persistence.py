@@ -124,12 +124,12 @@ def test_dual_field_distinct_across_cross_section(conn):
         _record(ticker="NVDA", final_score=73.5, neutralized_final_score=68.1),
         _record(ticker="AAPL", final_score=61.0, neutralized_final_score=64.4),
     ])
-    rows = dict(
-        (t, (raw, neu))
+    rows = {
+        t: (raw, neu)
         for t, raw, neu in conn.execute(
             "SELECT ticker, final_score, neutralized_final_score FROM cio_evaluations"
         )
-    )
+    }
     assert rows["NVDA"] == (pytest.approx(73.5), pytest.approx(68.1))
     assert rows["AAPL"] == (pytest.approx(61.0), pytest.approx(64.4))
 

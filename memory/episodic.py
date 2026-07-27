@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 
 from evals import outcome_store
@@ -81,6 +80,7 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
 
     from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
+
     from config import ANTHROPIC_API_KEY, PER_STOCK_MODEL
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
@@ -100,7 +100,7 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
             break
 
         symbol, score_date, score = r[0], r[1], r[2]
-        conviction, thesis_summary, signal = r[3], r[4], r[5]
+        conviction, thesis_summary, _signal = r[3], r[4], r[5]
         regime, vix = r[6], r[7]
         stock_return, spy_return, log_alpha = r[8], r[9], r[10]
 

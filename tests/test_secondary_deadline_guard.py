@@ -15,21 +15,19 @@ when run_time is unparseable.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from graph.research_graph import (
-    _run_secondary_within_budget,
     _SECONDARY_DEADLINE_DEFAULT_S,
     _SECONDARY_DEADLINE_ENV,
+    _run_secondary_within_budget,
     _secondary_deadline_budget_s,
     _secondary_work_deadline_exhausted,
 )
 
 
 def _state_started_seconds_ago(seconds: float) -> dict:
-    start = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    start = datetime.now(UTC) - timedelta(seconds=seconds)
     return {"run_time": start.isoformat()}
 
 
@@ -80,7 +78,7 @@ class TestDeadlineGuard:
     def test_naive_run_time_treated_as_utc(self, monkeypatch):
         """run_time without tzinfo must not raise (defensive)."""
         monkeypatch.setenv(_SECONDARY_DEADLINE_ENV, "780")
-        naive = (datetime.now(timezone.utc) - timedelta(seconds=890)).replace(tzinfo=None)
+        naive = (datetime.now(UTC) - timedelta(seconds=890)).replace(tzinfo=None)
         hit, elapsed = _secondary_work_deadline_exhausted({"run_time": naive.isoformat()})
         assert hit is True
 

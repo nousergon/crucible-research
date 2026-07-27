@@ -7,9 +7,6 @@ Each team has a Quant Analyst and Qualitative Analyst.
 
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 # ── GICS-to-Team Mapping ─────────────────────────────────────────────────────
 # Maps each GICS sector name to one of 6 sector teams.
 # Keys must match the sector names produced by price_fetcher.fetch_sp500_sp400_with_sectors().

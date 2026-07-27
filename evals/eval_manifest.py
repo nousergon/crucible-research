@@ -54,7 +54,7 @@ import json
 import logging
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -268,7 +268,7 @@ def build_manifests(
     Idempotent: re-running with the same input produces byte-identical
     output (sort order pinned). Safe to schedule daily.
     """
-    today = today or datetime.now(timezone.utc).date()
+    today = today or datetime.now(UTC).date()
     if judge_run_dates is None:
         judge_run_dates = [
             (today - timedelta(days=offset)).isoformat()
@@ -321,7 +321,7 @@ def build_manifests(
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "capture_date": capture_date,
-            "generated_at": datetime.now(timezone.utc).isoformat().replace(
+            "generated_at": datetime.now(UTC).isoformat().replace(
                 "+00:00", "Z",
             ),
             "eval_count": len(entries),

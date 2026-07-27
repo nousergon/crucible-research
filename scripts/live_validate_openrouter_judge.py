@@ -30,12 +30,13 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from config import OPENROUTER_API_KEY  # noqa: E402
-from evals.judge_models import OPENROUTER_SHADOW  # noqa: E402
 from krepis.judge import (  # noqa: E402
     JudgeToolCallLeakError,
     check_openai_tool_response_for_leak,
 )
+
+from config import OPENROUTER_API_KEY  # noqa: E402
+from evals.judge_models import OPENROUTER_SHADOW  # noqa: E402
 
 _TOOL_SCHEMA = {
     "type": "object",

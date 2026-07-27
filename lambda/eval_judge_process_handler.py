@@ -32,13 +32,19 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
+from datetime import UTC
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from graph.langsmith_pandas_patch import install as _install_ls_patch
+
 _install_ls_patch()
 
-from nousergon_lib.logging import monitor_handler, setup_logging
+# Imported after the sys.path.insert above — this Lambda entrypoint isn't
+# on sys.path until that line runs (mirrors lambda/handler.py's pattern).
+from nousergon_lib.logging import monitor_handler, setup_logging  # noqa: E402
+
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
         "LAMBDA_TASK_ROOT",
@@ -61,7 +67,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
 
 
@@ -125,14 +131,14 @@ def handler(event, context):
     # build_manifests is idempotent, so any later run self-heals the index.
     manifest_dates: list[str] = []
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from evals.eval_manifest import build_manifests
 
         written = build_manifests(
             s3_client=__import__("boto3").client("s3"),
             bucket=bucket,
-            judge_run_dates=[datetime.now(timezone.utc).date().isoformat()],
+            judge_run_dates=[datetime.now(UTC).date().isoformat()],
         )
         manifest_dates = sorted(written)
     except Exception:  # noqa: BLE001 — index maintenance; recorded below

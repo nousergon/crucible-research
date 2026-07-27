@@ -12,8 +12,6 @@ Pins:
 """
 from __future__ import annotations
 
-import pytest
-
 from graph.research_graph import _build_risk_posture
 
 

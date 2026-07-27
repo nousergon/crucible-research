@@ -26,7 +26,6 @@ from pathlib import Path
 
 import boto3
 
-
 _BUCKET = "alpha-engine-research"
 _PREFIX = "decision_artifacts"
 _FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "llm_outputs"

@@ -291,6 +291,7 @@ def create_qual_tools(context: dict) -> list:
         # inst_ownership derived table (built from SEC quarterly bulk Form 13F data)
         try:
             import boto3 as _boto3
+
             from data.substrate.reader import read_inst_ownership
 
             s3 = _boto3.client("s3")
@@ -334,8 +335,9 @@ def create_qual_tools(context: dict) -> list:
             doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
         """
         try:
-            from nousergon_lib.rag import retrieve
             from datetime import date, timedelta
+
+            from nousergon_lib.rag import retrieve
 
             _rag_stats["attempted"] += 1
             # Hybrid retrieval (vector + BM25 blend) — pgvector cosine on

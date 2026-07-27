@@ -17,6 +17,7 @@ import datetime
 import logging
 import os
 import sys
+import tempfile
 import time
 
 # Ensure the project root is on sys.path so sibling modules
@@ -44,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # anything else re-imports it. Supersedes the temporary
 # `LANGCHAIN_TRACING_V2=false` disable from earlier in this session.
 from graph.langsmith_pandas_patch import install as _install_ls_patch
+
 _install_ls_patch()
 
 # Structured logging + flow-doctor singleton from alpha-engine-lib. When
@@ -55,7 +57,8 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging
+from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging  # noqa: E402
+
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
 setup_logging(
@@ -132,6 +135,7 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
         return
     try:
         import boto3  # local import — only paid when flag is on
+
         from evals.team_accuracy import analyze_team_performance, save_team_accuracy
         team_accuracy = analyze_team_performance(archive.db_conn, as_of_date=trading_date)
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
@@ -190,6 +194,7 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
         return
     try:
         import boto3  # local import — only paid when flag is on
+
         from evals.last_week_scorecard import build_scorecard, emit_scorecard_to_s3
         sc = build_scorecard(archive.db_conn, as_of_date=trading_date)
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
@@ -393,7 +398,7 @@ def _run_challengers_only(event: dict) -> dict:
         from producers.runner import run_challengers
         shadow = run_challengers(
             archive, run_date,
-            run_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            run_time=datetime.datetime.now(datetime.UTC).isoformat(),
             population=prior_population,
         )
         return {
@@ -427,7 +432,7 @@ def handler(event, context):
     # Run one-time expensive imports + SSM secrets fetch on the first
     # invocation. Warm-container calls are a no-op via the _init_done flag.
     _ensure_init()
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
 
     if event.get("mode") == "challengers_only":
         return _run_challengers_only(event)
@@ -442,7 +447,6 @@ def handler(event, context):
     # only proceed to real pass if stub-pass succeeds.
     skip_dry_run_gate = event.get("skip_dry_run_gate", False)
     dry_run_llm = event.get("dry_run_llm", False)
-    fd = None
 
     # ── dry_run_llm — deploy-canary boot/import/wiring smoke ──────────────
     # dry_run_llm is EXCLUSIVELY the deploy canary's smoke-test mode
@@ -463,8 +467,8 @@ def handler(event, context):
     # paths (return before any S3 / secrets).
     if dry_run_llm:
         from archive.manager import ArchiveManager
-        from graph.research_graph import build_graph, create_initial_state
         from dry_run import install_dry_run_stubs
+        from graph.research_graph import build_graph, create_initial_state
         _dry_run_date = str(most_recent_trading_day(datetime.date.today()))
         logger.info(
             "dry_run_llm=True: boot/import/wiring validation only "
@@ -564,10 +568,10 @@ def handler(event, context):
     # Import pipeline (deferred to reduce cold-start time)
     try:
         from archive.manager import ArchiveManager
-        from graph.research_graph import build_graph, create_initial_state
 
         # ── Validate required env vars (fail fast, not 30 min in) ─────
         from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
+        from graph.research_graph import build_graph, create_initial_state
         _missing = []
         if not ANTHROPIC_API_KEY:
             _missing.append("ANTHROPIC_API_KEY")
@@ -806,6 +810,7 @@ def handler(event, context):
         if final_state.get("email_sent"):
             try:
                 import boto3 as _boto3_agg
+
                 from scripts.aggregate_costs import aggregate_day
                 _agg_summary = aggregate_day(
                     s3_client=_boto3_agg.client("s3"),
@@ -847,6 +852,7 @@ def handler(event, context):
         if final_state.get("email_sent"):
             try:
                 import boto3 as _boto3_cs
+
                 from scripts.corpus_stats import compute_corpus_stats
                 _cs = compute_corpus_stats(
                     s3_client=_boto3_cs.client("s3"),

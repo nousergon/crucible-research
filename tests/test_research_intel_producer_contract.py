@@ -30,7 +30,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph.research_graph import _build_research_intel_payload  # noqa: E402
 
-
 # ── Contract field sets (MUST match research_intel.schema.json) ────────────────
 
 _REQUIRED_TOP_LEVEL = {

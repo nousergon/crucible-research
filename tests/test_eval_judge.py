@@ -19,26 +19,25 @@ SF-wiring PR.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
 from moto import mock_aws
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
 )
+
 from evals.judge_models import OPENROUTER_SHADOW
 from graph.state_schemas import (
     RubricDimensionScore,
     RubricEvalArtifact,
     RubricEvalLLMOutput,
 )
-
 
 # ── OpenRouter transport fakes (alpha-engine-config-I2997) — mirrors
 #    tests/test_eval_judge_openrouter.py's helpers; duplicated locally
@@ -208,7 +207,8 @@ class TestBuildEvalS3Key:
         — we do NOT hand-roll the format. Pin the equivalence so a drift
         in either side is caught."""
         from nousergon_lib.eval_artifacts import eval_artifact_key
-        from evals.judge import build_eval_s3_key, DEFAULT_EVAL_PREFIX
+
+        from evals.judge import DEFAULT_EVAL_PREFIX, build_eval_s3_key
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
             judge_run_id="2605092230",
@@ -335,10 +335,11 @@ class TestNewJudgeRunId:
         assert len(rid) == 10
 
     def test_sortable_chronologically(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from nousergon_lib.eval_artifacts import new_eval_run_id
-        earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc))
-        later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=timezone.utc))
+        earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=UTC))
+        later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=UTC))
         assert earlier < later  # lexicographic = chronological
 
 
@@ -348,7 +349,7 @@ class TestBuildLegacyEvalS3Key:
 
     def test_legacy_nested_shape(self):
         from evals.judge import build_legacy_eval_s3_key
-        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=UTC)
         key = build_legacy_eval_s3_key(
             judged_agent_id="sector_quant:technology",
             run_id="run-abc-123",
@@ -497,6 +498,7 @@ class TestEvaluateArtifact:
         """First attempt has no tool call (ordinary non-conformance);
         second attempt succeeds. Counts 2 creates total."""
         import logging
+
         from evals import judge as judge_mod
 
         fake_client = MagicMock()
@@ -788,8 +790,10 @@ class TestPersistEvalArtifact:
         """The latest.json sidecar mirrors the most-recently-written key
         and is resolvable by the lib's load_latest_eval_artifact reader."""
         from nousergon_lib.eval_artifacts import (
-            eval_latest_key, load_latest_eval_artifact,
+            eval_latest_key,
+            load_latest_eval_artifact,
         )
+
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
 
         artifact = RubricEvalArtifact(
@@ -823,8 +827,9 @@ class TestPersistEvalArtifact:
         assert loaded["judged_agent_id"] == "ic_cio"
 
     def test_update_latest_false_skips_sidecar(self, mocked_s3):
-        from nousergon_lib.eval_artifacts import eval_latest_key
         from botocore.exceptions import ClientError
+        from nousergon_lib.eval_artifacts import eval_latest_key
+
         from evals.judge import DEFAULT_EVAL_PREFIX, persist_eval_artifact
 
         artifact = RubricEvalArtifact(

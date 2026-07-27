@@ -44,7 +44,7 @@ import argparse
 import logging
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
 
@@ -62,7 +62,7 @@ from thinktank.ledger import (
     select_intake,
 )
 from thinktank.ratings import update_ratings_board
-from thinktank.schemas import CompanyThesis, EventRecord, RunManifest
+from thinktank.schemas import CompanyThesis, CoverageLedger, EventRecord, RunManifest
 from thinktank.settings import ThinktankSettings, load_settings
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
@@ -76,6 +76,33 @@ scanner top-60" window, independent of the daily cadence's rank_ceiling
 (150). Shared with ``_compute_coverage_gap``'s default so the reported
 gap and the actual gap-fill selection are always computed over the same
 window."""
+
+
+def _checkpoint_thesis_write(
+    store: ThinktankStore,
+    ledger: CoverageLedger,
+    *,
+    ticker: str,
+    trading_day: str,
+    thesis_version: int,
+    sector: str | None = None,
+    attractiveness_rank: int | None = None,
+) -> None:
+    """Record a thesis write AND persist the ledger immediately (config#3072:
+    each thesis is an idempotent checkpointed unit). A Lambda timeout or SF
+    retry mid-run then re-selects intake against a ledger that already
+    reflects every unit completed so far — ``select_intake`` skips covered
+    tickers by construction, so a retry only rebuilds the remaining gap
+    instead of restarting the whole batch from ticker 1."""
+    record_thesis_write(
+        ledger,
+        ticker=ticker,
+        trading_day=trading_day,
+        thesis_version=thesis_version,
+        sector=sector,
+        attractiveness_rank=attractiveness_rank,
+    )
+    save_ledger(store, ledger)
 
 
 def run_daily(
@@ -104,7 +131,7 @@ def run_daily(
         ),
         trading_day=trading_day,
         calendar_date=calendar_date,
-        started_at=datetime.now(timezone.utc).isoformat(),
+        started_at=datetime.now(UTC).isoformat(),
     )
 
     guard = BudgetGuard(store, settings, ssm_client=ssm_client)
@@ -169,7 +196,7 @@ def run_daily(
     covered_before = [] if refresh_tickers is not None else sorted(ledger.covered())
 
     if dry_run:
-        manifest.finished_at = datetime.now(timezone.utc).isoformat()
+        manifest.finished_at = datetime.now(UTC).isoformat()
         logger.info(
             "DRY RUN — would add %s, refresh %s, sweep %d covered names; "
             "month spend $%.2f / cap $%.2f",
@@ -199,8 +226,8 @@ def run_daily(
             calendar_date=calendar_date,
             update_reason="initial",
         )
-        record_thesis_write(
-            ledger,
+        _checkpoint_thesis_write(
+            store, ledger,
             ticker=ticker,
             trading_day=trading_day,
             thesis_version=thesis.version,
@@ -221,8 +248,8 @@ def run_daily(
             calendar_date=calendar_date,
             update_reason=refresh_reason,
         )
-        record_thesis_write(
-            ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version
+        _checkpoint_thesis_write(
+            store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version
         )
         theses_written.append(thesis)
         manifest.theses_written += 1
@@ -248,8 +275,8 @@ def run_daily(
                     update_reason="event",
                     event_context=a.rationale,
                 )
-                record_thesis_write(
-                    ledger,
+                _checkpoint_thesis_write(
+                    store, ledger,
                     ticker=a.ticker,
                     trading_day=trading_day,
                     thesis_version=thesis.version,
@@ -309,7 +336,7 @@ def run_daily(
         cost_usd=manifest.total_cost_usd,
     )
     manifest.budget_month_spent_usd = cost_ledger.spent_usd
-    manifest.finished_at = datetime.now(timezone.utc).isoformat()
+    manifest.finished_at = datetime.now(UTC).isoformat()
     store.put_json(
         MANIFEST_KEY_TMPL.format(trading_day=trading_day, run_id=run_id),
         manifest.model_dump(),
@@ -333,7 +360,7 @@ def run_daily(
 
 def _compute_coverage_gap(
     board: dict | None,
-    ledger: "CoverageLedger",
+    ledger: CoverageLedger,
     *,
     top_n: int = 60,
 ) -> dict:

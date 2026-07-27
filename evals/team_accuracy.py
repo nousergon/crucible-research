@@ -72,7 +72,7 @@ import json
 import logging
 import sqlite3
 from datetime import date, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from nousergon_lib.quant.horizons import DEFAULT_POLICY
 
@@ -278,7 +278,7 @@ def save_team_accuracy(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(

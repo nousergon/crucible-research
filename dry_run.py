@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +60,14 @@ def _stub_run_macro_agent_with_reflection(
         "report_md": "[DRY-RUN STUB] Macro environment is neutral. Fed on hold, yields stable.",
         "macro_json": {
             "market_regime": "neutral",
-            "sector_modifiers": {s: 1.0 for s in ALL_SECTORS},
+            "sector_modifiers": dict.fromkeys(ALL_SECTORS, 1.0),
             "sector_ratings": {
                 s: {"rating": "market_weight", "rationale": "Synthetic data"}
                 for s in ALL_SECTORS
             },
         },
         "market_regime": "neutral",
-        "sector_modifiers": {s: 1.0 for s in ALL_SECTORS},
+        "sector_modifiers": dict.fromkeys(ALL_SECTORS, 1.0),
         "sector_ratings": {
             s: {"rating": "market_weight", "rationale": "Synthetic data"}
             for s in ALL_SECTORS
@@ -93,7 +94,7 @@ def _stub_run_quant_analyst(
         team_id,
         len(sector_tickers),
     )
-    rng = random.Random(hash(team_id))
+    rng = random.Random(hash(team_id))  # noqa: S311 — deterministic dry-run synthetic data, not security-sensitive
     picks = []
     for t in sector_tickers[:10]:
         picks.append(
@@ -128,7 +129,7 @@ def _stub_run_qual_analyst(
     logger.info(
         "[dry-run] stub run_qual_analyst: %s (%d picks)", team_id, len(quant_top5)
     )
-    rng = random.Random(hash(team_id) + 10)
+    rng = random.Random(hash(team_id) + 10)  # noqa: S311 — deterministic dry-run synthetic data, not security-sensitive
     assessments = []
     for pick in quant_top5:
         assessments.append(
@@ -191,8 +192,8 @@ def _stub_run_sector_team(team_id, ctx, **kwargs):
         branch of the real code).
     """
     logger.info("[dry-run] stub run_sector_team: %s", team_id)
-    from agents.sector_teams.team_config import get_team_tickers
     from agents.sector_teams.sector_team import _sector_team_inverse
+    from agents.sector_teams.team_config import get_team_tickers
 
     # L1995 Phase 5 / L4464: mirror prod — screen the pre-filtered
     # candidate set (agent_input_set), not the full sector slice.

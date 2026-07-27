@@ -1,6 +1,5 @@
 """Tests for material trigger detection — determines when held stock theses need updating."""
 
-import pytest
 from agents.sector_teams.material_triggers import check_material_triggers
 
 

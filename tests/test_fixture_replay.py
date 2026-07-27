@@ -39,7 +39,6 @@ from graph.state_schemas import (
     SectorTeamOutput,
 )
 
-
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "llm_outputs"
 
 

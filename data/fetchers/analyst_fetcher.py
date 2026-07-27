@@ -18,12 +18,10 @@ import json as _json
 import logging
 import threading
 import time
-from datetime import date, datetime
-from typing import Optional
+from datetime import date
 
 import boto3
 import requests
-
 from nousergon_lib.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -154,7 +152,7 @@ def fmp_402_skip_counts() -> dict[str, int]:
     return dict(_fmp_402_skipped_count)
 
 
-def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STABLE) -> dict | list:
+def _fmp_get(endpoint: str, params: dict | None = None, base: str = _FMP_STABLE) -> dict | list:
     global _fmp_last_call, _fmp_daily_count
 
     # 402 circuit breaker: if this endpoint already tripped earlier in the
@@ -178,7 +176,7 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
     if params:
         p.update(params)
 
-    for attempt in range(_FMP_MAX_RETRIES):
+    for _attempt in range(_FMP_MAX_RETRIES):
         # Rate limit: enforce minimum interval and daily budget
         with _fmp_lock:
             if _fmp_daily_count >= _FMP_DAILY_LIMIT:
@@ -220,7 +218,7 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
             _save_fmp_counter(_fmp_daily_count)
             logger.warning("FMP 429 for %s — daily quota exhausted, disabling FMP for remainder of run",
                            endpoint)
-            raise FMPDailyLimitError(f"FMP 429 received — quota exhausted")
+            raise FMPDailyLimitError("FMP 429 received — quota exhausted")
 
         resp.raise_for_status()
         return resp.json()
@@ -230,7 +228,7 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
     return resp.json()
 
 
-def fetch_analyst_consensus(ticker: str, current_price: Optional[float] = None) -> dict:
+def fetch_analyst_consensus(ticker: str, current_price: float | None = None) -> dict:
     """
     Fetch earnings surprise history for a ticker (PEAD scoring, O10).
 
