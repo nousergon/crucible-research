@@ -122,9 +122,23 @@ llm:
   max_tokens_strategic: 4096
   concurrent_agents: 10
 
-  # Where class names are resolved. On a host running the LiteLLM router this
-  # is the router; in Lambda, which cannot reach 127.0.0.1, it is OpenRouter.
-  # Same shape thinktank already uses (ProviderSpec.base_url) — the endpoint is
-  # a DEPLOYMENT fact, the class is not.
-  router_base_url: http://127.0.0.1:8980/v1
+  # DIRECT-MODE fallback models. Used ONLY when router_base_url is unset (see
+  # below), and by the call sites not yet migrated to class addressing
+  # (ic_cio, canary_replay). These stay concrete model ids on purpose: while a
+  # site still talks to Anthropic directly, a class name here would be sent as
+  # a model name and rejected.
+  per_stock_model: claude-haiku-4-5-20251001
+  strategic_model: claude-sonnet-4-6
+
+  # Where class names are resolved. LEAVE UNSET to keep talking to Anthropic
+  # directly with the *_model ids above — that is the pre-migration behaviour
+  # and the default, so no deployment changes behaviour until it opts in.
+  #
+  # Set it to gain the platform (registry routing, fallback chains, and — only
+  # where the endpoint is a local proxy — DLP scanning):
+  #   host running the LiteLLM router : http://127.0.0.1:8980/v1
+  #   Lambda / EC2 (no local router)  : the OpenRouter base url
+  # The endpoint is a DEPLOYMENT fact; the class is not. Same split thinktank
+  # already uses via ProviderSpec.base_url.
+  # router_base_url: http://127.0.0.1:8980/v1
   router_key_secret: LITELLM_MASTER_KEY

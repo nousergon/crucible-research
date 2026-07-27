@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
@@ -102,7 +101,7 @@ def run_peer_review(
         }
 
     # Joint finalization via single Haiku call
-    result = _joint_finalization(llm, team_id, all_candidates, market_regime)
+    result = _joint_finalization(llm, team_id, all_candidates, market_regime, model_class=PER_STOCK_CLASS)
 
     # Stage D' Wire 1: regime-conditional gate — applied after selection.
     # Teams may emit 0 picks if no candidate clears the regime-conditional
@@ -235,7 +234,7 @@ def _apply_regime_pick_gate(
 
 
 def _quant_reviews_addition(
-    llm: ChatAnthropic,
+    llm,
     team_id: str,
     candidate: dict,
     technical_scores: dict,
@@ -356,10 +355,12 @@ def _merge_candidates(
 
 
 def _joint_finalization(
-    llm: ChatAnthropic,
+    llm,
     team_id: str,
     candidates: list[dict],
     market_regime: str,
+    *,
+    model_class: str = PER_STOCK_CLASS,
 ) -> dict:
     """Two-pass joint finalization (selection then per-ticker rationale).
 
@@ -394,18 +395,19 @@ def _joint_finalization(
     # output. Even though the new schema is small (~200 tokens),
     # MAX_TOKENS_STRATEGIC is the right ceiling: it leaves slack for
     # team_rationale verbosity and matches the prior call shape.
-    # Same capability class as the caller's llm, a wider token budget. Reads
-    # the class from the passed instance rather than re-deriving it, so a
-    # caller that overrode the class still gets ONE class for both passes —
-    # a two-pass call that silently changed model between passes would make
-    # pass-2 rationales incomparable to pass-1 selections.
+    # Same capability class as the caller, a wider token budget — one class
+    # across both passes, since a two-pass call that silently changed model
+    # between passes would make pass-2 rationales incomparable to pass-1
+    # selections.
     #
-    # ChatOpenAI exposes it as `model_name`; the old ChatAnthropic exposed
-    # `model`. getattr covers both so this survives the judge/canary
-    # migration landing later.
-    _caller_class = getattr(llm, "model_name", None) or getattr(llm, "model", PER_STOCK_CLASS)
+    # The class is PASSED IN, never sniffed off the llm instance. Reading
+    # `llm.model_name`/`llm.model` looked equivalent and is not: in direct
+    # mode the factory returns a client holding a concrete model id, so the
+    # sniffed value came back as e.g. "claude-haiku-4-5-20251001" and was fed
+    # straight back in as a model_class. A capability class and a model id are
+    # different kinds of name; only the caller knows which it asked for.
     finalization_llm = make_agent_llm(
-        model_class=_caller_class,
+        model_class=model_class,
         max_tokens=MAX_TOKENS_STRATEGIC,
         callbacks=llm.callbacks,
     )

@@ -119,20 +119,65 @@ def test_the_factory_itself_sets_a_request_timeout():
 
 def test_agents_do_not_construct_chat_models_directly():
     """Capability-class addressing (model-portability-policy I1): a direct
-    ctor in an agent names a model and bypasses the registry, the router,
-    fallback chains and cost telemetry.
+    ctor names a model and bypasses the registry, the router, fallback chains
+    and cost telemetry.
 
-    ic_cio.py (judge) and canary_replay.py (canary) are the sanctioned
-    exceptions — policy §8 requires a shadow/overlap period for a judge and a
-    recorded re-baseline for a canary, so they migrate separately.
+    SCOPE IS THE WHOLE REPO, NOT agents/. The first version of this guard
+    scanned agents/ only. memory/semantic.py, memory/episodic.py and
+    scripts/decision_review.py also construct chat models from
+    config.PER_STOCK_MODEL, and the narrow scan reported a clean migration
+    while three sites were still unmigrated. A guard whose scope is narrower
+    than the invariant it claims to enforce is worse than no guard: it reads
+    as coverage.
+
+    Sanctioned exceptions are pinned by RELATIVE PATH, so a file named
+    ic_cio.py appearing somewhere else does not inherit the exemption.
     """
-    # langchain_utils.py IS the factory — it necessarily constructs one, and
-    # test_the_factory_itself_sets_a_request_timeout covers it directly.
-    SANCTIONED = {"langchain_utils.py", "ic_cio.py", "canary_replay.py"}
+    # langchain_utils.py IS the factory — it necessarily constructs both a
+    # router-mode and a direct-mode client; the two tests above cover it.
+    #
+    # ic_cio (judge) and canary_replay (canary) are held back deliberately:
+    # policy section 8 requires a shadow/overlap window for a judge and a
+    # recorded re-baseline for a canary.
+    #
+    # memory/ and scripts/ are NOT sanctioned — they are tracked follow-ups in
+    # alpha-engine-config-I4459 and listed here so the guard passes today
+    # while still naming them. Removing an entry must make this test fail.
+    SANCTIONED = {
+        "agents/langchain_utils.py",
+        "agents/investment_committee/ic_cio.py",
+        "agents/canary_replay.py",
+        "memory/semantic.py",
+        "memory/episodic.py",
+        "scripts/decision_review.py",
+    }
+    repo_root = _AGENTS_DIR.parent
+    skip_dirs = {".git", "__pycache__", ".venv", "venv", "node_modules", "tests"}
+
     offenders = []
-    for py in _AGENTS_DIR.rglob("*.py"):
-        if py.name in SANCTIONED:
+    seen_sanctioned = set()
+    for py in sorted(repo_root.rglob("*.py")):
+        rel = py.relative_to(repo_root).as_posix()
+        if any(part in skip_dirs for part in py.relative_to(repo_root).parts):
             continue
-        for name, call in _direct_chat_model_calls(ast.parse(py.read_text())):
-            offenders.append(f"{py.name}:{call.lineno} ({name})")
-    assert not offenders, f"agents must construct chat models via make_agent_llm, not directly: {offenders}"
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError:
+            continue
+        calls = list(_direct_chat_model_calls(tree))
+        if rel in SANCTIONED:
+            if calls:
+                seen_sanctioned.add(rel)
+            continue
+        for name, call in calls:
+            offenders.append(f"{rel}:{call.lineno} ({name})")
+
+    assert not offenders, "chat models must be constructed via make_agent_llm, not directly:\n" + "\n".join(
+        f"  - {o}" for o in offenders
+    )
+
+    # An exemption for a file that no longer constructs anything is stale and
+    # silently widens the guard's blind spot. Same failure mode as the one
+    # that let memory/ and scripts/ through.
+    stale = SANCTIONED - seen_sanctioned
+    assert not stale, f"SANCTIONED entries no longer construct a chat model — remove them: {sorted(stale)}"

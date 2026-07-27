@@ -188,14 +188,53 @@ def make_agent_llm(
     hand — dropping those silently would change failure behaviour under load
     while looking like a pure refactor.
     """
-    from langchain_openai import ChatOpenAI
-
     # Local imports: keeps this module importable without the LLM deps, which
     # matters because it is also imported by tooling that never makes a call.
     from nousergon_lib.secrets import get_secret
 
-    from config import ROUTER_BASE_URL, ROUTER_KEY_SECRET
+    from config import (
+        ANTHROPIC_API_KEY,
+        DIRECT_MODEL_FOR_CLASS,
+        ROUTER_BASE_URL,
+        ROUTER_KEY_SECRET,
+    )
     from graph.llm_cost_tracker import get_cost_telemetry_callback
+
+    cbs = callbacks if callbacks is not None else [get_cost_telemetry_callback()]
+
+    # DIRECT MODE — no router configured for this deployment. Resolve the class
+    # to a concrete model locally and talk to Anthropic exactly as these call
+    # sites did before the migration.
+    #
+    # This branch is why the migration is safe to land: Lambda and the EC2
+    # canary box have no reachable router, and defaulting them onto one turned
+    # every agent call into a connection error. Opting in is a config edit per
+    # deployment, not a flag day.
+    if not ROUTER_BASE_URL:
+        from langchain_anthropic import ChatAnthropic
+
+        model = DIRECT_MODEL_FOR_CLASS.get(model_class)
+        if model is None:
+            # Fail loud: a class with no direct-mode model would otherwise be
+            # sent to Anthropic as a literal model name and 404 at call time.
+            raise ValueError(
+                f"model_class {model_class!r} has no direct-mode model. Either set "
+                f"llm.router_base_url to resolve classes via the registry, or add a "
+                f"concrete model for this class in config.DIRECT_MODEL_FOR_CLASS "
+                f"(known: {sorted(DIRECT_MODEL_FOR_CLASS)})."
+            )
+        return ChatAnthropic(
+            model=model,
+            anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+            max_tokens=max_tokens,
+            max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
+            default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+            callbacks=cbs,
+            **extra,
+        )
+
+    # ROUTER MODE — the class name goes on the wire and the registry resolves it.
+    from langchain_openai import ChatOpenAI
 
     key = api_key or get_secret(ROUTER_KEY_SECRET, required=False, default="") or "unused"
 
@@ -206,7 +245,7 @@ def make_agent_llm(
         max_tokens=max_tokens,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-        callbacks=callbacks if callbacks is not None else [get_cost_telemetry_callback()],
+        callbacks=cbs,
         **extra,
     )
 
