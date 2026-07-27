@@ -55,16 +55,37 @@ def _ok_artifact() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def stub_universe_membership():
+    """Stub the load-bearing membership producer for every handler test.
+
+    Unlike the other post-candidates writes, the membership producer is NOT
+    fail-soft (alpha-engine-config-I4818) — an unstubbed call would reach real
+    S3 and raise, failing every test in this module for a reason unrelated to
+    what each one asserts. Tests that care about membership behavior patch the
+    same target again inside their own `with`, which takes precedence.
+    """
+    with patch(
+        "scoring.universe_membership.compute_and_write_universe_membership",
+        return_value="universe_membership/2026-05-29/membership.json",
+    ):
+        yield
+
+
 class TestHandler:
     def test_ok_when_orchestrator_succeeds(self, handler_mod):
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-30/candidates.json"), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"run_date": "2026-05-30"}, context=None,
+                {"run_date": "2026-05-30"},
+                context=None,
             )
         assert result["status"] == "OK"
         # 2026-05-30 (Sat) normalizes to the 2026-05-29 (Fri) trading day —
@@ -80,25 +101,30 @@ class TestHandler:
     def test_error_when_orchestrator_precondition_fails(self, handler_mod):
         from data.scanner_orchestrator import ScannerOrchestratorError
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   side_effect=ScannerOrchestratorError(
-                       "feature store empty"
-                   )), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "data.scanner_orchestrator.build_candidates_artifact",
+                side_effect=ScannerOrchestratorError("feature store empty"),
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"run_date": "2026-05-30"}, context=None,
+                {"run_date": "2026-05-30"},
+                context=None,
             )
         assert result["status"] == "ERROR"
         assert "feature store" in result["error"]
 
     def test_error_when_orchestrator_raises_unexpected(self, handler_mod):
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   side_effect=RuntimeError("S3 unreachable")), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", side_effect=RuntimeError("S3 unreachable")),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"run_date": "2026-05-30"}, context=None,
+                {"run_date": "2026-05-30"},
+                context=None,
             )
         assert result["status"] == "ERROR"
         assert "S3 unreachable" in result["error"]
@@ -106,14 +132,15 @@ class TestHandler:
     def test_error_when_s3_write_fails(self, handler_mod):
         # Build succeeded but the S3 write itself blew up — must surface
         # as ERROR (the artifact was lost; SF Catch handles).
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   side_effect=RuntimeError("PutObject denied")), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch("data.scanner_orchestrator.write_candidates_artifact", side_effect=RuntimeError("PutObject denied")),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"run_date": "2026-05-30"}, context=None,
+                {"run_date": "2026-05-30"},
+                context=None,
             )
         assert result["status"] == "ERROR"
         assert "S3 write failed" in result["error"]
@@ -135,9 +162,11 @@ class TestHandler:
         # dry_run_llm shell-run path must NOT touch S3 or call the
         # orchestrator. Mirrors the rationale_clustering / eval_judge
         # dry path used by Friday-Preflight shell runs.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact") as mock_build, \
-             patch("boto3.client") as mock_boto:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact") as mock_build,
+            patch("boto3.client") as mock_boto,
+        ):
             result = handler_mod.handler(
                 {"dry_run_llm": True, "run_date": "2026-05-30"},
                 context=None,
@@ -154,14 +183,18 @@ class TestHandler:
             captured.update(kwargs)
             return _ok_artifact()
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   side_effect=fake_build), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-30/candidates.json"), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", side_effect=fake_build),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             handler_mod.handler(
-                {"run_date": "2026-05-30"}, context=None,
+                {"run_date": "2026-05-30"},
+                context=None,
             )
         # Normalized Sat→Fri trading day before reaching the orchestrator.
         assert captured["run_date"] == "2026-05-29"
@@ -173,12 +206,15 @@ class TestHandler:
             captured.update(kwargs)
             return _ok_artifact()
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   side_effect=fake_build), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-30/candidates.json"), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", side_effect=fake_build),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             handler_mod.handler(
                 {
                     "run_date": "2026-05-30",
@@ -197,25 +233,29 @@ class TestHandler:
         Scanner keyed by calendar date (Sat) while Research read trading day
         (Fri). Saturday 2026-05-30 → Friday 2026-05-29; a trading-day input
         passes through unchanged."""
-        for given, expected in [("2026-05-30", "2026-05-29"),   # Sat → Fri
-                                ("2026-05-31", "2026-05-29"),   # Sun → Fri
-                                ("2026-05-29", "2026-05-29")]:   # Fri → Fri
+        for given, expected in [
+            ("2026-05-30", "2026-05-29"),  # Sat → Fri
+            ("2026-05-31", "2026-05-29"),  # Sun → Fri
+            ("2026-05-29", "2026-05-29"),
+        ]:  # Fri → Fri
             captured = {}
 
             def fake_build(*, _captured=captured, **kwargs):
                 _captured.update(kwargs)
                 return _ok_artifact()
 
-            with patch.object(handler_mod, "_ensure_init"), \
-                 patch("data.scanner_orchestrator.build_candidates_artifact",
-                       side_effect=fake_build), \
-                 patch("data.scanner_orchestrator.write_candidates_artifact",
-                       return_value=f"candidates/{expected}/candidates.json"), \
-                 patch("boto3.client", return_value=MagicMock()):
+            with (
+                patch.object(handler_mod, "_ensure_init"),
+                patch("data.scanner_orchestrator.build_candidates_artifact", side_effect=fake_build),
+                patch(
+                    "data.scanner_orchestrator.write_candidates_artifact",
+                    return_value=f"candidates/{expected}/candidates.json",
+                ),
+                patch("boto3.client", return_value=MagicMock()),
+            ):
                 result = handler_mod.handler({"run_date": given}, context=None)
             assert captured["run_date"] == expected, (
-                f"run_date {given} must normalize to trading day {expected}, "
-                f"got {captured.get('run_date')}"
+                f"run_date {given} must normalize to trading day {expected}, got {captured.get('run_date')}"
             )
             assert result["date"] == expected
 
@@ -224,16 +264,20 @@ class TestHandler:
         # each challenger artifact to the isolated shadow prefix and records the
         # keys in summary.shadows — without disturbing the live OK path.
         shadow_art = {"momentum_sleeve": {"run_date": "2026-05-29", "scanner_tickers": ["A"]}}
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-29/candidates.json"), \
-             patch("data.scanner_orchestrator.build_shadow_candidate_artifacts",
-                   return_value=shadow_art), \
-             patch("data.scanner_orchestrator.write_shadow_candidates_artifact",
-                   return_value="candidates_shadow/momentum_sleeve/2026-05-29/candidates.json"), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch("data.scanner_orchestrator.build_shadow_candidate_artifacts", return_value=shadow_art),
+            patch(
+                "data.scanner_orchestrator.write_shadow_candidates_artifact",
+                return_value="candidates_shadow/momentum_sleeve/2026-05-29/candidates.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["shadows"] == {
@@ -244,14 +288,19 @@ class TestHandler:
     def test_shadow_failure_does_not_downgrade_live_ok(self, handler_mod):
         # A shadow build/write failure is WHOLLY fail-soft: live stays OK, the
         # failure is recorded in summary.shadow_error (no-silent-fails).
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-29/candidates.json"), \
-             patch("data.scanner_orchestrator.build_shadow_candidate_artifacts",
-                   side_effect=RuntimeError("loadings exploded")), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.build_shadow_candidate_artifacts",
+                side_effect=RuntimeError("loadings exploded"),
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["shadows"] == {}
@@ -261,18 +310,24 @@ class TestHandler:
         # alpha-engine-config-I2515: the standalone Scanner path becomes a
         # universe-board producer. The handler records the written key in
         # summary.universe_board without disturbing the live OK path.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-29/candidates.json"), \
-             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
-                   return_value="scanner/universe/2026-05-29/universe.json"), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["universe_board"] == {
-            "status": "OK", "key": "scanner/universe/2026-05-29/universe.json",
+            "status": "OK",
+            "key": "scanner/universe/2026-05-29/universe.json",
         }
         assert "universe_board_error" not in result["summary"]
 
@@ -280,14 +335,19 @@ class TestHandler:
         # A board build/write failure is WHOLLY fail-soft: live stays OK, the
         # failure is recorded in summary.universe_board_error (no-silent-fails)
         # — mirrors the shadow-artifact fail-soft contract above.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=_ok_artifact()), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-29/candidates.json"), \
-             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
-                   side_effect=RuntimeError("factor profiles unreadable")), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                side_effect=RuntimeError("factor profiles unreadable"),
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["universe_board"] == {"status": "error", "key": None}
@@ -304,16 +364,83 @@ class TestHandler:
             captured["artifact"] = artifact
             return "scanner/universe/2026-05-29/universe.json"
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("data.scanner_orchestrator.build_candidates_artifact",
-                   return_value=ok_artifact), \
-             patch("data.scanner_orchestrator.write_candidates_artifact",
-                   return_value="candidates/2026-05-29/candidates.json"), \
-             patch("data.scanner_orchestrator.write_universe_board_for_scanner_run",
-                   side_effect=fake_write), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=ok_artifact),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch("data.scanner_orchestrator.write_universe_board_for_scanner_run", side_effect=fake_write),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             handler_mod.handler(
-                {"run_date": "2026-05-30", "market_regime": "bull"}, context=None,
+                {"run_date": "2026-05-30", "market_regime": "bull"},
+                context=None,
             )
         assert captured["market_regime"] == "bull"
         assert captured["artifact"] is ok_artifact
+
+    # ── Universe membership (alpha-engine-config-I4818) ──────────────────────
+    # The membership artifact is LOAD-BEARING (the predictor resolves its daily
+    # scoring universe from it), so its contract is the OPPOSITE of the board's
+    # fail-soft one above: a write failure must fail the Scanner run.
+
+    def test_universe_membership_written_and_summarized(self, handler_mod):
+        captured = {}
+
+        def fake_write(run_date, scanner_tickers, **kwargs):
+            captured["run_date"] = run_date
+            captured["scanner_tickers"] = scanner_tickers
+            captured.update(kwargs)
+            return "universe_membership/2026-05-29/membership.json"
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("scoring.universe_membership.compute_and_write_universe_membership", side_effect=fake_write),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["summary"]["universe_membership"] == ("universe_membership/2026-05-29/membership.json")
+        # Keyed by TRADING day (same normalization as candidates.json), and fed
+        # the run's own scanner cut — not a re-read of some other artifact.
+        assert captured["run_date"] == "2026-05-29"
+        assert captured["scanner_tickers"] == _ok_artifact()["scanner_tickers"]
+
+    def test_universe_membership_failure_fails_the_run(self, handler_mod):
+        # The regression this pins: a silently-absent membership artifact leaves
+        # the predictor resolving a STALE universe (it scored a frozen
+        # 2026-07-10 population for three weekly cycles). A membership failure
+        # must therefore surface as a red Scanner run, NOT an OK-with-error-field
+        # like the fail-soft board write.
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch(
+                "scoring.universe_membership.compute_and_write_universe_membership",
+                side_effect=RuntimeError("no factor profiles readable"),
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "ERROR"
+        assert "universe membership failed" in result["error"]
+        assert "no factor profiles readable" in result["error"]
