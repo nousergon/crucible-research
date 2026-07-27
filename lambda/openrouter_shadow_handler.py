@@ -58,6 +58,7 @@ import datetime
 import logging
 import os
 import sys
+import tempfile
 
 # Repo root on sys.path so ``from evals.openrouter_shadow import ...``
 # resolves under Lambda's task layout. Mirrors the existing shared-image
@@ -89,7 +90,7 @@ def _ensure_init() -> None:
     global _init_done
     if _init_done:
         return
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
 
 
@@ -111,8 +112,7 @@ def handler(event, context):
 
     if is_dry(event):
         logger.info(
-            "[openrouter_shadow_handler] dry_run_llm=True: shell-run "
-            "no-op (no S3/CloudWatch access, no LLM calls)",
+            "[openrouter_shadow_handler] dry_run_llm=True: shell-run no-op (no S3/CloudWatch access, no LLM calls)",
         )
         return {"status": "OK", "dry_run": True}
 
@@ -121,15 +121,14 @@ def handler(event, context):
     from evals.openrouter_shadow import run_shadow_judge_over_date
 
     date = (event.get("date") if isinstance(event, dict) else None) or _default_date()
-    bucket = (
-        (event.get("bucket") if isinstance(event, dict) else None)
-        or os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+    bucket = (event.get("bucket") if isinstance(event, dict) else None) or os.environ.get(
+        "RESEARCH_BUCKET", "alpha-engine-research"
     )
 
     logger.info(
-        "[openrouter_shadow_handler] start date=%s bucket=%s "
-        "(SHADOW — no decision authority, config#2575)",
-        date, bucket,
+        "[openrouter_shadow_handler] start date=%s bucket=%s (SHADOW — no decision authority, config#2575)",
+        date,
+        bucket,
     )
 
     summary = run_shadow_judge_over_date(date=date, bucket=bucket)
