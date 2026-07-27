@@ -111,8 +111,34 @@ schedule:
   run_on_early_close: true
 
 llm:
-  per_stock_model: claude-haiku-4-5-20251001   # news + research agents
-  strategic_model: claude-sonnet-4-6            # scanner ranking, macro, consolidator
+  # CAPABILITY CLASSES, not concrete models. The registry decides which model
+  # a class means (model-portability-policy I1); naming a model here would put
+  # a selection fact in a consumer's config.
+  #   low  = mechanical/deterministic   med = scoped reasoning
+  #   high = frontier judgment          ultra = maximum capability
+  per_stock_class: low        # news + research agents
+  strategic_class: med        # scanner ranking, macro, consolidator
   max_tokens_per_stock: 800
   max_tokens_strategic: 4096
   concurrent_agents: 10
+
+  # DIRECT-MODE fallback models. Used ONLY when router_base_url is unset (see
+  # below), and by the call sites not yet migrated to class addressing
+  # (ic_cio, canary_replay). These stay concrete model ids on purpose: while a
+  # site still talks to Anthropic directly, a class name here would be sent as
+  # a model name and rejected.
+  per_stock_model: claude-haiku-4-5-20251001
+  strategic_model: claude-sonnet-4-6
+
+  # Where class names are resolved. LEAVE UNSET to keep talking to Anthropic
+  # directly with the *_model ids above — that is the pre-migration behaviour
+  # and the default, so no deployment changes behaviour until it opts in.
+  #
+  # Set it to gain the platform (registry routing, fallback chains, and — only
+  # where the endpoint is a local proxy — DLP scanning):
+  #   host running the LiteLLM router : http://127.0.0.1:8980/v1
+  #   Lambda / EC2 (no local router)  : the OpenRouter base url
+  # The endpoint is a DEPLOYMENT fact; the class is not. Same split thinktank
+  # already uses via ProviderSpec.base_url.
+  # router_base_url: http://127.0.0.1:8980/v1
+  router_key_secret: LITELLM_MASTER_KEY

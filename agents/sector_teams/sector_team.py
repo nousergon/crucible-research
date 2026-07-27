@@ -17,13 +17,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_structured_with_validation_retry,
+    make_agent_llm,
 )
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.material_triggers import check_material_triggers
@@ -35,9 +33,8 @@ from agents.sector_teams.team_config import (
     get_team_tickers,
 )
 from config import (
-    ANTHROPIC_API_KEY,
     MAX_TOKENS_STRATEGIC,
-    PER_STOCK_MODEL,
+    PER_STOCK_CLASS,
 )
 
 # Per-sub-agent cost-tracker scopes. Each sub-agent call below opens its
@@ -79,6 +76,7 @@ class QuarantinableThesisError(RuntimeError):
 @dataclass
 class SectorTeamContext:
     """Bundled context for a sector team run — avoids 17-parameter function signatures."""
+
     scanner_universe: list[str]
     # L1995 Phase 5 / L4464: the pre-filtered sector-team screening input
     # (standalone scanner candidate set ∪ held population). The quant/qual
@@ -147,8 +145,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
             "tool_calls": list[dict],  # combined tool call log
         }
     """
-    log.info("[team:%s] starting — %d universe, %d held",
-             team_id, len(ctx.scanner_universe), len(ctx.held_tickers))
+    log.info("[team:%s] starting — %d universe, %d held", team_id, len(ctx.scanner_universe), len(ctx.held_tickers))
 
     # ── Step 1: Get sector tickers ────────────────────────────────────────────
     # L1995 Phase 5 / L4464: screen the pre-filtered candidate set ∪ held
@@ -184,7 +181,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         node_name="sector_team_node",
         run_type="weekly_research",
         run_id=ctx.run_id,
-        model_name_fallback=PER_STOCK_MODEL,
+        model_name_fallback=PER_STOCK_CLASS,
         prompt=load_prompt("quant_analyst_user"),
     ):
         quant_output = run_quant_analyst_with_retry(
@@ -205,7 +202,9 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     if len(valid_picks) < len(quant_picks):
         log.warning(
             "[team:%s] quant produced %d picks but %d lack 'ticker' key — dropped",
-            team_id, len(quant_picks), len(quant_picks) - len(valid_picks),
+            team_id,
+            len(quant_picks),
+            len(quant_picks) - len(valid_picks),
         )
     if not valid_picks:
         log.warning("[team:%s] quant produced no valid picks", team_id)
@@ -220,7 +219,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         node_name="sector_team_node",
         run_type="weekly_research",
         run_id=ctx.run_id,
-        model_name_fallback=PER_STOCK_MODEL,
+        model_name_fallback=PER_STOCK_CLASS,
         prompt=load_prompt("qual_analyst_user"),
     ):
         qual_output = run_qual_analyst(
@@ -254,7 +253,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         node_name="sector_team_node",
         run_type="weekly_research",
         run_id=ctx.run_id,
-        model_name_fallback=PER_STOCK_MODEL,
+        model_name_fallback=PER_STOCK_CLASS,
         prompt=load_prompt("peer_review_joint_selection"),
     ):
         peer_output = run_peer_review(
@@ -269,13 +268,14 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         )
 
     # ── Step 5: Thesis maintenance for held stocks ────────────────────────────
-    team_held = [t for t in ctx.held_tickers if ctx.sector_map.get(t, "") in
-                 {s for s, tid in _sector_team_inverse().items() if tid == team_id}]
+    team_held = [
+        t
+        for t in ctx.held_tickers
+        if ctx.sector_map.get(t, "") in {s for s, tid in _sector_team_inverse().items() if tid == team_id}
+    ]
 
     # Check for sector regime change
-    sector_regime_changed = _check_regime_change(
-        team_id, ctx.prior_sector_ratings, ctx.current_sector_ratings
-    )
+    sector_regime_changed = _check_regime_change(team_id, ctx.prior_sector_ratings, ctx.current_sector_ratings)
 
     thesis_updates = {}
     # Per-ticker quarantine (config#2247): a held ticker whose thesis update
@@ -325,15 +325,19 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
                 node_name="sector_team_node",
                 run_type="weekly_research",
                 run_id=ctx.run_id,
-                model_name_fallback=PER_STOCK_MODEL,
+                model_name_fallback=PER_STOCK_CLASS,
                 prompt=load_prompt("sector_team_thesis_update"),
             ):
                 try:
                     updated = _update_thesis_for_held_stock(
-                        ticker, triggers, ctx.prior_theses.get(ticker),
+                        ticker,
+                        triggers,
+                        ctx.prior_theses.get(ticker),
                         ctx.news_data_by_ticker.get(ticker),
                         ctx.analyst_data_by_ticker.get(ticker),
-                        ctx.run_date, team_id, ctx.api_key,
+                        ctx.run_date,
+                        team_id,
+                        ctx.api_key,
                     )
                 except QuarantinableThesisError as exc:
                     # Deterministic per-ticker output failure (the CRUS case,
@@ -346,14 +350,18 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
                         "deterministically (%s). Omitted from signals.json "
                         "(explicit-absence contract, config#2247); no "
                         "prior-thesis carry-forward. Run continues for the rest.",
-                        team_id, ticker, exc,
+                        team_id,
+                        ticker,
+                        exc,
                     )
-                    quarantined.append({
-                        "ticker": ticker,
-                        "team_id": team_id,
-                        "stage": "held_thesis_update",
-                        "reason": str(exc),
-                    })
+                    quarantined.append(
+                        {
+                            "ticker": ticker,
+                            "team_id": team_id,
+                            "stage": "held_thesis_update",
+                            "reason": str(exc),
+                        }
+                    )
                     continue
             thesis_updates[ticker] = updated
         else:
@@ -368,6 +376,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
             # schema-compliant; score_aggregator's recompute path also
             # normalizes downstream so this is double-cover, not a bypass.
             from scoring.composite import normalize_conviction
+
             prior = ctx.prior_theses[ticker]
             preserved = {
                 **prior,
@@ -375,20 +384,22 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
                 "triggers": [],
             }
             if "conviction" in preserved:
-                preserved["conviction"] = normalize_conviction(
-                    preserved["conviction"]
-                )
+                preserved["conviction"] = normalize_conviction(preserved["conviction"])
             thesis_updates[ticker] = preserved
 
     # ── Combine tool call logs ────────────────────────────────────────────────
     all_tool_calls = (
-        quant_output.get("tool_calls", []) +
-        qual_output.get("tool_calls", []) +
-        [{"phase": "peer_review", "rationale": peer_output.get("peer_review_rationale", "")}]
+        quant_output.get("tool_calls", [])
+        + qual_output.get("tool_calls", [])
+        + [{"phase": "peer_review", "rationale": peer_output.get("peer_review_rationale", "")}]
     )
 
-    log.info("[team:%s] done — %d recommendations, %d thesis updates",
-             team_id, len(peer_output.get("recommendations", [])), len(thesis_updates))
+    log.info(
+        "[team:%s] done — %d recommendations, %d thesis updates",
+        team_id,
+        len(peer_output.get("recommendations", [])),
+        len(thesis_updates),
+    )
 
     # Propagate the first analyst error (if any) to the team level so the
     # score_aggregator can hard-fail loudly. Quant errors take precedence —
@@ -404,10 +415,8 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     # genuine failures still hard-fail.
     team_partial = bool(quant_output.get("partial") or qual_output.get("partial"))
     partial_reasons = [
-        f"quant:{quant_output.get('partial_reason')}"
-        if quant_output.get("partial") else None,
-        f"qual:{qual_output.get('partial_reason')}"
-        if qual_output.get("partial") else None,
+        f"quant:{quant_output.get('partial_reason')}" if quant_output.get("partial") else None,
+        f"qual:{qual_output.get('partial_reason')}" if qual_output.get("partial") else None,
     ]
     partial_reasons = [r for r in partial_reasons if r is not None]
 
@@ -435,8 +444,7 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     }
 
 
-def _empty_result(team_id: str, quant_output: dict | None = None,
-                  error: str | None = None) -> dict:
+def _empty_result(team_id: str, quant_output: dict | None = None, error: str | None = None) -> dict:
     # If quant produced an error and no explicit error was passed, surface
     # it so the aggregator sees the failure rather than an empty team that
     # looks identical to "no sector tickers in universe".
@@ -447,7 +455,8 @@ def _empty_result(team_id: str, quant_output: dict | None = None,
     partial = bool(quant_output.get("partial")) if quant_output else False
     partial_reasons = (
         [f"quant:{quant_output.get('partial_reason')}"]
-        if partial and quant_output and quant_output.get("partial_reason") else []
+        if partial and quant_output and quant_output.get("partial_reason")
+        else []
     )
     return {
         "team_id": team_id,
@@ -466,6 +475,7 @@ def _empty_result(team_id: str, quant_output: dict | None = None,
 def _sector_team_inverse() -> dict[str, str]:
     """Return {gics_sector: team_id} mapping."""
     from agents.sector_teams.team_config import SECTOR_TEAM_MAP
+
     return SECTOR_TEAM_MAP
 
 
@@ -518,7 +528,8 @@ def _augment_news_summary_with_rag(
     except ImportError as e:
         log.warning(
             "[thesis_update:%s] RAG augment skipped — import error: %s",
-            ticker, e,
+            ticker,
+            e,
         )
         return base_news_summary
 
@@ -526,9 +537,7 @@ def _augment_news_summary_with_rag(
     # ['price_move_gt_2atr', 'earnings_beat'] → 'price move earnings
     # beat'. Falls back to ticker name when triggers absent.
     trigger_terms = " ".join(t.replace("_", " ") for t in triggers)
-    rag_query = (
-        f"{ticker} {trigger_terms}".strip() if trigger_terms else ticker
-    )
+    rag_query = f"{ticker} {trigger_terms}".strip() if trigger_terms else ticker
 
     pieces: list[str] = []
     if base_news_summary:
@@ -536,32 +545,36 @@ def _augment_news_summary_with_rag(
 
     try:
         news_excerpts = search_news_impl(
-            ticker, rag_query, days_back=14, top_k=5,
+            ticker,
+            rag_query,
+            days_back=14,
+            top_k=5,
         )
         # search_news_impl returns a "No recent news found" string on
         # empty; skip those.
         if news_excerpts and not news_excerpts.startswith("No recent news"):
-            pieces.append(
-                "Recent news context (from RAG, last 14 days):\n"
-                + news_excerpts
-            )
+            pieces.append("Recent news context (from RAG, last 14 days):\n" + news_excerpts)
     except Exception as e:
         log.warning(
-            "[thesis_update:%s] RAG news augment failed: %s", ticker, e,
+            "[thesis_update:%s] RAG news augment failed: %s",
+            ticker,
+            e,
         )
 
     try:
         filings_excerpts = search_filings_impl(
-            ticker, rag_query, days_back=90, top_k=3,
+            ticker,
+            rag_query,
+            days_back=90,
+            top_k=3,
         )
         if filings_excerpts and not filings_excerpts.startswith("No filings"):
-            pieces.append(
-                "Recent filings context (from RAG, last 90 days):\n"
-                + filings_excerpts
-            )
+            pieces.append("Recent filings context (from RAG, last 90 days):\n" + filings_excerpts)
     except Exception as e:
         log.warning(
-            "[thesis_update:%s] RAG filings augment failed: %s", ticker, e,
+            "[thesis_update:%s] RAG filings augment failed: %s",
+            ticker,
+            e,
         )
 
     return "\n\n".join(pieces) if pieces else base_news_summary
@@ -621,19 +634,10 @@ def _update_thesis_for_held_stock(
     # AST-scans every ChatAnthropic(...) call site in agents/ for a literal
     # default_request_timeout/timeout keyword (config#687 regression guard);
     # a **kwargs-constructed call would be invisible to that walk.
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
-        # ChatAnthropic's own default is temperature=None (no override sent
-        # to the API, server defaults to 1.0) — passing None through here
-        # reproduces that exactly, so the harness-only ``temperature`` param
-        # is a true no-op at its default and changes nothing for the live
-        # production call path.
-        temperature=temperature,
     )
 
     prior_text = ""
@@ -644,9 +648,7 @@ def _update_thesis_for_held_stock(
     if news_data:
         articles = news_data.get("articles", [])
         if articles:
-            news_summary = "\n".join(
-                f"- {a.get('headline', '')}" for a in articles[:5]
-            )
+            news_summary = "\n".join(f"- {a.get('headline', '')}" for a in articles[:5])
 
     # Wave 1 PR E (data-revamp-260513.md): optional RAG-context injection.
     # When THESIS_UPDATE_RAG_CONTEXT_ENABLED=true (default OFF for
@@ -673,8 +675,7 @@ def _update_thesis_for_held_stock(
         if surprises:
             latest = surprises[0]
             analyst_summary = (
-                f"Latest earnings surprise ({latest.get('date', 'N/A')}): "
-                f"{latest.get('surprise_pct', 'N/A')}%"
+                f"Latest earnings surprise ({latest.get('date', 'N/A')}): {latest.get('surprise_pct', 'N/A')}%"
             )
 
     loaded_prompt = load_prompt("sector_team_thesis_update")
@@ -726,7 +727,8 @@ def _update_thesis_for_held_stock(
     from graph.state_schemas import HeldThesisUpdateLLMOutput
 
     structured_llm = llm.with_structured_output(
-        HeldThesisUpdateLLMOutput, include_raw=True,
+        HeldThesisUpdateLLMOutput,
+        include_raw=True,
     )
     # SOTA structured-output recovery: route through the shared
     # ``invoke_structured_with_validation_retry`` chokepoint every other
@@ -773,16 +775,16 @@ def _update_thesis_for_held_stock(
         # ALL-AGENTS-STRICT: this agent did NOT produce real output, so the run
         # must fail. NO carry-forward of the prior thesis (that was #193, now
         # removed). Raise — surfaces as the team's hard error.
-        last_error: Exception = parsing_error or ValueError(
-            "structured-output returned no parsed model"
-        )
+        last_error: Exception = parsing_error or ValueError("structured-output returned no parsed model")
         log.error(
             "[thesis_update:%s] still malformed after %d parse "
             "attempts (%s) — RAISING. Per the all-agents-strict "
             "directive a held-thesis update that cannot produce "
             "real output fails the whole run; the prior thesis is "
             "NOT carried forward.",
-            ticker, _MAX_PARSE_ATTEMPTS, last_error,
+            ticker,
+            _MAX_PARSE_ATTEMPTS,
+            last_error,
         )
         raise QuarantinableThesisError(
             f"held-thesis update for {ticker} ({team_id}) failed "
@@ -794,10 +796,7 @@ def _update_thesis_for_held_stock(
     # Convert to dict + drop default-empty fields so they don't overwrite a
     # populated prior_thesis value with the default (e.g. an empty bull_case
     # shouldn't blank out a non-empty prior bull_case).
-    llm_update_clean = {
-        k: v for k, v in update.model_dump().items()
-        if v not in (None, "", [])
-    }
+    llm_update_clean = {k: v for k, v in update.model_dump().items() if v not in (None, "", [])}
     if prior_thesis:
         result = {**prior_thesis, **llm_update_clean}
     else:

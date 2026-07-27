@@ -10,21 +10,19 @@ from __future__ import annotations
 
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
+from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
+from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
     invoke_react_with_recovery,
     is_step_budget_exhausted_sentinel,
+    make_agent_llm,
     make_tool_use_repair_hook,
 )
-from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
-from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
@@ -33,7 +31,7 @@ from agents.sector_teams.react_budget import (
     workload_derived_recursion_limit,
 )
 from agents.sector_teams.team_config import MAX_TICKERS_IN_PROMPT, QUANT_TOP_N, TEAM_SCREENING_PARAMS
-from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUANT_MAX_ITERATIONS
+from config import MAX_TOKENS_STRATEGIC, PER_STOCK_CLASS, QUANT_MAX_ITERATIONS
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
 
@@ -60,13 +58,14 @@ def _quant_recursion_limit(n_tickers: int, n_tools: int) -> int:
     ``QUANT_MAX_ITERATIONS`` rounds but grows to cover every tool on every
     ticker in the screened sector universe plus a synthesis margin.
     """
-    return workload_derived_recursion_limit(
-        n_tickers, n_tools, floor_iterations=QUANT_MAX_ITERATIONS
-    )
+    return workload_derived_recursion_limit(n_tickers, n_tools, floor_iterations=QUANT_MAX_ITERATIONS)
 
 
 def _emit_retry_telemetry_safely(
-    *, team_id: str, attempted: bool, succeeded: bool,
+    *,
+    team_id: str,
+    attempted: bool,
+    succeeded: bool,
 ) -> None:
     """Best-effort emit one retry-event datapoint to AlphaEngine/Agents.
 
@@ -86,7 +85,9 @@ def _emit_retry_telemetry_safely(
         )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning(
-            "[quant:%s] retry telemetry emission failed: %s", team_id, exc,
+            "[quant:%s] retry telemetry emission failed: %s",
+            team_id,
+            exc,
         )
 
 
@@ -101,15 +102,11 @@ def _render_focus_list_for_prompt(focus_list: list[dict]) -> str:
     """
     if not focus_list:
         return ""
-    header = (
-        "TICKER | sector | stance | focus_score | "
-        "momentum_p | quality_p | value_p | low_vol_p"
-    )
+    header = "TICKER | sector | stance | focus_score | momentum_p | quality_p | value_p | low_vol_p"
     rows = []
     for e in focus_list:
         rows.append(
-            "{ticker} | {sector} | {stance} | {focus_score:.1f} | "
-            "{mom} | {qual} | {val} | {lv}".format(
+            "{ticker} | {sector} | {stance} | {focus_score:.1f} | {mom} | {qual} | {val} | {lv}".format(
                 ticker=e.get("ticker", "?"),
                 sector=e.get("sector", "?"),
                 stance=e.get("stance", "?"),
@@ -188,12 +185,9 @@ def run_quant_analyst(
     # qual_analyst — covers the structured-output extraction call's
     # list of ranked picks (5 picks × ~400 tokens each + envelope ≈
     # 2500 tokens typical, more at verbose end). Same risk class.
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -209,17 +203,18 @@ def run_quant_analyst(
     #     up to sector_team's team_result so archive_writer can project
     #     agent_override=1 onto the audit table).
     from config import FACTOR_BLEND_REGIME_WEIGHTS
-    focus_list_tickers = {
-        e.get("ticker") for e in (focus_list or []) if e.get("ticker")
-    }
-    tools = create_quant_tools({
-        "price_data": price_data,
-        "technical_scores": technical_scores,
-        "market_regime": market_regime,
-        "factor_blend_regime_weights": FACTOR_BLEND_REGIME_WEIGHTS,
-        "focus_list_tickers": focus_list_tickers,
-        "override_tickers": override_tickers if override_tickers is not None else [],
-    })
+
+    focus_list_tickers = {e.get("ticker") for e in (focus_list or []) if e.get("ticker")}
+    tools = create_quant_tools(
+        {
+            "price_data": price_data,
+            "technical_scores": technical_scores,
+            "market_regime": market_regime,
+            "factor_blend_regime_weights": FACTOR_BLEND_REGIME_WEIGHTS,
+            "focus_list_tickers": focus_list_tickers,
+            "override_tickers": override_tickers if override_tickers is not None else [],
+        }
+    )
 
     # Build system prompt. Wrapped in a ``SystemMessage`` with a
     # content-block ``cache_control`` marker so the assembled prefix
@@ -235,11 +230,15 @@ def run_quant_analyst(
     # ``graph.llm_cost_tracker`` telemetry and the rollout is a no-op —
     # no functional regression.
     system_prompt_text = _build_system_prompt(team_id, team_params, market_regime, len(sector_tickers))
-    system_prompt = SystemMessage(content=[{
-        "type": "text",
-        "text": system_prompt_text,
-        "cache_control": {"type": "ephemeral"},
-    }])
+    system_prompt = SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": system_prompt_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    )
 
     # Create ReAct agent via LangGraph. The ReAct loop runs until the model
     # produces a final-text answer (no more tool calls). The structured-
@@ -259,6 +258,7 @@ def run_quant_analyst(
     # and the strict-mode parsing-error contract, which is the established
     # pattern across every other LLM-output site in this codebase.
     from graph.state_schemas import QuantAnalystOutput
+
     # pre_model_hook (config#1065): drop orphan ``tool_use`` turns from the
     # LLM-input view before every ReAct turn so a truncated/aborted tool
     # emission can never reach the API as an unpaired ``tool_use`` (the
@@ -287,6 +287,7 @@ def run_quant_analyst(
     # focus_list is empty (graceful degrade if the factor substrate is
     # unavailable this cycle).
     from config import FOCUS_LIST_GATING_ENABLED
+
     use_focus_gating = bool(FOCUS_LIST_GATING_ENABLED and focus_list)
     if use_focus_gating:
         focus_tickers_ordered = [e["ticker"] for e in focus_list if e.get("ticker")]
@@ -294,9 +295,10 @@ def run_quant_analyst(
         focus_list_rendered = _render_focus_list_for_prompt(focus_list)
         universe_size_for_prompt = len(focus_tickers_ordered)
         log.info(
-            "[quant:%s] FOCUS_LIST_GATING_ENABLED: agent sees %d focus-list "
-            "tickers (was %d full sector slice)",
-            team_id, len(focus_tickers_ordered), len(sector_tickers),
+            "[quant:%s] FOCUS_LIST_GATING_ENABLED: agent sees %d focus-list tickers (was %d full sector slice)",
+            team_id,
+            len(focus_tickers_ordered),
+            len(sector_tickers),
         )
     else:
         ticker_list = ", ".join(sector_tickers[:MAX_TICKERS_IN_PROMPT])
@@ -336,9 +338,11 @@ def run_quant_analyst(
     # not a fixed constant — see ``_quant_recursion_limit`` (config#1822).
     recursion_limit = _quant_recursion_limit(len(sector_tickers), len(tools))
     log.info(
-        "[quant:%s] starting ReAct agent with %d tickers, %d tools "
-        "(recursion_limit=%d)",
-        team_id, len(sector_tickers), len(tools), recursion_limit,
+        "[quant:%s] starting ReAct agent with %d tickers, %d tools (recursion_limit=%d)",
+        team_id,
+        len(sector_tickers),
+        len(tools),
+        recursion_limit,
     )
 
     try:
@@ -379,7 +383,10 @@ def run_quant_analyst(
                 "sentinel ('%s') after %d tool calls — treating as "
                 "recursion-limit exhaustion (partial, not error). "
                 "sector_tickers=%d",
-                team_id, final_text.strip(), len(tool_calls), len(sector_tickers),
+                team_id,
+                final_text.strip(),
+                len(tool_calls),
+                len(sector_tickers),
             )
             return {
                 "team_id": team_id,
@@ -403,15 +410,18 @@ def run_quant_analyst(
                 f"nothing to extract structured picks from. tool_calls={len(tool_calls)}"
             )
         structured_llm = llm.with_structured_output(
-            QuantAnalystOutput, include_raw=True,
+            QuantAnalystOutput,
+            include_raw=True,
         )
-        extract_msg = HumanMessage(content=(
-            "Extract the final ranked picks from this analyst's answer "
-            "into the structured schema. Use only what's in the text — "
-            "do not invent picks. If the analyst produced no picks, "
-            "return an empty list.\n\n"
-            f"--- ANALYST ANSWER ---\n{final_text}"
-        ))
+        extract_msg = HumanMessage(
+            content=(
+                "Extract the final ranked picks from this analyst's answer "
+                "into the structured schema. Use only what's in the text — "
+                "do not invent picks. If the analyst produced no picks, "
+                "return an empty list.\n\n"
+                f"--- ANALYST ANSWER ---\n{final_text}"
+            )
+        )
         extract_resp = invoke_anthropic_safe(
             structured_llm,
             [extract_msg],
@@ -421,10 +431,7 @@ def run_quant_analyst(
         parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
         if parsing_error is not None:
-            msg = (
-                f"[quant:{team_id}] structured-output parse failed: "
-                f"{type(parsing_error).__name__}: {parsing_error}"
-            )
+            msg = f"[quant:{team_id}] structured-output parse failed: {type(parsing_error).__name__}: {parsing_error}"
             if is_strict_validation_enabled():
                 raise RuntimeError(msg)
             log.warning("%s — falling back to empty picks (lax mode)", msg)
@@ -435,8 +442,7 @@ def run_quant_analyst(
         # consumers (peer_review, score_aggregator) that use dict-access.
         picks = [p.model_dump() for p in parsed.ranked_picks]
 
-        log.info("[quant:%s] completed — %d picks, %d tool calls",
-                 team_id, len(picks), len(tool_calls))
+        log.info("[quant:%s] completed — %d picks, %d tool calls", team_id, len(picks), len(tool_calls))
 
         # Diagnostic logging for the "no valid picks" case. 2-3 sector
         # teams have been returning zero picks per weekly run since at
@@ -454,9 +460,7 @@ def run_quant_analyst(
             recursion_limit_hit = len(tool_calls) >= rounds_budget - 1
             text_tail = (final_text[-500:] if final_text else "<empty>").replace("\n", " ")
             log.warning(
-                "[quant:%s] produced 0 picks — tool_calls=%d "
-                "(recursion_limit_hit=%s) last_tool=%s "
-                "final_text_tail=%r",
+                "[quant:%s] produced 0 picks — tool_calls=%d (recursion_limit_hit=%s) last_tool=%s final_text_tail=%r",
                 team_id,
                 len(tool_calls),
                 recursion_limit_hit,
@@ -494,7 +498,8 @@ def run_quant_analyst(
             "[quant:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 picks). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, recursion_limit,
+            team_id,
+            recursion_limit,
         )
         return {
             "team_id": team_id,
@@ -601,7 +606,9 @@ def run_quant_analyst_with_retry(
         first["retry_succeeded"] = False
         first["retry_first_iterations"] = None
         _emit_retry_telemetry_safely(
-            team_id=team_id, attempted=False, succeeded=False,
+            team_id=team_id,
+            attempted=False,
+            succeeded=False,
         )
         return first
 
@@ -612,7 +619,8 @@ def run_quant_analyst_with_retry(
         "[quant:%s] retry-on-empty firing — first attempt produced 0 picks "
         "after %d tool calls (error=None, partial=False). Retrying once "
         "with augmented prompt (must produce ≥3 picks).",
-        team_id, first["iterations"],
+        team_id,
+        first["iterations"],
     )
 
     retry_preamble = _QUANT_RETRY_PREAMBLE.format(
@@ -636,7 +644,9 @@ def run_quant_analyst_with_retry(
     second["retry_succeeded"] = second_picks > 0
     second["retry_first_iterations"] = first["iterations"]
     _emit_retry_telemetry_safely(
-        team_id=team_id, attempted=True, succeeded=second["retry_succeeded"],
+        team_id=team_id,
+        attempted=True,
+        succeeded=second["retry_succeeded"],
     )
 
     if second_picks == 0:
@@ -654,13 +664,17 @@ def run_quant_analyst_with_retry(
             "Investigate whether the sector universe has degenerate "
             "technical-score input, the prompt is too restrictive, or "
             "the LLM is regressing.",
-            team_id, first["iterations"], second.get("iterations", 0),
+            team_id,
+            first["iterations"],
+            second.get("iterations", 0),
         )
     else:
         log.info(
             "[quant:%s] retry SUCCEEDED — produced %d picks (first attempt: 0, "
             "second iterations=%d). Augmented prompt forced commitment.",
-            team_id, second_picks, second.get("iterations", 0),
+            team_id,
+            second_picks,
+            second.get("iterations", 0),
         )
 
     return second

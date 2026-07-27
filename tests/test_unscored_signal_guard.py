@@ -89,9 +89,11 @@ def test_held_stock_thesis_update_preserves_prior_scores():
         )
     )
 
-    with patch.object(sector_team, "ChatAnthropic", return_value=fake_llm), \
-         patch.object(sector_team, "load_prompt") as mock_load, \
-         patch.object(sector_team, "format_structured_thesis_for_prompt", return_value=""):
+    with (
+        patch.object(sector_team, "make_agent_llm", return_value=fake_llm),
+        patch.object(sector_team, "load_prompt") as mock_load,
+        patch.object(sector_team, "format_structured_thesis_for_prompt", return_value=""),
+    ):
         mock_load.return_value.format.return_value = "prompt"
         result = sector_team._update_thesis_for_held_stock(
             ticker="LNTH",
@@ -156,13 +158,13 @@ def test_held_stock_thesis_update_no_prior_marks_score_failed():
     from agents.sector_teams import sector_team
     from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-    fake_llm = _fake_structured_llm_factory(
-        HeldThesisUpdateLLMOutput(bull_case="bull", bear_case="bear")
-    )
+    fake_llm = _fake_structured_llm_factory(HeldThesisUpdateLLMOutput(bull_case="bull", bear_case="bear"))
 
-    with patch.object(sector_team, "ChatAnthropic", return_value=fake_llm), \
-         patch.object(sector_team, "load_prompt") as mock_load, \
-         patch.object(sector_team, "format_structured_thesis_for_prompt", return_value=""):
+    with (
+        patch.object(sector_team, "make_agent_llm", return_value=fake_llm),
+        patch.object(sector_team, "load_prompt") as mock_load,
+        patch.object(sector_team, "format_structured_thesis_for_prompt", return_value=""),
+    ):
         mock_load.return_value.format.return_value = "prompt"
         result = sector_team._update_thesis_for_held_stock(
             ticker="NEW",
@@ -211,9 +213,7 @@ def test_build_signals_downgrades_buy_when_final_score_none():
     lnth = signals.get("LNTH")
     assert lnth is not None, f"LNTH missing from signals: {signals}"
     # Must be HOLD, not ENTER — the safety gate downgrades unscored BUYs
-    assert lnth["signal"] == "HOLD", (
-        f"Unscored BUY should have been downgraded to HOLD, got: {lnth}"
-    )
+    assert lnth["signal"] == "HOLD", f"Unscored BUY should have been downgraded to HOLD, got: {lnth}"
 
 
 def test_build_signals_allows_scored_buy_through():
