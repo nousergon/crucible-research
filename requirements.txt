@@ -133,7 +133,7 @@ krepis>=0.16.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
-pytz~=2024.1
+pytz~=2026.3
 
 # DB
 # SQLite is stdlib; no extra package needed
