@@ -46,8 +46,7 @@ T = TypeVar("T", bound=BaseModel)
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 _JSON_INSTRUCTION = (
-    "\n\nRespond with ONLY a single JSON object matching this JSON Schema — "
-    "no prose, no markdown fences:\n{schema}"
+    "\n\nRespond with ONLY a single JSON object matching this JSON Schema — no prose, no markdown fences:\n{schema}"
 )
 
 # Two DISTINCT transient-failure classes, each retried on its own budget,
@@ -59,6 +58,16 @@ _JSON_INSTRUCTION = (
 _HTTP_RETRY_ATTEMPTS = 3
 _NON_JSON_RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY_S = 2.0
+
+
+class _NullChoicesError(Exception):
+    """A 200 response whose ``choices`` is null/empty.
+
+    OpenRouter reports upstream provider failures in the response BODY rather
+    than as an HTTP error, so this is not raised by the SDK. Modelling it as an
+    exception lets it share the transient-error retry path instead of escaping
+    as a TypeError from ``choices[0]``.
+    """
 
 
 def _backoff_sleep(base_delay: float, attempt: int) -> None:
@@ -180,8 +189,7 @@ class ThinktankClient:
             messages.append(
                 {
                     "role": "user",
-                    "content": user
-                    + _JSON_INSTRUCTION.format(schema=json.dumps(schema)),
+                    "content": user + _JSON_INSTRUCTION.format(schema=json.dumps(schema)),
                 }
             )
 
@@ -191,9 +199,7 @@ class ThinktankClient:
         non_json_retries_left = _NON_JSON_RETRY_ATTEMPTS - 1
         schema_retries_left = 1  # ONE bounded corrective retry, unchanged
         while True:
-            response = self._create_completion(
-                client, messages, kwargs, tier_name=tier.name, agent_id=agent_id
-            )
+            response = self._create_completion(client, messages, kwargs, tier_name=tier.name, agent_id=agent_id)
             raw_text = (response.choices[0].message.content or "").strip()
             usage = getattr(response, "usage", None)
             in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -212,9 +218,11 @@ class ThinktankClient:
                 if non_json_retries_left > 0:
                     non_json_retries_left -= 1
                     logger.warning(
-                        "thinktank tier=%s agent=%s non-JSON provider body "
-                        "(retries left %d): %s",
-                        tier.name, agent_id, non_json_retries_left, exc,
+                        "thinktank tier=%s agent=%s non-JSON provider body (retries left %d): %s",
+                        tier.name,
+                        agent_id,
+                        non_json_retries_left,
+                        exc,
                     )
                     _backoff_sleep(_RETRY_BASE_DELAY_S, _NON_JSON_RETRY_ATTEMPTS - 2 - non_json_retries_left)
                     continue
@@ -229,7 +237,9 @@ class ThinktankClient:
                 last_error = exc
                 logger.warning(
                     "thinktank tier=%s agent=%s failed schema validation: %s",
-                    tier.name, agent_id, exc,
+                    tier.name,
+                    agent_id,
+                    exc,
                 )
                 if schema_retries_left > 0:
                     schema_retries_left -= 1
@@ -284,13 +294,17 @@ class ThinktankClient:
             prompt_version=prompt_version,
         )
         raise ThinktankLLMError(
-            f"tier={tier.name} model={tier.model} agent={agent_id}: response failed "
-            f"after bounded retries: {last_error}"
+            f"tier={tier.name} model={tier.model} agent={agent_id}: response failed after bounded retries: {last_error}"
         )
 
     def _create_completion(
-        self, client: Any, messages: list[dict[str, str]], kwargs: dict[str, Any],
-        *, tier_name: str, agent_id: str,
+        self,
+        client: Any,
+        messages: list[dict[str, str]],
+        kwargs: dict[str, Any],
+        *,
+        tier_name: str,
+        agent_id: str,
     ) -> Any:
         """One provider call, retried with jittered backoff on transient
         errors (timeout / connection reset / 5xx / rate-limit) — provider
@@ -300,13 +314,34 @@ class ThinktankClient:
         last_exc: Exception | None = None
         for attempt in range(_HTTP_RETRY_ATTEMPTS):
             try:
-                return client.chat.completions.create(messages=messages, **kwargs)
-            except errors as exc:
+                resp = client.chat.completions.create(messages=messages, **kwargs)
+                # OpenRouter reports an upstream provider failure in the BODY
+                # of a 200: `choices` null (or empty) with an `error` object
+                # beside it. That is not an exception, so it slips past the
+                # `except` below and the caller's `response.choices[0]` raises
+                # TypeError: 'NoneType' object is not subscriptable — escaping
+                # this retry loop entirely and discarding the provider's own
+                # error message unread.
+                #
+                # It is exactly the transient provider flakiness this method
+                # exists to absorb, so classify it as such here rather than
+                # guarding at each call site.
+                if not getattr(resp, "choices", None):
+                    raise _NullChoicesError(
+                        f"provider returned no choices "
+                        f"(error={getattr(resp, 'error', None)!r}, "
+                        f"id={getattr(resp, 'id', None)!r})"
+                    )
+                return resp
+            except (*errors, _NullChoicesError) as exc:
                 last_exc = exc
                 logger.warning(
-                    "thinktank tier=%s agent=%s transient provider error "
-                    "(attempt %d/%d): %s",
-                    tier_name, agent_id, attempt + 1, _HTTP_RETRY_ATTEMPTS, exc,
+                    "thinktank tier=%s agent=%s transient provider error (attempt %d/%d): %s",
+                    tier_name,
+                    agent_id,
+                    attempt + 1,
+                    _HTTP_RETRY_ATTEMPTS,
+                    exc,
                 )
                 if attempt < _HTTP_RETRY_ATTEMPTS - 1:
                     _backoff_sleep(_RETRY_BASE_DELAY_S, attempt)
@@ -329,9 +364,7 @@ class ThinktankClient:
         prompt_version: str,
         sft_meta: dict[str, Any] | None = None,
     ) -> float:
-        cost = (
-            input_tokens * tier.price_in_per_m + output_tokens * tier.price_out_per_m
-        ) / 1_000_000
+        cost = (input_tokens * tier.price_in_per_m + output_tokens * tier.price_out_per_m) / 1_000_000
         bucket_usage = self._usage.setdefault(tier.name, TierUsage())
         bucket_usage.calls += 1
         bucket_usage.input_tokens += input_tokens
@@ -387,8 +420,9 @@ class ThinktankClient:
             "1",
             "true",
         ):
-            logger.info("thinktank SFT capture disabled — %d rows dropped by flag",
-                        sum(len(v) for v in self._sft_rows.values()))
+            logger.info(
+                "thinktank SFT capture disabled — %d rows dropped by flag", sum(len(v) for v in self._sft_rows.values())
+            )
             return 0
         client = s3_client or boto3.client("s3")
         flushed = 0
@@ -417,13 +451,9 @@ class ThinktankClient:
             ]
             key = f"decision_artifacts/_sft_raw/{trading_day}/{self.run_id}/{agent_id}.jsonl"
             try:
-                client.put_object(
-                    Bucket=bucket, Key=key, Body=sft.to_jsonl_bytes(records)
-                )
+                client.put_object(Bucket=bucket, Key=key, Body=sft.to_jsonl_bytes(records))
             except Exception as exc:  # noqa: BLE001 — re-raised loud below
-                raise SftCaptureWriteError(
-                    f"SFT flush failed for s3://{bucket}/{key}: {exc}"
-                ) from exc
+                raise SftCaptureWriteError(f"SFT flush failed for s3://{bucket}/{key}: {exc}") from exc
             flushed += len(records)
         self._sft_rows.clear()
         return flushed
