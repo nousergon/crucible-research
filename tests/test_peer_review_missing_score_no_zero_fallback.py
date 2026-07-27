@@ -46,7 +46,12 @@ from graph.state_schemas import JointSelectionOutput
 
 
 class _FakeLLM:
-    model = "claude-haiku-4-5"
+    # A factory-built client is addressed by capability CLASS. The old value
+    # here was a concrete model id, which is what a client holds in direct
+    # mode -- feeding that back in as a model_class is the bug this migration
+    # had to fix, so the stub must not model it.
+    model_name = "low"
+    model = "low"
     anthropic_api_key = "test-key"
     callbacks = []
 
@@ -111,14 +116,10 @@ class TestCandidateCompositeScoreNoneSafety:
         assert _candidate_composite_score({"quant_score": 60}) == 60.0
 
     def test_both_present_averages(self):
-        assert _candidate_composite_score(
-            {"quant_score": 80, "qual_score": 60}
-        ) == 70.0
+        assert _candidate_composite_score({"quant_score": 80, "qual_score": 60}) == 70.0
 
     def test_genuine_zero_quant_computes_real_zero_not_none(self):
-        assert _candidate_composite_score(
-            {"quant_score": 0, "qual_score": 0}
-        ) == 0.0
+        assert _candidate_composite_score({"quant_score": 0, "qual_score": 0}) == 0.0
 
 
 class TestJointFinalizationFallbackSortNoSilentZero:
@@ -136,10 +137,16 @@ class TestJointFinalizationFallbackSortNoSilentZero:
 
             return _Bound()
 
+        # Patch the FACTORY, not a concrete chat-model class: peer_review no
+        # longer names one, and in direct vs router mode it is a different
+        # class entirely.
+        class _Rebound:
+            def with_structured_output(self, schema, *args, **kwargs):
+                return fake_with_structured_output(None, schema)
+
         with patch(
-            "agents.sector_teams.peer_review.ChatAnthropic.with_structured_output",
-            autospec=True,
-            side_effect=fake_with_structured_output,
+            "agents.sector_teams.peer_review.make_agent_llm",
+            return_value=_Rebound(),
         ):
             return _joint_finalization(_FakeLLM(), "tech", candidates, "neutral")
 
@@ -151,12 +158,9 @@ class TestJointFinalizationFallbackSortNoSilentZero:
         however low."""
         monkeypatch.setenv("STRICT_VALIDATION", "false")
         candidates = [
-            {"ticker": "UNSCORED", "quant_score": None, "qual_score": None,
-             "bull_case": "", "bear_case": ""},
-            {"ticker": "LOWSCORE", "quant_score": 5, "qual_score": 3,
-             "bull_case": "", "bear_case": ""},
-            {"ticker": "MIDSCORE", "quant_score": 55, "qual_score": 60,
-             "bull_case": "", "bear_case": ""},
+            {"ticker": "UNSCORED", "quant_score": None, "qual_score": None, "bull_case": "", "bear_case": ""},
+            {"ticker": "LOWSCORE", "quant_score": 5, "qual_score": 3, "bull_case": "", "bear_case": ""},
+            {"ticker": "MIDSCORE", "quant_score": 55, "qual_score": 60, "bull_case": "", "bear_case": ""},
         ]
 
         result = self._run_fallback(candidates)
@@ -173,12 +177,9 @@ class TestJointFinalizationFallbackSortNoSilentZero:
         fallback ordering is unchanged by the refactor."""
         monkeypatch.setenv("STRICT_VALIDATION", "false")
         candidates = [
-            {"ticker": "NVDA", "quant_score": 78, "qual_score": 72,
-             "bull_case": "", "bear_case": ""},
-            {"ticker": "PLTR", "quant_score": 65, "qual_score": 70,
-             "bull_case": "", "bear_case": ""},
-            {"ticker": "RKLB", "quant_score": 60, "qual_score": 68,
-             "bull_case": "", "bear_case": ""},
+            {"ticker": "NVDA", "quant_score": 78, "qual_score": 72, "bull_case": "", "bear_case": ""},
+            {"ticker": "PLTR", "quant_score": 65, "qual_score": 70, "bull_case": "", "bear_case": ""},
+            {"ticker": "RKLB", "quant_score": 60, "qual_score": 68, "bull_case": "", "bear_case": ""},
         ]
 
         result = self._run_fallback(candidates)
