@@ -98,24 +98,60 @@ class TestAggregateDayHappyPath:
         from scripts.aggregate_costs import aggregate_day
 
         # Three sector teams + macro + cio, each with 1-3 calls.
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:tech.jsonl", [
-            _make_row(agent_id="sector_team:tech", sector_team_id="tech",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=4000, output_tokens=1200, cost_usd=0.010, call_seq=1),
-            _make_row(agent_id="sector_team:tech", sector_team_id="tech",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=2000, output_tokens=800, cost_usd=0.006, call_seq=2),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:financials.jsonl", [
-            _make_row(agent_id="sector_team:financials", sector_team_id="financials",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=3500, output_tokens=900, cost_usd=0.008, call_seq=1),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/macro_economist.jsonl", [
-            _make_row(agent_id="macro_economist", sector_team_id=None,
-                      model_name="claude-sonnet-4-6",
-                      input_tokens=8000, output_tokens=3000, cost_usd=0.069, call_seq=1),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:tech.jsonl",
+            [
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=4000,
+                    output_tokens=1200,
+                    cost_usd=0.010,
+                    call_seq=1,
+                ),
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=2000,
+                    output_tokens=800,
+                    cost_usd=0.006,
+                    call_seq=2,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:financials.jsonl",
+            [
+                _make_row(
+                    agent_id="sector_team:financials",
+                    sector_team_id="financials",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=3500,
+                    output_tokens=900,
+                    cost_usd=0.008,
+                    call_seq=1,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/macro_economist.jsonl",
+            [
+                _make_row(
+                    agent_id="macro_economist",
+                    sector_team_id=None,
+                    model_name="claude-sonnet-4-6",
+                    input_tokens=8000,
+                    output_tokens=3000,
+                    cost_usd=0.069,
+                    call_seq=1,
+                ),
+            ],
+        )
 
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
 
@@ -131,27 +167,56 @@ class TestAggregateDayHappyPath:
         df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
         assert len(df) == 4
         assert set(df["agent_id"]) == {
-            "sector_team:tech", "sector_team:financials", "macro_economist",
+            "sector_team:tech",
+            "sector_team:financials",
+            "macro_economist",
         }
 
     def test_summary_breakdowns_match_per_row_sums(self, s3):
         from scripts.aggregate_costs import aggregate_day
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:tech.jsonl", [
-            _make_row(agent_id="sector_team:tech", sector_team_id="tech",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=1000, output_tokens=500, cost_usd=0.0035),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:financials.jsonl", [
-            _make_row(agent_id="sector_team:financials", sector_team_id="financials",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=2000, output_tokens=800, cost_usd=0.006),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/ic_cio.jsonl", [
-            _make_row(agent_id="ic_cio", sector_team_id=None,
-                      model_name="claude-sonnet-4-6",
-                      input_tokens=10000, output_tokens=2000, cost_usd=0.060),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:tech.jsonl",
+            [
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=1000,
+                    output_tokens=500,
+                    cost_usd=0.0035,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:financials.jsonl",
+            [
+                _make_row(
+                    agent_id="sector_team:financials",
+                    sector_team_id="financials",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=2000,
+                    output_tokens=800,
+                    cost_usd=0.006,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/ic_cio.jsonl",
+            [
+                _make_row(
+                    agent_id="ic_cio",
+                    sector_team_id=None,
+                    model_name="claude-sonnet-4-6",
+                    input_tokens=10000,
+                    output_tokens=2000,
+                    cost_usd=0.060,
+                ),
+            ],
+        )
 
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
 
@@ -176,11 +241,20 @@ class TestAggregateDayHappyPath:
     def test_token_totals_surfaced(self, s3):
         from scripts.aggregate_costs import aggregate_day
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/agent_a.jsonl", [
-            _make_row(agent_id="agent_a", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=5000, output_tokens=1500, cost_usd=0.0125),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/agent_a.jsonl",
+            [
+                _make_row(
+                    agent_id="agent_a",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=5000,
+                    output_tokens=1500,
+                    cost_usd=0.0125,
+                ),
+            ],
+        )
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
         assert summary["total_input_tokens"] == 5000
         assert summary["total_output_tokens"] == 1500
@@ -192,6 +266,7 @@ class TestAggregateDayHappyPath:
 class TestEmptyDay:
     def test_no_files_returns_none(self, s3):
         from scripts.aggregate_costs import aggregate_day
+
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
         assert summary is None
 
@@ -238,13 +313,24 @@ class TestOutputKeyOverride:
     def test_override_routes_parquet(self, s3):
         from scripts.aggregate_costs import aggregate_day
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/agent_a.jsonl", [
-            _make_row(agent_id="agent_a", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=10, output_tokens=5, cost_usd=0.0001),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/agent_a.jsonl",
+            [
+                _make_row(
+                    agent_id="agent_a",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_usd=0.0001,
+                ),
+            ],
+        )
         summary = aggregate_day(
-            s3, _BUCKET, date(2026, 5, 2),
+            s3,
+            _BUCKET,
+            date(2026, 5, 2),
             output_key_override="custom/path/test.parquet",
         )
         assert summary["output_key"] == "custom/path/test.parquet"
@@ -262,6 +348,7 @@ class TestOutputKeyOverride:
 class TestCliArgs:
     def test_bad_date_format_exits_2(self, capsys):
         from scripts.aggregate_costs import main
+
         rc = main(["--date", "2026/05/02"])  # wrong separator
         assert rc == 2
         captured = capsys.readouterr()
@@ -269,6 +356,7 @@ class TestCliArgs:
 
     def test_missing_required_date_exits_2(self):
         from scripts.aggregate_costs import main
+
         with pytest.raises(SystemExit) as exc:
             main([])
         # argparse missing-required exits 2.
@@ -291,9 +379,11 @@ class TestPagination:
                 f"decision_artifacts/_cost_raw/2026-05-02/r/agent_{i}.jsonl",
                 [
                     _make_row(
-                        agent_id=f"agent_{i}", sector_team_id=None,
+                        agent_id=f"agent_{i}",
+                        sector_team_id=None,
                         model_name="claude-haiku-4-5",
-                        input_tokens=100, output_tokens=50,
+                        input_tokens=100,
+                        output_tokens=50,
                         cost_usd=0.000350,
                     ),
                 ],
@@ -315,70 +405,139 @@ class TestPagination:
 class TestImplausibleRowFilter:
     def test_plausible_production_run_id_passes(self):
         from scripts.aggregate_costs import _is_plausible_cost_row
-        for run_id in ("2026-05-13", "2026-05-15",
-                       "2026-05-20-001", "2026-05-20_run1"):
-            ok, reason = _is_plausible_cost_row({
-                "run_id": run_id,
-                "input_tokens": 4000, "output_tokens": 1200,
-            })
+
+        for run_id in ("2026-05-13", "2026-05-15", "2026-05-20-001", "2026-05-20_run1"):
+            ok, reason = _is_plausible_cost_row(
+                {
+                    "run_id": run_id,
+                    "input_tokens": 4000,
+                    "output_tokens": 1200,
+                }
+            )
             assert ok, f"{run_id!r} should pass — reason: {reason}"
 
-    def test_test_fixture_run_id_fails(self):
+    def test_run_id_shape_is_no_longer_a_rejection_reason(self):
+        """run_id shape must NOT gate plausibility (I5206).
+
+        This test previously asserted the opposite: that ad-hoc run_ids
+        like ``run-x`` were rejected. That guard silently killed the cost
+        pipeline for 17 days once production run_ids changed shape —
+        ``eval_judge`` moved to artifact-scoped ids like
+        ``276a5be44c7c-EXEL-v5``, and 100% of production rows were
+        classified as test pollution. The invariant was a format coupling,
+        not a law about the data. Inverted deliberately so a
+        reintroduction fails here.
+        """
         from scripts.aggregate_costs import _is_plausible_cost_row
-        # The exact run_ids the 2026-05-13 incident left in S3.
-        for run_id in ("run-1", "run-2", "run-budget-test", "run-x", "", None):
-            ok, reason = _is_plausible_cost_row({
-                "run_id": run_id,
-                "input_tokens": 4000, "output_tokens": 1200,
-            })
-            assert not ok
-            assert "run_id" in reason
+
+        for run_id in ("run-1", "run-budget-test", "run-x", "", None, "276a5be44c7c-EXEL-v5", "2026-07-10"):
+            ok, reason = _is_plausible_cost_row(
+                {
+                    "run_id": run_id,
+                    "input_tokens": 4000,
+                    "output_tokens": 1200,
+                }
+            )
+            assert ok, f"run_id={run_id!r} rejected on shape: {reason}"
+            assert reason is None
+
+    def test_real_production_row_from_the_i5206_partition_passes(self):
+        """Regression lock on the exact row shape that was being dropped.
+
+        Read from ``decision_artifacts/_cost_raw/2026-07-19/
+        276a5be44c7c-EXEL-v5/eval_judge.jsonl`` on 2026-07-28 — a genuine
+        production row (real model, real tokens, real cost) that the old
+        guard rejected.
+        """
+        from scripts.aggregate_costs import _is_plausible_cost_row
+
+        ok, reason = _is_plausible_cost_row(
+            {
+                "run_id": "276a5be44c7c-EXEL-v5",
+                "agent_id": "eval_judge",
+                "model_name": "claude-sonnet-4-6",
+                "input_tokens": 10011,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost_usd": 0.049008,
+            }
+        )
+        assert ok, f"the I5206 row is still being dropped: {reason}"
 
     def test_implausible_token_count_fails(self):
         from scripts.aggregate_costs import _is_plausible_cost_row
+
         # The big_spender row had input_tokens=1e9 — 200x the Claude
         # Opus 4.7 context window. Real API calls cannot reach this.
-        ok, reason = _is_plausible_cost_row({
-            "run_id": "2026-05-13",
-            "input_tokens": 1_000_000_000, "output_tokens": 0,
-        })
+        ok, reason = _is_plausible_cost_row(
+            {
+                "run_id": "2026-05-13",
+                "input_tokens": 1_000_000_000,
+                "output_tokens": 0,
+            }
+        )
         assert not ok
         assert "input_tokens" in reason
         assert "1,000,000,000" in reason
 
     def test_aggregate_day_drops_polluted_rows(self, s3):
         from scripts.aggregate_costs import aggregate_day
+
         # Mix: 3 real rows + 2 test pollution rows in the same JSONL.
         _put_jsonl(
             s3,
             "decision_artifacts/_cost_raw/2026-05-13/sector_team:tech.jsonl",
             [
-                _make_row(agent_id="sector_team:tech",
-                          sector_team_id="tech",
-                          model_name="claude-haiku-4-5",
-                          input_tokens=4000, output_tokens=1200,
-                          cost_usd=0.012, call_seq=1),
-                _make_row(agent_id="sector_team:tech",
-                          sector_team_id="tech",
-                          model_name="claude-haiku-4-5",
-                          input_tokens=2000, output_tokens=800,
-                          cost_usd=0.006, call_seq=2),
-                _make_row(agent_id="sector_team:tech",
-                          sector_team_id="tech",
-                          model_name="claude-haiku-4-5",
-                          input_tokens=3000, output_tokens=1000,
-                          cost_usd=0.008, call_seq=3),
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=4000,
+                    output_tokens=1200,
+                    cost_usd=0.012,
+                    call_seq=1,
+                ),
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=2000,
+                    output_tokens=800,
+                    cost_usd=0.006,
+                    call_seq=2,
+                ),
+                _make_row(
+                    agent_id="sector_team:tech",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=3000,
+                    output_tokens=1000,
+                    cost_usd=0.008,
+                    call_seq=3,
+                ),
                 # The exact 2026-05-13 pollution shape.
-                {**_make_row(agent_id="big_spender", sector_team_id=None,
-                             model_name="claude-haiku-4-5",
-                             input_tokens=1_000_000_000, output_tokens=0,
-                             cost_usd=1000.0),
-                 "run_id": "run-x"},
-                {**_make_row(agent_id="runaway_agent", sector_team_id=None,
-                             model_name="claude-haiku-4-5",
-                             input_tokens=10_000_000, output_tokens=0,
-                             cost_usd=10.0),
-                 "run_id": "run-budget-test"},
+                {
+                    **_make_row(
+                        agent_id="big_spender",
+                        sector_team_id=None,
+                        model_name="claude-haiku-4-5",
+                        input_tokens=1_000_000_000,
+                        output_tokens=0,
+                        cost_usd=1000.0,
+                    ),
+                    "run_id": "run-x",
+                },
+                {
+                    **_make_row(
+                        agent_id="runaway_agent",
+                        sector_team_id=None,
+                        model_name="claude-haiku-4-5",
+                        input_tokens=10_000_000,
+                        output_tokens=0,
+                        cost_usd=10.0,
+                    ),
+                    "run_id": "run-budget-test",
+                },
             ],
         )
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 13))
@@ -391,23 +550,54 @@ class TestImplausibleRowFilter:
         assert set(summary["by_agent_id"].keys()) == {"sector_team:tech"}
         assert abs(summary["by_agent_id"]["sector_team:tech"] - 0.026) < 1e-6
 
-    def test_aggregate_day_skips_when_all_rows_polluted(self, s3, caplog):
-        # All-pollution day → no parquet written (same shape as
-        # zero-rows case, distinguishable in logs).
-        from scripts.aggregate_costs import aggregate_day
+    def test_aggregate_day_raises_when_every_row_is_dropped(self, s3):
+        """Rows in, nothing out → RAISE, never a silent skip (I5206).
+
+        This previously asserted ``summary is None``. That silence is
+        precisely how the pipeline stayed dead for 17 days: the guard
+        rejected every production row, the state succeeded, and the
+        dashboard rendered stale partitions. "Input had rows but none
+        survived" means the filter and the producer disagree about what a
+        valid row is — a contract violation a producer may not swallow.
+        """
+        from scripts.aggregate_costs import CostAggregationError, aggregate_day
+
         _put_jsonl(
             s3,
             "decision_artifacts/_cost_raw/2026-05-13/run-x/big_spender.jsonl",
             [
-                {**_make_row(agent_id="big_spender", sector_team_id=None,
-                             model_name="claude-haiku-4-5",
-                             input_tokens=1_000_000_000, output_tokens=0,
-                             cost_usd=1000.0),
-                 "run_id": "run-x"},
+                {
+                    **_make_row(
+                        agent_id="big_spender",
+                        sector_team_id=None,
+                        model_name="claude-haiku-4-5",
+                        input_tokens=1_000_000_000,
+                        output_tokens=0,
+                        cost_usd=1000.0,
+                    ),
+                    "run_id": "run-x",
+                },
             ],
         )
-        summary = aggregate_day(s3, _BUCKET, date(2026, 5, 13))
-        assert summary is None
+        with pytest.raises(CostAggregationError, match="dropped as implausible"):
+            aggregate_day(s3, _BUCKET, date(2026, 5, 13))
+
+    def test_empty_input_still_returns_none_not_an_error(self, s3):
+        """A genuinely quiet day is NOT an error — only a total drop is.
+
+        Guards the distinction the raise above depends on: zero rows read
+        is a legitimately empty week and must stay a quiet ``None``, or
+        the alarm this change installs would fire every quiet cycle and
+        get ignored.
+        """
+        from scripts.aggregate_costs import aggregate_day
+
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-14/run-x/nobody.jsonl",
+            [],
+        )
+        assert aggregate_day(s3, _BUCKET, date(2026, 5, 14)) is None
 
 
 # ── Tool-fee column handling (schema v2) ──────────────────────────────────
@@ -421,18 +611,38 @@ class TestToolRequestTotals:
     def test_sums_tool_request_counts_across_files(self, s3):
         from scripts.aggregate_costs import aggregate_day
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_a.jsonl", [
-            _make_row(agent_id="qual_a", sector_team_id="tech",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=1000, output_tokens=200, cost_usd=0.502,
-                      web_search_requests=50, web_fetch_requests=2),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_b.jsonl", [
-            _make_row(agent_id="qual_b", sector_team_id="financials",
-                      model_name="claude-haiku-4-5",
-                      input_tokens=500, output_tokens=100, cost_usd=0.301,
-                      web_search_requests=30, web_fetch_requests=0),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_a.jsonl",
+            [
+                _make_row(
+                    agent_id="qual_a",
+                    sector_team_id="tech",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=1000,
+                    output_tokens=200,
+                    cost_usd=0.502,
+                    web_search_requests=50,
+                    web_fetch_requests=2,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/qual_b.jsonl",
+            [
+                _make_row(
+                    agent_id="qual_b",
+                    sector_team_id="financials",
+                    model_name="claude-haiku-4-5",
+                    input_tokens=500,
+                    output_tokens=100,
+                    cost_usd=0.301,
+                    web_search_requests=30,
+                    web_fetch_requests=0,
+                ),
+            ],
+        )
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30))
         assert summary is not None
         assert summary["total_web_search_requests"] == 80
@@ -444,12 +654,21 @@ class TestToolRequestTotals:
         when the schema-v2 columns are entirely absent from the DataFrame."""
         from scripts.aggregate_costs import aggregate_day
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/legacy.jsonl", [
-            _make_row(agent_id="legacy", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=1000, output_tokens=200, cost_usd=0.002,
-                      schema_version=1),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/legacy.jsonl",
+            [
+                _make_row(
+                    agent_id="legacy",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=1000,
+                    output_tokens=200,
+                    cost_usd=0.002,
+                    schema_version=1,
+                ),
+            ],
+        )
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
         assert summary is not None
         assert summary["total_web_search_requests"] == 0
@@ -470,16 +689,34 @@ class TestPerAgentCwMetrics:
         from scripts.aggregate_costs import aggregate_day
 
         cw = MagicMock()
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl", [
-            _make_row(agent_id="data:news_event_extraction", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=10_000, output_tokens=2_000, cost_usd=0.020),
-        ])
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/b.jsonl", [
-            _make_row(agent_id="executor:eod_narrative", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=2_000, output_tokens=500, cost_usd=0.0045),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl",
+            [
+                _make_row(
+                    agent_id="data:news_event_extraction",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=10_000,
+                    output_tokens=2_000,
+                    cost_usd=0.020,
+                ),
+            ],
+        )
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/b.jsonl",
+            [
+                _make_row(
+                    agent_id="executor:eod_narrative",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=2_000,
+                    output_tokens=500,
+                    cost_usd=0.0045,
+                ),
+            ],
+        )
 
         aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
 
@@ -491,7 +728,8 @@ class TestPerAgentCwMetrics:
 
         weekly_costs = {
             tuple((d["Name"], d["Value"]) for d in m["Dimensions"]): m["Value"]
-            for m in metrics if m["MetricName"] == "WeeklyCostUsd"
+            for m in metrics
+            if m["MetricName"] == "WeeklyCostUsd"
         }
         assert weekly_costs[(("agent_id", "data:news_event_extraction"),)] == pytest.approx(0.020)
         assert weekly_costs[(("agent_id", "executor:eod_narrative"),)] == pytest.approx(0.0045)
@@ -503,9 +741,12 @@ class TestPerAgentCwMetrics:
 
         cw = MagicMock()
         row = _make_row(
-            agent_id="ic_cio", sector_team_id=None,
+            agent_id="ic_cio",
+            sector_team_id=None,
             model_name="claude-sonnet-4-6",
-            input_tokens=1_000, output_tokens=200, cost_usd=0.01,
+            input_tokens=1_000,
+            output_tokens=200,
+            cost_usd=0.01,
         )
         row["cache_read_tokens"] = 3_000  # heavy cache usage
         _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/c.jsonl", [row])
@@ -524,10 +765,14 @@ class TestPerAgentCwMetrics:
 
         cw = MagicMock()
         row = _make_row(
-            agent_id="qual_tools_agent", sector_team_id="tech",
+            agent_id="qual_tools_agent",
+            sector_team_id="tech",
             model_name="claude-haiku-4-5",
-            input_tokens=1_000, output_tokens=200, cost_usd=0.502,
-            web_search_requests=50, web_fetch_requests=3,
+            input_tokens=1_000,
+            output_tokens=200,
+            cost_usd=0.502,
+            web_search_requests=50,
+            web_fetch_requests=3,
         )
         _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/d.jsonl", [row])
 
@@ -535,7 +780,8 @@ class TestPerAgentCwMetrics:
         metrics = cw.put_metric_data.call_args.kwargs["MetricData"]
         tool_metrics = {
             tuple(sorted((d["Name"], d["Value"]) for d in m["Dimensions"])): m["Value"]
-            for m in metrics if m["MetricName"] == "ToolFeeRequests"
+            for m in metrics
+            if m["MetricName"] == "ToolFeeRequests"
         }
         ws_key = tuple(sorted([("agent_id", "qual_tools_agent"), ("tool", "web_search")]))
         wf_key = tuple(sorted([("agent_id", "qual_tools_agent"), ("tool", "web_fetch")]))
@@ -554,11 +800,20 @@ class TestPerAgentCwMetrics:
         cw = MagicMock()
         cw.put_metric_data.side_effect = RuntimeError("ThrottlingException")
 
-        _put_jsonl(s3, "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl", [
-            _make_row(agent_id="a", sector_team_id=None,
-                      model_name="claude-haiku-4-5",
-                      input_tokens=10, output_tokens=5, cost_usd=0.001),
-        ])
+        _put_jsonl(
+            s3,
+            "decision_artifacts/_cost_raw/2026-05-30/2026-05-30/a.jsonl",
+            [
+                _make_row(
+                    agent_id="a",
+                    sector_team_id=None,
+                    model_name="claude-haiku-4-5",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_usd=0.001,
+                ),
+            ],
+        )
 
         # MUST NOT raise — parquet write succeeds, CW failure swallowed.
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
