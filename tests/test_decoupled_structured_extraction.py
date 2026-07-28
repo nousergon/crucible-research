@@ -36,6 +36,7 @@ def fresh_modules():
     """Force-reload analyst modules to defeat MagicMock pollution from
     test_dry_run.py's sentinel pattern (cross-test order dependency)."""
     from agents.sector_teams import qual_analyst, quant_analyst, sector_team
+
     importlib.reload(quant_analyst)
     importlib.reload(qual_analyst)
     importlib.reload(sector_team)
@@ -48,6 +49,7 @@ def fresh_modules():
 def _react_result(final_text: str) -> dict:
     """Build a minimal LangGraph ReAct result with a final AI message."""
     from langchain_core.messages import AIMessage
+
     return {"messages": [AIMessage(content=final_text)]}
 
 
@@ -85,14 +87,14 @@ def test_quant_extraction_happy_path(fresh_modules):
     from graph.state_schemas import QuantAnalystOutput, QuantPick
 
     fake_agent = MagicMock()
-    fake_agent.invoke.return_value = _react_result(
-        "Top picks: AAPL (75), MSFT (70). Both showing momentum."
-    )
+    fake_agent.invoke.return_value = _react_result("Top picks: AAPL (75), MSFT (70). Both showing momentum.")
 
-    parsed = QuantAnalystOutput(ranked_picks=[
-        QuantPick(ticker="AAPL", quant_score=75.0, rationale="momentum"),
-        QuantPick(ticker="MSFT", quant_score=70.0, rationale="momentum"),
-    ])
+    parsed = QuantAnalystOutput(
+        ranked_picks=[
+            QuantPick(ticker="AAPL", quant_score=75.0, rationale="momentum"),
+            QuantPick(ticker="MSFT", quant_score=70.0, rationale="momentum"),
+        ]
+    )
     fake_structured_llm = MagicMock()
     fake_structured_llm.invoke.return_value = {
         "raw": MagicMock(content="..."),
@@ -103,8 +105,10 @@ def test_quant_extraction_happy_path(fresh_modules):
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qa, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qa, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qa, "create_react_agent", return_value=fake_agent),
+        patch.object(_qa, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qa.run_quant_analyst(**_quant_kwargs())
 
     assert result["error"] is None
@@ -112,7 +116,8 @@ def test_quant_extraction_happy_path(fresh_modules):
     assert {p["ticker"] for p in result["ranked_picks"]} == {"AAPL", "MSFT"}
     # Verify the extraction call happened with QuantAnalystOutput + include_raw
     fake_llm.with_structured_output.assert_called_once_with(
-        QuantAnalystOutput, include_raw=True,
+        QuantAnalystOutput,
+        include_raw=True,
     )
 
 
@@ -125,8 +130,10 @@ def test_quant_extraction_empty_final_text_raises(fresh_modules):
     fake_agent.invoke.return_value = _react_result("")  # empty final
     fake_llm = MagicMock()
 
-    with patch.object(_qa, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qa, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qa, "create_react_agent", return_value=fake_agent),
+        patch.object(_qa, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qa.run_quant_analyst(**_quant_kwargs())
 
     assert result["error"] is not None
@@ -138,6 +145,7 @@ def test_quant_extraction_parsing_error_strict_raises(fresh_modules, monkeypatch
     must surface as a hard error. Mirrors macro_agent.py's contract."""
     monkeypatch.setenv("STRICT_VALIDATION", "true")
     from agents.sector_teams import quant_analyst as _qa
+
     importlib.reload(_qa)  # re-eval is_strict_validation_enabled at import time
 
     fake_agent = MagicMock()
@@ -151,8 +159,10 @@ def test_quant_extraction_parsing_error_strict_raises(fresh_modules, monkeypatch
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qa, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qa, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qa, "create_react_agent", return_value=fake_agent),
+        patch.object(_qa, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qa.run_quant_analyst(**_quant_kwargs())
 
     assert result["error"] is not None
@@ -165,6 +175,7 @@ def test_quant_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatc
     fallback semantics as macro_agent."""
     monkeypatch.setenv("STRICT_VALIDATION", "false")
     from agents.sector_teams import quant_analyst as _qa
+
     importlib.reload(_qa)
 
     fake_agent = MagicMock()
@@ -178,8 +189,10 @@ def test_quant_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatc
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qa, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qa, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qa, "create_react_agent", return_value=fake_agent),
+        patch.object(_qa, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qa.run_quant_analyst(**_quant_kwargs())
 
     assert result["error"] is None
@@ -195,13 +208,13 @@ def test_quant_recursion_error_unchanged_by_refactor(fresh_modules):
     from agents.sector_teams import quant_analyst as _qa
 
     fake_agent = MagicMock()
-    fake_agent.invoke.side_effect = GraphRecursionError(
-        "Recursion limit of 18 reached"
-    )
+    fake_agent.invoke.side_effect = GraphRecursionError("Recursion limit of 18 reached")
     fake_llm = MagicMock()
 
-    with patch.object(_qa, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qa, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qa, "create_react_agent", return_value=fake_agent),
+        patch.object(_qa, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qa.run_quant_analyst(**_quant_kwargs())
 
     assert result["error"] is None
@@ -227,13 +240,12 @@ def test_qual_extraction_happy_path(fresh_modules, monkeypatch):
     monkeypatch.setattr(_qual, "PILLAR_EMIT_ENABLED", False)
 
     fake_agent = MagicMock()
-    fake_agent.invoke.return_value = _react_result(
-        "Assessment: AAPL strong fundamentals, $200 PT."
+    fake_agent.invoke.return_value = _react_result("Assessment: AAPL strong fundamentals, $200 PT.")
+    parsed = QualAnalystOutput(
+        assessments=[
+            QualAssessment(ticker="AAPL", qual_score=80.0, bull_case="strong fundamentals"),
+        ]
     )
-    parsed = QualAnalystOutput(assessments=[
-        QualAssessment(ticker="AAPL", qual_score=80.0,
-                       bull_case="strong fundamentals"),
-    ])
     fake_structured_llm = MagicMock()
     fake_structured_llm.invoke.return_value = {
         "raw": MagicMock(content="..."),
@@ -243,8 +255,10 @@ def test_qual_extraction_happy_path(fresh_modules, monkeypatch):
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qual, "create_react_agent", return_value=fake_agent),
+        patch.object(_qual, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qual.run_qual_analyst(**_qual_kwargs())
 
     assert result["error"] is None
@@ -259,8 +273,10 @@ def test_qual_extraction_empty_final_text_raises(fresh_modules):
     fake_agent.invoke.return_value = _react_result("")
     fake_llm = MagicMock()
 
-    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qual, "create_react_agent", return_value=fake_agent),
+        patch.object(_qual, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qual.run_qual_analyst(**_qual_kwargs())
 
     assert result["error"] is not None
@@ -270,6 +286,7 @@ def test_qual_extraction_empty_final_text_raises(fresh_modules):
 def test_qual_extraction_parsing_error_strict_raises(fresh_modules, monkeypatch):
     monkeypatch.setenv("STRICT_VALIDATION", "true")
     from agents.sector_teams import qual_analyst as _qual
+
     importlib.reload(_qual)
 
     fake_agent = MagicMock()
@@ -283,8 +300,10 @@ def test_qual_extraction_parsing_error_strict_raises(fresh_modules, monkeypatch)
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qual, "create_react_agent", return_value=fake_agent),
+        patch.object(_qual, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qual.run_qual_analyst(**_qual_kwargs())
 
     assert result["error"] is not None
@@ -300,6 +319,7 @@ def test_qual_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatch
     below)."""
     monkeypatch.setenv("STRICT_VALIDATION", "false")
     from agents.sector_teams import qual_analyst as _qual
+
     importlib.reload(_qual)
     # Pillar-hardening Item 2 (2026-05-21): pillar parse failure always
     # raises. This test exercises the LEGACY extraction's lax path, so
@@ -317,8 +337,10 @@ def test_qual_extraction_parsing_error_lax_falls_back(fresh_modules, monkeypatch
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qual, "create_react_agent", return_value=fake_agent),
+        patch.object(_qual, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qual.run_qual_analyst(**_qual_kwargs())
 
     assert result["error"] is None
@@ -340,6 +362,7 @@ def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monke
     """
     monkeypatch.setenv("STRICT_VALIDATION", "false")
     from agents.sector_teams import qual_analyst as _qual
+
     importlib.reload(_qual)
     monkeypatch.setattr(_qual, "PILLAR_EMIT_ENABLED", True)
 
@@ -348,14 +371,13 @@ def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monke
     # First invoke (legacy extraction) returns valid output. Second invoke
     # (pillar extraction) returns parsing_error — used to silently return
     # empty dict pre-hardening; now ALWAYS raises.
-    parsed_ok = QualAnalystOutput(assessments=[
-        QualAssessment(ticker="AAPL", qual_score=80.0,
-                       bull_case="strong fundamentals"),
-    ])
-    fake_agent = MagicMock()
-    fake_agent.invoke.return_value = _react_result(
-        "Assessment: AAPL strong fundamentals."
+    parsed_ok = QualAnalystOutput(
+        assessments=[
+            QualAssessment(ticker="AAPL", qual_score=80.0, bull_case="strong fundamentals"),
+        ]
     )
+    fake_agent = MagicMock()
+    fake_agent.invoke.return_value = _react_result("Assessment: AAPL strong fundamentals.")
     # 2026-05-24 update: pillar extraction now retries up to 2x on
     # ValidationError (SOTA structured-output retry-with-validation-feedback,
     # research #224) before propagating. The fail-loud invariant tested here
@@ -364,13 +386,13 @@ def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monke
     # 3 pillar_fail entries (initial + 2 retries) so the retry budget is
     # exhausted within the test.
     pillar_fail_response = {
-        "raw": MagicMock(content="..."), "parsed": None,
+        "raw": MagicMock(content="..."),
+        "parsed": None,
         "parsing_error": ValueError("pillar schema mismatch"),
     }
     fake_structured_llm = MagicMock()
     fake_structured_llm.invoke.side_effect = [
-        {"raw": MagicMock(content="..."), "parsed": parsed_ok,
-         "parsing_error": None},  # legacy extraction succeeds
+        {"raw": MagicMock(content="..."), "parsed": parsed_ok, "parsing_error": None},  # legacy extraction succeeds
         pillar_fail_response,  # pillar initial attempt fails
         pillar_fail_response,  # pillar retry 1 fails
         pillar_fail_response,  # pillar retry 2 fails — budget exhausted
@@ -378,8 +400,10 @@ def test_qual_extraction_pillar_parse_failure_always_raises(fresh_modules, monke
     fake_llm = MagicMock()
     fake_llm.with_structured_output.return_value = fake_structured_llm
 
-    with patch.object(_qual, "create_react_agent", return_value=fake_agent), \
-         patch.object(_qual, "ChatAnthropic", return_value=fake_llm):
+    with (
+        patch.object(_qual, "create_react_agent", return_value=fake_agent),
+        patch.object(_qual, "make_agent_llm", return_value=fake_llm),
+    ):
         result = _qual.run_qual_analyst(**_qual_kwargs())
 
     # Outer except in run_qual_analyst catches the RuntimeError from
@@ -401,6 +425,7 @@ def _strip_comments_and_strings(src: str) -> str:
     architectural-invariant checks aren't tripped by mention of a forbidden
     pattern in a comment explaining WHY it was removed."""
     import re
+
     # Drop triple-quoted strings (greedy across newlines)
     src = re.sub(r'"""[\s\S]*?"""', "", src)
     src = re.sub(r"'''[\s\S]*?'''", "", src)
@@ -417,8 +442,8 @@ def test_quant_analyst_does_not_use_response_format():
     ...)`` would resurrect the markdown-fence ValidationError class that
     crashed today's SF replay."""
     from pathlib import Path
-    src = (Path(__file__).parent.parent / "agents" / "sector_teams"
-           / "quant_analyst.py").read_text()
+
+    src = (Path(__file__).parent.parent / "agents" / "sector_teams" / "quant_analyst.py").read_text()
     code = _strip_comments_and_strings(src)
     assert "response_format=" not in code, (
         "quant_analyst.py uses response_format= as a code argument — this "
@@ -432,8 +457,8 @@ def test_quant_analyst_does_not_use_response_format():
 def test_qual_analyst_does_not_use_response_format():
     """Same architectural lock for qual_analyst."""
     from pathlib import Path
-    src = (Path(__file__).parent.parent / "agents" / "sector_teams"
-           / "qual_analyst.py").read_text()
+
+    src = (Path(__file__).parent.parent / "agents" / "sector_teams" / "qual_analyst.py").read_text()
     code = _strip_comments_and_strings(src)
     assert "response_format=" not in code
     assert "with_structured_output(" in code

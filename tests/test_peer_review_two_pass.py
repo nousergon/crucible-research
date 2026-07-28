@@ -25,17 +25,20 @@ from graph.state_schemas import JointFinalizationDecision, JointSelectionOutput
 
 
 class _FakeLLM:
-    """Minimal stand-in for ChatAnthropic used by `_joint_finalization`.
+    """Minimal stand-in for the chat model handed to `_joint_finalization`.
 
-    `_joint_finalization` rebinds via `ChatAnthropic(model=llm.model,
-    anthropic_api_key=llm.anthropic_api_key, max_tokens=...,
-    callbacks=llm.callbacks)`, so we just need these attributes. The
-    rebound LLM gets patched at the class level so its
+    It rebinds via `make_agent_llm(model_class=<caller's class>, ...)`, reading
+    the class off this object, so these attributes are all it needs. The
+    rebound instance is supplied by patching the factory, and its
     `with_structured_output(...).invoke(...)` is what the test controls.
+
+    `model_name` is what ChatOpenAI exposes; `model` is kept because the
+    rebinding reads either, so this fake stays valid for the judge/canary
+    call sites that have not migrated yet.
     """
 
-    model = "claude-haiku-4-5"
-    anthropic_api_key = "test-key"
+    model_name = "low"
+    model = "low"
     callbacks = []
 
 
@@ -98,23 +101,27 @@ def _patch_two_pass(selection: JointSelectionOutput, rationales: dict[str, str])
                     text = messages[0].content if messages else ""
                     for ticker in rationales:
                         if f'"{ticker}"' in text or f" {ticker}" in text or f"={ticker}" in text:
-                            return JointFinalizationDecision(
-                                ticker=ticker, rationale=rationales[ticker]
-                            )
+                            return JointFinalizationDecision(ticker=ticker, rationale=rationales[ticker])
                     # Fallback if the message-shape changes — shouldn't
                     # happen in practice but keeps the test robust.
                     first = next(iter(rationales))
-                    return JointFinalizationDecision(
-                        ticker=first, rationale=rationales[first]
-                    )
+                    return JointFinalizationDecision(ticker=first, rationale=rationales[first])
                 raise AssertionError(f"Unexpected schema bound: {schema}")
 
         return _Bound()
 
+    # Patch the FACTORY, not a chat-model class. _joint_finalization now
+    # rebinds via make_agent_llm, so patching ChatAnthropic here would leave
+    # the test making a real call to the router — which is exactly what it
+    # did during the I4459 migration before this was updated (a live 400 from
+    # LiteLLM surfaced in the suite).
+    class _Rebound:
+        def with_structured_output(self, schema):
+            return fake_with_structured_output(None, schema)
+
     return patch(
-        "agents.sector_teams.peer_review.ChatAnthropic.with_structured_output",
-        autospec=True,
-        side_effect=fake_with_structured_output,
+        "agents.sector_teams.peer_review.make_agent_llm",
+        return_value=_Rebound(),
     )
 
 
@@ -158,11 +165,11 @@ def test_pass1_failure_falls_back_to_combined_score(candidates, monkeypatch):
 
         return _Bound()
 
-    with patch(
-        "agents.sector_teams.peer_review.ChatAnthropic.with_structured_output",
-        autospec=True,
-        side_effect=fake_with_structured_output,
-    ):
+    class _Rebound:
+        def with_structured_output(self, schema, *a, **k):
+            return fake_with_structured_output(None, schema)
+
+    with patch("agents.sector_teams.peer_review.make_agent_llm", return_value=_Rebound()):
         result = _joint_finalization(_FakeLLM(), "tech", candidates, "neutral")
 
     # Top-3 by combined score in fixtures: NVDA (75), PLTR (67.5), RKLB (64)
@@ -189,20 +196,18 @@ def test_pass2_failure_keeps_pick_with_empty_rationale(candidates, monkeypatch):
                 if schema is JointFinalizationDecision:
                     text = messages[0].content if messages else ""
                     if "NVDA" in text:
-                        return JointFinalizationDecision(
-                            ticker="NVDA", rationale="AI inflection."
-                        )
+                        return JointFinalizationDecision(ticker="NVDA", rationale="AI inflection.")
                     if "PLTR" in text:
                         raise RuntimeError("simulated Pass 2 hiccup for PLTR")
                 raise AssertionError(f"Unexpected schema: {schema}")
 
         return _Bound()
 
-    with patch(
-        "agents.sector_teams.peer_review.ChatAnthropic.with_structured_output",
-        autospec=True,
-        side_effect=fake_with_structured_output,
-    ):
+    class _Rebound:
+        def with_structured_output(self, schema, *a, **k):
+            return fake_with_structured_output(None, schema)
+
+    with patch("agents.sector_teams.peer_review.make_agent_llm", return_value=_Rebound()):
         result = _joint_finalization(_FakeLLM(), "tech", candidates, "neutral")
 
     by_ticker = {p["ticker"]: p for p in result["picks"]}

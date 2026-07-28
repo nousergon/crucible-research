@@ -75,9 +75,7 @@ class _FakeLLM:
 def _validation_error_response():
     try:
         HeldThesisUpdateLLMOutput(catalysts=_LEAKED_TOOL_XML)
-        raise AssertionError(
-            "Expected HeldThesisUpdateLLMOutput to reject a str catalysts"
-        )
+        raise AssertionError("Expected HeldThesisUpdateLLMOutput to reject a str catalysts")
     except Exception as exc:
         parsing_error = exc
     return {"raw": object(), "parsed": None, "parsing_error": parsing_error}
@@ -94,9 +92,7 @@ def _valid_response(**fields):
 def _patch_call_site(monkeypatch, fake_llm):
     from agents.sector_teams import sector_team
 
-    monkeypatch.setattr(
-        sector_team, "ChatAnthropic", lambda *a, **k: fake_llm
-    )
+    monkeypatch.setattr(sector_team, "make_agent_llm", lambda *a, **k: fake_llm)
 
     class _FakePrompt:
         def format(self, **kwargs):
@@ -105,11 +101,10 @@ def _patch_call_site(monkeypatch, fake_llm):
         def langsmith_metadata(self):
             return {}
 
+    monkeypatch.setattr(sector_team, "load_prompt", lambda name: _FakePrompt())
     monkeypatch.setattr(
-        sector_team, "load_prompt", lambda name: _FakePrompt()
-    )
-    monkeypatch.setattr(
-        sector_team, "format_structured_thesis_for_prompt",
+        sector_team,
+        "format_structured_thesis_for_prompt",
         lambda *a, **k: "",
     )
 
@@ -165,16 +160,18 @@ def test_reroll_recovers_when_a_later_attempt_valid(monkeypatch):
     transient tool-XML leak is still recovered by a parse re-roll."""
     from agents.sector_teams import sector_team
 
-    structured = _FakeStructuredLLM([
-        _validation_error_response(),
-        _validation_error_response(),
-        _valid_response(
-            bull_case="new bull narrative",
-            bear_case="new bear narrative",
-            catalysts=["Q3 earnings beat", "new defense contract"],
-            conviction=70,
-        ),
-    ])
+    structured = _FakeStructuredLLM(
+        [
+            _validation_error_response(),
+            _validation_error_response(),
+            _valid_response(
+                bull_case="new bull narrative",
+                bear_case="new bear narrative",
+                catalysts=["Q3 earnings beat", "new defense contract"],
+                conviction=70,
+            ),
+        ]
+    )
     fake_llm = _FakeLLM(structured)
     _patch_call_site(monkeypatch, fake_llm)
 
@@ -255,9 +252,7 @@ def test_429_past_deadline_fails_fast_no_carry_forward(monkeypatch):
     from agents import langchain_utils
     from agents.sector_teams import sector_team
 
-    monkeypatch.setattr(
-        langchain_utils, "RATE_LIMIT_RETRY_DEADLINE_SECONDS", 0.01
-    )
+    monkeypatch.setattr(langchain_utils, "RATE_LIMIT_RETRY_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(langchain_utils.time, "sleep", lambda s: None)
 
     class _FakeResp:
@@ -273,6 +268,7 @@ def test_429_past_deadline_fails_fast_no_carry_forward(monkeypatch):
                 body=None,
             )
         except Exception:
+
             class _Duck(Exception):
                 status_code = 429
 
@@ -293,9 +289,7 @@ def test_429_past_deadline_fails_fast_no_carry_forward(monkeypatch):
         def with_structured_output(self, schema, **kwargs):
             return _StructuredAlways429()
 
-    monkeypatch.setattr(
-        sector_team, "ChatAnthropic", lambda *a, **k: _LLM429()
-    )
+    monkeypatch.setattr(sector_team, "make_agent_llm", lambda *a, **k: _LLM429())
 
     class _FakePrompt:
         def format(self, **kwargs):
@@ -304,11 +298,10 @@ def test_429_past_deadline_fails_fast_no_carry_forward(monkeypatch):
         def langsmith_metadata(self):
             return {}
 
+    monkeypatch.setattr(sector_team, "load_prompt", lambda name: _FakePrompt())
     monkeypatch.setattr(
-        sector_team, "load_prompt", lambda name: _FakePrompt()
-    )
-    monkeypatch.setattr(
-        sector_team, "format_structured_thesis_for_prompt",
+        sector_team,
+        "format_structured_thesis_for_prompt",
         lambda *a, **k: "",
     )
 
