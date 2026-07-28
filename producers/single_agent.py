@@ -68,7 +68,8 @@ class CandidateAssessment(BaseModel):
 class RankingProducerOutput(BaseModel):
     model_config = ConfigDict(extra="allow", validate_default=True)
     assessments: list[CandidateAssessment] = Field(
-        default_factory=list, min_length=1,
+        default_factory=list,
+        min_length=1,
         description="One qualitative assessment per scanner candidate.",
     )
 
@@ -104,8 +105,8 @@ def build_single_agent_signals(
         qual = a.get("qual_score") if a else None
         comp = compute_composite_score(
             quant_score=quant,
-            qual_score=qual,            # the single agent's qualitative read
-            sector_modifier=1.0,        # neutral; no macro agent
+            qual_score=qual,  # the single agent's qualitative read
+            sector_modifier=1.0,  # neutral; no macro agent
             macro_overlay_enabled=False,
         )
         final = comp.get("final_score")
@@ -159,9 +160,12 @@ def build_single_agent_signals(
     }
     payload = _build_signals_payload(state)
     logger.info(
-        "[single_agent] run_date=%s assessed=%d scored=%d buy_candidates=%d "
-        "new_entrants=%d", run_date, len(assessments), len(theses),
-        len(payload.get("buy_candidates", [])), len(advanced_tickers),
+        "[single_agent] run_date=%s assessed=%d scored=%d buy_candidates=%d new_entrants=%d",
+        run_date,
+        len(assessments),
+        len(theses),
+        len(payload.get("buy_candidates", [])),
+        len(advanced_tickers),
     )
     return payload
 
@@ -189,6 +193,17 @@ it (morning-signal's SSM `fallback_llm`, this repo's own
 `evals/judge_models.py::OPENROUTER_SHADOW`) confirms the `deepseek/deepseek-
 v4-*` naming family is correct. Never hand-write an OpenRouter model ID — a
 typo silently killed morning-signal on 2026-07-15."""
+
+CALLSITE_ID = "single-agent-quant"
+"""Cost-attribution join key for this call site (krepis >= 0.23 requires it).
+
+Every LLM call from here emits a cost row stamped with this literal; the
+matching row in ``alpha-engine-config/private-docs/LLM_CALLSITE_REGISTRY.yaml``
+carries the same value as its ``id``. The two are a lockstep pair — renaming
+one without the other silently orphans this call site's spend from its
+registry entry (the row still validates, the cost rows just never join). Slug
+follows the registry's existing kebab-case convention (``thinktank-thesis``,
+``evaljudge-sync``)."""
 
 CHALLENGER_LLM_MAX_RETRIES = 3
 """SDK-level (openai client) retry count for transport/429 errors — the
@@ -224,8 +239,8 @@ def assess_candidates(
     from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY
 
     loaded = load_prompt(_PROMPT_NAME)
-    prompt = loaded.text + "\n\n## Candidates\n" + _format_candidate_block(
-        scanner_tickers, technical_scores, sector_map
+    prompt = (
+        loaded.text + "\n\n## Candidates\n" + _format_candidate_block(scanner_tickers, technical_scores, sector_map)
     )
     key = api_key or OPENROUTER_API_KEY
     if not key:
@@ -247,8 +262,16 @@ def assess_candidates(
         reasoning={"exclude": True},
     )
     client = LLMClient(
-        spec, api_key=key, client_factory=client_factory,
+        spec,
+        api_key=key,
+        client_factory=client_factory,
         max_retries=CHALLENGER_LLM_MAX_RETRIES,
+        # REQUIRED since krepis 0.23 (krepis/llm.py::LLMClient.__init__ —
+        # validated non-empty, raises TypeError when omitted). It is the join
+        # key between this call's emitted cost row and its
+        # LLM_CALLSITE_REGISTRY.yaml entry, so the literal MUST stay in sync
+        # with that row's `id` (alpha-engine-config, id: single-agent-quant).
+        callsite_id=CALLSITE_ID,
     )
     result = client.structured(
         # Behavior parity with the pre-migration call (a single
@@ -264,8 +287,11 @@ def assess_candidates(
     logger.info(
         "[single_agent] challenger llm_call model=%s resolved_model=%s "
         "input_tokens=%d output_tokens=%d provider_cost_usd=%s",
-        CHALLENGER_MODEL, result.model, result.usage.input_tokens,
-        result.usage.output_tokens, result.usage.provider_cost_usd,
+        CHALLENGER_MODEL,
+        result.model,
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+        result.usage.provider_cost_usd,
     )
     raw: RankingProducerOutput = result.parsed
     return [a.model_dump() for a in raw.assessments]
@@ -293,9 +319,7 @@ def run_single_agent_producer(
     if population is None:
         population = archive_manager.load_population()
     pop_tickers = [p["ticker"] for p in population]
-    prior_theses = archive_manager.load_latest_theses(
-        list(dict.fromkeys(scanner_tickers + pop_tickers))
-    )
+    prior_theses = archive_manager.load_latest_theses(list(dict.fromkeys(scanner_tickers + pop_tickers)))
     constituents, sector_map = fetch_sp500_sp400_with_sectors()
     technical_scores, _ = _build_technical_scores_from_feature_store(constituents, sector_map)
 
