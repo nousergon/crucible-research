@@ -37,7 +37,6 @@ import argparse
 import io
 import json
 import logging
-import re
 import sys
 from datetime import date as date_type
 from typing import Any
@@ -46,6 +45,18 @@ import boto3
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+class CostAggregationError(RuntimeError):
+    """Raised when the aggregator read cost rows but could not produce a
+    parquet from them.
+
+    Distinct from an empty input, which is a legitimately quiet week and
+    returns ``None``. This exception means rows existed and the pipeline
+    still produced nothing — a contract violation the producer may not
+    swallow (I5206).
+    """
+
 
 _DEFAULT_BUCKET = "alpha-engine-research"
 _INPUT_PREFIX = "decision_artifacts/_cost_raw"
@@ -57,12 +68,9 @@ _OUTPUT_PREFIX = "decision_artifacts/_cost"
 # Per-agent_id dimension lets alarms rank-by-regressor.
 _COST_CW_NAMESPACE = "AlphaEngine/Cost"
 
-# Production run_id format in the cost-tracker is ISO date
-# (YYYY-MM-DD, sometimes with a hyphen-tail like YYYY-MM-DD-{seq}).
-# Test fixtures use ad-hoc strings like "run-x", "run-budget-test",
-# "run-1". Anchoring on the ISO-date prefix is the strong structural
-# discriminator — robust against new test fixture names.
-_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(\b|[-_])")
+# NOTE: ``_RUN_ID_RE`` (an ISO-date-prefix test-pollution discriminator)
+# was REMOVED 2026-07-28 — see ``_is_plausible_cost_row`` for the incident
+# it caused (I5206). Do not reintroduce a run_id-shape check here.
 
 # Anthropic's largest context window (Claude Opus 4.7) is ~1M tokens.
 # A single API response cannot exceed that. 5M is 5x the API ceiling
@@ -74,30 +82,45 @@ _MAX_PLAUSIBLE_TOKENS_PER_ROW = 5_000_000
 def _is_plausible_cost_row(row: dict) -> tuple[bool, str | None]:
     """Reject obvious test pollution before it reaches the daily parquet.
 
-    Two structural invariants any real production row must satisfy:
+    **One** structural invariant any real production row must satisfy:
+    every token-count column is below the API ceiling. The 2026-05-13
+    pollution carried ``input_tokens=1_000_000_000`` — ~1000x the real
+    ceiling, a number no provider could return.
 
-    1. ``run_id`` starts with an ISO date (``YYYY-MM-DD``). Tests use
-       ad-hoc strings like ``run-x`` / ``run-budget-test``; pinning the
-       regex discriminates structurally rather than via name
-       blocklisting, which would be brittle against new test fixtures.
-    2. Every token-count column is below the Claude API ceiling. The
-       2026-05-13 pollution had ``input_tokens=1_000_000_000`` — 1000x
-       the real ceiling — which the producer would have to fabricate.
+    **The run_id-shape invariant was removed 2026-07-28 (I5206) because it
+    silently killed this pipeline for 17 days.** It required ``run_id`` to
+    start with an ISO date, on the reasoning that production used
+    date-shaped run_ids and test fixtures used ad-hoc strings. Then the
+    production run_id format changed: ``eval_judge`` moved to
+    artifact-scoped ids like ``276a5be44c7c-EXEL-v5``. From 2026-07-18 the
+    guard classified **100% of production rows** as pollution — real model,
+    real tokens, real cost — the aggregator wrote no parquet, and the
+    dashboard rendered stale data with no signal. The
+    ``decision_artifacts/_cost_raw/2026-07-19/`` partition is the evidence:
+    intact raw rows that never became a parquet.
+
+    Two lessons encoded here, not just the one fix:
+
+    - **It was a format coupling wearing an invariant's clothes.** An
+      incidental naming convention of one producer became a safety
+      property, so an unrelated change in a *different* producer disabled
+      the pipeline. A real invariant is one the data cannot violate while
+      remaining true; a run_id's shape is a choice, not a law.
+    - **It was redundant.** The token ceiling alone catches the 2026-05-13
+      incident it was written for. It bought nothing and cost everything.
+
+    Discriminating test from production belongs at emission (an explicit
+    ``environment`` stamp), or better, at the boundary that let a test run
+    write to the production bucket at all — not in a read-time heuristic.
+    Tracked on I5206.
 
     Returns ``(ok, reason)``. ``ok=False`` → drop the row, log reason.
     Pure function — no I/O, deterministic for the same input.
     """
-    run_id = row.get("run_id")
-    if not run_id or not _RUN_ID_RE.match(str(run_id)):
-        return False, f"run_id={run_id!r} does not start with YYYY-MM-DD"
-    for col in ("input_tokens", "output_tokens",
-                "cache_read_tokens", "cache_create_tokens"):
+    for col in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_create_tokens"):
         v = row.get(col)
         if v is not None and v > _MAX_PLAUSIBLE_TOKENS_PER_ROW:
-            return False, (
-                f"{col}={v:,} exceeds plausible "
-                f"{_MAX_PLAUSIBLE_TOKENS_PER_ROW:,} (Claude API ceiling)"
-            )
+            return False, (f"{col}={v:,} exceeds plausible {_MAX_PLAUSIBLE_TOKENS_PER_ROW:,} (API ceiling)")
     return True, None
 
 
@@ -139,9 +162,7 @@ def _read_jsonl_rows(s3_client: Any, bucket: str, key: str) -> list[dict]:
         try:
             rows.append(json.loads(line))
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"Malformed JSONL at s3://{bucket}/{key} line {i}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Malformed JSONL at s3://{bucket}/{key} line {i}: {exc}") from exc
     return rows
 
 
@@ -168,15 +189,18 @@ def aggregate_day(
     keys = _list_jsonl_keys(s3_client, bucket, input_prefix)
     if not keys:
         logger.warning(
-            "[aggregate_costs] no JSONL files found at s3://%s/%s — "
-            "nothing to aggregate for %s",
-            bucket, input_prefix, date_str,
+            "[aggregate_costs] no JSONL files found at s3://%s/%s — nothing to aggregate for %s",
+            bucket,
+            input_prefix,
+            date_str,
         )
         return None
 
     logger.info(
         "[aggregate_costs] reading %d JSONL files from s3://%s/%s",
-        len(keys), bucket, input_prefix,
+        len(keys),
+        bucket,
+        input_prefix,
     )
     all_rows: list[dict] = []
     for key in keys:
@@ -184,8 +208,7 @@ def aggregate_day(
 
     if not all_rows:
         logger.warning(
-            "[aggregate_costs] %d JSONL files contained zero rows — "
-            "skipping parquet write",
+            "[aggregate_costs] %d JSONL files contained zero rows — skipping parquet write",
             len(keys),
         )
         return None
@@ -193,8 +216,9 @@ def aggregate_day(
     # Drop implausible rows (test pollution). Source: 2026-05-13 incident
     # where a unit-test run with real AWS creds wrote ~$1014 of fake-agent
     # rows into the _cost_raw partition, inflating the dashboard's weekly
-    # trend chart 700x. The filter is structural (run_id pattern + token
-    # ceiling), not a name blocklist — robust against new test fixtures.
+    # trend chart 700x. The filter is a single structural invariant (token
+    # ceiling) — see _is_plausible_cost_row for why the run_id-shape half
+    # was removed.
     clean_rows: list[dict] = []
     drop_reasons: list[str] = []
     for row in all_rows:
@@ -206,17 +230,30 @@ def aggregate_day(
     n_dropped = len(all_rows) - len(clean_rows)
     if n_dropped:
         logger.warning(
-            "[aggregate_costs] dropped %d implausible row(s) from "
-            "_cost_raw — sample reasons: %s",
-            n_dropped, "; ".join(drop_reasons[:5]),
+            "[aggregate_costs] dropped %d implausible row(s) from _cost_raw — sample reasons: %s",
+            n_dropped,
+            "; ".join(drop_reasons[:5]),
         )
     if not clean_rows:
-        logger.warning(
-            "[aggregate_costs] all %d rows dropped as implausible — "
-            "skipping parquet write",
-            len(all_rows),
+        # FAIL LOUD. This branch used to log a warning and return None,
+        # which is how I5206 stayed invisible for 17 days: the guard
+        # rejected 100% of production rows, the SF state succeeded, and
+        # the dashboard kept rendering stale partitions.
+        #
+        # "Input had rows but none survived the filter" is categorically
+        # different from "input was empty" (handled above, and a
+        # legitimately quiet week). It means the filter's notion of a
+        # valid row and the producer's have diverged — a contract
+        # violation, and exactly the case a producer may not swallow per
+        # the fail-loud rule. Raising surfaces it on the SF state.
+        raise CostAggregationError(
+            f"all {len(all_rows)} row(s) read from "
+            f"s3://{bucket}/{input_prefix} were dropped as implausible — "
+            f"refusing to write an empty parquet. This means the filter "
+            f"and the producer disagree about what a valid row is, not "
+            f"that there was no cost. Sample reasons: "
+            f"{'; '.join(drop_reasons[:5])}"
         )
-        return None
 
     df = pd.DataFrame(clean_rows)
 
@@ -233,7 +270,9 @@ def aggregate_day(
     )
     logger.info(
         "[aggregate_costs] wrote %d rows to s3://%s/%s",
-        len(df), bucket, output_key,
+        len(df),
+        bucket,
+        output_key,
     )
 
     summary = _build_summary(df, output_key=output_key, files_read=len(keys))
@@ -289,8 +328,8 @@ def _emit_per_agent_cw_metrics(
             cw = s3_client_or_cw
     except Exception as exc:
         logger.warning(
-            "[aggregate_costs] CloudWatch client construction failed; "
-            "skipping CW metric emit: %s", exc,
+            "[aggregate_costs] CloudWatch client construction failed; skipping CW metric emit: %s",
+            exc,
         )
         return
 
@@ -304,21 +343,25 @@ def _emit_per_agent_cw_metrics(
         input_tok = int(group["input_tokens"].fillna(0).sum()) if "input_tokens" in group.columns else 0
         cache_read_tok = int(group["cache_read_tokens"].fillna(0).sum()) if "cache_read_tokens" in group.columns else 0
 
-        metric_data.append({
-            "MetricName": "WeeklyCostUsd",
-            "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-            "Value": cost,
-            "Unit": "None",
-        })
+        metric_data.append(
+            {
+                "MetricName": "WeeklyCostUsd",
+                "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+                "Value": cost,
+                "Unit": "None",
+            }
+        )
 
         if input_tok + cache_read_tok > 0:
             hit_ratio = 100.0 * cache_read_tok / (input_tok + cache_read_tok)
-            metric_data.append({
-                "MetricName": "CacheHitRatio",
-                "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
-                "Value": hit_ratio,
-                "Unit": "Percent",
-            })
+            metric_data.append(
+                {
+                    "MetricName": "CacheHitRatio",
+                    "Dimensions": [{"Name": "agent_id", "Value": agent_id}],
+                    "Value": hit_ratio,
+                    "Unit": "Percent",
+                }
+            )
 
         # Schema v2: server-tool request counts (per agent + per tool).
         for tool_col, tool_label in (
@@ -330,15 +373,17 @@ def _emit_per_agent_cw_metrics(
             count = int(group[tool_col].fillna(0).sum())
             if count <= 0:
                 continue
-            metric_data.append({
-                "MetricName": "ToolFeeRequests",
-                "Dimensions": [
-                    {"Name": "agent_id", "Value": agent_id},
-                    {"Name": "tool", "Value": tool_label},
-                ],
-                "Value": count,
-                "Unit": "Count",
-            })
+            metric_data.append(
+                {
+                    "MetricName": "ToolFeeRequests",
+                    "Dimensions": [
+                        {"Name": "agent_id", "Value": agent_id},
+                        {"Name": "tool", "Value": tool_label},
+                    ],
+                    "Value": count,
+                    "Unit": "Count",
+                }
+            )
 
     if not metric_data:
         return
@@ -348,16 +393,18 @@ def _emit_per_agent_cw_metrics(
         for i in range(0, len(metric_data), 20):
             cw.put_metric_data(
                 Namespace=_COST_CW_NAMESPACE,
-                MetricData=metric_data[i:i + 20],
+                MetricData=metric_data[i : i + 20],
             )
         logger.info(
             "[aggregate_costs] emitted %d CW metrics under %s for %d agents",
-            len(metric_data), _COST_CW_NAMESPACE, df_clean["agent_id"].nunique(),
+            len(metric_data),
+            _COST_CW_NAMESPACE,
+            df_clean["agent_id"].nunique(),
         )
     except Exception as exc:
         logger.warning(
-            "[aggregate_costs] CW metric emit failed (parquet write "
-            "succeeded above; this is observability-only): %s", exc,
+            "[aggregate_costs] CW metric emit failed (parquet write succeeded above; this is observability-only): %s",
+            exc,
         )
 
 
@@ -455,21 +502,24 @@ def main(argv: list[str] | None = None) -> int:
         description="Aggregate per-call cost JSONL files into a daily parquet.",
     )
     parser.add_argument(
-        "--date", required=True,
+        "--date",
+        required=True,
         help="Target date in ISO format (YYYY-MM-DD) — corresponds to the "
-             "decision_artifacts/_cost_raw/{date}/ partition.",
+        "decision_artifacts/_cost_raw/{date}/ partition.",
     )
     parser.add_argument(
-        "--bucket", default=_DEFAULT_BUCKET,
+        "--bucket",
+        default=_DEFAULT_BUCKET,
         help=f"S3 bucket (default: {_DEFAULT_BUCKET}).",
     )
     parser.add_argument(
-        "--output-key", default=None,
-        help="Override the output parquet key. Default: "
-             "decision_artifacts/_cost/{date}/cost.parquet.",
+        "--output-key",
+        default=None,
+        help="Override the output parquet key. Default: decision_artifacts/_cost/{date}/cost.parquet.",
     )
     parser.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="Suppress the human-readable summary on stdout.",
     )
     args = parser.parse_args(argv)
@@ -484,7 +534,9 @@ def main(argv: list[str] | None = None) -> int:
 
     s3_client = boto3.client("s3")
     summary = aggregate_day(
-        s3_client, args.bucket, target_date,
+        s3_client,
+        args.bucket,
+        target_date,
         output_key_override=args.output_key,
     )
     if summary is None:
