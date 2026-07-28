@@ -33,9 +33,19 @@ Cuts emitted (each carries ``basis`` = how membership was decided):
 
   ``scanner_candidates``     the scanner's own gate cut — the tickers in
                              ``candidates.json::scanner_tickers`` verbatim.
-                             basis=``scanner_gate``. This is the cut the
-                             predictor's universe resolves from.
-  ``attractiveness_top_25``  top 25 by cross-sectional attractiveness rank.
+                             basis=``scanner_gate``. A ``tech_score`` momentum
+                             ranking, NOT an alpha ranking; retained as the
+                             incumbent challenger arm and as the churn baseline.
+  ``attractiveness_top_20``  top 20 by cross-sectional attractiveness rank.
+                             **This is the cut the predictor resolves from**
+                             (alpha-engine-config-I4983) — see
+                             ``PREDICTOR_UNIVERSE_CUT`` below for why.
+  ``scanner_top_20``         the INCUMBENT challenger arm — top 20 of the
+                             scanner cut by ``tech_score``, i.e. what the
+                             pre-I4983 rule would have picked at the champion's
+                             width. basis=``tech_score_rank``. Emitted only when
+                             the caller supplies the eval log's tech scores.
+  ``attractiveness_top_25``  top 25 by the same rank.
   ``attractiveness_top_60``  top 60 by the same rank — count-matched to the
                              scanner cut so the two are directly comparable
                              (the comparison is the point: the ranking is
@@ -61,7 +71,7 @@ Schema::
     "run_date": "YYYY-MM-DD",
     "generated_at": "ISO-8601 UTC",
     "universe_count": int,             # names with a rankable attractiveness score
-    "predictor_universe_cut": "scanner_candidates",   # names the cut the predictor resolves from
+    "predictor_universe_cut": "attractiveness_top_20",  # names the cut the predictor resolves from
     "cuts": {
       "<cut_name>": {
         "basis": "scanner_gate" | "attractiveness_rank",
@@ -74,6 +84,10 @@ Schema::
     "ranks": {                          # full universe, rank 1 = most attractive
       "AAPL": {"attractiveness_rank": int, "attractiveness_score": float},
       ...
+    },
+    "scanner_ranks": {                  # SCANNER CUT only, rank 1 = highest
+      "AAPL": {"tech_score_rank": int, "tech_score": float},   # tech_score.
+      ...                               # Absent when no eval log was supplied.
     }
   }
 
@@ -99,13 +113,45 @@ PRODUCER = "crucible-research/scoring/universe_membership.py"
 # artifact (``predictor_universe_cut``) rather than hardcoded on the consumer
 # side, so changing which cut drives inference is a producer-side, versioned,
 # reviewable decision — not a silent constant edit in another repo.
-PREDICTOR_UNIVERSE_CUT = "scanner_candidates"
+#
+# alpha-engine-config-I4983 (Brian, 2026-07-28): moved from ``scanner_candidates``
+# to ``attractiveness_top_20``. Three reasons, in order of weight:
+#
+#  1. The gate cut is a MOMENTUM ranking, not an alpha ranking. It is
+#     ``tech_score`` top-N (RSI / MACD / MA50 / MA200 / 20d momentum, equally
+#     weighted) plus the 10 most-oversold-by-RSI — no fundamentals at all. On
+#     the 2026-07-24 cycle its median name ranked 598 of 897 on attractiveness,
+#     with 39 of 60 in the BOTTOM HALF of the universe. Attractiveness is the
+#     6-pillar composite (quality/value/momentum/growth/stewardship/
+#     defensiveness) in which momentum is one input of six.
+#  2. §43: a hard gate must not double as alpha selection. Measured cost of the
+#     conflation: 21d scanner recall 3.9% (150 TP vs 3,732 FN), filter lift
+#     −0.68% — the survivor set both misses ~96% of winners and underperforms
+#     the universe mean.
+#  3. The gate cut has no persistent core — 42% week-over-week retention and
+#     ZERO names present across all 9 measured cycles, against 76%/18 for a
+#     count-matched rank cut (EXPERIMENTS.md 2026-07-27). It is a weekly
+#     re-draw, not a watchlist.
+#
+# The attractiveness re-ranking this restores was built under config-I1400/I1407
+# but spliced into the multi-agent graph, so it was orphaned when that layer was
+# retired as champion (config#1580) — see alpha-engine-config-I4980.
+PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
 
 # Attractiveness-rank cuts emitted every cycle. 60 is count-matched to the
 # scanner's ``momentum_top_n`` so scanner-cut-vs-rank-cut is an apples-to-apples
 # comparison; 25 matches the size of the retired tracked population so the
-# historical series stays interpretable across the producer change.
-_RANK_CUTS = (25, 60)
+# historical series stays interpretable across the producer change; 20 is the
+# live champion width, count-matched to Think Tank's ``CHALLENGER_TOP_N`` so all
+# three champion/challenger arms are directly comparable at equal size (an arm's
+# win must not be confounded between selection rule and breadth — the
+# count-matched framing is what made the churn finding legible at all).
+_RANK_CUTS = (20, 25, 60)
+
+# Width of the incumbent (``tech_score``) challenger arm — held equal to the
+# champion width so champion-vs-incumbent is a selection-rule comparison with
+# breadth held constant.
+_INCUMBENT_CUT_N = 20
 
 _DEFAULT_BUCKET = "alpha-engine-research"
 
@@ -149,11 +195,31 @@ def _top_n(ranks: dict[str, dict], n: int) -> list[str]:
     return sorted(t for t, _ in top)
 
 
+def _tech_score_rank_table(scanner_tickers: list[str], tech_scores: dict[str, float]) -> dict[str, dict]:
+    """``{ticker: {tech_score_rank, tech_score}}`` over the SCANNER CUT only,
+    rank 1 = highest ``tech_score``. Ties broken by ticker, matching
+    ``_rank_table``'s determinism contract.
+
+    Scoped to the cut rather than the full universe deliberately: ``tech_score``
+    is only meaningful as the incumbent's *selection* rule, and the incumbent
+    only ever selected from names that cleared its own gate. Ranking all 900
+    would invent an ordering the incumbent never expressed.
+
+    Names in the cut with no ``tech_score`` are omitted — the caller decides
+    whether a partial table is acceptable (it is: the cut membership itself is
+    unaffected, only the derived top-N narrows).
+    """
+    scored = {t: tech_scores[t] for t in dict.fromkeys(scanner_tickers) if isinstance(tech_scores.get(t), (int, float))}
+    ordered = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {ticker: {"tech_score_rank": i + 1, "tech_score": score} for i, (ticker, score) in enumerate(ordered)}
+
+
 def build_universe_membership(
     run_date: str,
     scanner_tickers: list[str],
     attractiveness: dict[str, float],
     *,
+    tech_scores: dict[str, float] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
 ) -> dict:
@@ -170,6 +236,12 @@ def build_universe_membership(
     attractiveness : ``{ticker: attractiveness_score}`` for the full scanned
         universe. Names with a null/absent score must be filtered by the caller;
         an unrankable name cannot be in a rank cut.
+    tech_scores : ``{ticker: tech_score}`` from
+        ``candidates.json::scanner_eval_log``. When supplied, emits the
+        ``scanner_top_20`` incumbent-challenger cut plus the ``scanner_ranks``
+        table. Optional so historical backfills, whose inputs may predate the
+        eval-log field, still build — they simply omit the incumbent arm rather
+        than failing or fabricating a ranking.
     backfilled_from : provenance string when this artifact is RECONSTRUCTED from
         historical inputs rather than emitted by the live run. Consumers must be
         able to tell a reconstruction from a first-class write — a backfill can
@@ -211,6 +283,22 @@ def build_universe_membership(
             "source": f"scanner/universe/{run_date}/universe.json::attractiveness_score",
         }
 
+    # Incumbent challenger arm (alpha-engine-config-I4983). ``scanner_candidates``
+    # is stored alphabetically — set semantics — so the incumbent's own ordering
+    # is NOT recoverable from it. Without this table there is no way to ask "what
+    # would the incumbent rule have picked at N?", which is precisely the
+    # comparison the champion flip has to be judged against.
+    scanner_ranks = _tech_score_rank_table(scanner_tickers, tech_scores) if tech_scores else {}
+    if scanner_ranks:
+        top = sorted(scanner_ranks.items(), key=lambda kv: kv[1]["tech_score_rank"])
+        incumbent = sorted(t for t, _ in top[:_INCUMBENT_CUT_N])
+        cuts[f"scanner_top_{_INCUMBENT_CUT_N}"] = {
+            "basis": "tech_score_rank",
+            "size": len(incumbent),
+            "tickers": incumbent,
+            "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score",
+        }
+
     membership = {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER,
@@ -221,6 +309,8 @@ def build_universe_membership(
         "cuts": cuts,
         "ranks": ranks,
     }
+    if scanner_ranks:
+        membership["scanner_ranks"] = scanner_ranks
     if backfilled_from:
         membership["backfilled_from"] = backfilled_from
     return membership
@@ -306,15 +396,42 @@ def attractiveness_for_run(run_date: str, *, bucket: str | None = None, s3_clien
     }
 
 
+def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
+    """``{ticker: tech_score}`` from ``candidates.json::scanner_eval_log``.
+
+    The eval log is the AUTHORITATIVE per-ticker scanner verdict (see
+    ``data.scanner_orchestrator.build_scanner_eval_rows_for_board``) and already
+    carries ``tech_score`` for every scanned name, so the incumbent's ranking
+    needs no new plumbing through the orchestrator — only this projection.
+
+    Rows without a numeric ``tech_score`` are skipped rather than coerced: a
+    missing score must not rank as the worst possible score.
+    """
+    out: dict[str, float] = {}
+    for row in eval_log or []:
+        ticker = row.get("ticker")
+        score = row.get("tech_score")
+        if ticker and isinstance(score, (int, float)):
+            out[str(ticker).upper()] = float(score)
+    return out
+
+
 def compute_and_write_universe_membership(
     run_date: str,
     scanner_tickers: list[str],
     *,
+    scanner_eval_log: list[dict] | None = None,
     bucket: str | None = None,
     s3_client: Any = None,
 ) -> str:
     """Scanner entry point — build from the run's candidate cut + factor profiles
     and write. Returns the dated S3 key.
+
+    ``scanner_eval_log`` is the run's ``candidates.json::scanner_eval_log``; when
+    passed, the incumbent ``scanner_top_20`` arm and ``scanner_ranks`` are
+    emitted. Optional so an omitted log degrades to "no incumbent arm recorded"
+    rather than failing the Scanner run — the champion cut, which is what the
+    predictor actually resolves, does not depend on it.
 
     Raises ``UniverseMembershipError`` on any empty input. The caller must NOT
     wrap this in a fail-soft except: a missing membership artifact leaves the
@@ -325,5 +442,6 @@ def compute_and_write_universe_membership(
         run_date,
         scanner_tickers,
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
+        tech_scores=tech_scores_from_eval_log(scanner_eval_log),
     )
     return write_universe_membership_to_s3(membership, run_date, bucket=bucket, s3_client=s3_client)

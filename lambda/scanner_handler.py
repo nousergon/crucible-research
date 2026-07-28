@@ -302,6 +302,10 @@ def handler(event, context):
         membership_key = compute_and_write_universe_membership(
             run_date,
             artifact["scanner_tickers"],
+            # Carries the incumbent's own ``tech_score`` ranking (I4983) so the
+            # membership artifact records the champion and incumbent arms at
+            # equal width. Already in the in-memory artifact — no extra read.
+            scanner_eval_log=artifact.get("scanner_eval_log"),
             bucket=bucket,
             s3_client=s3_client,
         )

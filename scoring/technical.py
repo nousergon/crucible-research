@@ -63,7 +63,8 @@ def _resolve_composite_weights(team_id: str | None) -> dict:
             missing = sorted(set(_REQUIRED_WEIGHT_KEYS) - set(override))
             logger.warning(
                 "composite_weights_per_sector[%s] missing keys %s; using global weights",
-                team_id, missing,
+                team_id,
+                missing,
             )
             _warned_overrides.add(team_id)
         return base
@@ -72,7 +73,8 @@ def _resolve_composite_weights(team_id: str | None) -> dict:
         if team_id not in _warned_overrides:
             logger.warning(
                 "composite_weights_per_sector[%s] sums to %.4f (expected 1.0); using global weights",
-                team_id, total,
+                team_id,
+                total,
             )
             _warned_overrides.add(team_id)
         return base
@@ -80,6 +82,7 @@ def _resolve_composite_weights(team_id: str | None) -> dict:
 
 
 # ── Per-signal scoring ────────────────────────────────────────────────────────
+
 
 def _score_rsi(rsi: float, market_regime: str = "neutral") -> float:
     """
@@ -227,6 +230,7 @@ def compute_technical_sub_scores(
 
 # ── Composite score ───────────────────────────────────────────────────────────
 
+
 def compute_technical_score(
     indicators: dict,
     market_regime: str = "neutral",
@@ -281,22 +285,26 @@ def compute_technical_score(
         + momentum_score * weights["momentum"]
     )
 
-    # ── Predictor enrichment (optional) ──────────────────────────────────────
-    # Keys present only when alpha-engine-predictor has run and written to S3.
-    # Falls through to existing composite unchanged if absent or below confidence gate.
-    pred_cfg = TECHNICAL_CFG.get("predictor_enrichment", {})
-    confidence_gate = pred_cfg.get("confidence_gate", 0.65)
-    max_adjustment = pred_cfg.get("max_adjustment", 10.0)
-
-    p_up = indicators.get("p_up")
-    p_down = indicators.get("p_down")
-    confidence = indicators.get("prediction_confidence", 0.0)
-    if p_up is not None and p_down is not None and confidence >= confidence_gate:
-        # (p_up - p_down) in [-1, +1]; scale to ±max_adjustment pts weighted by confidence.
-        direction_signal = (p_up - p_down) * max_adjustment * confidence
-        composite = composite + direction_signal
-    # ─────────────────────────────────────────────────────────────────────────
-
+    # NO predictor enrichment here — deliberately. `tech_score` must be a
+    # function of price/volume indicators ONLY (alpha-engine-config-I4983,
+    # Brian 2026-07-28).
+    #
+    # A `predictor_enrichment` block used to sit here, adding up to
+    # ±`max_adjustment` points from the predictor's own `p_up - p_down` when
+    # `prediction_confidence >= confidence_gate`. It was DEAD: nothing in this
+    # repo ever wrote `p_up` / `p_down` / `prediction_confidence` into the
+    # `indicators` dict that callers pass in (the only reads of those keys were
+    # inside the block itself), so the branch never once executed.
+    #
+    # It is removed rather than left dormant because if it HAD fired it would
+    # have closed a feedback loop: predictor output → tech_score → scanner gate
+    # cut → the predictor's own scoring universe. A future change that enriched
+    # the `indicators` dict for any unrelated reason would have silently
+    # activated that loop. Dead code guarding a live hazard is worse than no
+    # code — this is the same class as the orphaned attractiveness feed
+    # (alpha-engine-config-I4980).
+    #
+    # Pinned by tests/test_technical_no_predictor_feedback.py.
     return round(max(0.0, min(100.0, composite)), 2)
 
 
