@@ -78,6 +78,10 @@ _CANDIDATES_SHADOW = "candidates_shadow/{spec}/{date}/candidates.json"
 _CANDIDATES_LIVE = "candidates/{date}/candidates.json"
 _SIGNALS_SHADOW = "signals_shadow/{producer}/{date}/signals.json"
 _SIGNALS_LIVE = "signals/{date}/signals.json"
+# SSoT for WHICH producer is champion, written by crucible-backtester's
+# promotion engine (optimizer/champion_promotion.py). The research-side
+# registry does NOT duplicate this fact — see _resolve_champion_name.
+_CHAMPION_POINTER = "config/producer_champion.json"
 
 
 # ── S3 read helpers (mirror build_agent_quality._get_json) ────────────────────
@@ -337,6 +341,47 @@ def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
     return SpecDay(ranked=[t for t, _ in rows], scores=dict(rows))
 
 
+def _resolve_champion_name(s3: Any, bucket: str) -> str | None:
+    """The live champion producer's name, from the SSoT pointer.
+
+    alpha-engine-config-I5195. The champion's IDENTITY lives in
+    ``config/producer_champion.json``, written by crucible-backtester's
+    promotion engine — that is the artifact the promotion loop updates and the
+    one the executor's arm dispatch follows. The research-side
+    ``producers/registry.py`` separately carried a ``kind=="champion"`` spec,
+    and after ``agentic_sector_teams`` was retired (config-I2993) nothing
+    replaced it, so ``champion_producer()`` returned None and every producer
+    leaderboard since has reported ``champion: null`` — while the live pointer
+    had said ``scanner_predictor_direct`` since 2026-07-13.
+
+    Two registries for one fact is the multi-writer drift class. Reading the
+    pointer makes the leaderboard track the live champion by construction; the
+    registry stays the source for CHALLENGER specs (which carry ``build``
+    callables the pointer knows nothing about).
+
+    Falls back to the registry's champion spec if the pointer is absent or
+    malformed, so an S3 hiccup degrades to prior behaviour rather than
+    dropping the champion arm entirely.
+    """
+    try:
+        doc = _get_json(s3, bucket, _CHAMPION_POINTER)
+    except Exception as exc:  # noqa: BLE001 — fall back, never fail the build
+        logger.warning("[leaderboard] champion pointer unreadable (%s) — falling back to registry", exc)
+        doc = None
+
+    name = (doc or {}).get("champion")
+    if isinstance(name, str) and name:
+        return name
+
+    from producers.registry import champion_producer
+
+    spec = champion_producer()
+    if spec is not None:
+        logger.info("[leaderboard] champion pointer absent — using registry spec %s", spec.name)
+        return spec.name
+    return None
+
+
 def _load_producer_specs(
     s3: Any,
     bucket: str,
@@ -346,17 +391,17 @@ def _load_producer_specs(
     (``signals_shadow/{producer}/{date}/signals.json``) as SpecHistories, each
     reduced to its ENTER picks ranked by score.
 
-    Champion is ``None`` when no ``kind=="champion"`` producer is currently
-    registered (config-I2993: ``agentic_sector_teams`` retired 2026-07-12,
-    no successor champion spec registered yet — that registration is tracked
-    separately). Callers must treat ``None`` as an honest "no champion to
-    score", not an error."""
-    from producers.registry import challenger_producers, champion_producer
+    The champion's NAME comes from the live pointer (see
+    ``_resolve_champion_name``), not from the research registry — the promotion
+    loop owns that fact. Champion is ``None`` only when neither the pointer nor
+    the registry names one; callers must treat that as an honest "no champion
+    to score", not an error."""
+    from producers.registry import challenger_producers
 
-    champ_spec = champion_producer()
+    champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
-    if champ_spec is not None:
-        champion = SpecHistory(name=champ_spec.name, kind="champion")
+    if champ_name is not None:
+        champion = SpecHistory(name=champ_name, kind="champion")
         for d in dates:
             doc = _get_json(s3, bucket, _SIGNALS_LIVE.format(date=d))
             if doc:

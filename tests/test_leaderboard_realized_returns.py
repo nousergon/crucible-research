@@ -226,3 +226,77 @@ def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
     assert out["status"] == "ok"
     assert out["leaderboard"].get("status") != "unmeasurable"
     assert alert.call_count == 0
+
+
+# ── 5. The champion's identity comes from the live pointer, not the registry ──
+#
+# alpha-engine-config-I5195. `producers/registry.py` lost its champion spec when
+# `agentic_sector_teams` retired (config-I2993) and nothing replaced it, so every
+# producer leaderboard reported `champion: null` — while `config/producer_champion.json`
+# had named `scanner_predictor_direct` since 2026-07-13. Two registries for one
+# fact is the multi-writer drift class; the pointer wins.
+
+
+def _s3_returning(objects: dict):
+    """Minimal S3 stub: `objects` maps key -> dict body (absent keys 404)."""
+    import json as _json
+
+    class _Err(Exception):
+        def __init__(self):
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    class _S3Get:
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key not in objects:
+                from botocore.exceptions import ClientError
+
+                raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+            class _B:
+                @staticmethod
+                def read():
+                    return _json.dumps(objects[Key]).encode()
+
+            return {"Body": _B()}
+
+    return _S3Get()
+
+
+def test_champion_name_comes_from_the_live_pointer() -> None:
+    from scoring.leaderboard_producers import _resolve_champion_name
+
+    s3 = _s3_returning(
+        {
+            "config/producer_champion.json": {
+                "schema_version": 1,
+                "champion": "scanner_predictor_direct",
+                "promoted_at": "2026-07-13T22:07:09Z",
+            },
+        }
+    )
+    assert _resolve_champion_name(s3, "b") == "scanner_predictor_direct"
+
+
+def test_champion_falls_back_to_registry_when_pointer_absent() -> None:
+    """An S3 hiccup must degrade to prior behaviour, not drop the champion arm."""
+    from scoring.leaderboard_producers import _resolve_champion_name
+
+    with patch("producers.registry.champion_producer") as champ:
+        champ.return_value = type("S", (), {"name": "registry_champ"})()
+        assert _resolve_champion_name(_s3_returning({}), "b") == "registry_champ"
+
+
+def test_champion_is_none_only_when_neither_source_names_one() -> None:
+    from scoring.leaderboard_producers import _resolve_champion_name
+
+    with patch("producers.registry.champion_producer", return_value=None):
+        assert _resolve_champion_name(_s3_returning({}), "b") is None
+
+
+def test_malformed_pointer_does_not_yield_a_junk_champion_name() -> None:
+    from scoring.leaderboard_producers import _resolve_champion_name
+
+    with patch("producers.registry.champion_producer", return_value=None):
+        for bad in ({"champion": ""}, {"champion": None}, {"champion": 7}, {}):
+            s3 = _s3_returning({"config/producer_champion.json": bad})
+            assert _resolve_champion_name(s3, "b") is None, bad
