@@ -503,17 +503,15 @@ def build_qa_prompt(
     return system, user
 
 
-def _default_llm_fn(model: str):
+def _default_llm_fn(model_class: str):
     """Build the production LLM caller: ``(system, user) -> answer_text``."""
     def _call(system: str, user: str) -> str:
-        from langchain_anthropic import ChatAnthropic  # lazy
         from langchain_core.messages import HumanMessage, SystemMessage  # lazy
 
-        from config import ANTHROPIC_API_KEY  # lazy — avoids SSM in tests
+        from agents.langchain_utils import make_agent_llm
 
-        llm = ChatAnthropic(
-            model=model,
-            anthropic_api_key=ANTHROPIC_API_KEY,
+        llm = make_agent_llm(
+            model_class=model_class,
             max_tokens=1024,
         )
         resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
@@ -529,14 +527,15 @@ def answer_question(
     eval_date: str | None = None,
     *,
     with_artifacts: bool = False,
-    model: str | None = None,
+    model_class: str | None = None,
     llm_fn=None,
 ) -> dict:
     """Grounded LLM fallback. Skips the LLM entirely when nothing is recorded
     about the ticker (returns the no-evidence verdict at $0).
 
     ``llm_fn`` is injectable as ``(system, user) -> str`` for testing; the
-    default builds a ChatAnthropic caller on the configured strategic model."""
+    default builds a capability-class-addressed caller on the configured
+    strategic class (``model-portability-policy`` I1)."""
     ticker = ticker.upper()
     evidence = gather_evidence(conn, ticker, eval_date, with_artifacts=with_artifacts)
     date = evidence["review"]["eval_date"]
@@ -547,7 +546,7 @@ def answer_question(
             "eval_date": date,
             "question": question,
             "llm_called": False,
-            "model": None,
+            "model_class": None,
             "answer": (
                 f"No decision evidence recorded for {ticker} on {date} — nothing "
                 f"to reason over. It was not in the screened universe that cycle, "
@@ -556,27 +555,27 @@ def answer_question(
             "artifacts_used": [],
         }
 
-    chosen_model = model or _default_strategic_model()
+    chosen_class = model_class or _default_strategic_class()
     system, user = build_qa_prompt(ticker, date, question, evidence)
-    call = llm_fn or _default_llm_fn(chosen_model)
+    call = llm_fn or _default_llm_fn(chosen_class)
     answer = call(system, user)
     return {
         "ticker": ticker,
         "eval_date": date,
         "question": question,
         "llm_called": True,
-        "model": chosen_model,
+        "model_class": chosen_class,
         "answer": answer,
         "artifacts_used": sorted(evidence.get("artifacts", {}).keys()),
     }
 
 
-def _default_strategic_model() -> str:
-    """The configured Sonnet-tier model (synthesis quality for interactive
-    Q&A). Lazy so the non-``ask`` commands never import config."""
-    from config import STRATEGIC_MODEL  # lazy — avoids SSM in tests
+def _default_strategic_class() -> str:
+    """The configured strategic-tire capability class (synthesis quality for
+    interactive Q&A). Lazy so the non-``ask`` commands never import config."""
+    from config import STRATEGIC_CLASS  # lazy — avoids SSM in tests
 
-    return STRATEGIC_MODEL
+    return STRATEGIC_CLASS
 
 
 # ── DB source resolution ───────────────────────────────────────────────────
@@ -731,7 +730,7 @@ def render_ask(result: dict) -> str:
     head = f"=== ask {result['ticker']} (eval_date={result['eval_date']}) ==="
     q = f"Q: {result['question']}"
     if result["llm_called"]:
-        meta = f"(model={result['model']}"
+        meta = f"(class={result['model_class']}"
         if result["artifacts_used"]:
             meta += f", artifacts={', '.join(result['artifacts_used'])}"
         meta += ")"
@@ -779,7 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--with-artifacts", action="store_true",
         help="Also pull S3 decision_artifacts snapshots (needs capture enabled).",
     )
-    pa.add_argument("--model", help="Override the LLM model (default: strategic/Sonnet).")
+    pa.add_argument("--model-class", help="Override the LLM capability class (default: strategic/med).")
 
     return p
 
@@ -810,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "ask":
             result = answer_question(
                 conn, args.ticker, args.question, args.date,
-                with_artifacts=args.with_artifacts, model=args.model,
+                with_artifacts=args.with_artifacts, model_class=args.model_class,
             )
             print(json.dumps(result, default=str, indent=2) if args.json
                   else render_ask(result))

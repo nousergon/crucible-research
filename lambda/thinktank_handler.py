@@ -136,8 +136,7 @@ def handler(event, context):
     # bootstrap smoke. Return BEFORE secrets hydration / any S3 access.
     if is_dry(event):
         logger.info(
-            "[thinktank_handler] dry_run_llm=True: shell-run no-op "
-            "(no secrets fetch, no S3 read/write, no LLM calls)",
+            "[thinktank_handler] dry_run_llm=True: shell-run no-op (no secrets fetch, no S3 read/write, no LLM calls)",
         )
         return {"status": "OK", "dry_run": True}
 
@@ -162,9 +161,38 @@ def handler(event, context):
     # daily job's role). Runs observe-only — writes to thinktank/ S3
     # prefix for validation tracking; does NOT gate the Predictor.
     gap_fill_only = isinstance(event, dict) and event.get("mode") == "gap_fill"
+
+    # Hand the run THIS invocation's wall-clock so it can stop taking new LLM
+    # work in time to persist its terminal artifacts (alpha-engine-config-I5208).
+    # Without this the run hit the 900s ceiling mid-loop and died before writing
+    # the ratings board / challenger selection / leaderboard shadow view — every
+    # day from 2026-07-17, silently, while completing ~15 theses of real work per
+    # run and discarding all of it. `context` is None for local/operator calls,
+    # which correctly means "no deadline".
+    seconds_remaining = None
+    if context is not None and hasattr(context, "get_remaining_time_in_millis"):
+        seconds_remaining = lambda: context.get_remaining_time_in_millis() / 1000.0  # noqa: E731
+
     manifest = run_daily(
-        dry_run=plan_only, refresh_tickers=refresh, gap_fill_only=gap_fill_only
+        dry_run=plan_only,
+        refresh_tickers=refresh,
+        gap_fill_only=gap_fill_only,
+        seconds_remaining=seconds_remaining,
     )
+
+    if manifest.deadline_truncated:
+        # LOUD: a truncated run persisted partial coverage. That is far better
+        # than losing everything, but it is not a healthy run and must not read
+        # as one.
+        logger.error(
+            "[thinktank_handler] run TRUNCATED by deadline — skipped %d new, "
+            "%d refresh, sweep_skipped=%s. Terminal artifacts WERE written "
+            "(partial). Capacity no longer fits the runtime: see "
+            "alpha-engine-config-I5208.",
+            len(manifest.deadline_skipped_new),
+            len(manifest.deadline_skipped_refresh),
+            manifest.deadline_skipped_sweep,
+        )
 
     logger.info(
         "[thinktank_handler] done run_id=%s mode=%s trading_day=%s "
@@ -179,7 +207,69 @@ def handler(event, context):
         manifest.budget_month_spent_usd,
         manifest.budget_month_limit_usd,
     )
+    _notify_run_outcome(manifest)
     return {"status": "OK", "manifest": manifest.model_dump()}
+
+
+def _notify_run_outcome(manifest) -> None:
+    """Publish ONE daily notification per Think Tank run — success or degraded.
+
+    alpha-engine-config-I5208 (Brian, 2026-07-28: "we need a notification when
+    think tank runs for the day - or if it fails").
+
+    Why a SUCCESS ping and not only a failure one: the Think Tank ran dead for
+    ELEVEN DAYS (2026-07-17 -> 2026-07-28) and nothing said so. A failure-only
+    alert cannot catch that class — the run was not raising, it was being killed
+    mid-loop by the runtime, so there was no failure event to fire on. Absence
+    of a daily "ran" ping is a signal a human actually notices; absence of an
+    error is not. This is the same reasoning as a liveness heartbeat.
+
+    Severity ladder:
+      INFO  — clean run, everything persisted
+      WARN  — truncated by deadline (partial coverage persisted) OR the
+              challenger selection did not write (the leaderboard arm is blind
+              for the day, which is the failure that started this arc)
+
+    Never raises: notification is secondary observability on a path that has
+    already done its real work.
+    """
+    from observe_alerts import publish_observe_alert
+
+    try:
+        degraded: list[str] = []
+        if getattr(manifest, "deadline_truncated", False):
+            degraded.append(
+                f"deadline-truncated (skipped {len(manifest.deadline_skipped_new)} new, "
+                f"{len(manifest.deadline_skipped_refresh)} refresh, "
+                f"sweep_skipped={manifest.deadline_skipped_sweep})"
+            )
+        if not getattr(manifest, "challenger_selection_written", False):
+            degraded.append("challenger selection NOT written — the leaderboard arm is blind today")
+        if manifest.errors:
+            degraded.append(f"{len(manifest.errors)} error(s): {'; '.join(manifest.errors[:3])}")
+
+        headline = "DEGRADED" if degraded else "ok"
+        message = (
+            f"[thinktank] daily run {headline} — trading_day={manifest.trading_day} "
+            f"mode={manifest.mode} theses={manifest.theses_written} "
+            f"sweep={manifest.sweep_tickers} ratings_rows={manifest.ratings_rows} "
+            f"cost=${manifest.total_cost_usd:.4f} "
+            f"month=${manifest.budget_month_spent_usd:.2f}/${manifest.budget_month_limit_usd:.2f}"
+        )
+        if degraded:
+            message += " | " + " | ".join(degraded)
+
+        publish_observe_alert(
+            message,
+            source="research:thinktank_daily",
+            # One ping per trading day per mode. A retry storm (async retries on
+            # a timing-out run produced 3-21 invocations/day during the outage)
+            # must not become a notification storm.
+            dedup_key=f"thinktank_daily:{manifest.trading_day}:{manifest.mode}",
+            severity="WARN" if degraded else "INFO",
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary observability, never fatal
+        logger.warning("[thinktank_handler] daily notification failed: %s", exc)
 
 
 def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
@@ -197,9 +287,10 @@ def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
         run_id = event.get("run_id") or uuid.uuid4().hex[:12]
         plan = plan_gap_fill(run_id=run_id)
         logger.info(
-            "[thinktank_handler] gap_fill_plan run_id=%s trading_day=%s "
-            "tickers=%d",
-            plan["run_id"], plan["trading_day"], len(plan["tickers"]),
+            "[thinktank_handler] gap_fill_plan run_id=%s trading_day=%s tickers=%d",
+            plan["run_id"],
+            plan["trading_day"],
+            len(plan["tickers"]),
         )
         return plan
 
@@ -211,9 +302,10 @@ def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
             ticker=event["ticker"],
         )
         logger.info(
-            "[thinktank_handler] gap_fill_build run_id=%s ticker=%s "
-            "thesis_version=%s",
-            event["run_id"], event["ticker"], checkpoint.get("thesis_version"),
+            "[thinktank_handler] gap_fill_build run_id=%s ticker=%s thesis_version=%s",
+            event["run_id"],
+            event["ticker"],
+            checkpoint.get("thesis_version"),
         )
         return {"status": "OK", "checkpoint": checkpoint}
 
@@ -223,10 +315,12 @@ def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
         calendar_date=event["calendar_date"],
     )
     logger.info(
-        "[thinktank_handler] gap_fill_finalize run_id=%s trading_day=%s "
-        "theses=%d cost=$%.4f month=$%.2f/$%.2f",
-        manifest.run_id, manifest.trading_day, manifest.theses_written,
-        manifest.total_cost_usd, manifest.budget_month_spent_usd,
+        "[thinktank_handler] gap_fill_finalize run_id=%s trading_day=%s theses=%d cost=$%.4f month=$%.2f/$%.2f",
+        manifest.run_id,
+        manifest.trading_day,
+        manifest.theses_written,
+        manifest.total_cost_usd,
+        manifest.budget_month_spent_usd,
         manifest.budget_month_limit_usd,
     )
     return {"status": "OK", "manifest": manifest.model_dump()}

@@ -72,8 +72,7 @@ class CompanyThesisLLM(BaseModel):
     rating_rationale: str = Field(
         default="",
         description=(
-            "2-4 sentences: why this specific number — the evidence that "
-            "drives it and what would move it up or down."
+            "2-4 sentences: why this specific number — the evidence that drives it and what would move it up or down."
         ),
     )
 
@@ -105,9 +104,7 @@ class CompanyThesis(_Artifact):
     version: int = Field(ge=1)
     trading_day: str
     calendar_date: str
-    update_reason: Literal[
-        "initial", "event", "staleness_refresh", "reconcile", "operator_refresh"
-    ]
+    update_reason: Literal["initial", "event", "staleness_refresh", "reconcile", "operator_refresh"]
     thesis: CompanyThesisLLM
     sector: str | None = None
     attractiveness_score: float | None = None
@@ -241,9 +238,7 @@ class ThemeThesisLLM(BaseModel):
     stance: str = Field(description="One-word/phrase stance (e.g. risk-on, overweight, cautious).")
     drivers: list[str] = Field(description="What is driving the current view.")
     watch_items: list[str] = Field(description="What would change the view; upcoming data/events.")
-    material_change: bool = Field(
-        description="True ONLY if today's inputs materially change the prior view."
-    )
+    material_change: bool = Field(description="True ONLY if today's inputs materially change the prior view.")
     change_summary: str = Field(
         default="",
         description="If material_change, what changed and why; else empty.",
@@ -377,6 +372,16 @@ class RunManifest(_Artifact):
     budget_month_spent_usd: float = 0.0
     budget_month_limit_usd: float = 0.0
     errors: list[str] = Field(default_factory=list)
+    # ── Deadline truncation (alpha-engine-config-I5208) ──────────────────────
+    # A run that ran out of wall-clock still persists its terminal artifacts
+    # (ratings board, challenger selection, shadow view). These fields make
+    # that visible: a truncated run is PARTIAL, and a reader must be able to
+    # tell partial coverage from complete coverage. Silence here would
+    # reproduce the defect this was filed for.
+    deadline_truncated: bool = False
+    deadline_skipped_new: list[str] = Field(default_factory=list)
+    deadline_skipped_refresh: list[str] = Field(default_factory=list)
+    deadline_skipped_sweep: bool = False
 
 
 class MonthlyCostLedger(_Artifact):

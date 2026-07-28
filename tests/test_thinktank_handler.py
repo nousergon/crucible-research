@@ -83,20 +83,18 @@ class TestDryPaths:
     def test_plan_only_dry_run_routes_to_run_daily_dry(self, handler_mod):
         manifest = _manifest_mock()
         manifest.mode = "dry_run"
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", return_value=manifest) as run:
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({"dry_run": True}, None)
-        run.assert_called_once_with(dry_run=True, refresh_tickers=None, gap_fill_only=False)
+        run.assert_called_once_with(dry_run=True, refresh_tickers=None, gap_fill_only=False, seconds_remaining=None)
         assert result["status"] == "OK"
 
 
 class TestSuccessPath:
     def test_ok_returns_manifest_dump(self, handler_mod):
         manifest = _manifest_mock()
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", return_value=manifest) as run:
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({}, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False, seconds_remaining=None)
         assert result == {
             "status": "OK",
             "manifest": {"run_id": "abc123def456", "mode": "daily"},
@@ -106,10 +104,9 @@ class TestSuccessPath:
         """EventBridge scheduled events are dicts, but a None/odd payload
         from a manual invoke must not crash the flag probe."""
         manifest = _manifest_mock()
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", return_value=manifest) as run:
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler(None, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False, seconds_remaining=None)
         assert result["status"] == "OK"
 
     def test_mode_gap_fill_routes_gap_fill_only_true(self, handler_mod):
@@ -118,10 +115,9 @@ class TestSuccessPath:
         off the measured coverage gap instead of daily_new_names."""
         manifest = _manifest_mock()
         manifest.mode = "gap_fill"
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", return_value=manifest) as run:
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=manifest) as run:
             result = handler_mod.handler({"mode": "gap_fill"}, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=True)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=True, seconds_remaining=None)
         assert result["status"] == "OK"
 
     def test_unrecognized_mode_does_not_gap_fill(self, handler_mod):
@@ -129,10 +125,9 @@ class TestSuccessPath:
         or unrelated mode value must fall through to the normal daily path,
         never silently."""
         manifest = _manifest_mock()
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", return_value=manifest) as run:
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=manifest) as run:
             handler_mod.handler({"mode": "sf_cover"}, None)
-        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False)
+        run.assert_called_once_with(dry_run=False, refresh_tickers=None, gap_fill_only=False, seconds_remaining=None)
 
 
 class TestGapFillFanout:
@@ -140,9 +135,11 @@ class TestGapFillFanout:
     "gap_fill_finalize"} routes to the fan-out phases, never run_daily."""
 
     def test_gap_fill_plan_routes_to_plan_gap_fill(self, handler_mod):
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.gap_fill_fanout.plan_gap_fill") as plan, \
-             patch("thinktank.run.run_daily") as run_daily:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.gap_fill_fanout.plan_gap_fill") as plan,
+            patch("thinktank.run.run_daily") as run_daily,
+        ):
             plan.return_value = {"run_id": "gf1", "trading_day": "2026-07-18", "tickers": ["A", "B"]}
             result = handler_mod.handler({"mode": "gap_fill_plan"}, None)
         run_daily.assert_not_called()
@@ -150,36 +147,49 @@ class TestGapFillFanout:
         assert result == plan.return_value
 
     def test_gap_fill_build_routes_to_build_gap_fill_unit(self, handler_mod):
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.gap_fill_fanout.build_gap_fill_unit") as build, \
-             patch("thinktank.run.run_daily") as run_daily:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.gap_fill_fanout.build_gap_fill_unit") as build,
+            patch("thinktank.run.run_daily") as run_daily,
+        ):
             build.return_value = {"ticker": "A", "thesis_version": 1}
             event = {
-                "mode": "gap_fill_build", "run_id": "gf1",
-                "trading_day": "2026-07-18", "calendar_date": "2026-07-18",
+                "mode": "gap_fill_build",
+                "run_id": "gf1",
+                "trading_day": "2026-07-18",
+                "calendar_date": "2026-07-18",
                 "ticker": "A",
             }
             result = handler_mod.handler(event, None)
         run_daily.assert_not_called()
         build.assert_called_once_with(
-            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18", ticker="A",
+            run_id="gf1",
+            trading_day="2026-07-18",
+            calendar_date="2026-07-18",
+            ticker="A",
         )
         assert result == {"status": "OK", "checkpoint": build.return_value}
 
     def test_gap_fill_finalize_routes_to_finalize_gap_fill(self, handler_mod):
         manifest = _manifest_mock()
         manifest.mode = "gap_fill"
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.gap_fill_fanout.finalize_gap_fill", return_value=manifest) as fin, \
-             patch("thinktank.run.run_daily") as run_daily:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.gap_fill_fanout.finalize_gap_fill", return_value=manifest) as fin,
+            patch("thinktank.run.run_daily") as run_daily,
+        ):
             event = {
-                "mode": "gap_fill_finalize", "run_id": "gf1",
-                "trading_day": "2026-07-18", "calendar_date": "2026-07-18",
+                "mode": "gap_fill_finalize",
+                "run_id": "gf1",
+                "trading_day": "2026-07-18",
+                "calendar_date": "2026-07-18",
             }
             result = handler_mod.handler(event, None)
         run_daily.assert_not_called()
         fin.assert_called_once_with(
-            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18",
+            run_id="gf1",
+            trading_day="2026-07-18",
+            calendar_date="2026-07-18",
         )
         assert result == {"status": "OK", "manifest": manifest.model_dump.return_value}
 
@@ -187,8 +197,10 @@ class TestGapFillFanout:
 class TestRaiseOnFailure:
     def test_run_daily_failure_propagates(self, handler_mod):
         """The core contract: NO error-dict conversion. See module doc."""
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("thinktank.run.run_daily", side_effect=RuntimeError("boom")):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", side_effect=RuntimeError("boom")),
+        ):
             with pytest.raises(RuntimeError, match="boom"):
                 handler_mod.handler({}, None)
 
@@ -203,13 +215,9 @@ class TestRaiseOnFailure:
 
 
 class TestColdStartHydration:
-    def test_hydrates_both_rag_secrets_and_capture_flag(
-        self, handler_mod, monkeypatch
-    ):
+    def test_hydrates_both_rag_secrets_and_capture_flag(self, handler_mod, monkeypatch):
         secrets = {"RAG_DATABASE_URL": "postgres://x", "VOYAGE_API_KEY": "vk"}
-        with patch(
-            "nousergon_lib.secrets.get_secret", side_effect=secrets.__getitem__
-        ) as get_secret:
+        with patch("nousergon_lib.secrets.get_secret", side_effect=secrets.__getitem__) as get_secret:
             handler_mod._ensure_init()
         assert {c.args[0] for c in get_secret.call_args_list} == set(secrets)
         import os
@@ -226,9 +234,167 @@ class TestColdStartHydration:
         get_secret.assert_not_called()
 
     def test_init_runs_once(self, handler_mod):
-        with patch(
-            "nousergon_lib.secrets.get_secret", return_value="v"
-        ) as get_secret:
+        with patch("nousergon_lib.secrets.get_secret", return_value="v") as get_secret:
             handler_mod._ensure_init()
             handler_mod._ensure_init()
         assert get_secret.call_count == 2  # two secrets, fetched exactly once
+
+
+class TestDeadlineWiring:
+    """The Lambda's own clock must actually reach the run loop.
+
+    alpha-engine-config-I5208. The rest of this file passes `context=None`
+    (the local/operator shape), which asserts `seconds_remaining=None` — so
+    without these, the production path where a REAL context supplies the
+    deadline would be entirely unexercised, and the fix could regress silently.
+    """
+
+    def test_real_context_supplies_a_working_seconds_remaining(self, handler_mod):
+        _mf = _manifest_mock()
+        ctx = MagicMock()
+        ctx.get_remaining_time_in_millis.return_value = 840_000  # 14 min
+
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=_mf) as run:
+            handler_mod.handler({}, ctx)
+
+        fn = run.call_args.kwargs["seconds_remaining"]
+        assert fn is not None, "the Lambda deadline never reached the run loop"
+        assert fn() == 840.0, "millis must be converted to seconds"
+
+    def test_context_without_the_method_is_treated_as_no_deadline(self, handler_mod):
+        _mf = _manifest_mock()
+        """A context object lacking the API (older runtimes, test doubles) must
+        degrade to 'no deadline', never to a crash on attribute access."""
+        ctx = object()
+
+        with patch.object(handler_mod, "_ensure_init"), patch("thinktank.run.run_daily", return_value=_mf) as run:
+            handler_mod.handler({}, ctx)
+
+        assert run.call_args.kwargs["seconds_remaining"] is None
+
+    def test_truncated_run_is_logged_loud(self, handler_mod, caplog):
+        _mf = _manifest_mock()
+        """A partial run must not read as a healthy one."""
+        import logging
+
+        _mf.deadline_truncated = True
+        _mf.deadline_skipped_new = ["AAPL", "MSFT"]
+        _mf.deadline_skipped_refresh = []
+        _mf.deadline_skipped_sweep = True
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            caplog.at_level(logging.ERROR),
+        ):
+            handler_mod.handler({}, None)
+
+        assert any("TRUNCATED" in r.message for r in caplog.records), (
+            "a deadline-truncated run must surface at ERROR, not blend into INFO"
+        )
+
+
+class TestDailyRunNotification:
+    """One notification per Think Tank run — success or degraded.
+
+    alpha-engine-config-I5208. The FAILURE side of this already existed and
+    worked: the freshness monitor detected `thinktank_challenger_selection`
+    missing, escalated warning->critical after 3 sweeps, and paged Telegram
+    daily from ~2026-07-21. What did NOT exist is a positive "it ran" signal —
+    and a dead component is only distinguishable from a healthy one by its
+    absence, which is exactly the signal that got lost among 4 other
+    chronically-stale artifacts paging on the same channel.
+    """
+
+    def test_clean_run_pings_at_info(self, handler_mod):
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+        _mf.ratings_rows = 42
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        assert alert.call_count == 1
+        kw = alert.call_args.kwargs
+        assert kw["severity"] == "INFO"
+        assert "ok" in alert.call_args.args[0]
+
+    def test_truncated_run_pings_at_warn_and_says_why(self, handler_mod):
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = True
+        _mf.deadline_skipped_new = ["AAPL", "MSFT"]
+        _mf.deadline_skipped_refresh = []
+        _mf.deadline_skipped_sweep = True
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        msg = alert.call_args.args[0]
+        assert alert.call_args.kwargs["severity"] == "WARN"
+        assert "DEGRADED" in msg and "deadline-truncated" in msg
+
+    def test_missing_challenger_selection_is_called_out(self, handler_mod):
+        """The specific failure that started this arc — the leaderboard arm
+        going blind — must be named, not folded into a generic 'degraded'."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = False
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        msg = alert.call_args.args[0]
+        assert alert.call_args.kwargs["severity"] == "WARN"
+        assert "leaderboard arm is blind" in msg
+
+    def test_dedup_key_is_one_ping_per_trading_day_and_mode(self, handler_mod):
+        """Async retries produced 3-21 invocations/day during the outage. A
+        retry storm must not become a notification storm."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+        _mf.trading_day = "2026-07-28"
+        _mf.mode = "daily"
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        assert alert.call_args.kwargs["dedup_key"] == "thinktank_daily:2026-07-28:daily"
+
+    def test_notification_failure_never_breaks_the_run(self, handler_mod):
+        """Secondary observability on a path that already did its real work."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert", side_effect=RuntimeError("sns down")),
+        ):
+            result = handler_mod.handler({}, None)
+
+        assert result["status"] == "OK"

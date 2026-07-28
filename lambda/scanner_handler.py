@@ -112,16 +112,13 @@ def handler(event, context):
     # circuits everything for Friday-Preflight shell runs.
     if is_dry(event):
         logger.info(
-            "[scanner_handler] dry_run_llm=True: shell-run no-op "
-            "(no S3 read/write, no scanner pass)",
+            "[scanner_handler] dry_run_llm=True: shell-run no-op (no S3 read/write, no scanner pass)",
         )
         return {"status": "OK", "dry_run": True}
 
     run_date = event.get("run_date")
     if not run_date:
-        logger.error(
-            "[scanner_handler] event missing required 'run_date' field"
-        )
+        logger.error("[scanner_handler] event missing required 'run_date' field")
         return {
             "status": "ERROR",
             "error": "event missing required 'run_date' field (ISO YYYY-MM-DD)",
@@ -155,6 +152,7 @@ def handler(event, context):
     import datetime as _dt
 
     from nousergon_lib import trading_calendar as _tc
+
     _cal = _dt.date.fromisoformat(run_date[:10])
     _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
     _trading_day = _td.isoformat()
@@ -163,7 +161,8 @@ def handler(event, context):
             "[scanner_handler] normalized run_date %s (calendar) → %s (trading "
             "day) per DATE_CONVENTIONS — candidates.json keys by trading day to "
             "match Research + signals.json",
-            run_date, _trading_day,
+            run_date,
+            _trading_day,
         )
     run_date = _trading_day
 
@@ -172,7 +171,9 @@ def handler(event, context):
 
     logger.info(
         "[scanner_handler] start run_date=%s (trading day) bucket=%s market_regime=%s",
-        run_date, bucket, market_regime,
+        run_date,
+        bucket,
+        market_regime,
     )
 
     s3_client = boto3.client("s3")
@@ -196,7 +197,9 @@ def handler(event, context):
 
     try:
         s3_key = write_candidates_artifact(
-            artifact, s3_client=s3_client, bucket=bucket,
+            artifact,
+            s3_client=s3_client,
+            bucket=bucket,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[scanner_handler] S3 write failed hard")
@@ -216,18 +219,22 @@ def handler(event, context):
         for spec_name, shadow_artifact in shadow_artifacts.items():
             try:
                 shadows[spec_name] = write_shadow_candidates_artifact(
-                    shadow_artifact, spec_name, s3_client=s3_client, bucket=bucket,
+                    shadow_artifact,
+                    spec_name,
+                    s3_client=s3_client,
+                    bucket=bucket,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[scanner_handler] shadow write failed for spec %s "
-                    "(non-fatal, live unaffected): %s", spec_name, exc,
+                    "[scanner_handler] shadow write failed for spec %s (non-fatal, live unaffected): %s",
+                    spec_name,
+                    exc,
                 )
                 shadow_error = f"{spec_name}: {exc}"
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[scanner_handler] shadow candidate-gen build failed "
-            "(non-fatal, live unaffected): %s", exc,
+            "[scanner_handler] shadow candidate-gen build failed (non-fatal, live unaffected): %s",
+            exc,
         )
         shadow_error = str(exc)
 
@@ -251,17 +258,64 @@ def handler(event, context):
     universe_board_error: str | None = None
     try:
         universe_board_key = write_universe_board_for_scanner_run(
-            artifact, market_regime=market_regime, s3_client=s3_client, bucket=bucket,
+            artifact,
+            market_regime=market_regime,
+            s3_client=s3_client,
+            bucket=bucket,
         )
         logger.info(
-            "[scanner_handler] universe scoreboard written → %s", universe_board_key,
+            "[scanner_handler] universe scoreboard written → %s",
+            universe_board_key,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[scanner_handler] universe scoreboard write failed (non-fatal, "
-            "dashboard visibility only — candidates.json unaffected): %s", exc,
+            "dashboard visibility only — candidates.json unaffected): %s",
+            exc,
         )
         universe_board_error = str(exc)
+
+    # ── Universe membership artifact (alpha-engine-config-I4818) ─────────────
+    # LOAD-BEARING, and therefore deliberately NOT wrapped in a fail-soft
+    # except like every other post-candidates write in this handler: the
+    # predictor resolves its DAILY scoring universe from this artifact. A
+    # missing membership file does not degrade a dashboard panel — it leaves
+    # the predictor scoring whatever stale membership it last saw, which is
+    # exactly the defect this artifact was built to end (the predictor spent
+    # three weekly cycles on a frozen 2026-07-10 population before anyone
+    # noticed, because its producer's disappearance was silent).
+    #
+    # Placement: AFTER candidates.json is written (it reads scanner_tickers
+    # from the in-memory artifact) and after the board block (which produces
+    # the factor profiles this read needs — see write_universe_board_for_
+    # scanner_run's factor-profiles ordering note). A board failure upstream
+    # therefore surfaces HERE as a loud membership failure rather than as a
+    # silent stale universe tomorrow morning, which is the correct severity.
+    # The failure is surfaced as an ERROR *response* rather than a raised
+    # exception purely for consistency with this handler's other hard-failure
+    # paths (orchestrator precondition, candidates S3 write) — the SF treats
+    # both identically, and one convention per handler is worth more than the
+    # marginal difference.
+    from scoring.universe_membership import compute_and_write_universe_membership
+
+    try:
+        membership_key = compute_and_write_universe_membership(
+            run_date,
+            artifact["scanner_tickers"],
+            # Carries the incumbent's own ``tech_score`` ranking (I4983) so the
+            # membership artifact records the champion and incumbent arms at
+            # equal width. Already in the in-memory artifact — no extra read.
+            scanner_eval_log=artifact.get("scanner_eval_log"),
+            bucket=bucket,
+            s3_client=s3_client,
+        )
+    except Exception as exc:  # noqa: BLE001 — re-surfaced as ERROR, never swallowed
+        logger.exception("[scanner_handler] universe membership write failed hard")
+        return {"status": "ERROR", "error": f"universe membership failed: {exc}"}
+    logger.info(
+        "[scanner_handler] universe membership written → %s",
+        membership_key,
+    )
 
     # ── Champion/challenger leaderboard SCORER (config#1221) ─────────────────
     # Same trigger point + S3 access as the shadow emission above, and the moment
@@ -280,12 +334,13 @@ def handler(event, context):
         leaderboard_status = build_scanner_leaderboard(s3_client, bucket, run_date)
         logger.info(
             "[scanner_handler] scanner leaderboard status=%s key=%s",
-            leaderboard_status.get("status"), leaderboard_status.get("key"),
+            leaderboard_status.get("status"),
+            leaderboard_status.get("key"),
         )
     except Exception as exc:  # noqa: BLE001 — observe-only, live unaffected
         logger.warning(
-            "[scanner_handler] scanner leaderboard build failed "
-            "(non-fatal, live unaffected): %s", exc,
+            "[scanner_handler] scanner leaderboard build failed (non-fatal, live unaffected): %s",
+            exc,
         )
         leaderboard_status = {"status": "error", "error": str(exc)}
 
@@ -295,10 +350,9 @@ def handler(event, context):
         "population_tickers": len(artifact["population_tickers"]),
         "agent_input_set": len(artifact["agent_input_set"]),
         "new_vs_prior_cycle": len(artifact["stats"]["new_vs_prior_cycle"]),
-        "dropped_vs_prior_cycle": len(
-            artifact["stats"]["dropped_vs_prior_cycle"]
-        ),
+        "dropped_vs_prior_cycle": len(artifact["stats"]["dropped_vs_prior_cycle"]),
         "baseline_missing": artifact["stats"]["baseline_missing"],
+        "universe_membership": membership_key,
         "shadows": shadows,
         "leaderboard": {
             "status": leaderboard_status.get("status"),
@@ -315,8 +369,7 @@ def handler(event, context):
         summary["universe_board_error"] = universe_board_error
 
     logger.info(
-        "[scanner_handler] done run_date=%s scanner_tickers=%d "
-        "population=%d new=%d dropped=%d",
+        "[scanner_handler] done run_date=%s scanner_tickers=%d population=%d new=%d dropped=%d",
         run_date,
         summary["scanner_tickers"],
         summary["population_tickers"],

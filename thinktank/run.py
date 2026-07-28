@@ -44,6 +44,7 @@ import argparse
 import logging
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
@@ -105,6 +106,44 @@ def _checkpoint_thesis_write(
     save_ledger(store, ledger)
 
 
+# Wall-clock reserve, in seconds, held back for the terminal writes (ledger
+# save, ratings board, challenger selection + its leaderboard shadow view,
+# events jsonl, cost ledger, manifest, SFT flush). Those are S3 puts, not LLM
+# calls, so this is generous by design — the cost of over-reserving is one
+# fewer thesis, the cost of under-reserving is the entire run's terminal state.
+_TERMINAL_WRITE_RESERVE_S = 120.0
+
+
+def _out_of_time(
+    seconds_remaining: Callable[[], float] | None,
+    reserve: float = _TERMINAL_WRITE_RESERVE_S,
+) -> bool:
+    """True when too little wall-clock remains to start another LLM unit.
+
+    alpha-engine-config-I5208. The Think Tank ran on a 900s Lambda with NO
+    deadline awareness: every run since 2026-07-17 hit the ceiling mid-loop and
+    died before its terminal writes, so ~15 theses of real work per day were
+    completed and then thrown away — `thinktank/ratings/`,
+    `thinktank/challenger_selection/` and the leaderboard shadow view all
+    froze on 2026-07-17 while the logs looked busy and healthy.
+
+    This is NOT a Lambda workaround. Any bounded runtime needs it — a spot box
+    gets a 2-minute reclaim notice, which is squarely inside this reserve — so
+    the guard belongs in the run loop regardless of where the run executes.
+
+    ``None`` means "no deadline known" (local/operator invocation): never stop.
+    A callable that raises is treated as no-deadline rather than as a stop,
+    since a broken clock must not silently truncate a healthy run.
+    """
+    if seconds_remaining is None:
+        return False
+    try:
+        return float(seconds_remaining()) <= reserve
+    except Exception:  # noqa: BLE001 — a broken clock must not truncate a run
+        logger.warning("[thinktank] seconds_remaining() raised — treating as no deadline")
+        return False
+
+
 def run_daily(
     settings: ThinktankSettings | None = None,
     *,
@@ -114,6 +153,7 @@ def run_daily(
     store: ThinktankStore | None = None,
     client: ThinktankClient | None = None,
     ssm_client=None,
+    seconds_remaining: Callable[[], float] | None = None,
 ) -> RunManifest:
     settings = settings or load_settings()
     store = store or ThinktankStore(settings.bucket)
@@ -124,9 +164,12 @@ def run_daily(
     manifest = RunManifest(
         run_id=run_id,
         mode=(
-            "dry_run" if dry_run
-            else "operator_refresh" if refresh_tickers
-            else "gap_fill" if gap_fill_only
+            "dry_run"
+            if dry_run
+            else "operator_refresh"
+            if refresh_tickers
+            else "gap_fill"
+            if gap_fill_only
             else "daily"
         ),
         trading_day=trading_day,
@@ -198,8 +241,7 @@ def run_daily(
     if dry_run:
         manifest.finished_at = datetime.now(UTC).isoformat()
         logger.info(
-            "DRY RUN — would add %s, refresh %s, sweep %d covered names; "
-            "month spend $%.2f / cap $%.2f",
+            "DRY RUN — would add %s, refresh %s, sweep %d covered names; month spend $%.2f / cap $%.2f",
             manifest.names_added,
             refresh,
             len(covered_before),
@@ -209,17 +251,31 @@ def run_daily(
         return manifest
 
     client = client or ThinktankClient(settings=settings, run_id=run_id)
-    themes = ThemeKeeper(
-        store, client, ctx, trading_day=trading_day, calendar_date=calendar_date
-    )
+    themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
     if refresh_tickers is None:
         themes.ensure_current()
 
     theses_written: list[CompanyThesis] = []
     board_by_ticker = {r["ticker"]: r for r in new_rows}
-    for ticker in manifest.names_added:
+    for idx, ticker in enumerate(manifest.names_added):
+        if _out_of_time(seconds_remaining):
+            skipped = manifest.names_added[idx:]
+            manifest.deadline_truncated = True
+            manifest.deadline_skipped_new = skipped
+            logger.warning(
+                "[thinktank] DEADLINE: stopping new-thesis intake with %d of %d "
+                "remaining (%s) — proceeding to terminal writes so this run's "
+                "completed work persists (alpha-engine-config-I5208)",
+                len(skipped),
+                len(manifest.names_added),
+                ", ".join(skipped[:10]),
+            )
+            break
         thesis = build_thesis(
-            store, client, ctx, themes,
+            store,
+            client,
+            ctx,
+            themes,
             ticker=ticker,
             board_row=board_by_ticker[ticker],
             trading_day=trading_day,
@@ -227,7 +283,8 @@ def run_daily(
             update_reason="initial",
         )
         _checkpoint_thesis_write(
-            store, ledger,
+            store,
+            ledger,
             ticker=ticker,
             trading_day=trading_day,
             thesis_version=thesis.version,
@@ -239,27 +296,48 @@ def run_daily(
 
     ranked_rows = {s.get("ticker"): s for s in (ctx.board or {}).get("stocks", [])}
     refresh_reason = "operator_refresh" if refresh_tickers is not None else "staleness_refresh"
-    for ticker in refresh:
+    for idx, ticker in enumerate(refresh):
+        if _out_of_time(seconds_remaining):
+            skipped = list(refresh[idx:])
+            manifest.deadline_truncated = True
+            manifest.deadline_skipped_refresh = skipped
+            logger.warning(
+                "[thinktank] DEADLINE: stopping refresh with %d of %d remaining "
+                "— proceeding to terminal writes (alpha-engine-config-I5208)",
+                len(skipped),
+                len(refresh),
+            )
+            break
         thesis = build_thesis(
-            store, client, ctx, themes,
+            store,
+            client,
+            ctx,
+            themes,
             ticker=ticker,
             board_row=ranked_rows.get(ticker),
             trading_day=trading_day,
             calendar_date=calendar_date,
             update_reason=refresh_reason,
         )
-        _checkpoint_thesis_write(
-            store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version
-        )
+        _checkpoint_thesis_write(store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version)
         theses_written.append(thesis)
         manifest.theses_written += 1
 
     # ── events sweep over everything covered before today's additions ────────
     event_rows: list[dict] = []
-    if covered_before:
-        assessments, macro_notes = sweep(
-            client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size
+    if covered_before and _out_of_time(seconds_remaining):
+        # The sweep is a single LLM fan-out over every covered name — it cannot
+        # be partially completed, so near the deadline it is skipped ENTIRELY
+        # rather than started and lost. Recorded, never silent.
+        manifest.deadline_truncated = True
+        manifest.deadline_skipped_sweep = True
+        logger.warning(
+            "[thinktank] DEADLINE: skipping the events sweep over %d covered "
+            "names — proceeding to terminal writes (alpha-engine-config-I5208)",
+            len(covered_before),
         )
+    elif covered_before:
+        assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
         manifest.sweep_tickers = len(covered_before)
         record_sweep(ledger, covered_before, trading_day)
         for a in assessments:
@@ -267,7 +345,10 @@ def run_daily(
             if a.action == "update_thesis":
                 manifest.events_flagged += 1
                 thesis = build_thesis(
-                    store, client, ctx, themes,
+                    store,
+                    client,
+                    ctx,
+                    themes,
                     ticker=a.ticker,
                     board_row=ranked_rows.get(a.ticker),
                     trading_day=trading_day,
@@ -276,7 +357,8 @@ def run_daily(
                     event_context=a.rationale,
                 )
                 _checkpoint_thesis_write(
-                    store, ledger,
+                    store,
+                    ledger,
                     ticker=a.ticker,
                     trading_day=trading_day,
                     thesis_version=thesis.version,
@@ -303,9 +385,7 @@ def run_daily(
 
     # ── persist ──────────────────────────────────────────────────────────────
     save_ledger(store, ledger)
-    board = update_ratings_board(
-        store, ledger, theses_written, trading_day=trading_day
-    )
+    board = update_ratings_board(store, ledger, theses_written, trading_day=trading_day)
     manifest.ratings_rows = len(board.rows)
     # coverage_complete must reflect the ledger AFTER this run's thesis
     # writes, not the start-of-run manifest.coverage_gap — otherwise the

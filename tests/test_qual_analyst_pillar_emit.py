@@ -31,6 +31,7 @@ def reloaded_qual():
     """Force-reload the qual_analyst module so module-level constants
     (PILLAR_EMIT_ENABLED, schema classes) pick up the live config."""
     from agents.sector_teams import qual_analyst
+
     importlib.reload(qual_analyst)
     yield qual_analyst
 
@@ -77,11 +78,13 @@ def _make_chat_anthropic_yielding(
     """
     structured_qual = MagicMock()
     structured_qual.invoke.return_value = {
-        "parsed": qual_parsed, "parsing_error": qual_parse_error,
+        "parsed": qual_parsed,
+        "parsing_error": qual_parse_error,
     }
     structured_pillar = MagicMock()
     structured_pillar.invoke.return_value = {
-        "parsed": pillar_parsed, "parsing_error": pillar_parse_error,
+        "parsed": pillar_parsed,
+        "parsing_error": pillar_parse_error,
     }
 
     # with_structured_output is called twice in sequence under-flag, once
@@ -107,9 +110,11 @@ class TestDefaultOffBehavior:
         fake_agent = _make_react_agent_returning("some analyst reasoning text")
         fake_llm = _make_chat_anthropic_yielding(qual_parsed=qual_parsed)
 
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", False), \
-             patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "ChatAnthropic", return_value=fake_llm):
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", False),
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "make_agent_llm", return_value=fake_llm),
+        ):
             result = reloaded_qual.run_qual_analyst(**_qual_kwargs())
 
         assert result["error"] is None
@@ -122,7 +127,8 @@ class TestDefaultOffBehavior:
 
 class TestOnFlagBehavior:
     def test_flag_on_runs_second_extraction_and_returns_keyed_dict(
-        self, reloaded_qual,
+        self,
+        reloaded_qual,
     ):
         """With PILLAR_EMIT_ENABLED=True a second extraction fires and
         its parsed batch is converted to a per-ticker dict."""
@@ -168,10 +174,12 @@ class TestOnFlagBehavior:
             pillar_parsed=pillar_parsed,
         )
 
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True), \
-             patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "ChatAnthropic", return_value=fake_llm), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True),
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "make_agent_llm", return_value=fake_llm),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             # Mock the prompt loader to bypass needing the pillars prompt
             # file on disk for the test; we'll verify the *name* passed.
             mock_prompt = MagicMock()
@@ -196,8 +204,10 @@ class TestOnFlagBehavior:
         """Verify ``_build_system_prompt`` picks the pillar prompt name
         when the flag is on. Asserts the load_prompt call args directly
         rather than constructing the full ReAct invocation."""
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "rendered"
             mock_load_prompt.return_value = mock_prompt
@@ -207,8 +217,10 @@ class TestOnFlagBehavior:
         mock_load_prompt.assert_called_once_with("qual_analyst_system_pillars")
 
     def test_flag_off_loads_legacy_prompt_name(self, reloaded_qual):
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", False), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", False),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "rendered"
             mock_load_prompt.return_value = mock_prompt
@@ -220,7 +232,8 @@ class TestOnFlagBehavior:
 
 class TestParseFailureModes:
     def test_pillar_parse_error_always_raises_regardless_of_lax_mode(
-        self, reloaded_qual,
+        self,
+        reloaded_qual,
     ):
         """Hardening Item 2 (2026-05-21 AQR cutover incident): the
         pillar-extraction parse failure path now ALWAYS raises,
@@ -237,9 +250,7 @@ class TestParseFailureModes:
         catches → assessments populated but error field set)."""
         from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
-        qual_parsed = QualAnalystOutput(
-            assessments=[QualAssessment(ticker="NVDA", qual_score=80)]
-        )
+        qual_parsed = QualAnalystOutput(assessments=[QualAssessment(ticker="NVDA", qual_score=80)])
 
         fake_agent = _make_react_agent_returning("analyst reasoning")
         fake_llm = _make_chat_anthropic_yielding(
@@ -248,11 +259,13 @@ class TestParseFailureModes:
         )
 
         # Even with strict=False (lax mode), pillar parse failure raises.
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True), \
-             patch.object(reloaded_qual, "is_strict_validation_enabled", return_value=False), \
-             patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "ChatAnthropic", return_value=fake_llm), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True),
+            patch.object(reloaded_qual, "is_strict_validation_enabled", return_value=False),
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "make_agent_llm", return_value=fake_llm),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "system prompt"
             mock_prompt.version = "0.1.0"
@@ -270,9 +283,7 @@ class TestParseFailureModes:
         symmetric with the legacy QualAnalystOutput strict-mode contract."""
         from nousergon_lib.agent_schemas import QualAnalystOutput, QualAssessment
 
-        qual_parsed = QualAnalystOutput(
-            assessments=[QualAssessment(ticker="NVDA", qual_score=80)]
-        )
+        qual_parsed = QualAnalystOutput(assessments=[QualAssessment(ticker="NVDA", qual_score=80)])
 
         fake_agent = _make_react_agent_returning("analyst reasoning")
         fake_llm = _make_chat_anthropic_yielding(
@@ -280,11 +291,13 @@ class TestParseFailureModes:
             pillar_parse_error=ValueError("malformed JSON"),
         )
 
-        with patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True), \
-             patch.object(reloaded_qual, "is_strict_validation_enabled", return_value=True), \
-             patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "ChatAnthropic", return_value=fake_llm), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "PILLAR_EMIT_ENABLED", True),
+            patch.object(reloaded_qual, "is_strict_validation_enabled", return_value=True),
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "make_agent_llm", return_value=fake_llm),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "system prompt"
             mock_prompt.version = "0.1.0"
@@ -311,8 +324,10 @@ class TestErrorBranchShape:
         fake_agent = MagicMock()
         fake_agent.invoke.side_effect = GraphRecursionError("limit")
 
-        with patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "system prompt"
             mock_prompt.version = "0.1.0"
@@ -327,8 +342,10 @@ class TestErrorBranchShape:
         fake_agent = MagicMock()
         fake_agent.invoke.side_effect = RuntimeError("kaboom")
 
-        with patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent), \
-             patch.object(reloaded_qual, "load_prompt") as mock_load_prompt:
+        with (
+            patch.object(reloaded_qual, "create_react_agent", return_value=fake_agent),
+            patch.object(reloaded_qual, "load_prompt") as mock_load_prompt,
+        ):
             mock_prompt = MagicMock()
             mock_prompt.format.return_value = "system prompt"
             mock_prompt.version = "0.1.0"

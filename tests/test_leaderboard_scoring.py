@@ -19,7 +19,6 @@ Locks down:
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 
 import boto3
 import pytest
@@ -37,6 +36,7 @@ _BUCKET = "alpha-engine-research"
 
 
 # ── Pure statistics ───────────────────────────────────────────────────────────
+
 
 class TestSpearmanIC:
     def test_perfect_positive(self):
@@ -63,8 +63,8 @@ class TestDateClusteredStats:
         s = date_clustered_stats([0.1, 0.2, 0.3])
         assert s["n_dates"] == 3
         assert s["mean"] == pytest.approx(0.2)
-        assert s["se"] == pytest.approx(0.1 / (3 ** 0.5), rel=1e-4)
-        assert s["t_stat"] == pytest.approx(0.2 / (0.1 / (3 ** 0.5)), rel=1e-4)
+        assert s["se"] == pytest.approx(0.1 / (3**0.5), rel=1e-4)
+        assert s["t_stat"] == pytest.approx(0.2 / (0.1 / (3**0.5)), rel=1e-4)
 
     def test_single_date_has_no_se(self):
         s = date_clustered_stats([0.42])
@@ -76,9 +76,11 @@ class TestDateClusteredStats:
 
 # ── Scorer ────────────────────────────────────────────────────────────────────
 
+
 def _scanner_specs():
     champ = SpecHistory(
-        name="champ", kind="champion",
+        name="champ",
+        kind="champion",
         by_date={
             "2026-06-01": SpecDay(ranked=["A", "B", "C", "D"]),
             "2026-06-08": SpecDay(ranked=["A", "B", "C", "D"]),
@@ -86,7 +88,8 @@ def _scanner_specs():
     )
     # challenger inverts the champion order each date.
     chal = SpecHistory(
-        name="chal", kind="challenger",
+        name="chal",
+        kind="challenger",
         by_date={
             "2026-06-01": SpecDay(ranked=["D", "C", "B", "A"]),
             "2026-06-08": SpecDay(ranked=["D", "C", "B", "A"]),
@@ -136,11 +139,13 @@ class TestScoreLeaderboard:
     def test_producer_scores_use_explicit_scores(self):
         # producer specs carry per-ticker scores → rank-IC uses them directly.
         champ = SpecHistory(
-            name="agentic", kind="champion",
+            name="agentic",
+            kind="champion",
             by_date={"2026-06-01": SpecDay(ranked=["A", "B"], scores={"A": 90, "B": 70})},
         )
         chal = SpecHistory(
-            name="quant", kind="challenger",
+            name="quant",
+            kind="challenger",
             by_date={"2026-06-01": SpecDay(ranked=["B", "A"], scores={"B": 88, "A": 60})},
         )
         realized = {"2026-06-01": {"A": 0.10, "B": 0.02}}
@@ -185,9 +190,9 @@ class TestScoreLeaderboard:
 class TestCohortGate:
     def test_unmatured_date_does_not_join(self):
         champ = SpecHistory(
-            name="c", kind="champion",
-            by_date={"2026-06-01": SpecDay(ranked=["A", "B"]),
-                     "2026-06-08": SpecDay(ranked=["A", "B"])},
+            name="c",
+            kind="champion",
+            by_date={"2026-06-01": SpecDay(ranked=["A", "B"]), "2026-06-08": SpecDay(ranked=["A", "B"])},
         )
         # only the first date has realized returns (second hasn't matured).
         realized = {"2026-06-01": {"A": 0.05, "B": -0.01}}
@@ -199,7 +204,8 @@ class TestCohortGate:
 
     def test_no_realized_yields_null_metrics(self):
         champ = SpecHistory(
-            name="c", kind="champion",
+            name="c",
+            kind="champion",
             by_date={"2026-06-08": SpecDay(ranked=["A", "B"])},
         )
         lb = score_leaderboard(champ, [], {})  # nothing matured
@@ -208,6 +214,7 @@ class TestCohortGate:
 
 
 # ── S3 producers (moto) ───────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def s3():
@@ -221,25 +228,25 @@ def _put_json(s3, key, obj):
     s3.put_object(Bucket=_BUCKET, Key=key, Body=json.dumps(obj).encode())
 
 
-def _put_closes(s3, date_str, closes: dict):
-    import io
-
-    import pandas as pd
-
-    df = pd.DataFrame({"ticker": list(closes), "close": list(closes.values())})
-    buf = io.BytesIO()
-    df.to_parquet(buf, engine="pyarrow", index=False)
-    s3.put_object(Bucket=_BUCKET, Key=f"staging/daily_closes/{date_str}.parquet",
-                  Body=buf.getvalue())
+# Closes are no longer seeded into S3 (alpha-engine-config-I5195). The scorer
+# reads its panel from the DURABLE ArcticDB store via an injectable loader, so
+# these tests build a panel in memory and pass it as `closes_panel_loader`.
+# Seeding `staging/daily_closes/` here would test a source production no longer
+# uses — and that prefix's 7-day expiry vs a 21-session horizon was the defect.
 
 
-def _seed_horizon_calendar(s3, entry_dates: Iterable[str], horizon: int):
-    """Put empty placeholder closes for enough trading dates after each entry so
-    the horizon resolves (the join only reads entry + horizon-date closes)."""
-    # use a simple incrementing calendar of weekday-ish strings.
-    extra = [f"2026-07-{d:02d}" for d in range(1, horizon + 5)]
-    for d in extra:
-        _put_closes(s3, d, {"A": 1.0, "B": 1.0, "C": 1.0, "D": 1.0})
+class _Panel:
+    """Builds `{date: {ticker: close}}` and hands it back as a loader."""
+
+    def __init__(self):
+        self.panel: dict[str, dict[str, float]] = {}
+
+    def put(self, date_str: str, closes: dict) -> _Panel:
+        self.panel.setdefault(date_str, {}).update({t: float(c) for t, c in closes.items()})
+        return self
+
+    def loader(self):
+        return lambda bucket, entry_dates, horizon_days, symbols=None: self.panel
 
 
 class TestScannerLeaderboardProducer:
@@ -248,20 +255,25 @@ class TestScannerLeaderboardProducer:
 
         # live champion candidates + one shadow challenger for one cohort date.
         entry = "2026-06-01"
-        _put_json(s3, f"candidates/{entry}/candidates.json",
-                  {"scanner_tickers": ["A", "B", "C", "D"]})
-        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
-                  {"scanner_tickers": ["D", "C", "B", "A"]})
+        _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": ["A", "B", "C", "D"]})
+        _put_json(
+            s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json", {"scanner_tickers": ["D", "C", "B", "A"]}
+        )
 
         # daily_closes: entry-date closes + a matured horizon close 21 sessions on.
-        _put_closes(s3, entry, {"A": 100, "B": 100, "C": 100, "D": 100})
+        panel = _Panel().put(entry, {"A": 100, "B": 100, "C": 100, "D": 100})
         # 21 trading dates after entry (use July placeholders); the 21st is horizon.
-        horizon_dates = [f"2026-07-{d:02d}" for d in range(1, 25)]
-        for d in horizon_dates:
+        for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
             # A rises most, D falls — champion order tracks returns.
-            _put_closes(s3, d, {"A": 110, "B": 105, "C": 100, "D": 95})
+            panel.put(d, {"A": 110, "B": 105, "C": 100, "D": 95})
 
-        res = build_scanner_leaderboard(s3, _BUCKET, "2026-06-27", top_n=2)
+        res = build_scanner_leaderboard(
+            s3,
+            _BUCKET,
+            "2026-06-27",
+            top_n=2,
+            closes_panel_loader=panel.loader(),
+        )
         assert res["status"] == "ok"
         assert res["key"] == "scanner/leaderboard/2026-06-27.json"
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
@@ -278,13 +290,26 @@ class TestScannerLeaderboardProducer:
         from scoring.leaderboard_producers import build_scanner_leaderboard
 
         entry = "2026-06-20"
-        _put_json(s3, f"candidates/{entry}/candidates.json",
-                  {"scanner_tickers": ["A", "B"]})
-        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
-                  {"scanner_tickers": ["B", "A"]})
-        _put_closes(s3, entry, {"A": 100, "B": 100})  # no horizon close → no join
+        _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": ["A", "B"]})
+        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json", {"scanner_tickers": ["B", "A"]})
+        # A CAPABLE source (ArcticDB holds years) in which THIS cohort simply
+        # has not matured: 5 sessions after entry, horizon 21. That is the
+        # honest "fresh date" state and must stay `ok` — distinct from an
+        # unmeasurable source (alpha-engine-config-I5195). Seeding only the
+        # entry date, as this fixture once did, is indistinguishable from a
+        # 1-session retention window and no longer represents reality.
+        panel = _Panel().put(entry, {"A": 100, "B": 100})
+        for d in [f"2026-05-{d:02d}" for d in range(1, 21)]:  # history before entry
+            panel.put(d, {"A": 100, "B": 100})
+        for d in [f"2026-06-{d:02d}" for d in range(21, 26)]:  # only 5 sessions after
+            panel.put(d, {"A": 101, "B": 101})
 
-        res = build_scanner_leaderboard(s3, _BUCKET, "2026-06-27")
+        res = build_scanner_leaderboard(
+            s3,
+            _BUCKET,
+            "2026-06-27",
+            closes_panel_loader=panel.loader(),
+        )
         assert res["status"] == "ok"
         got = res["leaderboard"]
         assert got["n_dates"] == 0
@@ -301,8 +326,7 @@ class TestScannerLeaderboardProducer:
                 raise RuntimeError("AccessDenied")
 
         alerts = []
-        monkeypatch.setattr(lp, "publish_observe_alert",
-                            lambda message, **kw: alerts.append((message, kw)) or True)
+        monkeypatch.setattr(lp, "publish_observe_alert", lambda message, **kw: alerts.append((message, kw)) or True)
 
         res = lp.build_scanner_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
         assert res["status"] == "error"
@@ -326,27 +350,48 @@ class TestProducerLeaderboardProducer:
         # rather than asserting on the now-retired name. The no-champion-
         # registered CURRENT state is covered separately below.
         standin = ProducerSpec(
-            name="standin_champion", kind="champion", version="v1",
-            description="test standin — not the real registry", build=None,
+            name="standin_champion",
+            kind="champion",
+            version="v1",
+            description="test standin — not the real registry",
+            build=None,
         )
         monkeypatch.setattr("producers.registry.champion_producer", lambda: standin)
 
         entry = "2026-06-01"
         # live champion signals.json + one shadow challenger.
-        _put_json(s3, f"signals/{entry}/signals.json", {"signals": {
-            "A": {"signal": "ENTER", "score": 90},
-            "B": {"signal": "ENTER", "score": 70},
-            "Z": {"signal": "HOLD", "score": 99},  # excluded (not ENTER)
-        }})
-        _put_json(s3, f"signals_shadow/no_agent_quant/{entry}/signals.json", {"signals": {
-            "B": {"signal": "ENTER", "score": 88},
-            "A": {"signal": "ENTER", "score": 60},
-        }})
-        _put_closes(s3, entry, {"A": 100, "B": 100})
+        _put_json(
+            s3,
+            f"signals/{entry}/signals.json",
+            {
+                "signals": {
+                    "A": {"signal": "ENTER", "score": 90},
+                    "B": {"signal": "ENTER", "score": 70},
+                    "Z": {"signal": "HOLD", "score": 99},  # excluded (not ENTER)
+                }
+            },
+        )
+        _put_json(
+            s3,
+            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            {
+                "signals": {
+                    "B": {"signal": "ENTER", "score": 88},
+                    "A": {"signal": "ENTER", "score": 60},
+                }
+            },
+        )
+        panel = _Panel().put(entry, {"A": 100, "B": 100})
         for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
-            _put_closes(s3, d, {"A": 110, "B": 102})  # A outperforms
+            panel.put(d, {"A": 110, "B": 102})  # A outperforms
 
-        res = build_producer_leaderboard(s3, _BUCKET, "2026-06-27", top_n=1)
+        res = build_producer_leaderboard(
+            s3,
+            _BUCKET,
+            "2026-06-27",
+            top_n=1,
+            closes_panel_loader=panel.loader(),
+        )
         assert res["status"] == "ok"
         assert res["key"] == "research/producer_leaderboard/2026-06-27.json"
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
@@ -370,15 +415,27 @@ class TestProducerLeaderboardProducer:
         from scoring.leaderboard_producers import build_producer_leaderboard
 
         entry = "2026-06-01"
-        _put_json(s3, f"signals_shadow/no_agent_quant/{entry}/signals.json", {"signals": {
-            "A": {"signal": "ENTER", "score": 90},
-            "B": {"signal": "ENTER", "score": 70},
-        }})
-        _put_closes(s3, entry, {"A": 100, "B": 100, "SPY": 100})
+        _put_json(
+            s3,
+            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            {
+                "signals": {
+                    "A": {"signal": "ENTER", "score": 90},
+                    "B": {"signal": "ENTER", "score": 70},
+                }
+            },
+        )
+        panel = _Panel().put(entry, {"A": 100, "B": 100, "SPY": 100})
         for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
-            _put_closes(s3, d, {"A": 110, "B": 102, "SPY": 105})
+            panel.put(d, {"A": 110, "B": 102, "SPY": 105})
 
-        res = build_producer_leaderboard(s3, _BUCKET, "2026-06-27", top_n=1)
+        res = build_producer_leaderboard(
+            s3,
+            _BUCKET,
+            "2026-06-27",
+            top_n=1,
+            closes_panel_loader=panel.loader(),
+        )
         assert res["status"] == "ok"
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
         assert got["champion"] is None
@@ -398,8 +455,7 @@ class TestProducerLeaderboardProducer:
                 raise RuntimeError("AccessDenied")
 
         alerts = []
-        monkeypatch.setattr(lp, "publish_observe_alert",
-                            lambda message, **kw: alerts.append((message, kw)) or True)
+        monkeypatch.setattr(lp, "publish_observe_alert", lambda message, **kw: alerts.append((message, kw)) or True)
 
         res = lp.build_producer_leaderboard(_BoomS3(), _BUCKET, "2026-06-27")
         assert res["status"] == "error"

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
@@ -19,18 +18,17 @@ from nousergon_lib.pillars import QualitativePillarAssessment
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-    invoke_react_with_recovery,
-    invoke_structured_with_validation_retry,
-    is_step_budget_exhausted_sentinel,
-    make_tool_use_repair_hook,
-)
-from agents.langchain_utils import (
     extract_tool_calls as _extract_tool_calls,
 )
 from agents.langchain_utils import (
     get_final_text as _get_final_text,
+)
+from agents.langchain_utils import (
+    invoke_react_with_recovery,
+    invoke_structured_with_validation_retry,
+    is_step_budget_exhausted_sentinel,
+    make_agent_llm,
+    make_tool_use_repair_hook,
 )
 from agents.langchain_utils import (
     serialize_transcript as _serialize_transcript,
@@ -42,9 +40,8 @@ from agents.sector_teams.react_budget import (
     workload_derived_recursion_limit,
 )
 from config import (
-    ANTHROPIC_API_KEY,
     MAX_TOKENS_STRATEGIC,
-    PER_STOCK_MODEL,
+    PER_STOCK_CLASS,
     PILLAR_EMIT_ENABLED,
     QUAL_MAX_ITERATIONS,
 )
@@ -83,6 +80,7 @@ class _QualPillarBatch(BaseModel):
 
     items: list[_QualPillarItem] = Field(default_factory=list)
 
+
 log = logging.getLogger(__name__)
 
 # LangGraph ReAct step budget — DERIVED from the live workload, not a
@@ -103,9 +101,7 @@ def _qual_recursion_limit(n_picks: int, n_tools: int) -> int:
     can research every pick with every tool AND still synthesize its
     assessment.
     """
-    return workload_derived_recursion_limit(
-        n_picks, n_tools, floor_iterations=QUAL_MAX_ITERATIONS
-    )
+    return workload_derived_recursion_limit(n_picks, n_tools, floor_iterations=QUAL_MAX_ITERATIONS)
 
 
 def run_qual_analyst(
@@ -138,21 +134,20 @@ def run_qual_analyst(
     # envelope. ReAct-turn calls (which share this llm instance) are
     # individually small so the higher cap doesn't shift their token
     # cost (Anthropic bills emitted tokens, not the cap).
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=[get_cost_telemetry_callback()],
     )
 
-    tools = create_qual_tools({
-        "prior_theses": prior_theses,
-        "price_data": price_data or {},
-        "episodic_memories": episodic_memories or {},
-        "semantic_memories": semantic_memories or {},
-    })
+    tools = create_qual_tools(
+        {
+            "prior_theses": prior_theses,
+            "price_data": price_data or {},
+            "episodic_memories": episodic_memories or {},
+            "semantic_memories": semantic_memories or {},
+        }
+    )
 
     # Wrap the system prompt in a SystemMessage with content-block
     # cache_control so the (tools + system) prefix caches across the
@@ -161,11 +156,15 @@ def run_qual_analyst(
     # ``graph.llm_cost_tracker`` telemetry — see quant_analyst.py for
     # the full rationale and the 4096-token Haiku-4-5 minimum check.
     system_prompt_text = _build_system_prompt(team_id, market_regime, len(quant_top5))
-    system_prompt = SystemMessage(content=[{
-        "type": "text",
-        "text": system_prompt_text,
-        "cache_control": {"type": "ephemeral"},
-    }])
+    system_prompt = SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": system_prompt_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    )
 
     # ReAct loop only (no response_format). Structured-output extraction
     # is decoupled and runs as ``with_structured_output(include_raw=True)``
@@ -178,6 +177,7 @@ def run_qual_analyst(
     # strict-mode parsing-error contract (lax-mode falls back to empty
     # assessments; strict-mode raises).
     from graph.state_schemas import QualAnalystOutput
+
     # pre_model_hook (config#1065): drop orphan ``tool_use`` turns from the
     # LLM-input view before every ReAct turn — the structural pre-send fix
     # for the intermittent "tool_use without tool_result" 400. See the quant
@@ -190,8 +190,7 @@ def run_qual_analyst(
     )
 
     picks_text = "\n".join(
-        f"  {i+1}. {p['ticker']} (quant_score={p.get('quant_score', '?')}): "
-        f"{p.get('rationale', 'no rationale')}"
+        f"  {i + 1}. {p['ticker']} (quant_score={p.get('quant_score', '?')}): {p.get('rationale', 'no rationale')}"
         for i, p in enumerate(quant_top5)
     )
 
@@ -207,10 +206,7 @@ def run_qual_analyst(
     # PILLAR_EMIT_ENABLED the system prompt loaded is
     # ``qual_analyst_system_pillars`` so metadata names IT, not the
     # legacy template (matches the prompt actually fed to the ReAct loop).
-    _system_prompt_name = (
-        "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED
-        else "qual_analyst_system"
-    )
+    _system_prompt_name = "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED else "qual_analyst_system"
     system_prompt_loaded = load_prompt(_system_prompt_name)
     _ls_metadata = {
         **system_prompt_loaded.langsmith_metadata(),
@@ -222,9 +218,11 @@ def run_qual_analyst(
     # not a fixed constant — see ``_qual_recursion_limit`` (config#1822).
     recursion_limit = _qual_recursion_limit(len(quant_top5), len(tools))
     log.info(
-        "[qual:%s] starting ReAct agent with %d picks, %d tools "
-        "(recursion_limit=%d)",
-        team_id, len(quant_top5), len(tools), recursion_limit,
+        "[qual:%s] starting ReAct agent with %d picks, %d tools (recursion_limit=%d)",
+        team_id,
+        len(quant_top5),
+        len(tools),
+        recursion_limit,
     )
 
     try:
@@ -266,7 +264,9 @@ def run_qual_analyst(
                 "[qual:%s] ReAct loop hit the internal step-budget "
                 "sentinel ('%s') after %d tool calls — treating as "
                 "recursion-limit exhaustion (partial, not error).",
-                team_id, final_text.strip(), len(tool_calls),
+                team_id,
+                final_text.strip(),
+                len(tool_calls),
             )
             return {
                 "team_id": team_id,
@@ -291,15 +291,18 @@ def run_qual_analyst(
                 f"nothing to extract assessments from. tool_calls={len(tool_calls)}"
             )
         structured_llm = llm.with_structured_output(
-            QualAnalystOutput, include_raw=True,
+            QualAnalystOutput,
+            include_raw=True,
         )
-        extract_msg = HumanMessage(content=(
-            "Extract the per-ticker assessments and any additional "
-            "candidate from this analyst's answer into the structured "
-            "schema. Use only what's in the text — do not invent picks. "
-            "If the analyst produced no assessments, return an empty list.\n\n"
-            f"--- ANALYST ANSWER ---\n{final_text}"
-        ))
+        extract_msg = HumanMessage(
+            content=(
+                "Extract the per-ticker assessments and any additional "
+                "candidate from this analyst's answer into the structured "
+                "schema. Use only what's in the text — do not invent picks. "
+                "If the analyst produced no assessments, return an empty list.\n\n"
+                f"--- ANALYST ANSWER ---\n{final_text}"
+            )
+        )
         extract_resp = invoke_structured_with_validation_retry(
             structured_llm,
             [extract_msg],
@@ -309,10 +312,7 @@ def run_qual_analyst(
         parsed: QualAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
         if parsing_error is not None:
-            msg = (
-                f"[qual:{team_id}] structured-output parse failed: "
-                f"{type(parsing_error).__name__}: {parsing_error}"
-            )
+            msg = f"[qual:{team_id}] structured-output parse failed: {type(parsing_error).__name__}: {parsing_error}"
             if is_strict_validation_enabled():
                 raise RuntimeError(msg)
             log.warning("%s — falling back to empty assessments (lax mode)", msg)
@@ -323,9 +323,7 @@ def run_qual_analyst(
         # peer_review consumption (which uses dict-access patterns).
         assessments = [a.model_dump() for a in parsed.assessments]
         additional_candidate = (
-            parsed.additional_candidate.model_dump()
-            if parsed.additional_candidate is not None
-            else None
+            parsed.additional_candidate.model_dump() if parsed.additional_candidate is not None else None
         )
 
         # ── Pillar-assessment emission (Phase 2 of pillars arc, gated) ──
@@ -347,7 +345,10 @@ def run_qual_analyst(
 
         log.info(
             "[qual:%s] completed — %d assessments, %d tool calls, %d pillar",
-            team_id, len(assessments), len(tool_calls), len(pillar_assessments),
+            team_id,
+            len(assessments),
+            len(tool_calls),
+            len(pillar_assessments),
         )
 
         return {
@@ -374,7 +375,8 @@ def run_qual_analyst(
             "[qual:%s] recursion budget (%d transitions) exhausted before "
             "stop condition — accepting partial result (0 assessments). "
             "score_aggregator will proceed with this team excluded.",
-            team_id, recursion_limit,
+            team_id,
+            recursion_limit,
         )
         return {
             "team_id": team_id,
@@ -416,10 +418,7 @@ def _build_system_prompt(team_id: str, market_regime: str, n_picks: int) -> str:
     moat-archetype taxonomy so the agent's reasoning surfaces the
     decomposed signal cleanly for the second extraction call.
     """
-    prompt_name = (
-        "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED
-        else "qual_analyst_system"
-    )
+    prompt_name = "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED else "qual_analyst_system"
     return load_prompt(prompt_name).format(
         team_title=team_id.title(),
         n_picks=n_picks,
@@ -449,23 +448,26 @@ def _extract_pillar_assessments(
     decomposition. Strict-mode raises ``RuntimeError`` on parse failure.
     """
     structured_llm = llm.with_structured_output(
-        _QualPillarBatch, include_raw=True,
+        _QualPillarBatch,
+        include_raw=True,
     )
-    extract_msg = HumanMessage(content=(
-        "Extract a per-ticker pillar decomposition from this analyst's "
-        "answer. For EACH ticker the analyst assessed, produce a "
-        "QualitativePillarAssessment with subscores on the 6 pillars "
-        "(quality, value, momentum, growth, stewardship, defensiveness), "
-        "a structured MoatAssessment for the Quality pillar, and a "
-        "catalyst_horizon_modulation ∈ [-20, 20] for any near-term "
-        "catalyst effect. Use ONLY what's in the text — do not invent "
-        "pillar evidence the analyst did not surface. If the analyst's "
-        "reasoning doesn't support a pillar score, score it 50 (neutral) "
-        "with confidence 'low' and an evidence list explaining the "
-        "absence. If no tickers were assessed, return an empty items "
-        "list.\n\n"
-        f"--- ANALYST ANSWER ---\n{final_text}"
-    ))
+    extract_msg = HumanMessage(
+        content=(
+            "Extract a per-ticker pillar decomposition from this analyst's "
+            "answer. For EACH ticker the analyst assessed, produce a "
+            "QualitativePillarAssessment with subscores on the 6 pillars "
+            "(quality, value, momentum, growth, stewardship, defensiveness), "
+            "a structured MoatAssessment for the Quality pillar, and a "
+            "catalyst_horizon_modulation ∈ [-20, 20] for any near-term "
+            "catalyst effect. Use ONLY what's in the text — do not invent "
+            "pillar evidence the analyst did not surface. If the analyst's "
+            "reasoning doesn't support a pillar score, score it 50 (neutral) "
+            "with confidence 'low' and an evidence list explaining the "
+            "absence. If no tickers were assessed, return an empty items "
+            "list.\n\n"
+            f"--- ANALYST ANSWER ---\n{final_text}"
+        )
+    )
     extract_resp = invoke_structured_with_validation_retry(
         structured_llm,
         [extract_msg],
@@ -486,17 +488,11 @@ def _extract_pillar_assessments(
         # is the per-ticker safety net for missing-input cases this raise
         # WOULDN'T have caught (e.g. factor_profile absent on a held
         # stock with no pillar_assessment).
-        msg = (
-            f"[qual:{team_id}] pillar-assessment parse failed: "
-            f"{type(parsing_error).__name__}: {parsing_error}"
-        )
+        msg = f"[qual:{team_id}] pillar-assessment parse failed: {type(parsing_error).__name__}: {parsing_error}"
         raise RuntimeError(msg)
     # Internal type-narrowing assert, not a security boundary (config#2532).
     assert parsed is not None  # noqa: S101
-    return {
-        item.ticker: item.pillar_assessment.model_dump()
-        for item in parsed.items
-    }
+    return {item.ticker: item.pillar_assessment.model_dump() for item in parsed.items}
 
 
 # Cap the analyst's prose answer persisted into the decision artifact for

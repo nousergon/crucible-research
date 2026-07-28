@@ -61,6 +61,7 @@ def _find_config(filename: str, subdir: str = "research") -> Path:
         ),
     )
 
+
 _CONFIG_PATH = _find_config("universe.yaml")
 _SCORING_CFG_PATH = _find_config("scoring.yaml")
 
@@ -271,9 +272,7 @@ PILLAR_COMPOSITE_WEIGHTS: dict[str, float] = {
     "defensiveness": float(_PILLAR_WEIGHTS_CFG.get("defensiveness", 0.0)),
 }
 _WITHIN_PILLAR_CFG: dict = _PILLAR_COMPOSITE_CFG.get("within_pillar", {})
-PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT: float = float(
-    _WITHIN_PILLAR_CFG.get("qual_weight", 0.5)
-)
+PILLAR_COMPOSITE_WITHIN_PILLAR_QUAL_WEIGHT: float = float(_WITHIN_PILLAR_CFG.get("qual_weight", 0.5))
 _LEGACY_BLEND_CFG: dict = _PILLAR_COMPOSITE_CFG.get("legacy_blend", {})
 PILLAR_COMPOSITE_LEGACY_BLEND: dict[str, float] = {
     "w_legacy_quant": float(_LEGACY_BLEND_CFG.get("w_legacy_quant", 0.35)),
@@ -361,12 +360,8 @@ FOCUS_LIST_PER_TEAM_SIZE_OVERRIDES: dict[str, int] = {
 # Loaded from scoring.yaml `aggregator.regime_pick_gate`.
 _REGIME_PICK_GATE_CFG: dict = _AGGREGATOR_CFG.get("regime_pick_gate", {})
 SECTOR_REGIME_PICK_GATE_ENABLED: bool = bool(_REGIME_PICK_GATE_CFG.get("enabled", False))
-SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE: float = float(
-    _REGIME_PICK_GATE_CFG.get("base_min_score", 0.0)
-)
-SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE: float = float(
-    _REGIME_PICK_GATE_CFG.get("intensity_scale", 8.0)
-)
+SECTOR_REGIME_PICK_GATE_BASE_MIN_SCORE: float = float(_REGIME_PICK_GATE_CFG.get("base_min_score", 0.0))
+SECTOR_REGIME_PICK_GATE_INTENSITY_SCALE: float = float(_REGIME_PICK_GATE_CFG.get("intensity_scale", 8.0))
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
 SCANNER_CFG: dict = _cfg["scanner"]
@@ -442,14 +437,10 @@ if CIO_MIN_NEW_ENTRANTS < 0 or CIO_MAX_NEW_ENTRANTS < CIO_MIN_NEW_ENTRANTS:
 # bar). Quality gate so a saturated week never injects a sub-bar name — net-new
 # stays below floor and the tripwire fires instead. Set very high (e.g. 101) to
 # disable forcing entirely (pure tripwire).
-CIO_FORCE_FILL_CONVICTION_FLOOR: float = float(
-    _cio_cfg.get("force_fill_conviction_floor", 60)
-)
+CIO_FORCE_FILL_CONVICTION_FLOOR: float = float(_cio_cfg.get("force_fill_conviction_floor", 60))
 # Below this many net-new entrants in a week, emit a loud tripwire (WARN + CW
 # metric) — a saturated/0-add week is defensible but must be visible.
-CIO_NEW_ENTRANT_ALERT_FLOOR: int = int(
-    _cio_cfg.get("new_entrant_alert_floor", CIO_MIN_NEW_ENTRANTS)
-)
+CIO_NEW_ENTRANT_ALERT_FLOOR: int = int(_cio_cfg.get("new_entrant_alert_floor", CIO_MIN_NEW_ENTRANTS))
 # De-blended CIO orchestration (L4564): when enabled, the CIO ranks on a
 # deterministic SECTOR-NEUTRAL stock-quality score (rubric's per-sector bias
 # stripped in code) and weighs the sector tilt as a SEPARATE lever — instead
@@ -476,8 +467,48 @@ CIO_CRITIC_ENABLED: bool = (
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]
-PER_STOCK_MODEL: str = LLM_CFG["per_stock_model"]
-STRATEGIC_MODEL: str = LLM_CFG["strategic_model"]
+# Capability CLASSES, not concrete models. A model id in consumer config is a
+# selection fact living outside the registry (model-portability-policy I1).
+_DEFAULT_CLASS_FOR = {"per_stock_class": "low", "strategic_class": "med"}
+
+
+def _resolve_class(key: str) -> str:
+    return str(LLM_CFG.get(key, _DEFAULT_CLASS_FOR[key]))
+
+
+PER_STOCK_CLASS: str = _resolve_class("per_stock_class")
+STRATEGIC_CLASS: str = _resolve_class("strategic_class")
+
+# Endpoint that resolves a class name. A deployment fact, not a selection one.
+#
+# UNSET IS THE DEFAULT, AND IT MEANS DIRECT MODE. An empty value routes
+# make_agent_llm() back to a direct Anthropic client using the concrete
+# *_MODEL ids below — byte-identical to pre-migration behaviour. This makes
+# the migration opt-in per deployment rather than flag-day.
+#
+# It is deliberately NOT defaulted to 127.0.0.1:8980. Only the laptop and the
+# dashboard box run a local router; Lambda and the EC2 canary box cannot reach
+# localhost at all, so a localhost default is wrong for most of the fleet and
+# fails as a connection error at call time rather than at config load.
+ROUTER_BASE_URL: str = str(LLM_CFG.get("router_base_url", "") or "")
+ROUTER_KEY_SECRET: str = str(LLM_CFG.get("router_key_secret", "LITELLM_MASTER_KEY"))
+
+# Concrete model ids for DIRECT mode and for the call sites still talking to
+# Anthropic by hand (ic_cio, canary_replay — held back per policy section 8).
+#
+# These MUST stay real model ids. An earlier revision of this change aliased
+# them onto the class names; every un-migrated ChatAnthropic(model=...) site
+# then sent the literal string "low" to Anthropic and got a 404. Caught by the
+# canary replay probe, which is exactly the failure it exists to catch.
+PER_STOCK_MODEL: str = str(LLM_CFG.get("per_stock_model", "claude-haiku-4-5-20251001"))
+STRATEGIC_MODEL: str = str(LLM_CFG.get("strategic_model", "claude-sonnet-4-6"))
+
+# Class -> concrete model, for direct mode only. In router mode the registry
+# owns this mapping and this table is unused.
+DIRECT_MODEL_FOR_CLASS: dict[str, str] = {
+    PER_STOCK_CLASS: PER_STOCK_MODEL,
+    STRATEGIC_CLASS: STRATEGIC_MODEL,
+}
 MAX_TOKENS_PER_STOCK: int = LLM_CFG["max_tokens_per_stock"]
 MAX_TOKENS_STRATEGIC: int = LLM_CFG["max_tokens_strategic"]
 CONCURRENT_AGENTS: int = LLM_CFG["concurrent_agents"]
@@ -503,14 +534,22 @@ PRIOR_REPORT_MAX_CHARS: int = int(_thesis_cfg.get("prior_report_max_chars", 2000
 REGIME_GUARDRAILS: dict = _cfg.get("regime_guardrails", {})
 
 # ── Scoring / staleness ───────────────────────────────────────────────────────
-STALENESS_THRESHOLD_DAYS: int = 5       # flag if score unchanged >= this many trading days
+STALENESS_THRESHOLD_DAYS: int = 5  # flag if score unchanged >= this many trading days
 MATERIAL_SCORE_CHANGE_MIN: float = 3.0  # minimum point change to reset last_material_change_date
 
 # ── All tracked tickers in a run (universe + up to 3 candidates) ──────────────
 ALL_SECTORS: list[str] = [
-    "Technology", "Healthcare", "Financial", "Consumer Discretionary",
-    "Consumer Staples", "Energy", "Industrials", "Materials",
-    "Real Estate", "Utilities", "Communication Services",
+    "Technology",
+    "Healthcare",
+    "Financial",
+    "Consumer Discretionary",
+    "Consumer Staples",
+    "Energy",
+    "Industrials",
+    "Materials",
+    "Real Estate",
+    "Utilities",
+    "Communication Services",
 ]
 
 # ── Sector Teams ──────────────────────────────────────────────────────────────
@@ -600,9 +639,13 @@ _research_params_cache: dict | None = None
 WEEKLY_CONFIG_STALE_HOURS = 24 * 7 * 2
 
 
-def check_s3_pointer_staleness(last_modified: datetime | None, s3_key: str,
-                               *, max_age_hours: float = WEEKLY_CONFIG_STALE_HOURS,
-                               logger: logging.Logger | None = None) -> None:
+def check_s3_pointer_staleness(
+    last_modified: datetime | None,
+    s3_key: str,
+    *,
+    max_age_hours: float = WEEKLY_CONFIG_STALE_HOURS,
+    logger: logging.Logger | None = None,
+) -> None:
     """Best-effort WARN when a weekly-tuned S3 config pointer's
     ``last_modified`` is older than ``max_age_hours`` (config#2891). Never
     raises, never blocks the caller — a stale-signal degradation, not a gate."""
@@ -615,7 +658,9 @@ def check_s3_pointer_staleness(last_modified: datetime | None, s3_key: str,
             "STALE %s: last modified %.1fh ago (> %.0fh / 2 weekly cycles) — "
             "the Saturday Evaluator may have silently failed or stalled; "
             "this consumer may be running on a stale tuned config (config#2891)",
-            s3_key, age_hours, max_age_hours,
+            s3_key,
+            age_hours,
+            max_age_hours,
         )
 
 
@@ -642,7 +687,8 @@ def _load_research_params_from_s3() -> dict | None:
         if params:
             _logger.info(
                 "Research params loaded from S3 (updated %s): %s",
-                data.get("updated_at", "unknown"), params,
+                data.get("updated_at", "unknown"),
+                params,
             )
             try:
                 with open(_RESEARCH_PARAMS_CACHE_PATH, "w") as f:
@@ -658,9 +704,12 @@ def _load_research_params_from_s3() -> dict | None:
     try:
         if os.path.exists(_RESEARCH_PARAMS_CACHE_PATH):
             import time
+
             cache_age_hours = (time.time() - os.path.getmtime(_RESEARCH_PARAMS_CACHE_PATH)) / 3600
             if cache_age_hours > 168:  # 7 days
-                _logger.warning("Research params cache is %.0fh old (>7d) — using YAML defaults instead", cache_age_hours)
+                _logger.warning(
+                    "Research params cache is %.0fh old (>7d) — using YAML defaults instead", cache_age_hours
+                )
                 return None
             if cache_age_hours > 24:
                 _logger.warning("Research params cache is %.0fh old — may be stale", cache_age_hours)
@@ -705,9 +754,7 @@ _FACTOR_BLEND_PARAMS_CACHE_PATH = os.environ.get(
 )
 
 # YAML cold-start default — the regime weights parsed from scoring.yaml above.
-_FB_REGIME_DEFAULTS: dict = {
-    regime: dict(weights) for regime, weights in FACTOR_BLEND_REGIME_WEIGHTS.items()
-}
+_FB_REGIME_DEFAULTS: dict = {regime: dict(weights) for regime, weights in FACTOR_BLEND_REGIME_WEIGHTS.items()}
 
 _factor_blend_regime_cache: dict | None = None
 
@@ -747,9 +794,7 @@ def _load_factor_blend_regime_weights_from_s3() -> dict | None:
         if os.path.exists(_FACTOR_BLEND_PARAMS_CACHE_PATH):
             import time
 
-            cache_age_hours = (
-                time.time() - os.path.getmtime(_FACTOR_BLEND_PARAMS_CACHE_PATH)
-            ) / 3600
+            cache_age_hours = (time.time() - os.path.getmtime(_FACTOR_BLEND_PARAMS_CACHE_PATH)) / 3600
             if cache_age_hours > 168:  # 7 days
                 _logger.warning(
                     "Factor-blend params cache is %.0fh old (>7d) — using YAML defaults",
@@ -791,6 +836,7 @@ def get_factor_blend_regime_weights() -> dict:
 
 # Convenience accessors — these call get_research_params() lazily, so they
 # always reflect S3 overrides once the first access triggers the load.
+
 
 def rp(key: str):
     """Get a single research param by key."""
@@ -836,14 +882,14 @@ def get_scanner_params() -> dict:
 
     try:
         import boto3
+
         bucket = os.environ.get("RESEARCH_BUCKET", S3_BUCKET)
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=_SCANNER_PARAMS_S3_KEY)
         data = json.loads(obj["Body"].read())
         params = {k: data[k] for k in _SP_DEFAULTS if k in data}
         if params:
-            _logger.info("Scanner params from S3 (updated %s): %s",
-                         data.get("updated_at", "unknown"), params)
+            _logger.info("Scanner params from S3 (updated %s): %s", data.get("updated_at", "unknown"), params)
             try:
                 with open(_SCANNER_PARAMS_CACHE_PATH, "w") as f:
                     json.dump(params, f, indent=2)

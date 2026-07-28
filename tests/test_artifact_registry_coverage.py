@@ -122,6 +122,19 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # has run once (register-with-or-after-producer). Single PUT site (loop over
     # dated + latest keys in write_universe_board_to_s3).
     "scoring/universe_board.py": 1,
+    # Cut-membership SSoT (universe_membership/{date}/membership.json + latest)
+    # — alpha-engine-config-I4818. LOAD-BEARING, unlike the board above: the
+    # predictor resolves its DAILY scoring universe from this artifact, so its
+    # write is NOT fail-soft and its absence is not a degraded panel. ARTIFACT_
+    # REGISTRY row + freshness SLA filed with the producer (register-with-or-
+    # after-producer). Single PUT site (loop over dated + latest keys in
+    # write_universe_membership_to_s3).
+    "scoring/universe_membership.py": 1,
+    # One-time historical backfill of the membership artifact. Writes the DATED
+    # key only (never the latest pointer the predictor resolves from) — an
+    # operator-invoked reconstruction script, not a pipeline producer, hence no
+    # ARTIFACT_REGISTRY row of its own beyond the producer's.
+    "scripts/backfill_universe_membership.py": 1,
     # Per-stock attractiveness HISTORY parquet
     # (scanner/universe/history/attractiveness_history.parquet) + the weekly
     # TRAJECTORY signal (scanner/universe/trajectory/{date}.json + latest).
@@ -197,6 +210,13 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # ARTIFACT_REGISTRY row (severity: critical); this producer is a second
     # implementation of that same registered artifact, not a new one.
     "scoring/signals_envelope.py": 1,
+    # RAG retrieval capture for domain-finetune label mining (config-I736) —
+    # writes decision_artifacts/_rag_retrieval/{trading_day}/{ticker}/
+    # {run_id}.json, gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED.
+    # Distillation training data accumulation stream, NOT a load-bearing
+    # freshness-SLA artifact with a daily consumer — per-file PUT pin only,
+    # same rationale as graph/llm_cost_tracker.py (_cost_raw/_sft_raw).
+    "agents/sector_teams/qual_tools.py": 1,
 }
 
 
@@ -213,9 +233,13 @@ def _enumerate_put_sites() -> dict[str, int]:
     """Return ``{relative_path: count}`` of production files with PUT sites."""
     result = subprocess.run(
         [
-            "git", "grep", "-l", "-E",
+            "git",
+            "grep",
+            "-l",
+            "-E",
             r"(put_object|upload_file)\(",
-            "--", "*.py",
+            "--",
+            "*.py",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -223,7 +247,8 @@ def _enumerate_put_sites() -> dict[str, int]:
         check=True,
     )
     files = [
-        line for line in result.stdout.splitlines()
+        line
+        for line in result.stdout.splitlines()
         if line and not any(line.startswith(p) for p in _SCAN_EXEMPT_PREFIXES)
     ]
     counts: dict[str, int] = {}
