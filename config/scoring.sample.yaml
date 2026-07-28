@@ -78,9 +78,13 @@ technical:
   # Default (empty) preserves sector-agnostic behaviour.
   composite_weights_per_sector: {}
 
-  predictor_enrichment:
-    confidence_gate: 0.60
-    max_adjustment: 10.0
+  # `predictor_enrichment` was REMOVED (alpha-engine-config-I4983). It nudged
+  # tech_score by the predictor's own p_up/p_down, but nothing ever populated
+  # those keys, so the branch never fired — and had it fired it would have
+  # closed a feedback loop: predictor -> tech_score -> scanner cut -> the
+  # predictor's own universe. tech_score is price/volume indicators ONLY.
+  # The consuming code is gone, so any leftover key in the private live
+  # scoring.yaml is inert. Do not reintroduce.
 
 aggregator:
   macro_modifier_range: 0.30

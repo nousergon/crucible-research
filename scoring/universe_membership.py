@@ -33,9 +33,14 @@ Cuts emitted (each carries ``basis`` = how membership was decided):
 
   ``scanner_candidates``     the scanner's own gate cut — the tickers in
                              ``candidates.json::scanner_tickers`` verbatim.
-                             basis=``scanner_gate``. This is the cut the
-                             predictor's universe resolves from.
-  ``attractiveness_top_25``  top 25 by cross-sectional attractiveness rank.
+                             basis=``scanner_gate``. A ``tech_score`` momentum
+                             ranking, NOT an alpha ranking; retained as the
+                             incumbent challenger arm and as the churn baseline.
+  ``attractiveness_top_20``  top 20 by cross-sectional attractiveness rank.
+                             **This is the cut the predictor resolves from**
+                             (alpha-engine-config-I4983) — see
+                             ``PREDICTOR_UNIVERSE_CUT`` below for why.
+  ``attractiveness_top_25``  top 25 by the same rank.
   ``attractiveness_top_60``  top 60 by the same rank — count-matched to the
                              scanner cut so the two are directly comparable
                              (the comparison is the point: the ranking is
@@ -61,7 +66,7 @@ Schema::
     "run_date": "YYYY-MM-DD",
     "generated_at": "ISO-8601 UTC",
     "universe_count": int,             # names with a rankable attractiveness score
-    "predictor_universe_cut": "scanner_candidates",   # names the cut the predictor resolves from
+    "predictor_universe_cut": "attractiveness_top_20",  # names the cut the predictor resolves from
     "cuts": {
       "<cut_name>": {
         "basis": "scanner_gate" | "attractiveness_rank",
@@ -99,13 +104,40 @@ PRODUCER = "crucible-research/scoring/universe_membership.py"
 # artifact (``predictor_universe_cut``) rather than hardcoded on the consumer
 # side, so changing which cut drives inference is a producer-side, versioned,
 # reviewable decision — not a silent constant edit in another repo.
-PREDICTOR_UNIVERSE_CUT = "scanner_candidates"
+#
+# alpha-engine-config-I4983 (Brian, 2026-07-28): moved from ``scanner_candidates``
+# to ``attractiveness_top_20``. Three reasons, in order of weight:
+#
+#  1. The gate cut is a MOMENTUM ranking, not an alpha ranking. It is
+#     ``tech_score`` top-N (RSI / MACD / MA50 / MA200 / 20d momentum, equally
+#     weighted) plus the 10 most-oversold-by-RSI — no fundamentals at all. On
+#     the 2026-07-24 cycle its median name ranked 598 of 897 on attractiveness,
+#     with 39 of 60 in the BOTTOM HALF of the universe. Attractiveness is the
+#     6-pillar composite (quality/value/momentum/growth/stewardship/
+#     defensiveness) in which momentum is one input of six.
+#  2. §43: a hard gate must not double as alpha selection. Measured cost of the
+#     conflation: 21d scanner recall 3.9% (150 TP vs 3,732 FN), filter lift
+#     −0.68% — the survivor set both misses ~96% of winners and underperforms
+#     the universe mean.
+#  3. The gate cut has no persistent core — 42% week-over-week retention and
+#     ZERO names present across all 9 measured cycles, against 76%/18 for a
+#     count-matched rank cut (EXPERIMENTS.md 2026-07-27). It is a weekly
+#     re-draw, not a watchlist.
+#
+# The attractiveness re-ranking this restores was built under config-I1400/I1407
+# but spliced into the multi-agent graph, so it was orphaned when that layer was
+# retired as champion (config#1580) — see alpha-engine-config-I4980.
+PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
 
 # Attractiveness-rank cuts emitted every cycle. 60 is count-matched to the
 # scanner's ``momentum_top_n`` so scanner-cut-vs-rank-cut is an apples-to-apples
 # comparison; 25 matches the size of the retired tracked population so the
-# historical series stays interpretable across the producer change.
-_RANK_CUTS = (25, 60)
+# historical series stays interpretable across the producer change; 20 is the
+# live champion width, count-matched to Think Tank's ``CHALLENGER_TOP_N`` so all
+# three champion/challenger arms are directly comparable at equal size (an arm's
+# win must not be confounded between selection rule and breadth — the
+# count-matched framing is what made the churn finding legible at all).
+_RANK_CUTS = (20, 25, 60)
 
 _DEFAULT_BUCKET = "alpha-engine-research"
 
