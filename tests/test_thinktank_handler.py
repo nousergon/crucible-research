@@ -292,3 +292,109 @@ class TestDeadlineWiring:
         assert any("TRUNCATED" in r.message for r in caplog.records), (
             "a deadline-truncated run must surface at ERROR, not blend into INFO"
         )
+
+
+class TestDailyRunNotification:
+    """One notification per Think Tank run — success or degraded.
+
+    alpha-engine-config-I5208. The FAILURE side of this already existed and
+    worked: the freshness monitor detected `thinktank_challenger_selection`
+    missing, escalated warning->critical after 3 sweeps, and paged Telegram
+    daily from ~2026-07-21. What did NOT exist is a positive "it ran" signal —
+    and a dead component is only distinguishable from a healthy one by its
+    absence, which is exactly the signal that got lost among 4 other
+    chronically-stale artifacts paging on the same channel.
+    """
+
+    def test_clean_run_pings_at_info(self, handler_mod):
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+        _mf.ratings_rows = 42
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        assert alert.call_count == 1
+        kw = alert.call_args.kwargs
+        assert kw["severity"] == "INFO"
+        assert "ok" in alert.call_args.args[0]
+
+    def test_truncated_run_pings_at_warn_and_says_why(self, handler_mod):
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = True
+        _mf.deadline_skipped_new = ["AAPL", "MSFT"]
+        _mf.deadline_skipped_refresh = []
+        _mf.deadline_skipped_sweep = True
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        msg = alert.call_args.args[0]
+        assert alert.call_args.kwargs["severity"] == "WARN"
+        assert "DEGRADED" in msg and "deadline-truncated" in msg
+
+    def test_missing_challenger_selection_is_called_out(self, handler_mod):
+        """The specific failure that started this arc — the leaderboard arm
+        going blind — must be named, not folded into a generic 'degraded'."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = False
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        msg = alert.call_args.args[0]
+        assert alert.call_args.kwargs["severity"] == "WARN"
+        assert "leaderboard arm is blind" in msg
+
+    def test_dedup_key_is_one_ping_per_trading_day_and_mode(self, handler_mod):
+        """Async retries produced 3-21 invocations/day during the outage. A
+        retry storm must not become a notification storm."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+        _mf.trading_day = "2026-07-28"
+        _mf.mode = "daily"
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert") as alert,
+        ):
+            handler_mod.handler({}, None)
+
+        assert alert.call_args.kwargs["dedup_key"] == "thinktank_daily:2026-07-28:daily"
+
+    def test_notification_failure_never_breaks_the_run(self, handler_mod):
+        """Secondary observability on a path that already did its real work."""
+        _mf = _manifest_mock()
+        _mf.deadline_truncated = False
+        _mf.challenger_selection_written = True
+        _mf.errors = []
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("thinktank.run.run_daily", return_value=_mf),
+            patch("observe_alerts.publish_observe_alert", side_effect=RuntimeError("sns down")),
+        ):
+            result = handler_mod.handler({}, None)
+
+        assert result["status"] == "OK"
