@@ -267,7 +267,7 @@ def test_answer_question_skips_llm_when_no_evidence(conn):
 
     result = answer_question(conn, "GHOST", "why not?", llm_fn=fake_llm)
     assert result["llm_called"] is False
-    assert result["model"] is None
+    assert result["model_class"] is None
     assert calls == []  # no LLM call when nothing is recorded
     assert "No decision evidence" in result["answer"]
 
@@ -283,11 +283,11 @@ def test_answer_question_calls_llm_with_evidence(conn):
         return "Ranked #11 (quant_score 47); the team recommended higher-scoring names."
 
     result = answer_question(
-        conn, "msft", "why didn't the team pick it?", model="claude-test",
+        conn, "msft", "why didn't the team pick it?", model_class="claude-test",
         llm_fn=fake_llm,
     )
     assert result["llm_called"] is True
-    assert result["model"] == "claude-test"
+    assert result["model_class"] == "claude-test"
     assert result["ticker"] == "MSFT"
     assert "Ranked #11" in result["answer"]
     assert "47" in captured["user"]  # evidence was passed to the model

@@ -78,19 +78,18 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
         logger.info("[memory_extractor] no new failed signals to process")
         return 0
 
-    from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
 
-    from config import ANTHROPIC_API_KEY, PER_STOCK_MODEL
-    from graph.llm_cost_tracker import get_cost_telemetry_callback
+    from agents.langchain_utils import make_agent_llm
+    from config import PER_STOCK_CLASS
 
-    # Wire to cost-telemetry stream — see memory/semantic.py for the
-    # rationale (Phase 0.2 of the cost-optimization workstream).
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    # Cost telemetry is wired by make_agent_llm internally — see
+    # memory/semantic.py for the rationale (Phase 0.2 of the
+    # cost-optimization workstream).
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=256,
-        callbacks=[get_cost_telemetry_callback()],
+        api_key=api_key,
     )
 
     n_created = 0
