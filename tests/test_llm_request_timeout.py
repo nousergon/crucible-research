@@ -140,16 +140,17 @@ def test_agents_do_not_construct_chat_models_directly():
     # policy section 8 requires a shadow/overlap window for a judge and a
     # recorded re-baseline for a canary.
     #
-    # memory/ and scripts/ are NOT sanctioned — they are tracked follow-ups in
-    # alpha-engine-config-I4459 and listed here so the guard passes today
-    # while still naming them. Removing an entry must make this test fail.
+    # memory/ and scripts/ were tracked follow-ups in
+    # alpha-engine-config-I4459 — migrated off direct construction in the
+    # same issue arc. Removing an entry must make this test fail.
+    #
+    # ic_cio (judge) and canary_replay (canary) are STILL held back:
+    # policy section 8 requires a shadow/overlap window for a judge and a
+    # recorded re-baseline for a canary.
     SANCTIONED = {
         "agents/langchain_utils.py",
         "agents/investment_committee/ic_cio.py",
         "agents/canary_replay.py",
-        "memory/semantic.py",
-        "memory/episodic.py",
-        "scripts/decision_review.py",
     }
     repo_root = _AGENTS_DIR.parent
     skip_dirs = {".git", "__pycache__", ".venv", "venv", "node_modules", "tests"}

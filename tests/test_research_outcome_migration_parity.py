@@ -406,7 +406,10 @@ class TestEpisodicParity:
 
         stub_config = types.ModuleType("config")
         stub_config.ANTHROPIC_API_KEY = "test-key"
-        stub_config.PER_STOCK_MODEL = "claude-haiku"
+        stub_config.PER_STOCK_CLASS = "low"
+        stub_config.DIRECT_MODEL_FOR_CLASS = {"low": "claude-haiku-4-5-20251001"}
+        stub_config.ROUTER_BASE_URL = ""
+        stub_config.ROUTER_KEY_SECRET = "unused"
         monkeypatch.setitem(sys.modules, "config", stub_config)
 
         stub_cost_tracker = types.ModuleType("graph.llm_cost_tracker")
