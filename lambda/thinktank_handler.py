@@ -207,7 +207,69 @@ def handler(event, context):
         manifest.budget_month_spent_usd,
         manifest.budget_month_limit_usd,
     )
+    _notify_run_outcome(manifest)
     return {"status": "OK", "manifest": manifest.model_dump()}
+
+
+def _notify_run_outcome(manifest) -> None:
+    """Publish ONE daily notification per Think Tank run — success or degraded.
+
+    alpha-engine-config-I5208 (Brian, 2026-07-28: "we need a notification when
+    think tank runs for the day - or if it fails").
+
+    Why a SUCCESS ping and not only a failure one: the Think Tank ran dead for
+    ELEVEN DAYS (2026-07-17 -> 2026-07-28) and nothing said so. A failure-only
+    alert cannot catch that class — the run was not raising, it was being killed
+    mid-loop by the runtime, so there was no failure event to fire on. Absence
+    of a daily "ran" ping is a signal a human actually notices; absence of an
+    error is not. This is the same reasoning as a liveness heartbeat.
+
+    Severity ladder:
+      INFO  — clean run, everything persisted
+      WARN  — truncated by deadline (partial coverage persisted) OR the
+              challenger selection did not write (the leaderboard arm is blind
+              for the day, which is the failure that started this arc)
+
+    Never raises: notification is secondary observability on a path that has
+    already done its real work.
+    """
+    from observe_alerts import publish_observe_alert
+
+    try:
+        degraded: list[str] = []
+        if getattr(manifest, "deadline_truncated", False):
+            degraded.append(
+                f"deadline-truncated (skipped {len(manifest.deadline_skipped_new)} new, "
+                f"{len(manifest.deadline_skipped_refresh)} refresh, "
+                f"sweep_skipped={manifest.deadline_skipped_sweep})"
+            )
+        if not getattr(manifest, "challenger_selection_written", False):
+            degraded.append("challenger selection NOT written — the leaderboard arm is blind today")
+        if manifest.errors:
+            degraded.append(f"{len(manifest.errors)} error(s): {'; '.join(manifest.errors[:3])}")
+
+        headline = "DEGRADED" if degraded else "ok"
+        message = (
+            f"[thinktank] daily run {headline} — trading_day={manifest.trading_day} "
+            f"mode={manifest.mode} theses={manifest.theses_written} "
+            f"sweep={manifest.sweep_tickers} ratings_rows={manifest.ratings_rows} "
+            f"cost=${manifest.total_cost_usd:.4f} "
+            f"month=${manifest.budget_month_spent_usd:.2f}/${manifest.budget_month_limit_usd:.2f}"
+        )
+        if degraded:
+            message += " | " + " | ".join(degraded)
+
+        publish_observe_alert(
+            message,
+            source="research:thinktank_daily",
+            # One ping per trading day per mode. A retry storm (async retries on
+            # a timing-out run produced 3-21 invocations/day during the outage)
+            # must not become a notification storm.
+            dedup_key=f"thinktank_daily:{manifest.trading_day}:{manifest.mode}",
+            severity="WARN" if degraded else "INFO",
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary observability, never fatal
+        logger.warning("[thinktank_handler] daily notification failed: %s", exc)
 
 
 def _handle_gap_fill_fanout(mode: str, event: dict) -> dict:
