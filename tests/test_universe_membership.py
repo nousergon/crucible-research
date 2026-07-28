@@ -191,3 +191,100 @@ def test_writes_dated_key_and_latest_sidecar_identically():
     assert set(s3.puts) == {key, "universe_membership/latest.json"}
     assert s3.puts[key] == s3.puts["universe_membership/latest.json"]
     assert json.loads(s3.puts[key])["run_date"] == _RUN_DATE
+
+
+# ── 6. Incumbent challenger arm (alpha-engine-config-I4983) ──────────────────
+#
+# `scanner_candidates` is stored alphabetically (set semantics), so the
+# incumbent's own `tech_score` ordering is NOT recoverable from it. Without
+# `scanner_ranks` there is no way to ask "what would the pre-I4983 rule have
+# picked at the champion's width?" — which is the comparison the champion flip
+# has to be judged against.
+
+
+def _tech_scores() -> dict[str, float]:
+    """tech_score for the scanner cut, deliberately ANTI-correlated with
+    attractiveness: T099 (least attractive) scores highest. This is not a
+    contrivance — on the live 2026-07-24 cycle the scanner cut's median name
+    ranked 598 of 897 on attractiveness, so the two rules genuinely disagree,
+    and a fixture where they agree would not exercise the distinction."""
+    cut = _scanner_cut()
+    return {t: float(i) for i, t in enumerate(cut)}
+
+
+def test_incumbent_arm_absent_without_tech_scores() -> None:
+    """No eval log → no incumbent arm, and NO fabricated one. A backfill whose
+    inputs predate the field must degrade honestly."""
+    m = _membership()
+    assert "scanner_top_20" not in m["cuts"]
+    assert "scanner_ranks" not in m
+
+
+def test_incumbent_arm_is_top_20_by_tech_score() -> None:
+    m = _membership(tech_scores=_tech_scores())
+    cut = m["cuts"]["scanner_top_20"]
+
+    assert cut["basis"] == "tech_score_rank"
+    assert cut["size"] == 20
+    assert cut["tickers"] == sorted(cut["tickers"]), "cut lists are SORTED (set semantics)"
+
+    # Highest tech_score wins: _tech_scores gives the LAST cut members the
+    # highest scores, so the incumbent top-20 is the tail of the cut.
+    assert set(cut["tickers"]) == set(_scanner_cut()[-20:])
+
+
+def test_incumbent_arm_is_count_matched_to_the_champion() -> None:
+    """The whole point of N=20 — an arm's win must not be confounded between
+    selection rule and breadth."""
+    m = _membership(tech_scores=_tech_scores())
+    assert m["cuts"]["scanner_top_20"]["size"] == m["cuts"]["attractiveness_top_20"]["size"] == 20
+
+
+def test_incumbent_arm_disagrees_with_the_champion() -> None:
+    """Guard against a fixture (or a future refactor) where both arms silently
+    resolve to the same names — that would make the comparison vacuous while
+    every other assertion still passed."""
+    m = _membership(tech_scores=_tech_scores())
+    champion = set(m["cuts"]["attractiveness_top_20"]["tickers"])
+    incumbent = set(m["cuts"]["scanner_top_20"]["tickers"])
+    assert champion != incumbent
+
+
+def test_scanner_ranks_are_scoped_to_the_cut_and_deterministic() -> None:
+    m = _membership(tech_scores=_tech_scores())
+    ranks = m["scanner_ranks"]
+
+    assert set(ranks) == set(_scanner_cut()), "ranked over the CUT, not the universe"
+    assert min(r["tech_score_rank"] for r in ranks.values()) == 1
+    assert sorted(r["tech_score_rank"] for r in ranks.values()) == list(range(1, len(ranks) + 1))
+    # Rank 1 is the highest tech_score.
+    top = min(ranks.items(), key=lambda kv: kv[1]["tech_score_rank"])
+    assert top[1]["tech_score"] == max(r["tech_score"] for r in ranks.values())
+
+
+def test_unscored_cut_members_are_omitted_not_ranked_worst() -> None:
+    """A missing tech_score must not be coerced to 0 — that would rank the name
+    as the worst possible candidate rather than as absent (same contract the
+    attractiveness table already holds)."""
+    partial = _tech_scores()
+    dropped = _scanner_cut()[:5]
+    for t in dropped:
+        del partial[t]
+
+    m = _membership(tech_scores=partial)
+    assert set(m["scanner_ranks"]).isdisjoint(dropped)
+    assert set(m["cuts"]["scanner_top_20"]["tickers"]).isdisjoint(dropped)
+
+
+def test_tech_scores_from_eval_log_projection() -> None:
+    from scoring.universe_membership import tech_scores_from_eval_log
+
+    rows = [
+        {"ticker": "aapl", "tech_score": 65.89},
+        {"ticker": "MSFT", "tech_score": 60.61},
+        {"ticker": "NOSCORE", "tech_score": None},
+        {"ticker": "BADTYPE", "tech_score": "60"},
+        {"tech_score": 99.0},
+    ]
+    assert tech_scores_from_eval_log(rows) == {"AAPL": 65.89, "MSFT": 60.61}
+    assert tech_scores_from_eval_log(None) == {}
