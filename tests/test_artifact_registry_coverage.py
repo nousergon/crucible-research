@@ -210,6 +210,13 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # ARTIFACT_REGISTRY row (severity: critical); this producer is a second
     # implementation of that same registered artifact, not a new one.
     "scoring/signals_envelope.py": 1,
+    # RAG retrieval capture for domain-finetune label mining (config-I736) —
+    # writes decision_artifacts/_rag_retrieval/{trading_day}/{ticker}/
+    # {run_id}.json, gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED.
+    # Distillation training data accumulation stream, NOT a load-bearing
+    # freshness-SLA artifact with a daily consumer — per-file PUT pin only,
+    # same rationale as graph/llm_cost_tracker.py (_cost_raw/_sft_raw).
+    "agents/sector_teams/qual_tools.py": 1,
 }
 
 
