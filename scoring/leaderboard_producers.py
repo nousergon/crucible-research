@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date as _date
 from typing import Any
 
 import arcticdb as _arcticdb  # noqa: F401
@@ -57,6 +58,8 @@ import arcticdb as _arcticdb  # noqa: F401
 # I5195 closes read: a native abort, not a Python exception, so no traceback
 # and no fail-soft path can catch it). Also fails loud at cold start if an
 # image lacks arcticdb, rather than degrading silently at scoring time.
+from nousergon_lib.trading_calendar import count_trading_days
+
 from observe_alerts import publish_observe_alert
 from scoring.leaderboard_scoring import (
     DEFAULT_HORIZON_DAYS,
@@ -473,6 +476,48 @@ def _picked_symbols(
     return out
 
 
+def _overdue_zero_cohort_reason(dates: list[str], horizon_days: int, as_of: str) -> str | None:
+    """Reason a zero-scored leaderboard is a DEFECT rather than immaturity.
+
+    Returns ``None`` while zero cohorts scored is still legitimately expected —
+    no cohort has aged past the horizon yet. That state resolves itself and
+    must NOT alert: it would fire every cycle for weeks on a healthy system,
+    which is how alert fatigue gets manufactured.
+
+    Returns a reason once the OLDEST cohort is old enough that it should have
+    matured. Immaturity is bounded; this is not. That distinction is the whole
+    point — alpha-engine-config-I5195's actual defect was four consecutive
+    weeks of ``n_dates: 0`` that nobody noticed, and a bare "immature" reading
+    renders that identically to a healthy first week.
+    """
+    if not dates:
+        return (
+            "no cohort dates found under the shadow prefix — no arm emitted "
+            "shadow signals at all, so there is nothing to score"
+        )
+    oldest = min(dates)
+    try:
+        elapsed = count_trading_days(_date.fromisoformat(oldest), _date.fromisoformat(as_of))
+    except Exception:  # noqa: BLE001 - calendar unavailable: do not invent a verdict
+        # An unverifiable clock must not manufacture an alert (ARCHITECTURE
+        # §132: unverified is not false). Stay silent and let the next cycle,
+        # with a working calendar, decide.
+        logger.warning(
+            "[leaderboard] trading-day calendar unavailable — cannot tell "
+            "immature from overdue for oldest cohort %s; not alerting",
+            oldest,
+        )
+        return None
+    if elapsed < horizon_days:
+        return None
+    return (
+        f"scored 0 cohorts, but the oldest ({oldest}) is {elapsed} trading "
+        f"days old against a {horizon_days}-day horizon — it should have "
+        "matured. This is no longer immaturity; realized returns are not "
+        "resolving for cohorts that ought to be measurable"
+    )
+
+
 def _unmeasurable_result(
     s3: Any,
     bucket: str,
@@ -566,6 +611,23 @@ def build_scanner_leaderboard(
         )
         leaderboard["leaderboard_id"] = "scanner"
         leaderboard["date"] = date_str
+        # config-I5195: zero scored cohorts is EXPECTED while cohorts are
+        # immature and a DEFECT once they should have matured. The two render
+        # identically as n_dates=0, which is how the original defect survived
+        # four weeks unnoticed. Immaturity stays status="ok" (self-resolving,
+        # must not alert); overdue escalates to unmeasurable.
+        overdue = _overdue_zero_cohort_reason(dates, horizon_days, date_str) if not leaderboard.get("n_dates") else None
+        if overdue:
+            return _unmeasurable_result(
+                s3,
+                bucket,
+                date_str,
+                leaderboard_id="scanner",
+                output_tmpl=_SCANNER_OUTPUT,
+                horizon_days=horizon_days,
+                reason=overdue,
+                write=write,
+            )
         key = _write_leaderboard(s3, bucket, _SCANNER_OUTPUT.format(date=date_str), leaderboard) if write else None
         return {"status": "ok", "key": key, "leaderboard": leaderboard}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
@@ -655,6 +717,23 @@ def build_producer_leaderboard(
         )
         leaderboard["leaderboard_id"] = "producer"
         leaderboard["date"] = date_str
+        # config-I5195: zero scored cohorts is EXPECTED while cohorts are
+        # immature and a DEFECT once they should have matured. The two render
+        # identically as n_dates=0, which is how the original defect survived
+        # four weeks unnoticed. Immaturity stays status="ok" (self-resolving,
+        # must not alert); overdue escalates to unmeasurable.
+        overdue = _overdue_zero_cohort_reason(dates, horizon_days, date_str) if not leaderboard.get("n_dates") else None
+        if overdue:
+            return _unmeasurable_result(
+                s3,
+                bucket,
+                date_str,
+                leaderboard_id="producer",
+                output_tmpl=_PRODUCER_OUTPUT,
+                horizon_days=horizon_days,
+                reason=overdue,
+                write=write,
+            )
         key = _write_leaderboard(s3, bucket, _PRODUCER_OUTPUT.format(date=date_str), leaderboard) if write else None
         return {"status": "ok", "key": key, "leaderboard": leaderboard}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
