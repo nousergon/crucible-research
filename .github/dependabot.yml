@@ -17,12 +17,10 @@ updates:
     # this every week is pure queue noise while the migration is unscheduled, and
     # it re-enters /backlog-triage each cycle. Narrow by dependency-name ON
     # PURPOSE: a blanket "*" major ignore would also suppress future
-    # security-relevant majors. REMOVING THESE THREE ENTRIES IS PART OF alpha-engine-config-I5214's closes-when.
+    # security-relevant majors. The pytz and pytest ignores are removed as
+    # part of alpha-engine-config-I5214 (bumps now landed). langchain-anthropic
+    # remains ignored until its own migration PR in this issue.
     ignore:
-      - dependency-name: "pytz"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "pytest"
-        update-types: ["version-update:semver-major"]
       - dependency-name: "langchain-anthropic"
         update-types: ["version-update:semver-major"]
     groups:
