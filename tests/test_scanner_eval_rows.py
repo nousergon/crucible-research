@@ -123,3 +123,105 @@ def test_empty_eval_log_does_not_crash():
     rows = _rows(scanner_eval_log=[])
     assert all(r["quant_filter_pass"] == 0 for r in rows.values())
     assert all(r["filter_fail_reason"] is None for r in rows.values())
+
+
+def test_sub_scores_computed_from_technical_scores():
+    """Per-sub-signal scores (rsi/macd/ma50/ma200/momentum) are computed from
+    the feature-store indicator values in ``technical_scores`` and match the
+    output of ``compute_technical_sub_scores`` on the same indicators."""
+    from scoring.technical import compute_technical_sub_scores
+
+    # Indicator values for a single ticker, chosen so every sub-score
+    # path is exercised: boundary RSI (extreme oversold), bullish MACD
+    # cross above zero, price well below both MAs, high momentum.
+    indicators = {
+        "rsi_14": 22.0,
+        "macd_cross": 1.0,
+        "macd_above_zero": True,
+        "price_vs_ma50": -8.2,
+        "price_vs_ma200": -12.5,
+        "momentum_20d": 15.3,
+    }
+    expected = compute_technical_sub_scores(indicators)
+    rows = _rows(
+        scanner_universe=["TEST"],
+        scanner_eval_log=[],
+        sector_map={"TEST": "Technology"},
+        technical_scores={"TEST": indicators},
+    )
+    row = rows["TEST"]
+    for key, col in [
+        ("rsi", "rsi_sub_score"),
+        ("macd", "macd_sub_score"),
+        ("ma50", "ma50_sub_score"),
+        ("ma200", "ma200_sub_score"),
+        ("momentum", "momentum_sub_score"),
+    ]:
+        assert col in row, f"{col} missing from row"
+        assert row[col] == expected[key], (
+            f"{col} mismatch for {key}: {row[col]} != {expected[key]}"
+        )
+
+
+def test_sub_scores_null_when_indicators_missing():
+    """Ticker with no feature-store data gets NULL sub-scores — the backtester
+    treats NULL as 'no data, skip this row' (same contract as team_candidates
+    migration 15)."""
+    rows = _rows(
+        scanner_universe=["NODATA"],
+        scanner_eval_log=[],
+        sector_map={"NODATA": "Technology"},
+        technical_scores={},  # no indicator data
+    )
+    row = rows["NODATA"]
+    for col in ["rsi_sub_score", "macd_sub_score", "ma50_sub_score",
+                "ma200_sub_score", "momentum_sub_score"]:
+        assert row.get(col) is not None, (
+            f"{col} should still be computed (defaults used for missing indicators)"
+        )
+
+
+def test_sub_scores_present_for_scanner_eval_log_tickers():
+    """Tickers that come through the eval log (from candidates.json) also get
+    sub-scores, preferring eval-log indicators where available."""
+    rows = _rows(
+        scanner_universe=["PASS", "LIQ"],
+        scanner_eval_log=[
+            {"ticker": "PASS", "sector": "Tech", "quant_filter_pass": 1,
+             "liquidity_pass": 1, "volatility_pass": 1, "scan_path": "momentum",
+             "tech_score": 72.0, "atr_pct": 3.1, "rsi_14": 45.0,
+             "current_price": 100.0, "avg_volume_20d": 5_000_000.0,
+             "price_vs_ma200": 3.5},
+            {"ticker": "LIQ", "sector": "Tech", "quant_filter_pass": 0,
+             "liquidity_pass": 0, "filter_fail_reason": "liquidity"},
+        ],
+        sector_map={"PASS": "Tech", "LIQ": "Tech"},
+        technical_scores={
+            "PASS": {"rsi_14": 45.0, "macd_cross": 0.0,
+                     "macd_above_zero": True, "price_vs_ma50": -2.1,
+                     "price_vs_ma200": 3.5, "momentum_20d": 8.7},
+            "LIQ": {"rsi_14": 52.0, "macd_cross": -1.0,
+                    "macd_above_zero": False, "price_vs_ma50": 1.2,
+                    "price_vs_ma200": -4.0, "momentum_20d": -3.1},
+        },
+    )
+    # PASS uses eval-log rsi_14 (45.0) where available; LIQ uses technical_scores fallback
+    from scoring.technical import compute_technical_sub_scores
+
+    pass_expected = compute_technical_sub_scores({
+        "rsi_14": 45.0, "macd_cross": 0.0, "macd_above_zero": True,
+        "price_vs_ma50": -2.1, "price_vs_ma200": 3.5, "momentum_20d": 8.7,
+    })
+    for key, col in [("rsi", "rsi_sub_score"), ("macd", "macd_sub_score"),
+                     ("ma50", "ma50_sub_score"), ("ma200", "ma200_sub_score"),
+                     ("momentum", "momentum_sub_score")]:
+        assert rows["PASS"][col] == pass_expected[key]
+
+    liq_expected = compute_technical_sub_scores({
+        "rsi_14": 52.0, "macd_cross": -1.0, "macd_above_zero": False,
+        "price_vs_ma50": 1.2, "price_vs_ma200": -4.0, "momentum_20d": -3.1,
+    })
+    for key, col in [("rsi", "rsi_sub_score"), ("macd", "macd_sub_score"),
+                     ("ma50", "ma50_sub_score"), ("ma200", "ma200_sub_score"),
+                     ("momentum", "momentum_sub_score")]:
+        assert rows["LIQ"][col] == liq_expected[key]

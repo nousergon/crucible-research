@@ -601,6 +601,23 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
     # unattributed group.
     23: ("Add override_team_id to scanner_evaluations (config#750 per-team override attribution)",
          "ALTER TABLE scanner_evaluations ADD COLUMN override_team_id TEXT"),
+    # Per-sub-signal scores in scanner_evaluations. Mirrors migration 15
+    # (the identical columns on team_candidates). Persisting the 5 sub-scores
+    # for every ~900 tickers enables the backtester's tech_weight_ablation
+    # optimizer to re-rank the full universe under alternate composite
+    # weights without re-running the scanner pipeline. The backtester's
+    # repoint (crucible-backtester Deliverable 2 of alpha-engine-config#841)
+    # reads scanner_evaluations instead of team_candidates. NULL on rows
+    # persisted before the producer-side wire-up — backtester treats those
+    # as "no sub-score data, ablation gates skip this row."
+    24: ("Add per-sub-signal scores to scanner_evaluations for ablation analysis",
+         """
+         ALTER TABLE scanner_evaluations ADD COLUMN rsi_sub_score REAL;
+         ALTER TABLE scanner_evaluations ADD COLUMN macd_sub_score REAL;
+         ALTER TABLE scanner_evaluations ADD COLUMN ma50_sub_score REAL;
+         ALTER TABLE scanner_evaluations ADD COLUMN ma200_sub_score REAL;
+         ALTER TABLE scanner_evaluations ADD COLUMN momentum_sub_score REAL;
+         """),
 }
 
 
