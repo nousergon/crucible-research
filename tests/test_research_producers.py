@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from producers.no_agent import build_no_agent_signals  # noqa: E402
 from producers.registry import (  # noqa: E402
     RESEARCH_PRODUCERS,
+    buildable_challenger_producers,
     challenger_producers,
     champion_producer,
 )
@@ -26,15 +27,19 @@ from tests.test_signals_producer_contract import (  # noqa: E402
 def _inputs():
     scanner_tickers = ["AAA", "BBB", "CCC", "DDD"]
     technical_scores = {
-        "AAA": {"technical_score": 85.0, "momentum_20d": 0.05},   # BUY, rising, new → ENTER
+        "AAA": {"technical_score": 85.0, "momentum_20d": 0.05},  # BUY, rising, new → ENTER
         "BBB": {"technical_score": 70.0, "momentum_20d": -0.05},  # BUY, declining, new → ENTER
-        "CCC": {"technical_score": 40.0, "momentum_20d": 0.0},    # < threshold → HOLD, dropped
-        "DDD": {"technical_score": 90.0, "momentum_20d": 0.01},   # BUY, HELD → reaffirmed ENTER
+        "CCC": {"technical_score": 40.0, "momentum_20d": 0.0},  # < threshold → HOLD, dropped
+        "DDD": {"technical_score": 90.0, "momentum_20d": 0.01},  # BUY, HELD → reaffirmed ENTER
     }
     population = [
         {
-            "ticker": "DDD", "sector": "Technology", "long_term_rating": "BUY",
-            "long_term_score": 88.0, "conviction": "stable", "price_target_upside": 0.1,
+            "ticker": "DDD",
+            "sector": "Technology",
+            "long_term_rating": "BUY",
+            "long_term_score": 88.0,
+            "conviction": "stable",
+            "price_target_upside": 0.1,
         }
     ]
     sector_map = {"AAA": "Technology", "BBB": "Healthcare", "CCC": "Technology", "DDD": "Technology"}
@@ -55,8 +60,8 @@ def _build():
 
 def test_no_agent_payload_satisfies_producer_contract():
     payload = _build()
-    assert _REQUIRED_TOP_LEVEL <= set(payload), (
-        "missing top-level contract keys: " + str(_REQUIRED_TOP_LEVEL - set(payload))
+    assert _REQUIRED_TOP_LEVEL <= set(payload), "missing top-level contract keys: " + str(
+        _REQUIRED_TOP_LEVEL - set(payload)
     )
     for section in ("universe", "buy_candidates"):
         for item in payload[section]:
@@ -96,8 +101,12 @@ def test_threshold_controls_entry():
     scanner_tickers, technical_scores, population, sector_map = _inputs()
     # Raise the bar above AAA/BBB/DDD's scores → no new entrants, DDD still held-HOLD?
     payload = build_no_agent_signals(
-        "2026-06-19", scanner_tickers=scanner_tickers, population=population,
-        prior_theses={}, technical_scores=technical_scores, sector_map=sector_map,
+        "2026-06-19",
+        scanner_tickers=scanner_tickers,
+        population=population,
+        prior_theses={},
+        technical_scores=technical_scores,
+        sector_map=sector_map,
         buy_score_threshold=95.0,
     )
     # No candidate clears 95 → no fresh BUY theses → AAA/BBB dropped; DDD carries
@@ -116,8 +125,15 @@ def test_registry_invariants():
     assert champs == []
     assert champion_producer() is None
     chals = challenger_producers()
-    assert chals and all(p.build is not None for p in chals)
+    assert chals
     assert "no_agent_quant" in {p.name for p in chals}
+    # config-I5195 scope 4b: a challenger MAY carry build=None when its shadow
+    # is written by its own pipeline (thinktank_coverage). The "must have a
+    # build" invariant now belongs to the BUILDABLE subset, which is what
+    # producers.runner iterates -- see tests/test_thinktank_arm_registration.py.
+    buildable = buildable_challenger_producers()
+    assert buildable and all(p.build is not None for p in buildable)
+    assert {b.name for b in buildable} <= {c.name for c in chals}
 
 
 def test_agentic_sector_teams_is_retired_with_date():
