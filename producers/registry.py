@@ -6,6 +6,14 @@ research graph, ``build`` is None here). Challengers carry a ``build`` callable
 conforming signals.json from the SAME scanner candidate set (scanner held
 constant across producers — a clean selection-only comparison).
 
+A challenger may carry ``build=None`` when its shadow signals are produced by
+its OWN pipeline rather than built during the weekly producer run — see
+``thinktank_coverage`` below. Such a spec is scored by the leaderboard exactly
+like any other challenger, but ``producers.runner`` must NOT try to build it
+(``runner`` filters on ``build is not None``; including it would raise
+TypeError inside the per-spec except, then trip the completeness gate and turn
+a healthy run red).
+
 A spec may instead be ``kind="retired"`` once it is no longer wired into the
 live pipeline — this makes liveness a queryable fact (``retired_date``)
 instead of a stale ``description`` string a downstream reader (e.g. the
@@ -72,11 +80,51 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         "macro/CIO (config#1223 / M3 baseline)",
         build=run_single_agent_producer,
     ),
+    "thinktank_coverage": ProducerSpec(
+        name="thinktank_coverage",
+        kind="challenger",
+        version="v1",
+        description="Think Tank coverage arm: per-ticker qualitative theses "
+        "(thesis + pillar/moat tiers) ranked by the Think Tank's own rating, "
+        "top-CHALLENGER_TOP_N submitted as the arm's picks. Arm 3 of 3 in the "
+        "count-matched predictor universe (config-I4983).",
+        # build=None ON PURPOSE. Unlike the other challengers, this arm's
+        # shadow (signals_shadow/thinktank_coverage/{date}/signals.json) is
+        # written by the Think Tank's OWN daily run, not synthesised during
+        # the weekly producer pass. `producers.runner` skips specs without a
+        # build callable; `scoring.leaderboard_producers` scores them all.
+        #
+        # Registration was deliberately held back (alpha-engine-config-I5195
+        # scope 4b, 2026-07-28): the Think Tank had been dead 11 days on the
+        # 900s Lambda ceiling, so registering it then would have added a
+        # permanently-missing arm and made every cohort incomplete. That
+        # blocker cleared 2026-07-29 when config-I5208 moved the run to EC2
+        # spot (ARCHITECTURE §47) and it resumed writing the shadow view.
+        build=None,
+    ),
 }
 
 
 def challenger_producers() -> list[ProducerSpec]:
+    """EVERY challenger arm, including those produced by their own pipeline.
+
+    This is the scoring set: the leaderboard reads each arm's shadow from S3,
+    so it does not care who wrote it. Callers that need to BUILD shadows want
+    :func:`buildable_challenger_producers` instead.
+    """
     return [p for p in RESEARCH_PRODUCERS.values() if p.kind == "challenger"]
+
+
+def buildable_challenger_producers() -> list[ProducerSpec]:
+    """Challengers the weekly producer run is responsible for BUILDING.
+
+    Excludes arms whose shadow is written by their own pipeline (``build is
+    None``). Keeping this distinct from :func:`challenger_producers` is
+    load-bearing: ``producers.runner`` both calls ``spec.build`` and asserts
+    every expected name emitted, so an externally-produced arm in that list
+    would raise TypeError and then fail the completeness gate on every run.
+    """
+    return [p for p in challenger_producers() if p.build is not None]
 
 
 def champion_producer() -> ProducerSpec | None:
