@@ -6,31 +6,47 @@ and must never rank on a stale ArcticDB read without saying so.
 
 from __future__ import annotations
 
-import importlib
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_source_env():
+    """Always restore SCANNER_FEATURE_SOURCE, even when a test fails.
+
+    Without this a failing test leaves the override set and every later
+    test in the session silently reads the wrong feature source.
+    """
+    import os
+
+    old = os.environ.get("SCANNER_FEATURE_SOURCE")
+    yield
+    if old is None:
+        os.environ.pop("SCANNER_FEATURE_SOURCE", None)
+    else:
+        os.environ["SCANNER_FEATURE_SOURCE"] = old
+
+
 def _reload_with_source(value: str | None):
-    """Re-import the reader with SCANNER_FEATURE_SOURCE set (module-level read)."""
+    """Return the reader module with SCANNER_FEATURE_SOURCE applied.
+
+    NO importlib.reload: the module reads the env var at call time, so the
+    setting can be varied by patching os.environ alone. An earlier version
+    of this helper did reload, which swapped the module object out from
+    under patches applied in OTHER test files and hard-aborted the suite at
+    test_scanner_handler.py while passing when run alone.
+    """
     import os
 
     import data.fetchers.feature_store_reader as mod
 
-    old = os.environ.get("SCANNER_FEATURE_SOURCE")
     if value is None:
         os.environ.pop("SCANNER_FEATURE_SOURCE", None)
     else:
         os.environ["SCANNER_FEATURE_SOURCE"] = value
-    try:
-        return importlib.reload(mod)
-    finally:
-        if old is None:
-            os.environ.pop("SCANNER_FEATURE_SOURCE", None)
-        else:
-            os.environ["SCANNER_FEATURE_SOURCE"] = old
+    return mod
 
 
 def _arctic_frame(last_date: str) -> pd.DataFrame:
@@ -84,7 +100,6 @@ def test_env_override_forces_the_weekly_snapshot_even_with_tickers():
 
     s3_read.assert_called_once()
     arctic.assert_not_called()
-    _reload_with_source(None)
 
 
 def test_stale_arcticdb_rows_raise_instead_of_ranking_the_universe():

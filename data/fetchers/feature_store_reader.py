@@ -54,11 +54,21 @@ logger = logging.getLogger(__name__)
 _BUCKET = os.environ.get("S3_BUCKET", "alpha-engine-research")
 _FEATURE_PREFIX = "features/"
 
-# Source selector. ArcticDB is the default; ``s3`` reverts to the weekly
-# snapshot without a redeploy if the daily path misbehaves. Deliberately a
-# real rollback lever rather than a dormant opt-in flag that never gets
-# flipped.
-_SOURCE = os.environ.get("SCANNER_FEATURE_SOURCE", "arcticdb").strip().lower()
+
+def _source() -> str:
+    """Feature source: ``arcticdb`` (default) or ``s3`` (rollback lever).
+
+    Read at CALL time, not import time. An import-time capture makes the
+    setting unchangeable for the life of the process, which forces tests to
+    ``importlib.reload`` the module to vary it — and a reload swaps the
+    module object out from under every ``patch("data.fetchers.
+    feature_store_reader.<fn>")`` already applied elsewhere in the session.
+    That leaked across files here: test_scanner_handler.py passed alone and
+    hard-aborted mid-suite, because its patches bound to a module object a
+    reload in another file had replaced, so the real ArcticDB connect ran.
+    """
+    return os.environ.get("SCANNER_FEATURE_SOURCE", "arcticdb").strip().lower()
+
 
 # The 12 technical columns the scanner actually consumes
 # (``data/scanner_orchestrator.py::_build_technical_scores_from_feature_store``
@@ -227,7 +237,7 @@ def _use_arctic(tickers: list[str] | None, *, what: str) -> bool:
     path (``scanner_orchestrator``) always passes its constituent list, so
     it can never reach the weekly surface by accident.
     """
-    if _SOURCE == "s3":
+    if _source() == "s3":
         logger.warning(
             "%s: SCANNER_FEATURE_SOURCE=s3 — reading the WEEKLY snapshot. "
             "Rankings will not change between Saturday runs.",
