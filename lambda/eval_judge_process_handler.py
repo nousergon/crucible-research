@@ -110,6 +110,7 @@ def handler(event, context):
         batch_id, plan_s3_key,
     )
 
+    _process_error: str | None = None
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         summary = process_batch_results(
@@ -120,15 +121,38 @@ def handler(event, context):
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_process_handler] process failed hard")
-        return {"status": "ERROR", "batch_id": batch_id, "error": str(exc)}
+        _process_error = str(exc)
+        # Evals that were persisted BEFORE the failure (each artifact persist
+        # has its own error handling inside process_batch_results, so partial
+        # success is the expected case) still need indexing.  Provide a thin
+        # fallback summary for the manifest step below.
+        summary = {
+            "date": batch_id if batch_id else "",
+            "haiku_evaluated": 0,
+            "sonnet_evaluated": 0,
+            "skipped_unmapped": 0,
+            "skipped_empty_input": 0,
+            "metric_emission_failures": 0,
+            "parse_retry_recovered": 0,
+            "failed": [],
+        }
 
-    # Maintain the _eval_by_capture index at write time (config#1579 P2):
-    # the batch-plan's already-judged dedup reads these manifests, and no
-    # scheduled aggregator exists — the write path owns its index. Secondary
-    # observability off the primary path: a failure here is WARN + summary
-    # field (the dedup then no-ops for the affected dates and the failure
-    # mode is a harmless duplicate eval next week, never a silent skip);
-    # build_manifests is idempotent, so any later run self-heals the index.
+    # Maintain the _eval_by_capture index at write time (config#1579 P2).
+    # Runs UNCONDITIONALLY after process_batch_results — even when it raised
+    # — because the persisted evals from partial success still need indexing.
+    #
+    # Prior to this fix (config#4776): the index build was gated on successful
+    # completion, so a late-stage failure in the Sonnet-escalation tail or
+    # batch-parse sync-retry (both with their own per-artifact error handling)
+    # skipped the manifest entirely.  The 2026-07-26 recovery then re-judged
+    # the same ~295-artifact corpus ~10 times because the stale (2026-07-17)
+    # manifest yielded only 12 dedup keys.
+    #
+    # Secondary observability off the primary path: a failure here is WARN +
+    # summary field (the dedup then no-ops for the affected dates and the
+    # failure mode is a harmless duplicate eval next week, never a silent
+    # skip); build_manifests is idempotent, so any later run self-heals the
+    # index.
     manifest_dates: list[str] = []
     try:
         from datetime import datetime
@@ -148,6 +172,12 @@ def handler(event, context):
             "(duplicate evals possible, never skips)", exc_info=True,
         )
     summary["manifest_capture_dates"] = manifest_dates
+
+    if _process_error is not None:
+        return {
+            "status": "ERROR", "batch_id": batch_id,
+            "error": _process_error, "summary": summary,
+        }
 
     status = "PARTIAL" if summary["failed"] else "OK"
     logger.info(
