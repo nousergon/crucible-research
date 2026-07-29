@@ -68,10 +68,31 @@ _IMDS_ACTION_URL = "http://169.254.169.254/latest/meta-data/spot/instance-action
 _IMDS_POLL_SECONDS = 5.0
 _IMDS_TIMEOUT_SECONDS = 2.0
 
-# Default budget for a full daily pass. Must stay strictly BELOW the
-# dispatcher's SSM execution_timeout_seconds; the dispatcher owns that
-# coupling and passes this value in explicitly.
-_DEFAULT_BUDGET_SECONDS = 12600  # 3.5h
+# Default budget for a daily pass. Must stay strictly BELOW the dispatcher's
+# SSM execution_timeout_seconds; the dispatcher owns that coupling and passes
+# this value in explicitly.
+#
+# DERIVED FROM MEASURED RUNS, not guessed. The daily run is INCREMENTAL — it
+# does not rebuild coverage. Two live manifests bracket the #464 step change:
+#
+#   2026-07-16 (pre-#464, last complete run): 443s total for 8 theses
+#     (5 new + 3 event-driven) AND a 70-name sweep. ~55s/thesis.
+#   2026-07-29 (post-#464, deadline-truncated): 801s for 5 theses and NO
+#     sweep. ~160s/thesis — the pillar/moat call roughly tripled per-thesis
+#     wall-clock, which is what pushed the run past the 900s ceiling.
+#
+# The sweep itself is cheap and was never the problem: it chunks at
+# sweep_chunk_size=25, so 135 covered names is 6 LLM calls (3 calls / $0.0007
+# on 07-16). Steady-state daily work is therefore ~8 theses at ~160s plus the
+# sweep chunks -- call it ~25 min, i.e. a shade over 2x the Lambda ceiling.
+#
+# 90 min gives ~3.5x headroom over that measurement, which covers the two
+# known growth vectors: intake continues at daily_new_names=5 until coverage
+# reaches rank_ceiling=150 (135 today, so ~3 more days), and staleness refresh
+# (stale_after_days=30) begins firing in early August for the theses written
+# when coverage started. Re-derive from manifests rather than raising blind
+# if runs start truncating again.
+_DEFAULT_BUDGET_SECONDS = 5400  # 90 min
 
 
 class SpotInterruptionWatcher:
