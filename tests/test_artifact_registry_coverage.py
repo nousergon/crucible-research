@@ -111,7 +111,12 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # enrichment writes moved to nousergon_lib.health (config#1727 Phase C).
     "data_manifest.py": 1,
     "local/sync_db.py": 1,
-    "scoring/factor_scoring.py": 2,
+    # 3 since the daily-scanner cutover: by_ticker.json, the latest.json
+    # sidecar, and provenance.json (registered as factor_profiles_provenance
+    # in ARTIFACT_REGISTRY.yaml — records which dated feature snapshot each
+    # group resolved to, now that carry-forward makes the calendar an
+    # unreliable proxy for that).
+    "scoring/factor_scoring.py": 3,
     # Full-universe scoreboard (scanner/universe/{date}/universe.json + latest).
     # SECONDARY observability for the dashboard's filterable ~900-name universe
     # board — built fail-soft off archive_writer (a write failure WARNs, never
