@@ -129,7 +129,7 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # which ship starting 0.16.0. BLOCKED until the companion krepis PR merges
 # + PyPI publish completes — same gate:dependency linkage pattern as the
 # 0.13.0 bump above.
-krepis>=0.16.0
+krepis==0.24.0  # pinned per §139 — first-party/fast-moving deps are pinned, never floored
 
 # Scheduling / calendar
 exchange-calendars~=4.13
