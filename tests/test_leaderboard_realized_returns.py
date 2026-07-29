@@ -202,12 +202,19 @@ def test_unmeasurable_leaderboard_is_written_labelled_and_alerted() -> None:
 
 def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
     """The core I5195 lesson: these two states must not render identically.
-    A healthy-but-immature run reports `ok`; an unmeasurable one does not."""
+    A healthy-but-immature run reports `ok`; an unmeasurable one does not.
+
+    Cohort date corrected 2026-07-29: this previously used 2026-06-01 against
+    an as-of of 2026-07-28 — **39 trading days** on a 21-day horizon. That is
+    not an immature cohort, it is a cohort that should long since have
+    matured, i.e. precisely the defect I5195 was filed about. The test was
+    asserting `ok` for the bug. It now uses a genuinely immature cohort.
+    """
     s3 = _S3()
     with (
         patch(
             "scoring.leaderboard_producers._cohort_dates",
-            return_value=["2026-06-01"],
+            return_value=["2026-07-24"],  # 2 trading days before as-of
         ),
         patch(
             "scoring.leaderboard_producers._load_producer_specs",
@@ -225,7 +232,37 @@ def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
 
     assert out["status"] == "ok"
     assert out["leaderboard"].get("status") != "unmeasurable"
-    assert alert.call_count == 0
+    assert alert.call_count == 0, (
+        "an immature cohort must NOT alert — it resolves itself, and alerting "
+        "every cycle for weeks is how alert fatigue is manufactured"
+    )
+
+
+def test_zero_cohorts_past_the_horizon_escalates_to_unmeasurable() -> None:
+    """Immaturity is BOUNDED. Once the oldest cohort is older than the horizon
+    and still nothing scores, that is no longer waiting — it is the four-weeks
+    -of-empty-artifacts defect I5195 was filed about, and it must say so."""
+    s3 = _S3()
+    with (
+        patch(
+            "scoring.leaderboard_producers._cohort_dates",
+            return_value=["2026-06-01"],  # ~39 trading days before as-of
+        ),
+        patch(
+            "scoring.leaderboard_producers._load_producer_specs",
+            return_value=(None, []),
+        ),
+        patch(
+            "scoring.leaderboard_producers._resolve_realized_returns",
+            return_value={},
+        ),
+        patch("scoring.leaderboard_producers.publish_observe_alert") as alert,
+    ):
+        out = build_producer_leaderboard(s3, "b", "2026-07-28")
+
+    assert out["status"] == "unmeasurable"
+    assert "should have matured" in out["leaderboard"]["unmeasurable_reason"]
+    assert alert.call_count == 1
 
 
 # ── 5. The champion's identity comes from the live pointer, not the registry ──
