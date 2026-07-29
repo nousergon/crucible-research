@@ -4,7 +4,7 @@
 # GH Actions Python 3.11 image). Not a build-backend requirement here — direct
 # pin exists solely to satisfy the security-audit gate.
 setuptools>=83.0.0
-anthropic~=0.40
+anthropic~=0.120
 langgraph~=0.2
 langchain-anthropic~=0.3
 # OpenAI-compatible chat model — how every research agent now reaches the
@@ -33,7 +33,7 @@ requests-ratelimiter~=0.7
 pandas~=2.2
 numpy~=1.26
 requests~=2.34
-feedparser~=6.0.11
+feedparser~=6.0.13
 beautifulsoup4~=4.15
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
 # resolution could read local files under the old resolve_entities=True
