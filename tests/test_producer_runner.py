@@ -35,19 +35,15 @@ def test_run_challengers_isolates_attempts_then_raises_on_gap(monkeypatch):
         ProducerSpec("good", "challenger", "v1", "ok", good_build),
         ProducerSpec("bad", "challenger", "v1", "raises", bad_build),
     ]
-    monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
     monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: True)
 
     am = MagicMock()
-    am.write_shadow_signals_json.side_effect = (
-        lambda name, rd, ga, payload: f"signals_shadow/{name}/{rd}/signals.json"
-    )
+    am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: f"signals_shadow/{name}/{rd}/signals.json"
 
     prior_pop = [{"ticker": "HELD"}]
     with pytest.raises(runner.ChallengerShadowGapError, match="bad"):
-        runner.run_challengers(
-            am, "2026-06-19", run_time="2026-06-19T09:00Z", population=prior_pop
-        )
+        runner.run_challengers(am, "2026-06-19", run_time="2026-06-19T09:00Z", population=prior_pop)
 
     # good's artifact was still written BEFORE the raise (isolation kept),
     # and the snapshotted prior population + run_time were threaded through.
@@ -62,8 +58,9 @@ def test_run_challengers_generated_at_falls_back_to_run_date(monkeypatch):
     def build(run_date, am, *, run_time="", population=None):
         return {"date": run_date}
 
-    monkeypatch.setattr(runner, "challenger_producers",
-                        lambda: [ProducerSpec("p", "challenger", "v1", "", build)])
+    monkeypatch.setattr(
+        runner, "buildable_challenger_producers", lambda: [ProducerSpec("p", "challenger", "v1", "", build)]
+    )
     am = MagicMock()
     am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: captured.update(ga=ga) or "k"
     runner.run_challengers(am, "2026-06-19")  # no run_time
@@ -73,6 +70,7 @@ def test_run_challengers_generated_at_falls_back_to_run_date(monkeypatch):
 def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
     """config#1403/#1683: a producer that emits nothing fires the LOUD observe
     alert BEFORE the gap raises (the alert pages even if a caller catches)."""
+
     def good_build(run_date, am, *, run_time="", population=None):
         return {"date": run_date}
 
@@ -83,10 +81,9 @@ def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
         ProducerSpec("good", "challenger", "v1", "ok", good_build),
         ProducerSpec("bad", "challenger", "v1", "raises", bad_build),
     ]
-    monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
     alerts = []
-    monkeypatch.setattr(runner, "publish_observe_alert",
-                        lambda message, **kw: alerts.append((message, kw)) or True)
+    monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: alerts.append((message, kw)) or True)
 
     am = MagicMock()
     am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: "k"
@@ -102,6 +99,7 @@ def test_run_challengers_alerts_loud_on_producer_gap(monkeypatch):
 
 def test_run_challengers_silent_when_all_emit(monkeypatch):
     """No gap → no alert (the alert must fire ONLY on a real always-on gap)."""
+
     def good_build(run_date, am, *, run_time="", population=None):
         return {"date": run_date}
 
@@ -109,10 +107,9 @@ def test_run_challengers_silent_when_all_emit(monkeypatch):
         ProducerSpec("a", "challenger", "v1", "ok", good_build),
         ProducerSpec("b", "challenger", "v1", "ok", good_build),
     ]
-    monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+    monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
     alerts = []
-    monkeypatch.setattr(runner, "publish_observe_alert",
-                        lambda message, **kw: alerts.append(message) or True)
+    monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: alerts.append(message) or True)
 
     am = MagicMock()
     am.write_shadow_signals_json.side_effect = lambda name, rd, ga, payload: "k"
@@ -132,7 +129,7 @@ class TestExperimentRecordWiring:
             return {"date": run_date}
 
         specs = [ProducerSpec("no_agent_quant", "challenger", "v1", "ok", build)]
-        monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+        monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
         monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: True)
 
         am = MagicMock()
@@ -142,8 +139,9 @@ class TestExperimentRecordWiring:
         runner.run_challengers(am, "2026-06-19")
 
         # 2 _s3_put calls (dated + latest) for the one challenger's record.
-        record_puts = [c for c in am._s3_put.call_args_list
-                       if c.args[0].startswith("experiments/no_agent_quant/records/")]
+        record_puts = [
+            c for c in am._s3_put.call_args_list if c.args[0].startswith("experiments/no_agent_quant/records/")
+        ]
         assert len(record_puts) == 2
         keys = {c.args[0] for c in record_puts}
         assert keys == {
@@ -151,9 +149,8 @@ class TestExperimentRecordWiring:
             "experiments/no_agent_quant/records/latest.json",
         }
         import json
-        dated_body = json.loads(
-            next(c.args[1] for c in record_puts if c.args[0].endswith("2026-06-19.json"))
-        )
+
+        dated_body = json.loads(next(c.args[1] for c in record_puts if c.args[0].endswith("2026-06-19.json")))
         assert dated_body["experiment_id"] == "no-agent-quant"
         assert dated_body["status"] == "complete"
 
@@ -165,20 +162,18 @@ class TestExperimentRecordWiring:
             raise RuntimeError("boom")
 
         specs = [ProducerSpec("bad", "challenger", "v1", "raises", bad_build)]
-        monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+        monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
         monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: True)
 
         am = MagicMock()
         with pytest.raises(runner.ChallengerShadowGapError):
             runner.run_challengers(am, "2026-06-19")
 
-        record_puts = [c for c in am._s3_put.call_args_list
-                       if c.args[0].startswith("experiments/bad/records/")]
+        record_puts = [c for c in am._s3_put.call_args_list if c.args[0].startswith("experiments/bad/records/")]
         assert len(record_puts) == 2
         import json
-        dated_body = json.loads(
-            next(c.args[1] for c in record_puts if c.args[0].endswith("2026-06-19.json"))
-        )
+
+        dated_body = json.loads(next(c.args[1] for c in record_puts if c.args[0].endswith("2026-06-19.json")))
         assert dated_body["status"] == "failed"
         row = next(a for a in dated_body["artifacts"] if a["name"] == "shadow_signals")
         assert row["status"] == "absent"
@@ -193,12 +188,12 @@ class TestExperimentRecordWiring:
             return {"date": run_date}
 
         specs = [ProducerSpec("good", "challenger", "v1", "ok", good_build)]
-        monkeypatch.setattr(runner, "challenger_producers", lambda: specs)
+        monkeypatch.setattr(runner, "buildable_challenger_producers", lambda: specs)
         alerts = []
-        monkeypatch.setattr(runner, "publish_observe_alert",
-                            lambda message, **kw: alerts.append((message, kw)) or True)
+        monkeypatch.setattr(runner, "publish_observe_alert", lambda message, **kw: alerts.append((message, kw)) or True)
         monkeypatch.setattr(
-            runner, "build_challenger_experiment_record",
+            runner,
+            "build_challenger_experiment_record",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("record bug")),
         )
 
