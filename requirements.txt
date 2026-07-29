@@ -133,7 +133,7 @@ krepis>=0.16.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
-pytz~=2024.1
+pytz~=2026.3
 
 # DB
 # SQLite is stdlib; no extra package needed
@@ -150,7 +150,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=2.0
+edgartools~=5.43
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
