@@ -110,6 +110,33 @@ def handler(event, context):
         batch_id, plan_s3_key,
     )
 
+    def _build_manifests() -> list[str]:
+        """Build _eval_by_capture manifests for today, returning sorted
+        capture dates on success or empty list on failure.
+
+        Extracted as a closure so both the success and error paths below
+        can call it with minimal code duplication.  Idempotent: re-running
+        produces byte-identical output.
+        """
+        try:
+            from datetime import datetime  # noqa: PLC0415 — lazy import
+
+            from evals.eval_manifest import build_manifests  # noqa: PLC0415
+
+            written = build_manifests(
+                s3_client=__import__("boto3").client("s3"),
+                bucket=bucket,
+                judge_run_dates=[datetime.now(UTC).date().isoformat()],
+            )
+            return sorted(written)
+        except Exception:  # noqa: BLE001 — index maintenance; recorded below
+            logger.warning(
+                "[eval_judge_process_handler] _eval_by_capture manifest build "
+                "failed — dedup will no-op for this batch's capture dates "
+                "(duplicate evals possible, never skips)", exc_info=True,
+            )
+            return []
+
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         summary = process_batch_results(
@@ -120,34 +147,24 @@ def handler(event, context):
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_process_handler] process failed hard")
-        return {"status": "ERROR", "batch_id": batch_id, "error": str(exc)}
+        # Build manifests even on hard failure: process_batch_results may
+        # have persisted eval artifacts before the crash, and those evals
+        # need their _eval_by_capture index entries written so the next
+        # batch plan's dedup sees them.  Without this, a run that
+        # persisted 295 evals and then raised in its escalation tail
+        # wrote 295 artifacts and zero index entries — the structural
+        # weakness this fix addresses (alpha-engine-config#4776).
+        return {
+            "status": "ERROR",
+            "batch_id": batch_id,
+            "error": str(exc),
+            "manifest_capture_dates": _build_manifests(),
+        }
 
     # Maintain the _eval_by_capture index at write time (config#1579 P2):
     # the batch-plan's already-judged dedup reads these manifests, and no
-    # scheduled aggregator exists — the write path owns its index. Secondary
-    # observability off the primary path: a failure here is WARN + summary
-    # field (the dedup then no-ops for the affected dates and the failure
-    # mode is a harmless duplicate eval next week, never a silent skip);
-    # build_manifests is idempotent, so any later run self-heals the index.
-    manifest_dates: list[str] = []
-    try:
-        from datetime import datetime
-
-        from evals.eval_manifest import build_manifests
-
-        written = build_manifests(
-            s3_client=__import__("boto3").client("s3"),
-            bucket=bucket,
-            judge_run_dates=[datetime.now(UTC).date().isoformat()],
-        )
-        manifest_dates = sorted(written)
-    except Exception:  # noqa: BLE001 — index maintenance; recorded below
-        logger.warning(
-            "[eval_judge_process_handler] _eval_by_capture manifest build "
-            "failed — dedup will no-op for this batch's capture dates "
-            "(duplicate evals possible, never skips)", exc_info=True,
-        )
-    summary["manifest_capture_dates"] = manifest_dates
+    # scheduled aggregator exists — the write path owns its index.
+    summary["manifest_capture_dates"] = _build_manifests()
 
     status = "PARTIAL" if summary["failed"] else "OK"
     logger.info(
