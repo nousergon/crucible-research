@@ -90,7 +90,7 @@ _BASELINE_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
     "quality_score": [
         # (raw_factor_column, weight, invert_rank)
         ("roe", 0.30, False),
-        ("debt_to_equity", 0.25, True),    # less debt = better
+        ("debt_to_equity", 0.25, True),  # less debt = better
         ("gross_margin", 0.25, False),
         ("current_ratio", 0.20, False),
     ],
@@ -103,7 +103,7 @@ _BASELINE_COMPOSITE_DEFS: dict[str, list[tuple[str, float, bool]]] = {
     ],
     "low_vol_score": [
         ("realized_vol_20d", 0.50, True),  # lower vol = higher score
-        ("vol_ratio_10_60", 0.30, True),   # vol stable / declining = higher score
+        ("vol_ratio_10_60", 0.30, True),  # vol stable / declining = higher score
         ("atr_14_pct", 0.20, True),
     ],
     "value_score": [
@@ -194,8 +194,7 @@ _DERIVED_FACTOR_DEFS: dict[str, str] = {
     # them was deprecated). NaN when inst_ownership has no row for the
     # ticker. See _add_institutional_accumulation_factor.
     "institutional_accumulation_score": (
-        "gate(n_funds_increasing - n_funds_decreasing, institutional_min_funds)"
-        " * institutional_boost"
+        "gate(n_funds_increasing - n_funds_decreasing, institutional_min_funds) * institutional_boost"
     ),
 }
 
@@ -219,9 +218,7 @@ def _add_derived_factors(merged: pd.DataFrame) -> pd.DataFrame:
     if "roe" in merged.columns and "payout_ratio" in merged.columns:
         # 1 - payout_ratio = retention rate. NaN propagates through both
         # the subtraction and the multiplication.
-        merged["sustainable_growth_rate"] = (
-            merged["roe"] * (1.0 - merged["payout_ratio"])
-        )
+        merged["sustainable_growth_rate"] = merged["roe"] * (1.0 - merged["payout_ratio"])
     else:
         # Phase 3a hasn't flowed through yet — emit NaN explicitly so the
         # rank step degrades gracefully. (Pandas treats a missing column
@@ -262,13 +259,14 @@ def _add_institutional_accumulation_factor(merged: pd.DataFrame) -> pd.DataFrame
 
     try:
         from config import get_research_params
+
         params = get_research_params()
         min_funds = params["institutional_min_funds"]
         boost = params["institutional_boost"]
     except Exception as e:  # noqa: BLE001 - config read must never break scoring
         logger.debug(
-            "institutional_accumulation_score: research params unavailable (%s), "
-            "using defaults min_funds=3 boost=3.0", e,
+            "institutional_accumulation_score: research params unavailable (%s), using defaults min_funds=3 boost=3.0",
+            e,
         )
         min_funds = 3
         boost = 3.0
@@ -356,7 +354,9 @@ def compute_factor_composites(
     # still get momentum + low_vol).
     merged = technical_df.merge(
         fundamental_df.drop(columns=[c for c in fundamental_df.columns if c == "date"], errors="ignore"),
-        on="ticker", how="outer", suffixes=("", "_fund"),
+        on="ticker",
+        how="outer",
+        suffixes=("", "_fund"),
     )
 
     # config#2428: outer-join in the 13F institutional-ownership snapshot
@@ -367,7 +367,10 @@ def compute_factor_composites(
         inst_cols = ["ticker", "n_funds_increasing", "n_funds_decreasing"]
         inst_cols = [c for c in inst_cols if c in inst_ownership_df.columns]
         merged = merged.merge(
-            inst_ownership_df[inst_cols], on="ticker", how="outer", suffixes=("", "_inst"),
+            inst_ownership_df[inst_cols],
+            on="ticker",
+            how="outer",
+            suffixes=("", "_inst"),
         )
 
     merged["sector"] = merged["ticker"].map(lambda t: sector_map.get(t, "Unknown"))
@@ -406,9 +409,7 @@ def compute_factor_composites(
         merged[composite] = composite_vals
         merged[f"{composite[:-6]}_n"] = composite_n  # quality_n, momentum_n, etc.
 
-    keep_cols = ["ticker", "sector"] + list(_COMPOSITE_DEFS.keys()) + [
-        f"{c[:-6]}_n" for c in _COMPOSITE_DEFS.keys()
-    ]
+    keep_cols = ["ticker", "sector"] + list(_COMPOSITE_DEFS.keys()) + [f"{c[:-6]}_n" for c in _COMPOSITE_DEFS.keys()]
     return merged[keep_cols].copy()
 
 
@@ -416,6 +417,7 @@ def write_factor_profiles_to_s3(
     profiles_df: pd.DataFrame,
     run_date: str,
     bucket: str | None = None,
+    provenance: dict | None = None,
 ) -> str:
     """Write factor profiles to S3 as `{date}/by_ticker.json`.
 
@@ -423,6 +425,15 @@ def write_factor_profiles_to_s3(
     low_vol_score, value_score, *_n}}``. Consumers (composite scoring,
     quant @tool, backtester attribution) read this single canonical
     artifact rather than re-deriving from raw parquets.
+
+    ``provenance`` records which dated feature snapshot each group resolved
+    to. It is written to a SEPARATE ``{date}/provenance.json`` rather than
+    folded into ``by_ticker.json`` — that payload is a flat ticker→record
+    mapping every consumer iterates, so a reserved non-ticker key would be
+    a schema change to a live contract for no gain. Once a cut can be built
+    from carried-forward inputs, "which snapshot produced this ranking" has
+    to be recoverable from an artifact rather than inferred from the
+    calendar (principles §1, transparency).
 
     Returns the S3 key written.
     """
@@ -448,13 +459,24 @@ def write_factor_profiles_to_s3(
     s3 = boto3.client("s3")
     s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
 
+    if provenance is not None:
+        s3.put_object(
+            Bucket=bucket,
+            Key=f"factors/profiles/{run_date}/provenance.json",
+            Body=json.dumps(provenance, indent=2),
+            ContentType="application/json",
+        )
+
     # Also write `latest.json` sidecar for cache-warm convenience
     latest_key = "factors/profiles/latest.json"
     s3.put_object(Bucket=bucket, Key=latest_key, Body=body, ContentType="application/json")
 
     logger.info(
         "Factor profiles written to s3://%s/%s (%d tickers, %d composite columns)",
-        bucket, key, len(payload), len(_COMPOSITE_DEFS),
+        bucket,
+        key,
+        len(payload),
+        len(_COMPOSITE_DEFS),
     )
     return key
 
@@ -473,10 +495,7 @@ def read_factor_profiles_from_s3(
     from botocore.exceptions import ClientError
 
     bucket = bucket or os.environ.get("S3_BUCKET", "alpha-engine-research")
-    key = (
-        f"factors/profiles/{run_date}/by_ticker.json"
-        if run_date else "factors/profiles/latest.json"
-    )
+    key = f"factors/profiles/{run_date}/by_ticker.json" if run_date else "factors/profiles/latest.json"
     try:
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -490,16 +509,190 @@ def read_factor_profiles_from_s3(
         return None
 
 
+# ── Per-group snapshot resolution (daily-scanner support) ────────────────────
+# The two feature groups this module reads have DIFFERENT natural cadences,
+# and the original exact-dated `features/{run_date}/` read collapsed that
+# distinction into "Saturday or nothing":
+#
+#   technical    — recomputed every trading day by alpha-engine-data's
+#                  builders/daily_append.py (weekday MorningEnrich).
+#   fundamental  — collected WEEKLY by collectors/fundamentals.py in Saturday
+#                  DataPhase1. PE / ROE / market cap move on earnings, so a
+#                  daily refresh would recompute identical numbers at 5x the
+#                  FMP/Finnhub call volume. Carry-forward is correct here;
+#                  daily collection is not.
+#
+# Each group therefore resolves to the latest snapshot ON OR BEFORE run_date
+# and carries its own staleness bound, counted in NYSE TRADING days
+# (feedback_staleness_windows_trading_days_not_calendar_260717). Past the
+# bound this RAISES: trading one stale surface (the whole point of the daily
+# cutover) for another that is silently six weeks old would be a worse bug
+# than the one being fixed.
+_MAX_TECHNICAL_STALENESS_TD = 3
+_MAX_FUNDAMENTAL_STALENESS_TD = 10
+
+# The technical columns the composites above actually reference. Derived by
+# hand from _BASELINE_COMPOSITE_DEFS ∩ alpha-engine-data's `technical`
+# feature group — the composites reference 21 columns total, of which these
+# 8 are technical, 11 are fundamental, and 2 (institutional_accumulation_score,
+# sustainable_growth_rate) are derived elsewhere in this module.
+#
+# Narrower than the scanner's 12-column tech_score set on purpose: the two
+# consumers overlap but differ, and this read spans ~900 symbols.
+_FACTOR_TECHNICAL_COLS: tuple[str, ...] = (
+    "atr_14_pct",
+    "dist_from_52w_high",
+    "momentum_20d",
+    "momentum_5d",
+    "realized_vol_20d",
+    "return_120d",
+    "return_60d",
+    "vol_ratio_10_60",
+)
+
+
+def _technical_frame_from_arctic(tickers: list[str], run_date_str: str) -> pd.DataFrame:
+    """Technical factor inputs from the DAILY ArcticDB surface.
+
+    The S3 ``features/{date}/technical.parquet`` partition only exists on
+    Saturdays, so resolving this group to "latest on or before run_date"
+    would still hand a Thursday run a snapshot 4 trading days old — past its
+    own staleness bound, i.e. the daily scanner would work Mon-Wed and fail
+    Thu-Fri. Carry-forward is the right answer for fundamentals, which are
+    genuinely collected weekly; it is the wrong answer for technicals, which
+    alpha-engine-data recomputes every trading day and merely does not
+    re-snapshot to S3.
+    """
+    from data.fetchers.feature_store_reader import read_latest_features
+
+    rows = (
+        read_latest_features(
+            tickers,
+            columns=_FACTOR_TECHNICAL_COLS,
+            ref_date=_date.fromisoformat(run_date_str),
+        )
+        or {}
+    )
+    if not rows:
+        raise FactorSnapshotStalenessError(
+            f"factor group 'technical': ArcticDB returned no rows for {len(tickers)} tickers as of {run_date_str}"
+        )
+    return pd.DataFrame([{"ticker": t, **vals} for t, vals in rows.items()])
+
+
+class FactorSnapshotStalenessError(RuntimeError):
+    """A feature group's newest snapshot is older than its staleness bound."""
+
+
+def _list_feature_snapshot_dates(s3, bucket: str) -> list[str]:
+    """Sorted ``YYYY-MM-DD`` partition names under ``features/``.
+
+    Paginated: the prefix accumulates one partition per weekly run and has
+    long outlived a single 1000-key ``list_objects_v2`` page.
+    """
+    dates: list[str] = []
+    token = None
+    # Bounded, and both continuation conditions are compared by IDENTITY
+    # rather than truthiness. A `while True` whose exit depends on the
+    # truthiness of a remote response field is one unexpected payload away
+    # from spinning forever inside a Lambda until it times out — and any
+    # test double returning a permissive object satisfies "truthy" for both
+    # IsTruncated and NextContinuationToken, which is exactly how this hung
+    # a local suite before the guard existed. 1000 pages x 1000 keys is far
+    # past any real size of this prefix.
+    for _ in range(1000):
+        kwargs = {"Bucket": bucket, "Prefix": "features/", "Delimiter": "/"}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        for p in resp.get("CommonPrefixes") or []:
+            part = p["Prefix"].rstrip("/").split("/")[-1]
+            if len(part) == 10 and part[4] == "-" and part[7] == "-":
+                dates.append(part)
+        if resp.get("IsTruncated") is not True:
+            break
+        token = resp.get("NextContinuationToken")
+        if not isinstance(token, str) or not token:
+            break
+    else:
+        logger.warning(
+            "features/ prefix listing hit the 1000-page cap — returning %d partitions, which may be incomplete",
+            len(dates),
+        )
+    return sorted(dates)
+
+
+def _resolve_group_snapshot(
+    s3,
+    bucket: str,
+    group: str,
+    run_date_str: str,
+    max_staleness_td: int,
+    *,
+    candidate_dates: list[str],
+) -> tuple[pd.DataFrame, str]:
+    """Latest ``features/{date}/{group}.parquet`` on or before ``run_date_str``.
+
+    Returns ``(df, resolved_date)``. Raises ``FactorSnapshotStalenessError``
+    when nothing resolves, or when what resolves is beyond
+    ``max_staleness_td`` NYSE trading days behind ``run_date_str``.
+    """
+    from nousergon_lib.trading_calendar import count_trading_days
+
+    on_or_before = [d for d in candidate_dates if d <= run_date_str]
+    for resolved in reversed(on_or_before):
+        key = f"features/{resolved}/{group}.parquet"
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            # EXPECTED, not swallowed: weekday partitions carry `technical`
+            # and no `fundamental`, so resolution walks back past them. The
+            # search is still bounded — exhausting every candidate raises
+            # below, and resolving something too old raises on staleness, so
+            # neither a missing group nor an ancient one can pass silently.
+            logger.debug("factor group %r absent at %s (%s)", group, resolved, exc)
+            continue
+        df = pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
+        stale_td = count_trading_days(_date.fromisoformat(resolved), _date.fromisoformat(run_date_str))
+        if stale_td > max_staleness_td:
+            raise FactorSnapshotStalenessError(
+                f"factor group {group!r}: newest snapshot on or before "
+                f"{run_date_str} is {resolved}, {stale_td} NYSE trading days "
+                f"behind (bound {max_staleness_td}). Refusing to rank the "
+                "universe on it. Producer: alpha-engine-data "
+                f"{'builders/daily_append.py (weekday MorningEnrich)' if group == 'technical' else 'collectors/fundamentals.py (Saturday DataPhase1)'}."
+            )
+        logger.info(
+            "Factor group %r resolved to %s (%d trading days behind %s, bound %d)",
+            group,
+            resolved,
+            stale_td,
+            run_date_str,
+            max_staleness_td,
+        )
+        return df, resolved
+
+    raise FactorSnapshotStalenessError(
+        f"factor group {group!r}: no features/{{date}}/{group}.parquet exists "
+        f"on or before {run_date_str} (searched {len(on_or_before)} partitions)"
+    )
+
+
 def compute_and_write_factor_profiles(
     run_date: str | _date,
     sector_map: dict[str, str],
     bucket: str | None = None,
 ) -> str:
-    """Saturday SF entry point — read raw factor parquets, compute composites, write profiles.
+    """Read raw factor parquets, compute composites, write profiles.
+
+    Runs on ANY trading day, not only Saturday. Each feature group resolves
+    independently to the latest snapshot on or before ``run_date`` — see
+    ``_resolve_group_snapshot`` for why the two groups carry different
+    staleness bounds.
 
     Reads:
-      - s3://{bucket}/features/{run_date}/technical.parquet
-      - s3://{bucket}/features/{run_date}/fundamental.parquet
+      - s3://{bucket}/features/{<= run_date}/technical.parquet
+      - s3://{bucket}/features/{<= run_date}/fundamental.parquet
       - s3://{bucket}/features/metron_supplemental/{run_date}/{technical,fundamental}.parquet
         (OPTIONAL — metron-ops#177: Metron-held/watchlisted tickers outside the
         S&P500+400 universe above, written by alpha-engine-data's
@@ -514,6 +707,7 @@ def compute_and_write_factor_profiles(
 
     Writes:
       - s3://{bucket}/factors/profiles/{run_date}/by_ticker.json
+      - s3://{bucket}/factors/profiles/{run_date}/provenance.json
       - s3://{bucket}/factors/profiles/latest.json (sidecar)
 
     Returns the dated S3 key written.
@@ -525,10 +719,9 @@ def compute_and_write_factor_profiles(
 
     s3 = boto3.client("s3")
 
-    def _read(parquet_name: str) -> pd.DataFrame:
-        key = f"features/{run_date_str}/{parquet_name}.parquet"
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        return pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
+    # One listing shared by both group resolutions — the prefix is identical
+    # and it is the expensive part of this read path.
+    candidate_dates = _list_feature_snapshot_dates(s3, bucket)
 
     def _read_metron_supplemental(parquet_name: str) -> pd.DataFrame | None:
         key = f"features/metron_supplemental/{run_date_str}/{parquet_name}.parquet"
@@ -538,8 +731,27 @@ def compute_and_write_factor_profiles(
         except Exception:  # noqa: BLE001 - genuinely optional artifact, never fabricate/raise
             return None
 
-    technical_df = _read("technical")
-    fundamental_df = _read("fundamental")
+    if os.environ.get("SCANNER_FEATURE_SOURCE", "arcticdb").strip().lower() == "s3":
+        technical_df, technical_date = _resolve_group_snapshot(
+            s3,
+            bucket,
+            "technical",
+            run_date_str,
+            _MAX_TECHNICAL_STALENESS_TD,
+            candidate_dates=candidate_dates,
+        )
+    else:
+        technical_df = _technical_frame_from_arctic(sorted(sector_map), run_date_str)
+        technical_date = run_date_str
+
+    fundamental_df, fundamental_date = _resolve_group_snapshot(
+        s3,
+        bucket,
+        "fundamental",
+        run_date_str,
+        _MAX_FUNDAMENTAL_STALENESS_TD,
+        candidate_dates=candidate_dates,
+    )
 
     supplemental_technical = _read_metron_supplemental("technical")
     if supplemental_technical is not None and not supplemental_technical.empty:
@@ -557,6 +769,7 @@ def compute_and_write_factor_profiles(
     # above.
     try:
         from data.substrate.reader import read_inst_ownership
+
         inst_ownership_df = read_inst_ownership(s3_client=s3, bucket=bucket)
     except Exception as e:  # noqa: BLE001 - optional artifact, never block scoring
         logger.info("inst_ownership read unavailable for factor profiles: %s", e)
@@ -569,4 +782,26 @@ def compute_and_write_factor_profiles(
         inst_ownership_df=inst_ownership_df,
     )
 
-    return write_factor_profiles_to_s3(profiles, run_date_str, bucket=bucket)
+    return write_factor_profiles_to_s3(
+        profiles,
+        run_date_str,
+        bucket=bucket,
+        provenance={
+            "run_date": run_date_str,
+            "groups": {
+                "technical": {
+                    "resolved_date": technical_date,
+                    "carried_forward": technical_date != run_date_str,
+                    "source": (
+                        "s3_weekly_snapshot"
+                        if os.environ.get("SCANNER_FEATURE_SOURCE", "arcticdb").strip().lower() == "s3"
+                        else "arcticdb_daily"
+                    ),
+                },
+                "fundamental": {
+                    "resolved_date": fundamental_date,
+                    "carried_forward": fundamental_date != run_date_str,
+                },
+            },
+        },
+    )

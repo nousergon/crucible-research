@@ -259,6 +259,7 @@ def _today() -> object:
 def read_latest_features(
     tickers: list[str] | None = None,
     *,
+    columns: tuple[str, ...] | None = None,
     ref_date=None,
 ) -> dict[str, dict] | None:
     """Newest technical features per ticker, ``{ticker: {feature: value}}``.
@@ -269,6 +270,11 @@ def read_latest_features(
     already holds the constituent list, so this is a pass-through, not a new
     lookup.
 
+    ``columns`` defaults to the scanner's 12-column ``tech_score`` set.
+    ``scoring/factor_scoring.py`` passes its own narrower set — the two
+    consumers need overlapping but different technical columns, and reading
+    the union over ~900 symbols would waste the difference on every run.
+
     Staleness raises ``FeatureStoreStalenessError``. An unreadable source
     still returns ``None`` on the S3 path, preserving the existing contract
     for the caller's explicit empty-store raise.
@@ -277,7 +283,7 @@ def read_latest_features(
         return (
             _read_arctic_latest(
                 tickers,
-                _TECHNICAL_COLS,
+                columns or _TECHNICAL_COLS,
                 ref_date or _today(),
                 what="technical features",
             )
