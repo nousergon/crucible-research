@@ -85,6 +85,34 @@ aws cloudwatch put-metric-alarm \
   --alarm-actions "$SNS_TOPIC_ARN" \
   --region "$REGION"
 
+# alpha-engine-config-I5208 (2026-07-28) — the Think Tank ran silently dead for
+# 11 days because every run hit the 900s Lambda ceiling mid-loop. The deadline
+# guard (crucible-research-PR516) now truncates gracefully inside a 120s reserve,
+# so a timeout means the guard itself failed or the terminal writes exceeded the
+# reserve. Either way, it is a capacity signal: the run needs the §47 spot
+# migration. The Error alarm above catches hard failures (handler raises); this
+# alarm catches the capacity ceiling. A timeout with Duration=900000ms fires only
+# when the Lambda actually hits the wall — a successful truncation inside the
+# reserve exits cleanly (Duration < 900000) and does NOT fire.
+TIMEOUT_ALARM="${ALARM_NAME}-timeout"
+
+echo "[setup-thinktank-schedule] alarm ${TIMEOUT_ALARM} (Duration >= 899000 ms in a day → SNS)"
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "$TIMEOUT_ALARM" \
+  --alarm-description "The daily think-tank run (config#1579) hit the 900s Lambda ceiling — the deadline guard (PR516) failed to truncate inside its 120s reserve, or the terminal writes exceeded the reserve. Capacity signal: the run needs the §47 spot migration (alpha-engine-config-I5208). Check /aws/lambda/${FUNCTION_THINKTANK} logs for deadline_truncated manifest fields." \
+  --namespace "AWS/Lambda" \
+  --metric-name Duration \
+  --dimensions "Name=FunctionName,Value=${FUNCTION_THINKTANK}" \
+  --statistic Maximum \
+  --period 86400 \
+  --evaluation-periods 1 \
+  --threshold 899000 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "$SNS_TOPIC_ARN" \
+  --region "$REGION"
+
 echo ""
-echo "Done. Rule ${RULE_THINKTANK} ENABLED (cron(30 14 * * ? *)); alarm ${ALARM_NAME} armed."
+echo "Done. Rule ${RULE_THINKTANK} ENABLED (cron(30 14 * * ? *)); alarms ${ALARM_NAME} (Errors) + ${TIMEOUT_ALARM} (Timeout) armed."
 echo ""
