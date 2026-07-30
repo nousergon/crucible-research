@@ -192,6 +192,10 @@ _FROZEN_FIELDS = {
         "deadline_skipped_new",
         "deadline_skipped_refresh",
         "deadline_skipped_sweep",
+        # Same partial-run invariant reached by a different cause: a run killed
+        # by an exception mid-loop persists its terminal artifacts and names
+        # what killed it here.
+        "aborted_by_error",
     },
     MonthlyCostLedger: {"schema_version", "month", "spent_usd", "updated_at", "runs"},
 }

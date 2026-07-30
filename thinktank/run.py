@@ -53,7 +53,7 @@ from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
 from thinktank.analyst import build_thesis, sweep
 from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
-from thinktank.context import load_context
+from thinktank.context import ContextBundle, load_context
 from thinktank.costs import BudgetGuard
 from thinktank.ledger import (
     load_ledger,
@@ -250,12 +250,127 @@ def run_daily(
         )
         return manifest
 
-    client = client or ThinktankClient(settings=settings, run_id=run_id)
+    # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
+    from krepis.cost_sink import S3JsonlCostSink
+
+    cost_sink = S3JsonlCostSink(
+        bucket=settings.bucket,
+        prefix="decision_artifacts/_cost",
+        run_id=run_id,
+        register_atexit=True,
+    )
+    client = client or ThinktankClient(
+        settings=settings,
+        run_id=run_id,
+        cost_sink=cost_sink,
+    )
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
+
+    # Bound BEFORE the guarded section: an exception anywhere inside
+    # ``_build_and_sweep`` must still leave the terminal-write block able to
+    # persist whatever completed. See ``_terminal_writes``.
+    theses_written: list[CompanyThesis] = []
+    event_rows: list[dict] = []
+    work_kwargs = {
+        "settings": settings,
+        "new_rows": new_rows,
+        "refresh": refresh,
+        "covered_before": covered_before,
+        "refresh_tickers": refresh_tickers,
+        "trading_day": trading_day,
+        "calendar_date": calendar_date,
+        "seconds_remaining": seconds_remaining,
+        "theses_written": theses_written,
+        "event_rows": event_rows,
+    }
+    terminal_kwargs = {
+        "guard": guard,
+        "run_id": run_id,
+        "trading_day": trading_day,
+        "calendar_date": calendar_date,
+        "theses_written": theses_written,
+        "event_rows": event_rows,
+    }
+    try:
+        _build_and_sweep(store, ledger, client, themes, ctx, manifest, **work_kwargs)
+    except Exception as exc:
+        # A run killed mid-loop used to discard every terminal write — the same
+        # loss the deadline guard was built to prevent (alpha-engine-config-I5208),
+        # reached by a different cause. Persist what completed, record the cause
+        # in the manifest, then RE-RAISE: the non-zero exit is the dispatcher's
+        # and sf-watch's only honest failure signal, and this must not convert a
+        # dead run into a reported success.
+        manifest.aborted_by_error = f"{type(exc).__name__}: {exc}"
+        manifest.errors.append(manifest.aborted_by_error)
+        logger.error(
+            "[thinktank] run %s ABORTED by %s after %d thesis write(s) — "
+            "persisting terminal artifacts for the completed work, then "
+            "re-raising. This run is PARTIAL: %s",
+            run_id,
+            type(exc).__name__,
+            manifest.theses_written,
+            exc,
+        )
+        try:
+            _terminal_writes(store, ledger, client, themes, ctx, manifest, aborted=True, **terminal_kwargs)
+        except Exception:
+            # The abort path's own writes failed. Recorded loudly and swallowed
+            # so the ORIGINAL cause is what propagates — chaining a secondary
+            # S3 error over it would bury the diagnosis.
+            logger.exception(
+                "[thinktank] run %s: terminal writes ALSO failed on the abort "
+                "path — this run persisted nothing terminal",
+                run_id,
+            )
+        raise
+
+    _terminal_writes(store, ledger, client, themes, ctx, manifest, **terminal_kwargs)
+
+    logger.info(
+        "thinktank run %s done: +%d theses (%d event updates), swept %d, "
+        "themes written %d, cost $%.4f (month $%.2f / $%.2f)",
+        run_id,
+        manifest.theses_written,
+        manifest.event_updates_written,
+        manifest.sweep_tickers,
+        manifest.theme_updates_written,
+        manifest.total_cost_usd,
+        manifest.budget_month_spent_usd,
+        manifest.budget_month_limit_usd,
+    )
+    return manifest
+
+
+def _build_and_sweep(
+    store: ThinktankStore,
+    ledger: CoverageLedger,
+    client: ThinktankClient,
+    themes: ThemeKeeper,
+    ctx: ContextBundle,
+    manifest: RunManifest,
+    *,
+    settings: ThinktankSettings,
+    new_rows: list[dict],
+    refresh: list[str],
+    covered_before: list[str],
+    refresh_tickers: list[str] | None,
+    trading_day: str,
+    calendar_date: str,
+    seconds_remaining: Callable[[], float] | None,
+    theses_written: list[CompanyThesis],
+    event_rows: list[dict],
+) -> None:
+    """Every LLM-bearing step of a run: themes, thesis builds, events sweep.
+
+    Split out of :func:`run_daily` so the terminal-write block can be reached
+    from BOTH the success path and the failure path. ``theses_written`` and
+    ``event_rows`` are passed IN and appended to rather than returned, so work
+    completed before an exception is still visible to the caller — a returned
+    value would be lost with the frame.
+    """
     if refresh_tickers is None:
         themes.ensure_current()
 
-    theses_written: list[CompanyThesis] = []
     board_by_ticker = {r["ticker"]: r for r in new_rows}
     for idx, ticker in enumerate(manifest.names_added):
         if _out_of_time(seconds_remaining):
@@ -324,7 +439,6 @@ def run_daily(
         manifest.theses_written += 1
 
     # ── events sweep over everything covered before today's additions ────────
-    event_rows: list[dict] = []
     if covered_before and _out_of_time(seconds_remaining):
         # The sweep is a single LLM fan-out over every covered name — it cannot
         # be partially completed, so near the deadline it is skipped ENTIRELY
@@ -380,6 +494,49 @@ def run_daily(
         if macro_notes:
             themes.ensure_current(daily_developments=macro_notes)
 
+
+def _terminal_writes(
+    store: ThinktankStore,
+    ledger: CoverageLedger,
+    client: ThinktankClient,
+    themes: ThemeKeeper,
+    ctx: ContextBundle,
+    manifest: RunManifest,
+    *,
+    guard: BudgetGuard,
+    run_id: str,
+    trading_day: str,
+    calendar_date: str,
+    theses_written: list[CompanyThesis],
+    event_rows: list[dict],
+    aborted: bool = False,
+) -> None:
+    """Persist everything the run owes its consumers, then the manifest.
+
+    Called on the success path AND from ``run_daily``'s abort handler. The
+    deadline guard (alpha-engine-config-I5208) exists so a run that runs out of
+    wall-clock still reaches this block; an exception mid-loop leaves the run in
+    the IDENTICAL state — completed theses, unwritten terminal artifacts — so it
+    reaches this block too. ``guard.record_run`` lives here, which is why
+    skipping it also lost the run's spend from the monthly cost ledger.
+
+    ``aborted=True`` HOLDS BACK THE CHALLENGER-SELECTION POINTER, and that
+    exception is the whole reason this parameter exists. The Think Tank runs on
+    a self-terminating spot box behind an async dispatcher that does not
+    babysit the run (nousergon-data ``thinktank-spot-dispatcher``), so the
+    dispatcher's alarm can only see "no box was ever launched". Per
+    ARTIFACT_REGISTRY's ``thinktank_challenger_selection`` row, that key is
+    therefore **the only end-to-end signal that this arm produced anything**,
+    and the freshness monitor probes it with a HEAD — ``LastModified`` and
+    ``ContentLength``, never content. Advancing the pointer from a dead run
+    would make the failure read as a healthy run to the one detector that can
+    see it. The dated key is still written (the partial cohort is real
+    evidence); only the *latest* pointer is withheld, because that pointer is a
+    claim this run produced a result, and it did not.
+
+    Everything else persists exactly as on the success path: completed theses,
+    the ratings board, events, spend, and the manifest that names the cause.
+    """
     manifest.themes_reconciled = themes.reconciled
     manifest.theme_updates_written = themes.updates_written
 
@@ -402,8 +559,9 @@ def run_daily(
         calendar_date=calendar_date,
         board_date=(ctx.board or {}).get("as_of"),
         coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
+        update_latest_pointer=not aborted,
     )
-    manifest.challenger_selection_written = True
+    manifest.challenger_selection_written = not aborted
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
@@ -422,20 +580,6 @@ def run_daily(
         manifest.model_dump(),
     )
     client.flush_sft(store.s3, store.bucket, trading_day)
-
-    logger.info(
-        "thinktank run %s done: +%d theses (%d event updates), swept %d, "
-        "themes written %d, cost $%.4f (month $%.2f / $%.2f)",
-        run_id,
-        manifest.theses_written,
-        manifest.event_updates_written,
-        manifest.sweep_tickers,
-        manifest.theme_updates_written,
-        manifest.total_cost_usd,
-        manifest.budget_month_spent_usd,
-        manifest.budget_month_limit_usd,
-    )
-    return manifest
 
 
 def _compute_coverage_gap(
