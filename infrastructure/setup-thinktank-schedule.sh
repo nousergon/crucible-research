@@ -32,6 +32,56 @@
 
 set -euo pipefail
 
+# ── SUPERSEDED — this script must not run (alpha-engine-config-I5720) ────────
+#
+# The §47 spot cutover (alpha-engine-config-I5208) moved the daily Think Tank
+# off this Lambda onto a self-terminating EC2 spot box behind
+# `alpha-engine-thinktank-spot-dispatcher` (nousergon-data). That cutover
+# repointed the SAME EventBridge rule this script targets, and deliberately
+# DELETED the two alarms this script creates.
+#
+# So re-running this would silently revert the migration, twice over:
+#
+#   1. `put-targets` on `alpha-research-thinktank-daily` is an upsert, and two
+#      scripts in two repos now aim it at different functions. Last writer
+#      wins. This one wins it back to the 900s Lambda that died mid-loop every
+#      day for 11 days — the exact failure I5208 exists to close.
+#   2. It re-creates `...-daily-run-failed` and `...-daily-run-failed-timeout`
+#      on a function that no longer runs the work. Both carry
+#      `--treat-missing-data notBreaching`, so zero invocations evaluates to
+#      OK: they would sit GREEN forever while nothing ran. The dispatcher's
+#      deploy.sh deletes them for precisely that reason, in the same action
+#      that blinds them.
+#
+# The header below still describes the pre-cutover world and is kept verbatim
+# as the record of what this script used to own. Nothing here is live.
+#
+# Current ownership:
+#   rule + dispatch alarm  ->  nousergon-data/infrastructure/lambdas/
+#                              thinktank-spot-dispatcher/deploy.sh --cutover
+#   end-to-end run health  ->  ARTIFACT_REGISTRY row
+#                              thinktank_challenger_selection (720min SLA)
+#
+# Refusing rather than deleting the file: the deploy checklist and two runbooks
+# still name this path, and a missing script fails with "No such file" while a
+# refusing one says where to go.
+cat >&2 <<'SUPERSEDED'
+[setup-thinktank-schedule] REFUSING TO RUN — superseded by the §47 spot cutover.
+
+  This script points alpha-research-thinktank-daily at
+  alpha-engine-research-thinktank:live and arms two alarms on that function.
+  The daily Think Tank no longer runs there. Running this would repoint the
+  live rule back at the retired Lambda and re-create two alarms that read
+  GREEN on zero invocations.
+
+  To (re)provision the schedule:
+    nousergon-data/infrastructure/lambdas/thinktank-spot-dispatcher/deploy.sh --cutover
+
+  Tracked: alpha-engine-config-I5720 · alpha-engine-config-I5208
+SUPERSEDED
+exit 1
+
+
 FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 RULE_THINKTANK="alpha-research-thinktank-daily"
 ALARM_NAME="alpha-engine-thinktank-daily-run-failed"

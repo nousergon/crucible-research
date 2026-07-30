@@ -22,13 +22,38 @@ eval_judge / scanner / rationale_clustering). Two invocation sources
    padded with stale-refill — kept small and bounded regardless of how
    large the full-universe backlog gets.
 
-Failure contract — RAISE, never return an ERROR dict, for BOTH
-invocation sources. For the EventBridge async invoke, an ERROR-dict
-return is a *successful* invocation — the AWS/Lambda Errors metric stays
-flat, no retry fires, and the failure is silent (exactly the
-no-silent-fails failure mode); raising instead drives the Errors metric
-that ``infrastructure/setup-thinktank-schedule.sh``'s alarm watches and
-engages EventBridge's two built-in async retries. For the SF's
+Failure contract — RAISE, never return an ERROR dict, on every
+invocation path. An ERROR-dict return is a *successful* invocation to
+every caller here: the Errors metric stays flat, no retry fires, and the
+failure is silent (exactly the no-silent-fails failure mode).
+
+**What raising actually buys differs by path, and the daily path changed
+under this docstring (alpha-engine-config-I5208 / -I5720).** Stated per
+caller rather than as one contract, because the pre-cutover version of
+this paragraph described a mechanism the daily run no longer uses:
+
+- **Box-side (the DAILY run since the §47 cutover)** — invoked by
+  ``infrastructure/thinktank_box_runner.py`` on a self-terminating EC2
+  spot box, dispatched by ``alpha-engine-thinktank-spot-dispatcher``
+  (nousergon-data). Raising exits non-zero, which the bootstrap
+  propagates to the SSM command status. There is **no EventBridge retry
+  of the run** — EventBridge retries the DISPATCHER, and the dispatcher
+  already succeeded the moment it launched the box. The dispatcher's
+  alarm covers *launch only*; the end-to-end signal is the
+  ARTIFACT_REGISTRY row ``thinktank_challenger_selection`` (720min SLA),
+  which is why ``thinktank.run`` withholds that key's latest pointer on
+  an aborted run (crucible-research#556). Whether anything watches the
+  SSM command status itself is alpha-engine-config-I5752.
+- **Step Functions (``mode=gap_fill`` and the fan-out modes)** — the
+  ``arn:aws:states:::lambda:invoke`` Task's Catch triggers only on an
+  actual raised Lambda error; a normal return value, even an
+  error-shaped dict, is a *successful* Task completion and would never
+  route through the non-blocking Catch.
+- **Direct Lambda invoke (operator / legacy EventBridge)** — raising
+  drives the AWS/Lambda Errors metric and engages EventBridge's two
+  built-in async retries. This is what the daily path used before the
+  cutover; ``infrastructure/setup-thinktank-schedule.sh`` provisioned it
+  and now refuses to run. For the SF's
 ``arn:aws:states:::lambda:invoke`` Task, the Catch only triggers on an
 actual raised Lambda error — a normal return value (even an error-shaped
 dict) is a *successful* Task completion and would never route through

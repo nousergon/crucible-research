@@ -36,15 +36,76 @@ CONFIG_PAT_SSM="${CONFIG_PAT_SSM:-/alpha-engine/saturday_sf_watch/github_pat}"
 ALPHA_ENGINE_EXPERIMENT_ID="${ALPHA_ENGINE_EXPERIMENT_ID:-reference}"
 THINKTANK_RUN_BUDGET_SECONDS="${THINKTANK_RUN_BUDGET_SECONDS:-12600}"
 
+# ── Terminal-outcome reporting (alpha-engine-config-I5752) ──────────────────
+# The box self-terminates on every exit path, so anything not shipped off it
+# before `shutdown` is gone. Measured 2026-07-30, the coverage this closes:
+#
+#   stage              | before                        | after
+#   -------------------|-------------------------------|---------------------
+#   dispatcher prelude | log -> S3, no alert            | unchanged (its own trap)
+#   THIS script        | NOTHING — no log, no alert     | log -> S3 + SNS on failure
+#   the Python run     | flow-doctor Telegram + email   | unchanged
+#   overran the cap    | reaped, no incomplete-reap row | marker + WatchKind
+#
+# The middle row is the gap. `fail()` here is what refuses to start when the
+# private prompt config is absent -- deliberately, before any LLM spend -- and
+# that refusal was silent: stderr died with the box and the SSM command status
+# is watched by nothing (alpha-engine-config-I5752).
+SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts}"
+RUN_TOKEN="${THINKTANK_SPOT_RUN_TOKEN:-unknown}"
+TRADING_DAY="$(date -u +%Y-%m-%d)"
+BOOTSTRAP_LOG="${BOOTSTRAP_LOG:-/var/log/thinktank-spot-bootstrap-${RUN_TOKEN}.log}"
+S3_LOG="s3://alpha-engine-research/_ssm_logs/thinktank-spot/${TRADING_DAY}/bootstrap-$(hostname)-${RUN_TOKEN}.log"
+
+# SUCCESS PATH ONLY -- principles.md §2.7. This marker is what
+# spot-orphan-reaper's Think-Tank WatchKind reads to decide whether a box it
+# reaped at the fleet age cap had actually finished. A marker a failed run
+# wrote would make the failure read as a completed run to the one detector
+# that can see a hung box, which is the exact inversion §2.7 forbids.
+COMPLETION_KEY="s3://alpha-engine-research/thinktank/_control/completed/${TRADING_DAY}-${RUN_TOKEN}.json"
+
 log() { echo "[thinktank-bootstrap] $*"; }
 fail() { echo "[thinktank-bootstrap] FATAL: $*" >&2; exit 1; }
 
 # Self-terminate on EVERY exit path, preserving the real exit code for the SSM
 # command status. `shutdown -h now` + InstanceInitiatedShutdownBehavior=terminate
 # is the fleet's standard teardown.
+#
+# Every step here is best-effort and `|| true`: the run's outcome is already
+# decided by `rc`, and a failure to REPORT it must never change it, nor block
+# the shutdown that stops the box billing. Each swallow is visible in the log
+# this same function ships (no-silent-fails carve-out: the failure mode is
+# "the report did not land", the primary deliverable is the run itself, and
+# the recording surface is $S3_LOG plus the SSM command status).
 on_exit() {
     local rc=$?
-    log "run finished rc=${rc} — terminating box"
+    log "run finished rc=${rc} — reporting outcome, then terminating box"
+
+    # Ship the log on EVERY exit, success included: a successful run's log is
+    # the baseline the next failure gets diffed against.
+    aws s3 cp "$BOOTSTRAP_LOG" "$S3_LOG" --region "$REGION" --quiet 2>/dev/null || true
+
+    if [ "$rc" -eq 0 ]; then
+        printf '{"trading_day":"%s","run_token":"%s","instance":"%s","completed_at":"%s"}\n' \
+            "$TRADING_DAY" "$RUN_TOKEN" "$(hostname)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            | aws s3 cp - "$COMPLETION_KEY" --region "$REGION" --quiet 2>/dev/null || true
+        log "completion marker written: ${COMPLETION_KEY}"
+    else
+        log "NO completion marker — this run failed (rc=${rc})"
+        aws sns publish --topic-arn "$SNS_TOPIC_ARN" --region "$REGION" \
+            --subject "Think Tank box FAILED (rc=${rc})" \
+            --message "The daily Think Tank box exited ${rc} before its run completed.
+trading_day=${TRADING_DAY} run_token=${RUN_TOKEN} instance=$(hostname)
+Log: ${S3_LOG}
+Last 40 lines:
+$(tail -n 40 "$BOOTSTRAP_LOG" 2>/dev/null || echo '(log unavailable)')
+
+This alert covers the window flow-doctor cannot: a failure BEFORE the Python
+run configures it (private config absent, venv, deps), where stderr dies with
+the box. A failure inside the run reports itself through flow-doctor instead.
+See alpha-engine-config-I5752." >/dev/null 2>&1 || true
+    fi
+
     shutdown -h now >/dev/null 2>&1 || true
     exit "$rc"
 }
