@@ -24,6 +24,32 @@ from evals.judge import _is_degenerate_input, evaluate_artifact
 from tests.test_eval_judge import _openai_response, _openai_tool_call
 
 
+def _patch_llm_client(judge_mod, fake_client):
+    """Patch ``judge_mod.LLMClient`` so it builds a REAL ``krepis.llm.LLMClient``
+    over *fake_client*.
+
+    alpha-engine-config#5223 moved the judge off a bare ``openai.OpenAI`` onto
+    the shared chokepoint, so ``patch.object(judge_mod, "OpenAI", ...)`` no
+    longer intercepts anything. Substituting the TRANSPORT rather than the whole
+    client keeps these tests exercising the real krepis call path — including
+    its null-choices guard and retry classification — while assertions on
+    ``fake_client.chat.completions.create.call_args`` still hold.
+    """
+    from krepis.llm import LLMClient as _RealLLMClient
+
+    def _factory(spec, **kwargs):
+        kwargs.pop("client_factory", None)
+        return _RealLLMClient(spec, client_factory=lambda _s, _k: fake_client, **kwargs)
+
+    return patch.object(judge_mod, "LLMClient", side_effect=_factory)
+
+
+def _spec_of(mock_llm_cls):
+    """The ModelSpec the judge handed to LLMClient — where base_url/api_key
+    configuration lives now that the judge no longer builds OpenAI(...)."""
+    return mock_llm_cls.call_args.args[0]
+
+
 def _artifact(
     agent_id: str,
     snap: dict | None = None,
@@ -168,15 +194,11 @@ class TestSectorPeerReviewDegenerate:
 
     def test_quant_picks_only_is_not_degenerate(self):
         snap = {"quant_picks": [{"ticker": "AAPL"}], "qual_picks": []}
-        assert not _is_degenerate_input(
-            _artifact("sector_peer_review:tech", snap)
-        )
+        assert not _is_degenerate_input(_artifact("sector_peer_review:tech", snap))
 
     def test_qual_picks_only_is_not_degenerate(self):
         snap = {"quant_picks": [], "qual_picks": [{"ticker": "AAPL"}]}
-        assert not _is_degenerate_input(
-            _artifact("sector_peer_review:tech", snap)
-        )
+        assert not _is_degenerate_input(_artifact("sector_peer_review:tech", snap))
 
 
 # ── macro + ic_cio: never degenerate ───────────────────────────────────
@@ -221,7 +243,7 @@ class TestEvaluateArtifactDegenerateInputShortCircuit:
         artifact = _artifact("thesis_update:tech:MCK", snap)
 
         fake_client = MagicMock()
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
 
         # No LLM call was made — the gate short-circuited
@@ -258,7 +280,7 @@ class TestEvaluateArtifactDegenerateInputShortCircuit:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", fake_parsed.model_dump())],
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
 
         # LLM call was made
