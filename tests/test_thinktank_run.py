@@ -372,8 +372,23 @@ def test_mid_loop_crash_still_persists_terminal_artifacts_then_raises(tt_config)
         # The terminal artifacts exist and describe the PARTIAL run.
         board = store.get_json("thinktank/ratings/latest.json")
         assert set(board["rows"]) == {"T0", "T1"}
-        sel = store.get_json("thinktank/challenger_selection/latest.json")
-        assert sel["trading_day"] == board["trading_day"]
+        # ...but the challenger-selection LATEST pointer is deliberately NOT
+        # advanced. It is the ONLY end-to-end health signal for this arm
+        # (ARTIFACT_REGISTRY thinktank_challenger_selection: the async spot
+        # dispatcher can only see "no box was ever launched"), and the
+        # freshness monitor probes it by HEAD — LastModified/ContentLength,
+        # never content. A fresh pointer from a dead run reads as a healthy run.
+        keys_now = {
+            o["Key"]
+            for o in s3.list_objects_v2(Bucket=BUCKET, Prefix="thinktank/challenger_selection/").get("Contents", [])
+        }
+        assert "thinktank/challenger_selection/latest.json" not in keys_now
+        # The DATED key still lands — the partial cohort is real evidence, it
+        # just is not a claim that this run produced a result.
+        dated = store.get_json(f"thinktank/challenger_selection/{board['trading_day']}.json")
+        assert dated["trading_day"] == board["trading_day"]
+        # And no leaderboard shadow evidence from a dead run.
+        assert not [k for k in keys_now if "signals_shadow" in k]
 
         # The manifest names the cause and is not readable as a healthy run.
         prefix = f"thinktank/runs/{board['trading_day']}/"
@@ -384,7 +399,7 @@ def test_mid_loop_crash_still_persists_terminal_artifacts_then_raises(tt_config)
         assert "simulated crash building T2" in manifest["aborted_by_error"]
         assert manifest["errors"] == [manifest["aborted_by_error"]]
         assert manifest["theses_written"] == 2
-        assert manifest["challenger_selection_written"] is True
+        assert manifest["challenger_selection_written"] is False
 
         # Spend is recorded: guard.record_run lives in the terminal block, so
         # skipping it silently under-counted the month against the budget cap.
