@@ -27,6 +27,32 @@ from graph.state_schemas import RubricEvalArtifact
 from tests.test_eval_judge import _make_artifact, _make_llm_output
 
 
+def _patch_llm_client(judge_mod, fake_client):
+    """Patch ``judge_mod.LLMClient`` so it builds a REAL ``krepis.llm.LLMClient``
+    over *fake_client*.
+
+    alpha-engine-config#5223 moved the judge off a bare ``openai.OpenAI`` onto
+    the shared chokepoint, so ``patch.object(judge_mod, "OpenAI", ...)`` no
+    longer intercepts anything. Substituting the TRANSPORT rather than the whole
+    client keeps these tests exercising the real krepis call path — including
+    its null-choices guard and retry classification — while assertions on
+    ``fake_client.chat.completions.create.call_args`` still hold.
+    """
+    from krepis.llm import LLMClient as _RealLLMClient
+
+    def _factory(spec, **kwargs):
+        kwargs.pop("client_factory", None)
+        return _RealLLMClient(spec, client_factory=lambda _s, _k: fake_client, **kwargs)
+
+    return patch.object(judge_mod, "LLMClient", side_effect=_factory)
+
+
+def _spec_of(mock_llm_cls):
+    """The ModelSpec the judge handed to LLMClient — where base_url/api_key
+    configuration lives now that the judge no longer builds OpenAI(...)."""
+    return mock_llm_cls.call_args.args[0]
+
+
 def _openai_tool_call(name: str, arguments: dict):
     return SimpleNamespace(
         id="call_1",
@@ -36,7 +62,11 @@ def _openai_tool_call(name: str, arguments: dict):
 
 
 def _openai_response(
-    *, finish_reason: str, tool_calls=None, content=None, model="deepseek/deepseek-v4-flash",
+    *,
+    finish_reason: str,
+    tool_calls=None,
+    content=None,
+    model="deepseek/deepseek-v4-flash",
     cost: float = 0.0001,
 ):
     message = SimpleNamespace(content=content, tool_calls=tool_calls)
@@ -53,6 +83,7 @@ def _valid_tool_args() -> dict:
 class TestEvaluateArtifactOpenRouter:
     def test_unmapped_agent_raises(self):
         from evals.judge import evaluate_artifact_openrouter
+
         artifact = _make_artifact("totally_made_up_agent")
         with pytest.raises(ValueError, match="No rubric mapped"):
             evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
@@ -66,7 +97,7 @@ class TestEvaluateArtifactOpenRouter:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client) as mock_openai_cls:
+        with _patch_llm_client(judge_mod, fake_client) as mock_llm_cls:
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact_openrouter(
                 artifact,
@@ -84,13 +115,22 @@ class TestEvaluateArtifactOpenRouter:
         # Only one call — first attempt succeeded.
         assert fake_client.chat.completions.create.call_count == 1
         # base_url must resolve to the OpenRouter endpoint.
-        mock_openai_cls.assert_called_once()
-        assert mock_openai_cls.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
-        assert mock_openai_cls.call_args.kwargs["api_key"] == "sk-or-test"
+        mock_llm_cls.assert_called_once()
+        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://openrouter.ai/api/v1"
+        assert mock_llm_cls.call_args.kwargs["api_key"] == "sk-or-test"
         # reasoning={"exclude": True} is forwarded per the documented
         # truncation-avoidance default.
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"] == {"reasoning": {"exclude": True}}
+        assert call_kwargs["extra_body"] == {
+            # Truncation-avoidance default, forwarded from the ModelSpec.
+            "reasoning": {"exclude": True},
+            # OpenRouter usage-accounting opt-in, added by krepis's
+            # _openai_extra_body() since alpha-engine-config#5223. It is what
+            # populates LLMResult.usage.provider_cost_usd — the field the
+            # migrated judge now reads for per-call cost, replacing the raw
+            # `usage.cost` read it did against a bare OpenAI client.
+            "usage": {"include": True},
+        }
 
     def test_leak_guard_trips_then_recovers_on_retry(self):
         """Reproduces the live-confirmed truncation shape on attempt 1
@@ -108,7 +148,7 @@ class TestEvaluateArtifactOpenRouter:
             ),
         ]
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
 
@@ -123,14 +163,18 @@ class TestEvaluateArtifactOpenRouter:
 
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = _openai_response(
-            finish_reason="length", tool_calls=None, content=None,
+            finish_reason="length",
+            tool_calls=None,
+            content=None,
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact_openrouter(
-                    artifact, api_key="sk-or-test", max_retries=3,
+                    artifact,
+                    api_key="sk-or-test",
+                    max_retries=3,
                 )
         assert fake_client.chat.completions.create.call_count == 3
 
@@ -155,7 +199,7 @@ class TestEvaluateArtifactOpenRouter:
             ),
         ]
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with caplog.at_level("WARNING"):
                 judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
@@ -177,7 +221,7 @@ class TestEvaluateArtifactOpenRouter:
                 tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
             ),
         ]
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
         assert isinstance(result, RubricEvalArtifact)
@@ -194,7 +238,7 @@ class TestEvaluateArtifactOpenRouter:
         from evals import judge as judge_mod
 
         fake_client = MagicMock()
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             artifact.agent_output = {}
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
