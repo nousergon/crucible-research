@@ -193,7 +193,6 @@ def make_agent_llm(
     from nousergon_lib.secrets import get_secret
 
     from config import (
-        ANTHROPIC_API_KEY,
         DIRECT_MODEL_FOR_CLASS,
         ROUTER_BASE_URL,
         ROUTER_KEY_SECRET,
@@ -225,13 +224,20 @@ def make_agent_llm(
             )
         return ChatAnthropic(
             model=model,
-            anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+            anthropic_api_key=api_key or get_secret("ANTHROPIC_API_KEY", required=False, default=""),
             max_tokens=max_tokens,
             max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
             default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
             callbacks=cbs,
             **extra,
         )
+        # Custodial compliance (policy §2a): the key is fetched from Secrets
+        # Manager at call time, NOT from a process-wide env var. Deployments
+        # with a reachable router use the sentinel ROUTER_KEY_SECRET instead
+        # and hold no upstream provider credential at all.
+        # The eval_judge Lambda handlers are registered as declared exceptions
+        # in the fleet's LLM_CALLSITE_REGISTRY.yaml until I4927 puts them
+        # behind the in-VPC gateway.
 
     # ROUTER MODE — the class name goes on the wire and the registry resolves it.
     from langchain_openai import ChatOpenAI
