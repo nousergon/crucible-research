@@ -250,7 +250,20 @@ def run_daily(
         )
         return manifest
 
-    client = client or ThinktankClient(settings=settings, run_id=run_id)
+    # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
+    from krepis.cost_sink import S3JsonlCostSink
+
+    cost_sink = S3JsonlCostSink(
+        bucket=settings.bucket,
+        prefix="decision_artifacts/_cost",
+        run_id=run_id,
+        register_atexit=True,
+    )
+    client = client or ThinktankClient(
+        settings=settings,
+        run_id=run_id,
+        cost_sink=cost_sink,
+    )
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
 
     # Bound BEFORE the guarded section: an exception anywhere inside
@@ -299,7 +312,7 @@ def run_daily(
             exc,
         )
         try:
-            _terminal_writes(store, ledger, client, themes, ctx, manifest, **terminal_kwargs)
+            _terminal_writes(store, ledger, client, themes, ctx, manifest, aborted=True, **terminal_kwargs)
         except Exception:
             # The abort path's own writes failed. Recorded loudly and swallowed
             # so the ORIGINAL cause is what propagates — chaining a secondary
@@ -496,6 +509,7 @@ def _terminal_writes(
     calendar_date: str,
     theses_written: list[CompanyThesis],
     event_rows: list[dict],
+    aborted: bool = False,
 ) -> None:
     """Persist everything the run owes its consumers, then the manifest.
 
@@ -505,6 +519,23 @@ def _terminal_writes(
     the IDENTICAL state — completed theses, unwritten terminal artifacts — so it
     reaches this block too. ``guard.record_run`` lives here, which is why
     skipping it also lost the run's spend from the monthly cost ledger.
+
+    ``aborted=True`` HOLDS BACK THE CHALLENGER-SELECTION POINTER, and that
+    exception is the whole reason this parameter exists. The Think Tank runs on
+    a self-terminating spot box behind an async dispatcher that does not
+    babysit the run (nousergon-data ``thinktank-spot-dispatcher``), so the
+    dispatcher's alarm can only see "no box was ever launched". Per
+    ARTIFACT_REGISTRY's ``thinktank_challenger_selection`` row, that key is
+    therefore **the only end-to-end signal that this arm produced anything**,
+    and the freshness monitor probes it with a HEAD — ``LastModified`` and
+    ``ContentLength``, never content. Advancing the pointer from a dead run
+    would make the failure read as a healthy run to the one detector that can
+    see it. The dated key is still written (the partial cohort is real
+    evidence); only the *latest* pointer is withheld, because that pointer is a
+    claim this run produced a result, and it did not.
+
+    Everything else persists exactly as on the success path: completed theses,
+    the ratings board, events, spend, and the manifest that names the cause.
     """
     manifest.themes_reconciled = themes.reconciled
     manifest.theme_updates_written = themes.updates_written
@@ -528,8 +559,9 @@ def _terminal_writes(
         calendar_date=calendar_date,
         board_date=(ctx.board or {}).get("as_of"),
         coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
+        update_latest_pointer=not aborted,
     )
-    manifest.challenger_selection_written = True
+    manifest.challenger_selection_written = not aborted
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 

@@ -16,24 +16,31 @@ Structured outputs, portably:
 Every call stamps cost (registry prices × usage) and stages an SFT row for the
 shared distillation corpus via the ``nousergon_lib.sft`` chokepoint
 (producer ``crucible_thinktank``).
+
+**alpha-engine-config-I5223 (2026-07-29):** the inner transport is now
+``krepis.llm.LLMClient.structured()`` — the library this client was the fork
+of. Per-call cost emission flows through ``krepis.cost_sink.S3JsonlCostSink``
+for the shared telemetry stream; thinktank's own cost tracking (budget guard,
+manifest, SFT staging) is unchanged.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import random
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 import boto3
+from krepis.cost_sink import S3JsonlCostSink
+from krepis.llm import LLMClient, LLMError
+from krepis.llm_config import ModelSpec
 from nousergon_lib import sft
 from nousergon_lib.secrets import get_secret
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from thinktank import SFT_PRODUCER
 from thinktank.schemas import TierUsage
@@ -45,63 +52,23 @@ T = TypeVar("T", bound=BaseModel)
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
-_JSON_INSTRUCTION = (
-    "\n\nRespond with ONLY a single JSON object matching this JSON Schema — no prose, no markdown fences:\n{schema}"
-)
-
-# Two DISTINCT transient-failure classes, each retried on its own budget,
-# separate from the ONE bounded schema-corrective retry below (config#3072):
-# a 5xx/connection blip or a non-JSON provider body (rate-limit/error page)
-# is provider flakiness, not a model mistake — re-issuing the SAME request
-# fresh (no corrective message) is the right remedy, with jittered backoff
-# so a transient blip isn't retried in a tight loop.
-_HTTP_RETRY_ATTEMPTS = 3
-_NON_JSON_RETRY_ATTEMPTS = 3
-_RETRY_BASE_DELAY_S = 2.0
-
-
-class _NullChoicesError(Exception):
-    """A 200 response whose ``choices`` is null/empty.
-
-    OpenRouter reports upstream provider failures in the response BODY rather
-    than as an HTTP error, so this is not raised by the SDK. Modelling it as an
-    exception lets it share the transient-error retry path instead of escaping
-    as a TypeError from ``choices[0]``.
-    """
-
-
-def _backoff_sleep(base_delay: float, attempt: int) -> None:
-    time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))  # noqa: S311
-
-
-def _transient_provider_errors() -> tuple[type[Exception], ...]:
-    # Imported lazily so the module stays importable without the openai dep
-    # (mirrors ``_client_for``'s lazy OpenAI import below).
-    from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
-
-    # ``json.JSONDecodeError`` belongs in this class even though it is not an
-    # openai exception: the SDK parses the body only AFTER it has decided the
-    # transaction succeeded, so a malformed body is invisible to the client's
-    # own ``max_retries`` (which is status/connection-driven) and escapes as a
-    # raw, context-free decode error. Live incident 2026-07-30 (report
-    # 019fb37b8b792803c2a92b924042): OpenRouter answered 200 with 8228 bytes of
-    # keep-alive whitespace and no payload, and the resulting
-    # ``JSONDecodeError`` killed the daily Think Tank run ~14 min in.
-    #
-    # STOPGAP. ``krepis.llm`` already classifies this failure exactly here for
-    # the same reason (krepis#38, live incident 2026-07-20) — this file is a
-    # fork of that chokepoint, which is why the fix did not reach it.
-    # crucible-research#530 / alpha-engine-config#5223 migrate these call sites
-    # onto ``krepis.llm`` and DELETE this function; it is blocked
-    # (``gate:dependency``) and CI-red, so the class is closed here in the
-    # meantime rather than left open on the daily path.
-    return (
-        APIConnectionError,
-        APITimeoutError,
-        InternalServerError,
-        RateLimitError,
-        json.JSONDecodeError,
-    )
+# Retry budget handed to ``krepis.llm.LLMClient.structured()``.
+#
+# The library defaults to ``attempts=2``. The fork this file replaces ran THREE
+# transport attempts and THREE non-JSON-body attempts, each on its own budget,
+# plus one schema-corrective retry (config#3072). Taking the library default
+# would therefore have SHRUNK the budget as a side effect of consolidating —
+# and shrunk it on exactly the failure that motivated this work: live incident
+# 2026-07-30 (flow-doctor report 019fb37b8b792803c2a92b924042), where OpenRouter
+# answered 200 with 8228 bytes of keep-alive padding and no payload, would get
+# one retry instead of three.
+#
+# 3 is the fork's per-class budget, preserved. It now covers every retryable
+# cause at once (non-JSON body, null-choices body, schema validation) because
+# the library uses one budget for all of them — a consolidation of BUDGETS,
+# never a reduction of the number of attempts any single failure gets. krepis
+# >= 0.25.0 backs off between attempts (krepis#93), so this is not a tight loop.
+_STRUCTURED_ATTEMPTS = 3
 
 
 class ThinktankLLMError(RuntimeError):
@@ -139,38 +106,85 @@ class _SftRow:
 
 @dataclass
 class ThinktankClient:
-    """Per-run LLM client: tier routing, validation, cost meter, SFT staging."""
+    """Per-run LLM client: tier routing, validation, cost meter, SFT staging.
+
+    **alpha-engine-config-I5223:** the inner transport is now
+    ``krepis.llm.LLMClient`` — each tier gets its own client instance
+    (lazily created and cached per tier name), replacing the forked
+    ``OpenAI(...)`` construction this module was extracted from. Cost
+    telemetry flows through the shared ``krepis.cost_sink`` chokepoint
+    while thinktank's own SFT staging + budget tracking stay unchanged.
+    """
 
     settings: ThinktankSettings
     run_id: str
     run_type: str = "thinktank_daily"
     # test seam: (provider_spec, api_key) -> object exposing .chat.completions.create
     client_factory: Callable[[ProviderSpec, str], Any] | None = None
+    # ── I5223: cost_sink for shared telemetry (set by run.py) ────────────
+    cost_sink: S3JsonlCostSink | None = None
 
-    _clients: dict[str, Any] = field(default_factory=dict, init=False)
+    _llm_clients: dict[str, LLMClient] = field(default_factory=dict, init=False)
     _usage: dict[str, TierUsage] = field(default_factory=dict, init=False)
     _sft_rows: dict[str, list[_SftRow]] = field(default_factory=dict, init=False)
     _call_seq: int = field(default=0, init=False)
 
     # ── provider clients ─────────────────────────────────────────────────────
 
-    def _client_for(self, provider: ProviderSpec) -> Any:
-        if provider.name not in self._clients:
-            api_key = get_secret(provider.key_secret)
-            if self.client_factory is not None:
-                self._clients[provider.name] = self.client_factory(provider, api_key)
-            else:
-                # Imported lazily so the package imports without the openai dep
-                # in environments that only read thinktank artifacts.
-                from openai import OpenAI
+    def _llm_client_for(self, tier: TierSpec, *, callsite_id: str) -> LLMClient:
+        """Return (or create and cache) the ``LLMClient`` for *tier*.
 
-                self._clients[provider.name] = OpenAI(
-                    base_url=provider.base_url,
-                    api_key=api_key,
-                    max_retries=3,
-                    timeout=180.0,
-                )
-        return self._clients[provider.name]
+        One client per (tier name, callsite_id) — themes-macro and themes-sector
+        share the same tier but are distinct call sites. The callsite_id is set
+        on the cached client; callers that need a different callsite_id on the
+        same tier pass the one they need.
+        """
+        cache_key = f"{tier.name}:{callsite_id}"
+        if cache_key not in self._llm_clients:
+            provider = self.settings.provider_for(tier)
+            api_key = get_secret(provider.key_secret)
+            spec = ModelSpec(
+                provider=provider.name,
+                model=tier.model,
+                max_tokens=tier.max_tokens,
+                base_url=provider.base_url,
+                api_key_env=provider.key_secret,
+                structured_outputs=tier.structured_outputs,
+                # reasoning not used by thinktank tiers — preserve current
+                # behaviour (no explicit reasoning control).
+            )
+            client = LLMClient(
+                spec,
+                callsite_id=callsite_id,
+                api_key=api_key,
+                client_factory=(self._adapt_client_factory() if self.client_factory is not None else None),
+                max_retries=3,
+                timeout=180.0,
+                cost_sink=self.cost_sink,
+            )
+            self._llm_clients[cache_key] = client
+        return self._llm_clients[cache_key]
+
+    def _adapt_client_factory(self) -> Callable[[ModelSpec, str], Any] | None:
+        """Adapt the old ``client_factory(ProviderSpec, api_key) → OpenAI``
+        test seam into the ``LLMClient`` shape ``(ModelSpec, api_key) → …``.
+
+        Only used when tests inject a factory. Returns None when no factory
+        is set, so ``LLMClient`` uses its own default construction.
+        """
+        if self.client_factory is None:
+            return None
+
+        def _adapted(spec: ModelSpec, api_key: str) -> Any:
+            # Reconstruct the old ProviderSpec shape for the test seam
+            provider = ProviderSpec(
+                name=spec.provider,
+                base_url=spec.base_url or "",
+                key_secret=spec.api_key_env or "",
+            )
+            return self.client_factory(provider, api_key)  # type: ignore[misc]
+
+        return _adapted
 
     # ── the one call surface ─────────────────────────────────────────────────
 
@@ -186,189 +200,86 @@ class ThinktankClient:
         prompt_version: str = "",
         sft_meta: dict[str, Any] | None = None,
     ) -> LLMCallResult:
-        """One structured LLM call on the named tier. Validates or raises."""
+        """One structured LLM call on the named tier. Validates or raises.
+
+        **I5223:** routes through ``krepis.llm.LLMClient.structured()``
+        instead of the forked ``OpenAI(...).chat.completions.create()``
+        this module used before.
+
+        The library collapses into ONE ``attempts`` budget what the fork kept
+        as two (a transport-failure budget and a schema-corrective budget).
+        That is the intended consolidation — but the budget must not SHRINK on
+        the way through, so it is passed explicitly rather than defaulted. See
+        ``_STRUCTURED_ATTEMPTS``.
+        """
         tier = self.settings.tier(tier_name)
-        provider = self.settings.provider_for(tier)
-        client = self._client_for(provider)
-        schema = response_model.model_json_schema()
+        callsite_id = _callsite_id_for(tier_name, agent_id)
+        client = self._llm_client_for(tier, callsite_id=callsite_id)
 
-        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-        kwargs: dict[str, Any] = {
-            "model": tier.model,
-            "max_tokens": tier.max_tokens,
-        }
-        if tier.structured_outputs:
-            messages.append({"role": "user", "content": user})
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_model.__name__,
-                    "strict": True,
-                    "schema": schema,
-                },
-            }
-        else:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": user + _JSON_INSTRUCTION.format(schema=json.dumps(schema)),
-                }
+        try:
+            result = client.structured(
+                system=system,
+                user_content=user,
+                schema=response_model,
+                schema_name=response_model.__name__,
+                max_tokens=tier.max_tokens,
+                attempts=_STRUCTURED_ATTEMPTS,
             )
-
-        last_error: Exception | None = None
-        raw_text = ""
-        total_in = total_out = 0
-        non_json_retries_left = _NON_JSON_RETRY_ATTEMPTS - 1
-        schema_retries_left = 1  # ONE bounded corrective retry, unchanged
-        while True:
-            response = self._create_completion(client, messages, kwargs, tier_name=tier.name, agent_id=agent_id)
-            raw_text = (response.choices[0].message.content or "").strip()
-            usage = getattr(response, "usage", None)
-            in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
-            out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
-            total_in += in_tok
-            total_out += out_tok
-
-            try:
-                extracted = _extract_json(raw_text)
-            except ValueError as exc:
-                # Provider returned a body with no valid JSON in it (a
-                # rate-limit page / transient error body) — provider
-                # flakiness, not a model mistake. Retry with a FRESH call
-                # (no corrective message appended) on its own budget.
-                last_error = exc
-                if non_json_retries_left > 0:
-                    non_json_retries_left -= 1
-                    logger.warning(
-                        "thinktank tier=%s agent=%s non-JSON provider body (retries left %d): %s",
-                        tier.name,
-                        agent_id,
-                        non_json_retries_left,
-                        exc,
-                    )
-                    _backoff_sleep(_RETRY_BASE_DELAY_S, _NON_JSON_RETRY_ATTEMPTS - 2 - non_json_retries_left)
-                    continue
-                break
-
-            try:
-                parsed = response_model.model_validate(extracted)
-            except ValidationError as exc:
-                # Valid JSON, wrong shape — a genuine model mistake. Feed
-                # the error back for ONE corrective retry (unchanged from
-                # the original design).
-                last_error = exc
-                logger.warning(
-                    "thinktank tier=%s agent=%s failed schema validation: %s",
-                    tier.name,
-                    agent_id,
-                    exc,
-                )
-                if schema_retries_left > 0:
-                    schema_retries_left -= 1
-                    messages = messages + [
-                        {"role": "assistant", "content": raw_text},
-                        {
-                            "role": "user",
-                            "content": (
-                                "Your previous response failed schema validation with: "
-                                f"{exc}\nReturn ONLY the corrected JSON object."
-                            ),
-                        },
-                    ]
-                    continue
-                break
-
-            cost = self._record(
+        except LLMError as exc:
+            # LLMClient raises LLMError on exhaustion. Record the failed
+            # spend (usage is carried on the exception per the lib contract)
+            # then re-raise as ThinktankLLMError for caller compatibility.
+            if exc.usage is not None:
+                total_in = exc.usage.input_tokens
+                total_out = exc.usage.output_tokens
+            else:
+                total_in = total_out = 0
+            self._record(
                 tier,
                 agent_id=agent_id,
-                sft_meta=sft_meta,
-                messages=messages,
-                kwargs=kwargs,
-                raw_text=raw_text,
-                parsed=parsed,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                kwargs={"model": tier.model, "max_tokens": tier.max_tokens},
+                raw_text="",
+                parsed=None,
                 input_tokens=total_in,
                 output_tokens=total_out,
                 prompt_id=prompt_id,
                 prompt_version=prompt_version,
+                sft_meta=sft_meta,
             )
-            return LLMCallResult(
-                parsed=parsed,
-                raw_text=raw_text,
-                model=tier.model,
-                tier=tier.name,
-                input_tokens=total_in,
-                output_tokens=total_out,
-                cost_usd=cost,
-            )
+            raise ThinktankLLMError(
+                f"tier={tier.name} model={tier.model} agent={agent_id}: response failed after bounded retries: {exc}"
+            ) from exc
 
-        # Record spend for the failed attempts too — tokens were consumed.
-        self._record(
+        usage = result.usage
+        cost = self._record(
             tier,
             agent_id=agent_id,
-            sft_meta=sft_meta,
-            messages=messages,
-            kwargs=kwargs,
-            raw_text=raw_text,
-            parsed=None,
-            input_tokens=total_in,
-            output_tokens=total_out,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            kwargs=result.raw_request,
+            raw_text=result.text,
+            parsed=result.parsed,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             prompt_id=prompt_id,
             prompt_version=prompt_version,
+            sft_meta=sft_meta,
         )
-        raise ThinktankLLMError(
-            f"tier={tier.name} model={tier.model} agent={agent_id}: response failed after bounded retries: {last_error}"
+        return LLMCallResult(
+            parsed=result.parsed,
+            raw_text=result.text,
+            model=result.model,
+            tier=tier.name,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost_usd=cost,
         )
-
-    def _create_completion(
-        self,
-        client: Any,
-        messages: list[dict[str, str]],
-        kwargs: dict[str, Any],
-        *,
-        tier_name: str,
-        agent_id: str,
-    ) -> Any:
-        """One provider call, retried with jittered backoff on transient
-        errors (timeout / connection reset / 5xx / rate-limit / a body the
-        SDK could not decode) — provider flakiness, not a model mistake, so
-        it's retried fresh rather than burning the schema-corrective budget
-        in ``complete``."""
-        errors = _transient_provider_errors()
-        last_exc: Exception | None = None
-        for attempt in range(_HTTP_RETRY_ATTEMPTS):
-            try:
-                resp = client.chat.completions.create(messages=messages, **kwargs)
-                # OpenRouter reports an upstream provider failure in the BODY
-                # of a 200: `choices` null (or empty) with an `error` object
-                # beside it. That is not an exception, so it slips past the
-                # `except` below and the caller's `response.choices[0]` raises
-                # TypeError: 'NoneType' object is not subscriptable — escaping
-                # this retry loop entirely and discarding the provider's own
-                # error message unread.
-                #
-                # It is exactly the transient provider flakiness this method
-                # exists to absorb, so classify it as such here rather than
-                # guarding at each call site.
-                if not getattr(resp, "choices", None):
-                    raise _NullChoicesError(
-                        f"provider returned no choices "
-                        f"(error={getattr(resp, 'error', None)!r}, "
-                        f"id={getattr(resp, 'id', None)!r})"
-                    )
-                return resp
-            except (*errors, _NullChoicesError) as exc:
-                last_exc = exc
-                logger.warning(
-                    "thinktank tier=%s agent=%s transient provider error (attempt %d/%d): %s",
-                    tier_name,
-                    agent_id,
-                    attempt + 1,
-                    _HTTP_RETRY_ATTEMPTS,
-                    exc,
-                )
-                if attempt < _HTTP_RETRY_ATTEMPTS - 1:
-                    _backoff_sleep(_RETRY_BASE_DELAY_S, attempt)
-        raise last_exc
 
     # ── accounting + SFT staging ─────────────────────────────────────────────
 
@@ -406,12 +317,6 @@ class ThinktankClient:
                 structured_output=parsed.model_dump() if parsed is not None else None,
                 usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
                 cost_usd=cost,
-                # Entity identifiers (ticker / theme key / version / trading
-                # day) ride in sft_meta so corpus rows JOIN to judge scores
-                # (via capture_run_id -> RubricEvalArtifact.run_id) and to
-                # realized outcomes (ticker + trading_day) — the two joins
-                # distillation curation needs (judge-filtered SFT,
-                # outcome-weighted selection).
                 meta={
                     "run_id": self.run_id,
                     "agent_id": agent_id,
@@ -464,9 +369,6 @@ class ThinktankClient:
                     structured_output=r.structured_output,
                     usage=r.usage,
                     cost_usd=r.cost_usd,
-                    # Real thinktank runs → provenance born tagged `live` (config#1539),
-                    # so the distillation corpus reader segregates these from any
-                    # future replay-minted/synthetic traces of the same agent.
                     source="live",
                     meta=r.meta,
                 )
@@ -488,8 +390,39 @@ def _extract_json(text: str) -> Any:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        # last resort: widest brace span (some models add a preamble sentence)
         start, end = cleaned.find("{"), cleaned.rfind("}")
         if start != -1 and end > start:
             return json.loads(cleaned[start : end + 1])
         raise ValueError(f"no JSON object found in response: {text[:200]!r}") from e
+
+
+def _callsite_id_for(tier_name: str, agent_id: str) -> str:
+    """Map (tier_name, agent_id) → registered callsite_id.
+
+    The 5 thinktank sites:
+      thesis + analyst_thesis  → thinktank-thesis
+      pillar + analyst_pillar  → thinktank-pillar
+      sweep  + analyst_sweep   → thinktank-sweep
+      themes + themes_macro    → thinktank-themes-macro
+      themes + themes_sector   → thinktank-themes-sector
+
+    The themes tier is the only one that maps to two different callsite_ids.
+    The agent_id disambiguates.
+    """
+    if tier_name == "thesis":
+        return "thinktank-thesis"
+    if tier_name == "pillar":
+        return "thinktank-pillar"
+    if tier_name == "sweep":
+        return "thinktank-sweep"
+    if tier_name == "themes":
+        if "sector" in agent_id:
+            return "thinktank-themes-sector"
+        return "thinktank-themes-macro"
+    # Fallback — should not be reached for registered tiers
+    logger.warning(
+        "unregistered callsite for tier=%r agent=%r — using derived id",
+        tier_name,
+        agent_id,
+    )
+    return f"thinktank-{tier_name}"
