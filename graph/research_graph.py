@@ -237,14 +237,15 @@ def _capture_if_enabled(
         )
         model_metadata = ModelMetadata(
             model_name=_FALLBACK_AGENT_MODEL_NAMES.get(
-                model_name_key, "claude-haiku-4-5",
+                model_name_key,
+                "claude-haiku-4-5",
             ),
         )
         full_prompt_context = FullPromptContext(
             system_prompt=f"<see config/prompts/{model_name_key}*.txt at run time; "
-                          f"call site not yet wired through track_llm_cost>",
+            f"call site not yet wired through track_llm_cost>",
             user_prompt="<rendered from input_data_snapshot at run time; "
-                        "call site not yet wired through track_llm_cost>",
+            "call site not yet wired through track_llm_cost>",
         )
 
     try:
@@ -269,7 +270,8 @@ def _capture_if_enabled(
             "raising to fail the run loud (per feedback_no_silent_fails). "
             "Disable via ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false if "
             "S3/IAM is broken and you need to recover the run.",
-            agent_id, run_id,
+            agent_id,
+            run_id,
         )
         raise
 
@@ -310,12 +312,12 @@ def _validate(
         model_cls.model_validate(payload)
     except ValidationError as e:
         if strict:
-            raise RuntimeError(
-                f"[schema-fail:{context}] {model_cls.__name__} validation: {e}"
-            ) from e
+            raise RuntimeError(f"[schema-fail:{context}] {model_cls.__name__} validation: {e}") from e
         logger.warning(
             "[schema-warn:%s] %s schema violation: %s",
-            context, model_cls.__name__, e,
+            context,
+            model_cls.__name__,
+            e,
         )
 
 
@@ -325,6 +327,7 @@ _warn_validate = _validate
 
 
 # ── State Schema ──────────────────────────────────────────────────────────────
+
 
 class ResearchState(TypedDict, total=False):
     # ── Core run info ────────────────────────────────────────────────────────
@@ -564,15 +567,15 @@ def _pre_fetch_held_enrichment(
         try:
             analyst_data_by_ticker[ticker] = fetch_analyst_consensus(ticker)
         except Exception as e:
-            logger.debug(
-                "[fetch_data] analyst fetch failed for %s: %s", ticker, e
-            )
+            logger.debug("[fetch_data] analyst fetch failed for %s: %s", ticker, e)
 
     return news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker
 
 
 def _read_institutional_substrate(
-    tickers: list[str], *, run_date: str,
+    tickers: list[str],
+    *,
+    run_date: str,
 ) -> dict[str, dict]:
     """Read the producer-side structured aggregates (Wave 1 PR F).
 
@@ -591,17 +594,17 @@ def _read_institutional_substrate(
     import boto3
 
     from data.substrate.reader import read_substrate_for_population
+
     s3 = boto3.client("s3")
     try:
         as_of = _date.fromisoformat(run_date[:10])
     except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"INSTITUTIONAL_SUBSTRATE_ENABLED=true but run_date "
-            f"is not ISO-formatted: {run_date!r}"
-        ) from e
+        raise ValueError(f"INSTITUTIONAL_SUBSTRATE_ENABLED=true but run_date is not ISO-formatted: {run_date!r}") from e
 
     snapshots = read_substrate_for_population(
-        tickers, as_of_date=as_of, s3_client=s3,
+        tickers,
+        as_of_date=as_of,
+        s3_client=s3,
     )
     out: dict[str, dict] = {}
     for ticker, snap in snapshots.items():
@@ -642,6 +645,7 @@ def _read_institutional_substrate(
 
 # ── Node Functions ────────────────────────────────────────────────────────────
 
+
 class AgentInputSetResolution(NamedTuple):
     """Return shape of :func:`_resolve_agent_input_set`.
 
@@ -649,6 +653,7 @@ class AgentInputSetResolution(NamedTuple):
     are sourced from the SAME ``am.load_candidates_json(run_date)`` call —
     returning them together avoids a second S3 round-trip from ``fetch_data``.
     """
+
     agent_input_set: list[str]
     scanner_eval_log: list[dict]
 
@@ -689,6 +694,7 @@ def _resolve_agent_input_set(
     was read) or when the artifact predates this field.
     """
     import os as _os
+
     candidates = am.load_candidates_json(run_date)
     scanner_tickers = (candidates or {}).get("scanner_tickers") or []
     scanner_eval_log = (candidates or {}).get("scanner_eval_log") or []
@@ -697,7 +703,8 @@ def _resolve_agent_input_set(
             logger.warning(
                 "[fetch_data] dry-run stub: no candidates.json for %s — "
                 "falling back to full scanner_universe for wiring validation "
-                "(NOT a real candidate selection)", run_date,
+                "(NOT a real candidate selection)",
+                run_date,
             )
             scanner_tickers = scanner_universe
             scanner_eval_log = []
@@ -711,9 +718,10 @@ def _resolve_agent_input_set(
             )
     agent_input_set = sorted(set(scanner_tickers) | set(population_tickers))
     logger.info(
-        "[fetch_data] sector-team input set: %d tickers "
-        "(scanner %d ∪ held population %d)",
-        len(agent_input_set), len(scanner_tickers), len(population_tickers),
+        "[fetch_data] sector-team input set: %d tickers (scanner %d ∪ held population %d)",
+        len(agent_input_set),
+        len(scanner_tickers),
+        len(population_tickers),
     )
     return AgentInputSetResolution(agent_input_set, scanner_eval_log)
 
@@ -737,10 +745,12 @@ def fetch_data(state: ResearchState) -> dict:
     rag_available = False
     try:
         from nousergon_lib.rag import is_available as _rag_is_available
+
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats
         from agents.sector_teams.qual_tools import reset_rag_stats
+
         reset_rag_stats()
     except Exception as e:
         logger.warning("[fetch_data] RAG availability check failed: %s", e)
@@ -751,6 +761,7 @@ def fetch_data(state: ResearchState) -> dict:
     # run's 402 forever, silently starving a run where the plan issue may
     # have since been fixed.
     from data.fetchers.analyst_fetcher import reset_fmp_402_breaker
+
     reset_fmp_402_breaker()
 
     # Load S&P 900 universe
@@ -770,7 +781,10 @@ def fetch_data(state: ResearchState) -> dict:
 
     # ── L1995 Phase 5 cutover: sector-team screening input ───────────────────
     agent_input_set, scanner_eval_log = _resolve_agent_input_set(
-        am, run_date, scanner_universe, population_tickers,
+        am,
+        run_date,
+        scanner_universe,
+        population_tickers,
     )
 
     # ── team_inputs ledger (v19): record the scanner→team input assignment ───
@@ -785,17 +799,20 @@ def fetch_data(state: ResearchState) -> dict:
         _team_inputs: list[dict] = []
         for _tid in ALL_TEAM_IDS:
             for _tkr in get_team_tickers(_tid, agent_input_set, sector_map):
-                _team_inputs.append({
-                    "ticker": _tkr,
-                    "eval_date": run_date,
-                    "team_id": _tid,
-                    "source": "held_population" if _tkr in _held else "scanner",
-                    "sector": sector_map.get(_tkr),
-                })
+                _team_inputs.append(
+                    {
+                        "ticker": _tkr,
+                        "eval_date": run_date,
+                        "team_id": _tid,
+                        "source": "held_population" if _tkr in _held else "scanner",
+                        "sector": sector_map.get(_tkr),
+                    }
+                )
         am.write_team_inputs(_team_inputs)
         am.commit()
-        logger.info("[fetch_data] team_inputs ledger: %d assignments across %d teams",
-                    len(_team_inputs), len(ALL_TEAM_IDS))
+        logger.info(
+            "[fetch_data] team_inputs ledger: %d assignments across %d teams", len(_team_inputs), len(ALL_TEAM_IDS)
+        )
     except Exception as e:  # pragma: no cover — observability ledger, never fatal
         logger.warning("[fetch_data] team_inputs ledger write failed (non-fatal): %s", e)
 
@@ -808,6 +825,7 @@ def fetch_data(state: ResearchState) -> dict:
     _fs_enriched = 0
     try:
         from data.fetchers.feature_store_reader import read_latest_features
+
         _fs_features = read_latest_features() or {}
         if _fs_features:
             for ticker, fs_row in _fs_features.items():
@@ -848,6 +866,7 @@ def fetch_data(state: ResearchState) -> dict:
     _price_filled = 0
     try:
         from data.fetchers.feature_store_reader import read_latest_daily_closes
+
         daily_closes = read_latest_daily_closes()
         if daily_closes:
             for ticker in technical_scores:
@@ -866,6 +885,7 @@ def fetch_data(state: ResearchState) -> dict:
     factor_loadings: dict[str, dict[str, float]] = {}
     try:
         from data.fetchers.feature_store_reader import read_latest_factor_loadings
+
         factor_loadings = read_latest_factor_loadings() or {}
         if factor_loadings:
             logger.info("[fetch_data] factor loadings: %d tickers loaded", len(factor_loadings))
@@ -881,19 +901,23 @@ def fetch_data(state: ResearchState) -> dict:
     if len(ohlcv_tickers) < len(all_tickers):
         logger.info(
             "[fetch_data] ArcticDB: reading %d tickers (skipped %d from feature store)",
-            len(ohlcv_tickers), len(all_tickers) - len(ohlcv_tickers),
+            len(ohlcv_tickers),
+            len(all_tickers) - len(ohlcv_tickers),
         )
     if ohlcv_tickers:
         # return_snapshot_id surfaces the ArcticDB ``VersionedItem.version``
         # the read resolved to → threaded into decision capture as the
         # run-level ``data_snapshot_id`` provenance stamp (L4567 1b / #781).
         price_data, data_snapshot_id = fetch_price_data(
-            ohlcv_tickers, period="3mo", return_snapshot_id=True,
+            ohlcv_tickers,
+            period="3mo",
+            return_snapshot_id=True,
         )
     else:
         # No OHLCV read this run (full feature-store coverage) → no ArcticDB
         # version to stamp. Record the sentinel, never crash on absence.
         from data.fetchers.price_fetcher import DATA_SNAPSHOT_ID_UNKNOWN
+
         price_data, data_snapshot_id = {}, DATA_SNAPSHOT_ID_UNKNOWN
     logger.info("[fetch_data] data_snapshot_id=%s", data_snapshot_id)
 
@@ -984,12 +1008,18 @@ def fetch_data(state: ResearchState) -> dict:
             "FROM macro_snapshots ORDER BY date DESC LIMIT 3"
         ).fetchall()
         for r in rows:
-            prior_macro_snapshots.append({
-                "date": r[0], "market_regime": r[1], "vix": r[2],
-                "treasury_10yr": r[3], "yield_curve_slope": r[4],
-                "sp500_30d_return": r[5], "sector_modifiers": r[6],
-                "sector_ratings": r[7],
-            })
+            prior_macro_snapshots.append(
+                {
+                    "date": r[0],
+                    "market_regime": r[1],
+                    "vix": r[2],
+                    "treasury_10yr": r[3],
+                    "yield_curve_slope": r[4],
+                    "sp500_30d_return": r[5],
+                    "sector_modifiers": r[6],
+                    "sector_ratings": r[7],
+                }
+            )
     except Exception as e:
         logger.warning("[fetch_data] failed to load macro snapshots: %s", e)
 
@@ -1044,25 +1074,26 @@ def fetch_data(state: ResearchState) -> dict:
     # When ON + parquets exist, the substrate snapshot enriches the
     # input context. When ON + parquets missing, all SubstrateSnapshot
     # fields default to empty — legacy maps still populate.
-    news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = (
-        _pre_fetch_held_enrichment(population_tickers)
-    )
+    news_data_by_ticker, analyst_data_by_ticker, insider_data_by_ticker = _pre_fetch_held_enrichment(population_tickers)
 
     # Surface the FMP 402 circuit-breaker skip counts in the run summary log
     # (config#1821). The breaker itself already logs one WARN per endpoint
     # at trip time; this is the run-level counter so a known-dead endpoint
     # shows up in the summary rather than as a silent data hole.
     from data.fetchers.analyst_fetcher import fmp_402_skip_counts
+
     _402_skips = fmp_402_skip_counts()
     if _402_skips:
         logger.info("[fetch_data] FMP 402 circuit breaker skips: %s", _402_skips)
 
     substrate_by_ticker: dict[str, dict] = {}
     import os as _os
+
     if _os.environ.get("INSTITUTIONAL_SUBSTRATE_ENABLED", "").lower() == "true":
         try:
             substrate_by_ticker = _read_institutional_substrate(
-                population_tickers, run_date=run_date,
+                population_tickers,
+                run_date=run_date,
             )
             logger.info(
                 "[fetch_data] institutional substrate loaded for %d tickers "
@@ -1075,12 +1106,16 @@ def fetch_data(state: ResearchState) -> dict:
             )
         except Exception as e:
             logger.warning(
-                "[fetch_data] institutional substrate read failed: %s — "
-                "falling back to legacy enrichment only", e,
+                "[fetch_data] institutional substrate read failed: %s — falling back to legacy enrichment only",
+                e,
             )
 
-    logger.info("[fetch_data] done — %d prices, %d tech scores, %d population",
-                len(price_data), len(technical_scores), len(population_tickers))
+    logger.info(
+        "[fetch_data] done — %d prices, %d tech scores, %d population",
+        len(price_data),
+        len(technical_scores),
+        len(population_tickers),
+    )
 
     return {
         "scanner_universe": scanner_universe,
@@ -1184,6 +1219,7 @@ def load_scorecard_node(state: ResearchState) -> dict:
         import boto3
 
         from evals.last_week_scorecard import load_latest_scorecard_text
+
         text = load_latest_scorecard_text(
             s3_client=boto3.client("s3"),
             bucket=bucket,
@@ -1204,8 +1240,7 @@ def load_scorecard_node(state: ResearchState) -> dict:
         # Mirror load_regime_substrate_node's graceful posture — never
         # fail the research cycle on a missing observability artifact.
         logger.warning(
-            "[load_scorecard] load failed: %s — agents will run without "
-            "prior-cycle outcome data",
+            "[load_scorecard] load failed: %s — agents will run without prior-cycle outcome data",
             e,
         )
         return {"prior_cycle_scorecard_text": ""}
@@ -1231,19 +1266,30 @@ def dispatch_sectors_and_exit(state: ResearchState) -> list:
 
     # 6 sector teams — now see macro's actual outputs via state
     for team_id in ALL_TEAM_IDS:
-        sends.append(Send("sector_team_node", {
-            **state,
-            "team_id": team_id,
-        }))
+        sends.append(
+            Send(
+                "sector_team_node",
+                {
+                    **state,
+                    "team_id": team_id,
+                },
+            )
+        )
 
     # Exit evaluator — parallel with sectors; independent of regime
-    sends.append(Send("exit_evaluator_node", {
-        **state,
-    }))
+    sends.append(
+        Send(
+            "exit_evaluator_node",
+            {
+                **state,
+            },
+        )
+    )
 
     logger.info(
         "[dispatch] sending %d parallel tasks (6 teams + exits) — regime=%s",
-        len(sends), state.get("market_regime", "neutral"),
+        len(sends),
+        state.get("market_regime", "neutral"),
     )
     return sends
 
@@ -1278,8 +1324,9 @@ def sector_team_node(state: ResearchState) -> dict:
             persisted = _am.load_sector_team_run(run_date, team_id)
         except Exception as e:  # pragma: no cover — defensive; loader is safe
             logger.warning(
-                "[sector_team:%s] resume load raised unexpectedly (%s) — "
-                "running team fresh", team_id, e,
+                "[sector_team:%s] resume load raised unexpectedly (%s) — running team fresh",
+                team_id,
+                e,
             )
             persisted = None
         if persisted is not None:
@@ -1352,7 +1399,9 @@ def sector_team_node(state: ResearchState) -> dict:
     qual_output = result.get("qual_output", {}) or {}
 
     q_snapshot, q_summary = build_sector_quant_capture_payload(
-        team_id, ctx, team_tickers=team_tickers,
+        team_id,
+        ctx,
+        team_tickers=team_tickers,
     )
     _capture_if_enabled(
         state=state,
@@ -1368,12 +1417,12 @@ def sector_team_node(state: ResearchState) -> dict:
     # first 5. Capturing the actual hand-off avoids over-stating qual's
     # input.
     quant_picks = quant_output.get("ranked_picks", []) or []
-    valid_picks = [
-        p for p in quant_picks if isinstance(p, dict) and "ticker" in p
-    ]
+    valid_picks = [p for p in quant_picks if isinstance(p, dict) and "ticker" in p]
     quant_top5 = valid_picks[:5]
     ql_snapshot, ql_summary = build_sector_qual_capture_payload(
-        team_id, ctx, quant_top5=quant_top5,
+        team_id,
+        ctx,
+        quant_top5=quant_top5,
     )
     _capture_if_enabled(
         state=state,
@@ -1391,7 +1440,8 @@ def sector_team_node(state: ResearchState) -> dict:
     qual_assessments = qual_output.get("assessments", []) or []
     qual_additional = qual_output.get("additional_candidate")
     pr_snapshot, pr_summary = build_sector_peer_review_capture_payload(
-        team_id, ctx,
+        team_id,
+        ctx,
         quant_top5=quant_top5,
         qual_assessments=qual_assessments,
         qual_additional_candidate=qual_additional,
@@ -1418,7 +1468,10 @@ def sector_team_node(state: ResearchState) -> dict:
         if not triggers:
             continue
         tu_snapshot, tu_summary = build_thesis_update_capture_payload(
-            team_id, ticker, ctx, triggers=list(triggers),
+            team_id,
+            ticker,
+            ctx,
+            triggers=list(triggers),
         )
         _capture_if_enabled(
             state=state,
@@ -1444,8 +1497,9 @@ def sector_team_node(state: ResearchState) -> dict:
             _am.save_sector_team_run(run_date, team_id, result)
         except Exception as e:  # pragma: no cover — saver is already safe
             logger.warning(
-                "[sector_team:%s] persist raised unexpectedly (%s) — run "
-                "continues; team just won't be resumable", team_id, e,
+                "[sector_team:%s] persist raised unexpectedly (%s) — run continues; team just won't be resumable",
+                team_id,
+                e,
             )
 
     # Return partial state update — reject_on_conflict reducer merges team
@@ -1476,14 +1530,14 @@ def macro_economist_node(state: ResearchState) -> dict:
             _persisted = _am.load_agent_run(run_date, "macro")
         except Exception as e:  # pragma: no cover — loader is safe
             logger.warning(
-                "[macro] resume load raised unexpectedly (%s) — "
-                "running macro fresh", e,
+                "[macro] resume load raised unexpectedly (%s) — running macro fresh",
+                e,
             )
             _persisted = None
         if _persisted is not None:
             logger.info(
-                "[macro] RESUME — reusing persisted output for %s "
-                "(zero LLM calls this invocation)", run_date,
+                "[macro] RESUME — reusing persisted output for %s (zero LLM calls this invocation)",
+                run_date,
             )
             return {
                 **_persisted,
@@ -1569,8 +1623,8 @@ def macro_economist_node(state: ResearchState) -> dict:
             _am.save_agent_run(run_date, "macro", macro_state_update)
         except Exception as e:  # pragma: no cover — saver is already safe
             logger.warning(
-                "[macro] persist raised unexpectedly (%s) — run "
-                "continues; macro just won't be resumable", e,
+                "[macro] persist raised unexpectedly (%s) — run continues; macro just won't be resumable",
+                e,
             )
 
     return macro_state_update
@@ -1658,9 +1712,10 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
             sector_map=sector_map,
         )
         logger.info(
-            "[compute_factor_profiles] wrote factor substrate for %s "
-            "(%d sector-mapped tickers) → s3 key=%s",
-            run_date, len(sector_map), s3_key,
+            "[compute_factor_profiles] wrote factor substrate for %s (%d sector-mapped tickers) → s3 key=%s",
+            run_date,
+            len(sector_map),
+            s3_key,
         )
         return {"factor_profiles_written": True, "factor_profiles_s3_key": s3_key}
     except Exception as e:
@@ -1671,7 +1726,9 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
             "same SF, so this is a real incident, not a tolerable degrade. "
             "Hard-failing the research run (feedback_no_silent_fails) "
             "rather than silently recreating the orphaned-producer bug.",
-            run_date, e, run_date,
+            run_date,
+            e,
+            run_date,
         )
         raise
 
@@ -1707,9 +1764,7 @@ def rank_candidates_by_attractiveness_node(state: ResearchState) -> dict:
 
         profiles = _read_factor_profiles(run_date, None, None) or {}
         if not profiles:
-            raise RuntimeError(
-                f"attractiveness feed: no factor profiles readable for {run_date}"
-            )
+            raise RuntimeError(f"attractiveness feed: no factor profiles readable for {run_date}")
         scores = attractiveness_from_factor_profiles(profiles)
         ranked = sorted(
             (t for t, v in scores.items() if v.get("attractiveness_score") is not None),
@@ -1727,14 +1782,19 @@ def rank_candidates_by_attractiveness_node(state: ResearchState) -> dict:
             "[attractiveness_feed] CHAMPION feed ON: %d tickers "
             "(top-%d attractiveness ∪ held population %d) — replacing tech_score "
             "feed of %d. Scored %d of %d profiled names.",
-            len(new_set), top_n, len(population_tickers), len(prior),
-            len(ranked), len(profiles),
+            len(new_set),
+            top_n,
+            len(population_tickers),
+            len(prior),
+            len(ranked),
+            len(profiles),
         )
         return {"agent_input_set": new_set}
     except Exception as e:  # FAIL-SAFE: keep the existing tech_score feed
         logger.warning(
             "[attractiveness_feed] FAILED — falling back to existing tech_score "
-            "candidate feed (the cut is inert this run): %s", e,
+            "candidate feed (the cut is inert this run): %s",
+            e,
         )
         return {}
 
@@ -1766,9 +1826,7 @@ def compute_focus_list_node(state: ResearchState) -> dict:
     logger.info("[focus_list] starting")
 
     if not FACTOR_BLEND_ENABLED:
-        logger.info(
-            "[focus_list] factor blend disabled — focus_list_by_team empty"
-        )
+        logger.info("[focus_list] factor blend disabled — focus_list_by_team empty")
         return {"focus_list_by_team": {}}
 
     factor_profiles = read_factor_profiles_from_s3()
@@ -1781,12 +1839,14 @@ def compute_focus_list_node(state: ResearchState) -> dict:
 
     market_regime = state.get("market_regime", "neutral")
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, get_factor_blend_regime_weights(),
+        factor_profiles,
+        market_regime,
+        get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
-            "[focus_list] no factor scores computed for regime=%s — "
-            "focus_list_by_team empty", market_regime,
+            "[focus_list] no factor scores computed for regime=%s — focus_list_by_team empty",
+            market_regime,
         )
         return {"focus_list_by_team": {}}
 
@@ -1799,15 +1859,12 @@ def compute_focus_list_node(state: ResearchState) -> dict:
     summary = summarize_focus_list(focus_list)
     logger.info(
         "[focus_list] regime=%s, gating_enabled=%s, summary=%s",
-        market_regime, FOCUS_LIST_GATING_ENABLED, summary,
+        market_regime,
+        FOCUS_LIST_GATING_ENABLED,
+        summary,
     )
 
-    return {
-        "focus_list_by_team": {
-            team_id: [e.to_dict() for e in entries]
-            for team_id, entries in focus_list.items()
-        }
-    }
+    return {"focus_list_by_team": {team_id: [e.to_dict() for e in entries] for team_id, entries in focus_list.items()}}
 
 
 def exit_evaluator_node(state: ResearchState) -> dict:
@@ -1868,9 +1925,7 @@ def merge_results_node(state: ResearchState) -> dict:
                 logger.warning("[merge] team_accuracy load failed: %s", e)
         logger.info("[merge] adaptive slots ON — team_accuracy=%s", team_accuracy)
 
-    team_slot_allocation = compute_team_slots(
-        open_slots, sector_ratings, team_accuracy=team_accuracy
-    )
+    team_slot_allocation = compute_team_slots(open_slots, sector_ratings, team_accuracy=team_accuracy)
 
     logger.info("[merge] %d open slots, allocation: %s", open_slots, team_slot_allocation)
 
@@ -1924,34 +1979,17 @@ def score_aggregator(state: ResearchState) -> dict:
     # downstream behavior; the strict gate only fires once teams exist.
     expected_team_ids = set(ALL_TEAM_IDS)
     present_team_ids = set(team_outputs)
-    missing_teams = (
-        sorted(expected_team_ids - present_team_ids)
-        if present_team_ids
-        else []
-    )
+    missing_teams = sorted(expected_team_ids - present_team_ids) if present_team_ids else []
 
-    failed_teams = {
-        tid: out.get("error")
-        for tid, out in team_outputs.items()
-        if out.get("error")
-    }
-    partial_teams = {
-        tid: out.get("partial_reasons", [])
-        for tid, out in team_outputs.items()
-        if out.get("partial")
-    }
+    failed_teams = {tid: out.get("error") for tid, out in team_outputs.items() if out.get("error")}
+    partial_teams = {tid: out.get("partial_reasons", []) for tid, out in team_outputs.items() if out.get("partial")}
 
     if missing_teams or failed_teams or partial_teams:
         parts: list[str] = []
         if missing_teams:
             parts.append(f"missing (never produced output): {missing_teams}")
         if failed_teams:
-            parts.append(
-                "failed: "
-                + "; ".join(
-                    f"{tid}: {err}" for tid, err in failed_teams.items()
-                )
-            )
+            parts.append("failed: " + "; ".join(f"{tid}: {err}" for tid, err in failed_teams.items()))
         if partial_teams:
             parts.append(f"partial: {partial_teams}")
         msg = (
@@ -1961,8 +1999,7 @@ def score_aggregator(state: ResearchState) -> dict:
             f"email / DB write). We get nothing from a process whose "
             f"agents didn't all run. Succeeded teams are persisted to "
             f"S3, so an SF redrive only re-attempts the still-missing "
-            f"team(s) within the long 429-retry window. "
-            + " | ".join(parts)
+            f"team(s) within the long 429-retry window. " + " | ".join(parts)
         )
         logger.error("[score_aggregator] %s", msg)
         raise RuntimeError(msg)
@@ -2000,7 +2037,8 @@ def score_aggregator(state: ResearchState) -> dict:
         logger.warning(
             "[score_aggregator] %d ticker(s) quarantined (within floor of %d) "
             "— completing run with explicit-absence contract: %s",
-            len(quarantined), MAX_QUARANTINED_TICKERS,
+            len(quarantined),
+            MAX_QUARANTINED_TICKERS,
             [q.get("ticker") for q in quarantined],
         )
 
@@ -2025,9 +2063,10 @@ def score_aggregator(state: ResearchState) -> dict:
             )
         else:
             logger.info(
-                "[score_aggregator] factor blend enabled: %d ticker profiles "
-                "loaded (regime=%s, weight=%.2f)",
-                len(factor_profiles_by_ticker), market_regime, FACTOR_BLEND_WEIGHT,
+                "[score_aggregator] factor blend enabled: %d ticker profiles loaded (regime=%s, weight=%.2f)",
+                len(factor_profiles_by_ticker),
+                market_regime,
+                FACTOR_BLEND_WEIGHT,
             )
 
     # Phase 4 (attractiveness-pillars-260520 arc): pillar_assessments are
@@ -2042,8 +2081,7 @@ def score_aggregator(state: ResearchState) -> dict:
     # (pillar_weights all 0), the final_score is IDENTICAL to legacy
     # compute_composite_score by construction.
     pillar_assessments_by_team: dict[str, dict] = {
-        tid: out.get("qual_output", {}).get("pillar_assessments", {}) or {}
-        for tid, out in team_outputs.items()
+        tid: out.get("qual_output", {}).get("pillar_assessments", {}) or {} for tid, out in team_outputs.items()
     }
     pillar_assessment_applied_count = 0
     pillar_coverage_skip_count = 0
@@ -2080,9 +2118,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 else:
                     factor_blend_skipped_count += 1
 
-            ticker_pillar_assessment = (
-                pillar_assessments_by_team.get(team_id, {}).get(ticker)
-            )
+            ticker_pillar_assessment = pillar_assessments_by_team.get(team_id, {}).get(ticker)
             if ticker_pillar_assessment:
                 pillar_assessment_applied_count += 1
 
@@ -2104,9 +2140,10 @@ def score_aggregator(state: ResearchState) -> dict:
             except PillarCoverageError as e:
                 pillar_coverage_skip_count += 1
                 logger.warning(
-                    "[score_aggregator] PillarCoverageError for %s/%s — "
-                    "skipping signal: %s",
-                    team_id, ticker, e,
+                    "[score_aggregator] PillarCoverageError for %s/%s — skipping signal: %s",
+                    team_id,
+                    ticker,
+                    e,
                 )
                 continue
 
@@ -2135,8 +2172,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 "macro_shift": breakdown.macro_shift,
                 "factor_subscore": breakdown.legacy_blend.factor_subscore,
                 "factor_weight_applied": (
-                    breakdown.legacy_blend.w_factor
-                    if breakdown.legacy_blend.factor_subscore is not None else 0.0
+                    breakdown.legacy_blend.w_factor if breakdown.legacy_blend.factor_subscore is not None else 0.0
                 ),
                 "factor_blend_breakdown": factor_breakdown,
                 "factor_quality_score": factor_quality_pct,
@@ -2152,10 +2188,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 # is absent (PILLAR_EMIT off / extraction skipped). Future
                 # archive/universe/{TICKER}/moat_profile.json time-series
                 # persistence reads the same field.
-                "quality_moat": (
-                    ticker_pillar_assessment.get("quality_moat")
-                    if ticker_pillar_assessment else None
-                ),
+                "quality_moat": (ticker_pillar_assessment.get("quality_moat") if ticker_pillar_assessment else None),
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
@@ -2226,7 +2259,11 @@ def score_aggregator(state: ResearchState) -> dict:
                         "(quant=%s, qual=%s, sector=%s, modifier=%.2f) → "
                         "final_score=%s. Upstream writer should populate "
                         "final_score at thesis-creation time.",
-                        ticker, quant_score, qual_score, sector, modifier,
+                        ticker,
+                        quant_score,
+                        qual_score,
+                        sector,
+                        modifier,
                         recomputed["final_score"],
                     )
                     thesis = dict(thesis)  # avoid mutating team output
@@ -2259,9 +2296,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 # both score_aggregator branches must run normalize_conviction.
                 normalized_thesis = dict(thesis)
                 if "conviction" in normalized_thesis:
-                    normalized_thesis["conviction"] = normalize_conviction(
-                        normalized_thesis["conviction"]
-                    )
+                    normalized_thesis["conviction"] = normalize_conviction(normalized_thesis["conviction"])
                 investment_theses[ticker] = {
                     "ticker": ticker,
                     "team_id": team_id,
@@ -2271,8 +2306,7 @@ def score_aggregator(state: ResearchState) -> dict:
     logger.info("[score_aggregator] scored %d tickers", len(investment_theses))
     if FACTOR_BLEND_ENABLED:
         logger.info(
-            "[score_aggregator] factor_blend coverage: applied=%d skipped=%d "
-            "(regime=%s, weight=%.2f)",
+            "[score_aggregator] factor_blend coverage: applied=%d skipped=%d (regime=%s, weight=%.2f)",
             factor_blend_applied_count,
             factor_blend_skipped_count,
             market_regime,
@@ -2312,7 +2346,8 @@ def score_aggregator(state: ResearchState) -> dict:
             logger.warning(
                 "[score_aggregator] pillar-coverage-skip Telegram publish "
                 "failed: %s (WARN log + CW Logs alarm remain the failure "
-                "surface)", e,
+                "surface)",
+                e,
             )
 
     # Pillar-distribution structural sanity check (first-cycle observation
@@ -2455,9 +2490,9 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
 
     if not alerts:
         logger.info(
-            "[score_aggregator] pillar-distribution sanity OK "
-            "(coverage=%.1f%%, n=%d)",
-            coverage_pct, n_with_pillar,
+            "[score_aggregator] pillar-distribution sanity OK (coverage=%.1f%%, n=%d)",
+            coverage_pct,
+            n_with_pillar,
         )
         return
 
@@ -2466,10 +2501,7 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
     # Telegram side — research-Lambda completion is the load-bearing
     # signal, not the alert publish status. Secondary-observability
     # swallow per the new CLAUDE.md fail-loud rule's clause (i).
-    msg = (
-        "[score_aggregator] AQR-prior cutover sanity FAIL "
-        f"({len(alerts)} issue(s)): " + " | ".join(alerts)
-    )
+    msg = f"[score_aggregator] AQR-prior cutover sanity FAIL ({len(alerts)} issue(s)): " + " | ".join(alerts)
     logger.warning(msg)
     # Dedup the publish on (run_date, coverage_bucket, n_failures). A real
     # cutover-bad day would otherwise spam the channel on every
@@ -2482,9 +2514,7 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
     # day re-fires intentionally).
     run_date = _resolve_run_date_for_dedup(investment_theses)
     coverage_bucket = f"{int(coverage_pct // 10) * 10}"  # 10-pct bucket
-    dedup_key = (
-        f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
-    )
+    dedup_key = f"pillar_sanity_{run_date}_cov{coverage_bucket}_n{len(alerts)}"
     try:
         from ops_alerts import publish_ops_alert
 
@@ -2500,7 +2530,8 @@ def _check_pillar_distribution_sanity(investment_theses: dict) -> None:
         # SNS/CW-Logs alarm path are the load-bearing surfaces.
         logger.warning(
             "[score_aggregator] pillar-sanity Telegram publish failed: %s "
-            "(WARN log + CW Logs alarm remain the failure surface)", e,
+            "(WARN log + CW Logs alarm remain the failure surface)",
+            e,
         )
 
 
@@ -2516,6 +2547,7 @@ def _resolve_run_date_for_dedup(investment_theses: dict) -> str:
         if rd:
             return str(rd)
     from datetime import datetime
+
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
@@ -2537,14 +2569,14 @@ def cio_node(state: ResearchState) -> dict:
             _persisted = _am_resume.load_agent_run(_run_date, "cio")
         except Exception as e:  # pragma: no cover — loader is safe
             logger.warning(
-                "[cio] resume load raised unexpectedly (%s) — running "
-                "CIO fresh", e,
+                "[cio] resume load raised unexpectedly (%s) — running CIO fresh",
+                e,
             )
             _persisted = None
         if _persisted is not None:
             logger.info(
-                "[cio] RESUME — reusing persisted output for %s "
-                "(zero LLM calls this invocation)", _run_date,
+                "[cio] RESUME — reusing persisted output for %s (zero LLM calls this invocation)",
+                _run_date,
             )
             return {
                 **_persisted,
@@ -2556,10 +2588,12 @@ def cio_node(state: ResearchState) -> dict:
     candidates = []
     for team_id, output in team_outputs.items():
         for rec in output.get("recommendations", []):
-            candidates.append({
-                **rec,
-                "team_id": team_id,
-            })
+            candidates.append(
+                {
+                    **rec,
+                    "team_id": team_id,
+                }
+            )
 
     # Load prior IC decisions for portfolio continuity
     prior_ic = []
@@ -2571,11 +2605,10 @@ def cio_node(state: ResearchState) -> dict:
                 "FROM thesis_history WHERE run_date = ("
                 "  SELECT MAX(run_date) FROM thesis_history WHERE run_date < ?"
                 ") ORDER BY conviction DESC",
-                (state.get("run_date", ""),)
+                (state.get("run_date", ""),),
             ).fetchall()
             prior_ic = [
-                {"ticker": r[0], "thesis_type": r[1], "rationale": r[2],
-                 "conviction": r[3], "score": r[4]}
+                {"ticker": r[0], "thesis_type": r[1], "rationale": r[2], "conviction": r[3], "score": r[4]}
                 for r in rows
             ]
             if prior_ic:
@@ -2601,8 +2634,9 @@ def cio_node(state: ResearchState) -> dict:
             state.get("run_date", ""),
         )
         logger.info(
-            "[cio] de-blend ON — sector-neutral quality computed for %d/%d "
-            "candidates", len(_sector_neutral_quality), len(candidates),
+            "[cio] de-blend ON — sector-neutral quality computed for %d/%d candidates",
+            len(_sector_neutral_quality),
+            len(candidates),
         )
     _cio_prompt_name = _PROMPT_DEBLENDED if _deblended else _PROMPT_DEFAULT
 
@@ -2644,12 +2678,9 @@ def cio_node(state: ResearchState) -> dict:
         prompt=load_prompt(_cio_prompt_name),
     ) as _cio_frame:
         if CIO_CRITIC_ENABLED:
-            cio_result, _cio_reflection_log = run_cio_with_reflection(
-                **_cio_call_kwargs
-            )
+            cio_result, _cio_reflection_log = run_cio_with_reflection(**_cio_call_kwargs)
             logger.info(
-                "[cio] IC critic reflection: action=%s flagged=%s "
-                "advanced %d→%d",
+                "[cio] IC critic reflection: action=%s flagged=%s advanced %d→%d",
                 _cio_reflection_log.get("critic_action"),
                 _cio_reflection_log.get("flagged_tickers"),
                 len(_cio_reflection_log.get("initial_advanced", [])),
@@ -2684,18 +2715,11 @@ def cio_node(state: ResearchState) -> dict:
     try:
         from graph.agent_telemetry import emit_new_entrant_tripwire
 
-        _held = {
-            p.get("ticker")
-            for p in (state.get("remaining_population") or [])
-            if p.get("ticker")
-        }
+        _held = {p.get("ticker") for p in (state.get("remaining_population") or []) if p.get("ticker")}
         _decisions = cio_result.get("decisions", [])
         _net_new = [t for t in cio_result.get("advanced_tickers", []) if t not in _held]
         _fresh = [d for d in _decisions if d.get("ticker") not in _held]
-        _fresh_convs = [
-            d.get("conviction") for d in _fresh
-            if isinstance(d.get("conviction"), (int, float))
-        ]
+        _fresh_convs = [d.get("conviction") for d in _fresh if isinstance(d.get("conviction"), (int, float))]
         _fresh_max = max(_fresh_convs) if _fresh_convs else None
         emit_new_entrant_tripwire(
             net_new_entrants=len(_net_new),
@@ -2708,21 +2732,27 @@ def cio_node(state: ResearchState) -> dict:
                 "(floor=%d). Fresh slate: %d candidate(s), max conviction %s vs "
                 "entrant bar %.0f. Defensible if the slate is genuinely weak "
                 "(saturation) — flagged for review. net-new=%s",
-                len(_net_new), CIO_NEW_ENTRANT_ALERT_FLOOR, len(_fresh),
+                len(_net_new),
+                CIO_NEW_ENTRANT_ALERT_FLOOR,
+                len(_fresh),
                 f"{_fresh_max:.0f}" if _fresh_max is not None else "n/a",
-                CIO_FORCE_FILL_CONVICTION_FLOOR, _net_new,
+                CIO_FORCE_FILL_CONVICTION_FLOOR,
+                _net_new,
             )
         else:
             logger.info(
                 "[cio] new-entrant check OK: %d net-new entrant(s) (floor=%d)",
-                len(_net_new), CIO_NEW_ENTRANT_ALERT_FLOOR,
+                len(_net_new),
+                CIO_NEW_ENTRANT_ALERT_FLOOR,
             )
     except Exception as _e:  # pragma: no cover — telemetry must not fail the run
         logger.warning("[cio] new-entrant tripwire failed (non-fatal): %s", _e)
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
     snapshot, summary = build_cio_capture_payload(
-        state, candidates=candidates, prior_ic=prior_ic,
+        state,
+        candidates=candidates,
+        prior_ic=prior_ic,
     )
     _capture_if_enabled(
         state=state,
@@ -2742,8 +2772,8 @@ def cio_node(state: ResearchState) -> dict:
             _am_resume.save_agent_run(_run_date, "cio", cio_state_update)
         except Exception as e:  # pragma: no cover — saver is already safe
             logger.warning(
-                "[cio] persist raised unexpectedly (%s) — run continues; "
-                "CIO just won't be resumable", e,
+                "[cio] persist raised unexpectedly (%s) — run continues; CIO just won't be resumable",
+                e,
             )
 
     return cio_state_update
@@ -2794,6 +2824,7 @@ def consolidator(state: ResearchState) -> dict:
     if macro_report:
         # Strip code fences that the macro agent sometimes includes
         import re
+
         macro_report = re.sub(r"```\w*\n?", "", macro_report).strip()
         sections.append(macro_report)
     sections.append("")
@@ -2933,9 +2964,7 @@ def consolidator(state: ResearchState) -> dict:
         else:
             status = "Existing"
             rationale = (
-                thesis.get("bull_case")
-                or prior.get("thesis_summary")
-                or "Continuing coverage — no material update"
+                thesis.get("bull_case") or prior.get("thesis_summary") or "Continuing coverage — no material update"
             )
 
         rows.append((ticker, status, recommendation, score, _with_notes(ticker, rationale)))
@@ -2954,9 +2983,7 @@ def consolidator(state: ResearchState) -> dict:
         if thesis.get("rating") == "BUY" and ticker not in new_tickers and ticker not in exit_tickers:
             score = thesis.get("final_score", 0)
             rationale = thesis.get("bull_case", "Buy recommendation — no open slot")
-            bench_buy_candidates.append(
-                (ticker, "Buy", score, _with_notes(ticker, rationale))
-            )
+            bench_buy_candidates.append((ticker, "Buy", score, _with_notes(ticker, rationale)))
 
     # Sort: New first, then Existing by Score desc, exits (Sell) last.
     def _row_sort_key(r):
@@ -2997,9 +3024,7 @@ def consolidator(state: ResearchState) -> dict:
         bench_buy_candidates.sort(key=lambda r: -(r[2] or 0))
         sections.append("---\n")
         sections.append("## c.1. BUY CANDIDATES (NO SLOT)\n")
-        sections.append(
-            "*Rated Buy but not currently held — no open population slot.*\n"
-        )
+        sections.append("*Rated Buy but not currently held — no open population slot.*\n")
         sections.append("| Ticker | Recommendation | Score | Rationale |")
         sections.append("|--------|----------------|-------|-----------|")
         for ticker, recommendation, score, rationale in bench_buy_candidates:
@@ -3039,19 +3064,12 @@ def _build_risk_posture(state: ResearchState) -> list[str]:
         # Both keys appear depending on which feature pipeline ran.
         return ts.get("atr_pct") or ts.get("atr_14_pct")
 
-    pop_atrs = [
-        a for a in (_atr_for(p["ticker"]) for p in new_pop)
-        if a is not None
-    ]
+    pop_atrs = [a for a in (_atr_for(p["ticker"]) for p in new_pop) if a is not None]
     if not pop_atrs:
         return []
 
     universe_atrs = [
-        a for a in (
-            ts.get("atr_pct") or ts.get("atr_14_pct")
-            for ts in technical_scores.values()
-        )
-        if a is not None
+        a for a in (ts.get("atr_pct") or ts.get("atr_14_pct") for ts in technical_scores.values()) if a is not None
     ]
 
     pop_atrs_sorted = sorted(pop_atrs)
@@ -3077,12 +3095,8 @@ def _build_risk_posture(state: ResearchState) -> list[str]:
             f"- **{n_high_vol}/{len(new_pop)}** picks in the top vol-quartile "
             f"of the fetched universe (ATR ≥ {high_vol_threshold:.2f}%)"
         )
-    lines.append(
-        "- _ATR-based vol proxy. Higher = more volatile names; intelligent risk-taking is the goal._"
-    )
-    lines.append(
-        "- _WoW delta gated on atr_pct in signals.json (P3 follow-up)._"
-    )
+    lines.append("- _ATR-based vol proxy. Higher = more volatile names; intelligent risk-taking is the goal._")
+    lines.append("- _WoW delta gated on atr_pct in signals.json (P3 follow-up)._")
     return lines
 
 
@@ -3210,13 +3224,10 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
         return f"{iz:+.2f}" if isinstance(iz, (int, float)) else "—"
 
     lines: list[str] = [
-        f"**Weekly regime substrate — last {len(artifacts)} run(s) "
-        f"(oldest → newest):**",
+        f"**Weekly regime substrate — last {len(artifacts)} run(s) (oldest → newest):**",
         "",
-        "| Date | HMM Regime | Intensity-z | BOCPD Change | "
-        "SPY Drawdown | Effective |",
-        "|------|------------|-------------|--------------|"
-        "--------------|-----------|",
+        "| Date | HMM Regime | Intensity-z | BOCPD Change | SPY Drawdown | Effective |",
+        "|------|------------|-------------|--------------|--------------|-----------|",
     ]
     for a in artifacts:
         lines.append(
@@ -3226,7 +3237,7 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
         )
     lines.append("")
     lines.append(
-        "_HMM filter run-length (\"weeks in state\") is intentionally "
+        '_HMM filter run-length ("weeks in state") is intentionally '
         "omitted — it is a label-stability diagnostic, not a "
         "market-duration statement; the continuous drawdown depth below "
         "is the market-grounded view._"
@@ -3237,8 +3248,7 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
         only = artifacts[0]
         iz = _iz_of(only)
         lines.append(
-            f"_Single artifact only — no trend yet. Current intensity-z "
-            f"{_fmt_iz(iz)} (HMM {_argmax_of(only)})._"
+            f"_Single artifact only — no trend yet. Current intensity-z {_fmt_iz(iz)} (HMM {_argmax_of(only)})._"
         )
         return lines
 
@@ -3264,11 +3274,8 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
         iz_summary = f"current intensity-z {_fmt_iz(iz_now)}"
 
     # Guardrail breach summary (latest artifact).
-    guardrails = (latest.get("guardrails") or {})
-    breached = [
-        k for k, v in guardrails.items()
-        if isinstance(v, bool) and v
-    ]
+    guardrails = latest.get("guardrails") or {}
+    breached = [k for k, v in guardrails.items() if isinstance(v, bool) and v]
     floor = guardrails.get("active_severity_floor")
     if breached:
         gr_summary = f"guardrail breached: {', '.join(sorted(breached))}"
@@ -3286,10 +3293,7 @@ def _build_regime_trend(archive_manager: Any, n_weeks: int = 8) -> list[str]:
     spy_dd = spy.get("drawdown")
     dd_clause = ""
     if isinstance(spy_dd, (int, float)):
-        parts = [
-            f"SPY {-spy_dd * 100:.1f}% off trailing peak "
-            f"(tier {spy.get('tier', '?')})"
-        ]
+        parts = [f"SPY {-spy_dd * 100:.1f}% off trailing peak (tier {spy.get('tier', '?')})"]
         ex = dd.get("excess") or {}
         if ex.get("available"):
             nav_dd = ex.get("nav_drawdown")
@@ -3391,9 +3395,7 @@ def _compute_focus_list_audit_lookup(
 
     # ── Legacy fallback — focus_list_by_team absent from state ─────────
     if not FACTOR_BLEND_ENABLED:
-        logger.info(
-            "[focus_list] factor blend disabled — shadow logging skipped"
-        )
+        logger.info("[focus_list] factor blend disabled — shadow logging skipped")
         return {}
 
     factor_profiles = read_factor_profiles_from_s3()
@@ -3405,12 +3407,13 @@ def _compute_focus_list_audit_lookup(
         return {}
 
     focus_scores = compute_focus_scores(
-        factor_profiles, market_regime, get_factor_blend_regime_weights(),
+        factor_profiles,
+        market_regime,
+        get_factor_blend_regime_weights(),
     )
     if not focus_scores:
         logger.warning(
-            "[focus_list] no factor scores computed for regime=%s — shadow "
-            "logging skipped",
+            "[focus_list] no factor scores computed for regime=%s — shadow logging skipped",
             market_regime,
         )
         return {}
@@ -3419,7 +3422,9 @@ def _compute_focus_list_audit_lookup(
     summary = summarize_focus_list(focus_list)
     logger.info(
         "[focus_list] regime=%s, %d teams, summary=%s",
-        market_regime, len(focus_list), summary,
+        market_regime,
+        len(focus_list),
+        summary,
     )
 
     # Legacy recompute path has no per-team override telemetry (overrides
@@ -3463,7 +3468,9 @@ def _secondary_deadline_budget_s() -> float:
     except (TypeError, ValueError):
         logger.warning(
             "[archive_writer] %s=%r is not a number; using default %.0fs",
-            _SECONDARY_DEADLINE_ENV, raw, _SECONDARY_DEADLINE_DEFAULT_S,
+            _SECONDARY_DEADLINE_ENV,
+            raw,
+            _SECONDARY_DEADLINE_DEFAULT_S,
         )
         return _SECONDARY_DEADLINE_DEFAULT_S
 
@@ -3490,7 +3497,9 @@ def _secondary_work_deadline_exhausted(state: ResearchState) -> tuple[bool, floa
 
 
 def _run_secondary_within_budget(
-    state: ResearchState, label: str, fn: Callable[[], Any],
+    state: ResearchState,
+    label: str,
+    fn: Callable[[], Any],
 ) -> tuple[bool, Any]:
     """Run an UNBOUNDED best-effort observability task ``fn`` iff the
     secondary-work wall-clock budget is not yet exhausted; otherwise SKIP it
@@ -3524,15 +3533,18 @@ def _run_secondary_within_budget(
             "(%.0fs elapsed >= %.0fs budget). signals.json already persisted; "
             "preserving the remaining Lambda budget for the must-not-miss eval "
             "logging + upload_db so the run returns OK, not TIMEOUT.",
-            label, elapsed, _secondary_deadline_budget_s(),
+            label,
+            elapsed,
+            _secondary_deadline_budget_s(),
         )
         return (False, None)
     try:
         return (True, fn())
     except Exception as e:  # noqa: BLE001 — best-effort observability, never fatal
         logger.warning(
-            "[archive_writer] %s FAILED (non-fatal, observe-mode — "
-            "signals.json unaffected): %s", label, e,
+            "[archive_writer] %s FAILED (non-fatal, observe-mode — signals.json unaffected): %s",
+            label,
+            e,
         )
         return (True, None)
 
@@ -3570,9 +3582,7 @@ def _build_scanner_eval_rows(
     ``quant_filter_pass=0`` + null reason — honest "not scanner-evaluated", with
     metrics still carried from ``technical_scores``.
     """
-    eval_by_ticker = {
-        e.get("ticker"): e for e in (scanner_eval_log or []) if e.get("ticker")
-    }
+    eval_by_ticker = {e.get("ticker"): e for e in (scanner_eval_log or []) if e.get("ticker")}
 
     def _pref(elog: dict, key: str, *fallbacks):
         """Scanner eval-log value (authoritative) else the first non-None
@@ -3654,6 +3664,7 @@ def archive_writer(state: ResearchState) -> dict:
     # bytes (config#1857). Reader-gated + env-flagged: a no-op emitting 0.0
     # unless RESEARCH_BOOST_SIGNALS_ENABLED=true, so it never breaks the write.
     from scoring.boost_signals import emit_boost_signals
+
     emit_boost_signals(_candidate_signals_payload, run_date=run_date)
     assert_no_stub_output(
         signals_payload=_candidate_signals_payload,
@@ -3757,7 +3768,8 @@ def archive_writer(state: ResearchState) -> dict:
         am.commit()
         logger.info(
             "[archive_writer] wrote %d/%d investment_thesis rows",
-            n_theses_written, len(investment_theses),
+            n_theses_written,
+            len(investment_theses),
         )
 
     # Per-ticker moat-profile time-series — ROADMAP L1650. Moats decay
@@ -3781,7 +3793,8 @@ def archive_writer(state: ResearchState) -> dict:
     if n_moats_written:
         logger.info(
             "[archive_writer] wrote %d/%d moat_profile snapshots",
-            n_moats_written, len(investment_theses),
+            n_moats_written,
+            len(investment_theses),
         )
 
     # Write signals.json (backward compatible).
@@ -3794,6 +3807,7 @@ def archive_writer(state: ResearchState) -> dict:
     universe_symbols: set[str] | None = None
     try:
         from nousergon_lib.arcticdb import get_universe_symbols
+
         universe_symbols = get_universe_symbols(am.bucket)
     except Exception as e:
         logger.warning(
@@ -3840,13 +3854,13 @@ def archive_writer(state: ResearchState) -> dict:
     # otherwise-successful run.
     quarantined_records = state.get("quarantined", []) or []
     if quarantined_records:
-        _summary = ", ".join(
-            f"{q.get('ticker')} ({q.get('team_id')})" for q in quarantined_records
-        )
+        _summary = ", ".join(f"{q.get('ticker')} ({q.get('team_id')})" for q in quarantined_records)
         logger.error(
             "[archive_writer] %d ticker(s) QUARANTINED this run (config#2247, "
             "explicit-absence contract) — omitted from signals.json, no "
-            "carry-forward: %s", len(quarantined_records), _summary,
+            "carry-forward: %s",
+            len(quarantined_records),
+            _summary,
         )
         try:
             from ops_alerts import publish_ops_alert
@@ -3867,7 +3881,8 @@ def archive_writer(state: ResearchState) -> dict:
             logger.warning(
                 "[archive_writer] quarantine Telegram publish failed: %s "
                 "(WARN+ERROR logs + signals.json `quarantined` field remain "
-                "the load-bearing surfaces)", e,
+                "the load-bearing surfaces)",
+                e,
             )
 
     # ── research_intel neutral artifact (config#1500 — Phase 0 of #1499) ──────
@@ -3899,7 +3914,8 @@ def archive_writer(state: ResearchState) -> dict:
     except Exception as e:  # noqa: BLE001 — neutral sibling, never fatal
         logger.warning(
             "[archive_writer] research_intel write FAILED (non-fatal — "
-            "signals.json unaffected, executor path intact): %s", e,
+            "signals.json unaffected, executor path intact): %s",
+            e,
         )
 
     # ── Score-neutralization OBSERVE shadow (config#1142) ────────────────────
@@ -3923,6 +3939,7 @@ def archive_writer(state: ResearchState) -> dict:
     _live_neutralized_scores: dict[str, float] = {}
     try:
         from scoring.neutralization_shadow import run_neutralization_shadow
+
         _shadow_artifact = run_neutralization_shadow(
             am,
             run_date,
@@ -4006,9 +4023,7 @@ def archive_writer(state: ResearchState) -> dict:
     # path in _compute_focus_list_audit_lookup remains as a fallback when
     # focus_list_by_team is unexpectedly absent from state.
     # Plan doc: alpha-engine-docs/private/scanner-260514.md
-    focus_list_by_team_state: dict[str, list[dict]] | None = state.get(
-        "focus_list_by_team"
-    )
+    focus_list_by_team_state: dict[str, list[dict]] | None = state.get("focus_list_by_team")
     # Aggregate override_tickers from sector_team_outputs. Each team's
     # output dict (per sector_team.py) carries an "override_tickers" list
     # of tickers the quant agent looked up via @tool get_factor_profile
@@ -4031,8 +4046,7 @@ def archive_writer(state: ResearchState) -> dict:
     # any ticker, not just ones in the current week's S&P 900 slice).
     universe_set = set(scanner_universe)
     extra_override_tickers = [
-        t for t in focus_lookup.keys()
-        if t not in universe_set and focus_lookup[t].get("agent_override") == 1
+        t for t in focus_lookup.keys() if t not in universe_set and focus_lookup[t].get("agent_override") == 1
     ]
 
     # The AUTHORITATIVE per-ticker scanner verdict (quant_filter_pass +
@@ -4075,7 +4089,8 @@ def archive_writer(state: ResearchState) -> dict:
         n_passed = sum(1 for r in scanner_evals if r.get("focus_list_passed"))
         logger.info(
             "[archive_writer] logged %d scanner evaluations (focus list: %d passed)",
-            len(scanner_evals), n_passed,
+            len(scanner_evals),
+            n_passed,
         )
     else:
         logger.info(
@@ -4100,7 +4115,8 @@ def archive_writer(state: ResearchState) -> dict:
     except Exception as e:
         logger.warning(
             "[archive_writer] universe scoreboard write FAILED (non-fatal, "
-            "dashboard visibility only — signals.json unaffected): %s", e,
+            "dashboard visibility only — signals.json unaffected): %s",
+            e,
         )
 
     # ── Attractiveness trajectory signal (orthogonalized factor-momentum) ────
@@ -4144,13 +4160,12 @@ def archive_writer(state: ResearchState) -> dict:
     # compute_technical_score call used so the RSI sub-score is
     # numerically consistent across producer + consumer.
     from scoring.technical import compute_technical_sub_scores
+
     team_candidate_records = []
     archive_writer_regime = state.get("market_regime", "neutral")
     for team_id, output in team_outputs.items():
         quant_picks = output.get("quant_output", {}).get("ranked_picks", [])
-        recommended_tickers = {
-            r.get("ticker", "") for r in output.get("recommendations", [])
-        }
+        recommended_tickers = {r.get("ticker", "") for r in output.get("recommendations", [])}
         for rank, pick in enumerate(quant_picks, 1):
             if not isinstance(pick, dict) or "ticker" not in pick:
                 continue
@@ -4170,27 +4185,31 @@ def archive_writer(state: ResearchState) -> dict:
             if isinstance(indicators, dict):
                 try:
                     sub_scores = compute_technical_sub_scores(
-                        indicators, market_regime=archive_writer_regime,
+                        indicators,
+                        market_regime=archive_writer_regime,
                     )
                 except Exception as e:
                     logger.warning(
                         "[archive_writer] sub-score computation failed for %s: %s",
-                        ticker, e,
+                        ticker,
+                        e,
                     )
-            team_candidate_records.append({
-                "ticker": ticker,
-                "eval_date": run_date,
-                "team_id": team_id,
-                "quant_rank": rank,
-                "quant_score": pick.get("quant_score"),
-                "qual_score": qual_score,
-                "team_recommended": 1 if ticker in recommended_tickers else 0,
-                "rsi_sub_score": sub_scores.get("rsi"),
-                "macd_sub_score": sub_scores.get("macd"),
-                "ma50_sub_score": sub_scores.get("ma50"),
-                "ma200_sub_score": sub_scores.get("ma200"),
-                "momentum_sub_score": sub_scores.get("momentum"),
-            })
+            team_candidate_records.append(
+                {
+                    "ticker": ticker,
+                    "eval_date": run_date,
+                    "team_id": team_id,
+                    "quant_rank": rank,
+                    "quant_score": pick.get("quant_score"),
+                    "qual_score": qual_score,
+                    "team_recommended": 1 if ticker in recommended_tickers else 0,
+                    "rsi_sub_score": sub_scores.get("rsi"),
+                    "macd_sub_score": sub_scores.get("macd"),
+                    "ma50_sub_score": sub_scores.get("ma50"),
+                    "ma200_sub_score": sub_scores.get("ma200"),
+                    "momentum_sub_score": sub_scores.get("momentum"),
+                }
+            )
     am.write_team_candidates(team_candidate_records)
     logger.info("[archive_writer] logged %d team candidates", len(team_candidate_records))
 
@@ -4199,32 +4218,34 @@ def archive_writer(state: ResearchState) -> dict:
     for decision in state.get("ic_decisions", []):
         ticker = decision.get("ticker", "")
         thesis = investment_theses.get(ticker, {})
-        cio_eval_records.append({
-            "ticker": ticker,
-            "eval_date": run_date,
-            "team_id": thesis.get("team_id"),
-            "quant_score": thesis.get("quant_score"),
-            "qual_score": thesis.get("qual_score"),
-            "combined_score": thesis.get("weighted_base"),
-            "macro_shift": thesis.get("macro_shift"),
-            "final_score": thesis.get("final_score"),
-            # DUAL field (config#1187): the LIVE #1142 neutralized composite
-            # score for this ticker, persisted alongside the raw final_score so
-            # the backtester can join the LIVE neutralized ranking to realized
-            # forward 21d alpha. Populated only when NEUTRALIZATION_LIVE_ENABLED
-            # rewrote this ticker's score above; NULL otherwise (gate off / no
-            # exposures / name absent from the neutralized cross-section).
-            "neutralized_final_score": _live_neutralized_scores.get(ticker),
-            "cio_decision": decision.get("decision", "UNKNOWN"),
-            "cio_conviction": decision.get("conviction"),
-            "cio_rank": decision.get("rank"),
-            "rationale": decision.get("rationale"),
-            # Rule-tag attribution from prompt v1.3.0 + lib v0.7.0
-            # CIORawDecision.rule_tags. None on legacy outputs (prompt
-            # < v1.3.0); persisted as SQLite NULL so analytics can
-            # distinguish "untagged legacy" from "no tags emitted."
-            "rule_tags": decision.get("rule_tags"),
-        })
+        cio_eval_records.append(
+            {
+                "ticker": ticker,
+                "eval_date": run_date,
+                "team_id": thesis.get("team_id"),
+                "quant_score": thesis.get("quant_score"),
+                "qual_score": thesis.get("qual_score"),
+                "combined_score": thesis.get("weighted_base"),
+                "macro_shift": thesis.get("macro_shift"),
+                "final_score": thesis.get("final_score"),
+                # DUAL field (config#1187): the LIVE #1142 neutralized composite
+                # score for this ticker, persisted alongside the raw final_score so
+                # the backtester can join the LIVE neutralized ranking to realized
+                # forward 21d alpha. Populated only when NEUTRALIZATION_LIVE_ENABLED
+                # rewrote this ticker's score above; NULL otherwise (gate off / no
+                # exposures / name absent from the neutralized cross-section).
+                "neutralized_final_score": _live_neutralized_scores.get(ticker),
+                "cio_decision": decision.get("decision", "UNKNOWN"),
+                "cio_conviction": decision.get("conviction"),
+                "cio_rank": decision.get("rank"),
+                "rationale": decision.get("rationale"),
+                # Rule-tag attribution from prompt v1.3.0 + lib v0.7.0
+                # CIORawDecision.rule_tags. None on legacy outputs (prompt
+                # < v1.3.0); persisted as SQLite NULL so analytics can
+                # distinguish "untagged legacy" from "no tags emitted."
+                "rule_tags": decision.get("rule_tags"),
+            }
+        )
     am.write_cio_evaluations(cio_eval_records)
     logger.info("[archive_writer] logged %d CIO evaluations", len(cio_eval_records))
 
@@ -4366,19 +4387,21 @@ def _build_slim_briefing_email(state: ResearchState) -> tuple[str, str]:
         "console archive.</p>",
     ]
     html_body = _SLIM_EMAIL_HTML_TEMPLATE.format(
-        body="\n".join(html_parts), date=run_date,
+        body="\n".join(html_parts),
+        date=run_date,
     )
 
-    plain_body = "\n".join([
-        f"Alpha Engine Research — {run_date}",
-        "=" * 40,
-        f"Regime:     {regime}",
-        f"Population: {n_pop} stocks ({n_entrants} new, "
-        f"{n_pop - n_entrants} existing, {n_exits} exited)",
-        "",
-        f"Full briefing: {url}",
-        "",
-    ])
+    plain_body = "\n".join(
+        [
+            f"Alpha Engine Research — {run_date}",
+            "=" * 40,
+            f"Regime:     {regime}",
+            f"Population: {n_pop} stocks ({n_entrants} new, {n_pop - n_entrants} existing, {n_exits} exited)",
+            "",
+            f"Full briefing: {url}",
+            "",
+        ]
+    )
     return html_body, plain_body
 
 
@@ -4545,19 +4568,18 @@ def _validate_signals_payload(
             "[signals_validation] SOFT-FAIL: %d ENTER signals from agents "
             "with zero tool_calls (hallucination signal): %s. signals.json "
             "still emitted; flip block_on_zero_tool_calls=True after soak.",
-            len(zero_tool_call_signals), sorted(zero_tool_call_signals),
+            len(zero_tool_call_signals),
+            sorted(zero_tool_call_signals),
         )
 
     blocking_failures: list[str] = []
     if unresolved_sector:
         blocking_failures.append(
-            f"{len(unresolved_sector)} ENTER signals with unresolved "
-            f"sector: {sorted(unresolved_sector)}"
+            f"{len(unresolved_sector)} ENTER signals with unresolved sector: {sorted(unresolved_sector)}"
         )
     if out_of_universe:
         blocking_failures.append(
-            f"{len(out_of_universe)} ENTER signals outside current S&P "
-            f"900 scanner universe: {sorted(out_of_universe)}"
+            f"{len(out_of_universe)} ENTER signals outside current S&P 900 scanner universe: {sorted(out_of_universe)}"
         )
     if zero_tool_call_signals and block_on_zero_tool_calls:
         blocking_failures.append(
@@ -4573,11 +4595,62 @@ def _validate_signals_payload(
         )
 
 
+def _build_rag_scope(state: ResearchState, exit_tickers: set[str]) -> dict:
+    """Build the ``rag_scope`` block — the corpus's fetch set (config-I5700).
+
+    THE DECISION SET, published explicitly so the RAG corpus stops inferring
+    it. ``rag-corpus-policy.md`` §2.1: the fetch set is the set the consuming
+    module actually reasons about, never the widest list available.
+
+    Contents = ``agent_input_set`` (the sector teams' screening input, itself
+    ``candidates.json::scanner_tickers`` — the ~60 quant-filtered names — ∪ the
+    held population, resolved by :func:`_resolve_agent_input_set`) ∪ tickers
+    carrying an open EXIT signal (a sell still needs a rationale).
+
+    WHY THIS EXISTS. Every ``rag/pipelines/*`` step in nousergon-data resolved
+    its tickers from ``signals.json["universe"]`` — the v1 *executor*
+    compatibility key, built from every ENTER/HOLD/EXIT signal. That is not a
+    research scope, and reusing it grew the corpus fetch set 27 -> 903 tickers,
+    ~3.1h of Polygon crawl at the account-wide 5 req/min. Research itself
+    already refuses the ~900 path for the same reason (see
+    :func:`_resolve_agent_input_set`'s fail-loud) — the corpus simply never got
+    the same treatment.
+
+    PURE + I/O-free, like every other payload builder here. Emitted as its own
+    top-level key rather than by narrowing ``universe``, because the executor
+    and predictor legitimately read the wider v1 key; this is an additive
+    contract, not a redefinition of an existing one.
+
+    ``counts`` is carried so a consumer (and the ratio guard in CI) can assert
+    the scope against its inputs without re-deriving them, and so a future
+    27 -> 903 drift is visible in the artifact itself rather than only in a
+    vendor bill.
+    """
+    agent_input = [t for t in (state.get("agent_input_set") or []) if t]
+    pop_tickers = [p["ticker"] for p in (state.get("new_population") or []) if p.get("ticker")]
+    tickers = sorted(set(agent_input) | set(pop_tickers) | set(exit_tickers))
+    return {
+        "tickers": tickers,
+        "counts": {
+            "total": len(tickers),
+            "agent_input_set": len(set(agent_input)),
+            "population": len(set(pop_tickers)),
+            "exits": len(set(exit_tickers)),
+        },
+        "source": "agent_input_set | population | exits",
+    }
+
+
 def _build_signals_payload(state: ResearchState) -> dict:
     """Build backward-compatible signals.json payload.
 
     Includes both v2 keys (signals, population) and v1 keys (universe, buy_candidates)
     so the executor and predictor can read actionable signals.
+
+    Also emits ``rag_scope`` (config-I5700) — the explicit decision set the RAG
+    corpus fetches for. See :func:`_build_rag_scope`; note that ``universe``
+    below is deliberately WIDER (it is the executor's key) and must not be used
+    as a corpus scope.
     """
     theses = state.get("investment_theses", {})
     prior_theses = state.get("prior_theses", {})
@@ -4617,8 +4690,7 @@ def _build_signals_payload(state: ResearchState) -> dict:
         # LNTH/KR/PR/HAL leaked through as ENTER with score=null.
         if rating == "BUY" and final_score is None:
             logger.warning(
-                "[signals] %s has rating=BUY but final_score is None — "
-                "downgrading to HOLD (broken thesis)",
+                "[signals] %s has rating=BUY but final_score is None — downgrading to HOLD (broken thesis)",
                 ticker,
             )
             rating = "HOLD"
@@ -4632,7 +4704,7 @@ def _build_signals_payload(state: ResearchState) -> dict:
         elif rating == "BUY" and in_pop:
             signal = "ENTER"  # Reaffirm existing BUY position
         elif in_pop:
-            signal = "HOLD"   # Held, not BUY-rated
+            signal = "HOLD"  # Held, not BUY-rated
         else:
             continue  # Not held, not CIO-advanced — drop
 
@@ -4729,22 +4801,24 @@ def _build_signals_payload(state: ResearchState) -> dict:
         sector = sig["sector"]
         sr = sector_ratings.get(sector, {})
         pop_entry = pop_lookup.get(ticker, {})
-        universe.append({
-            "ticker": ticker,
-            "signal": sig["signal"],
-            "score": sig["score"],
-            "rating": sig["rating"],
-            "conviction": sig["conviction"],
-            "price_target_upside": pop_entry.get("price_target_upside"),
-            "sector_rating": sr.get("rating", "market_weight"),
-            "sector": sector,
-            "thesis_summary": sig["thesis_summary"],
-            # Propagate pick provenance to the v1 universe entries the
-            # evaluator's stance_source_provenance grader reads (config#859).
-            "stance_source": sig.get("stance_source"),
-            "factor_quality_score": sig.get("factor_quality_score"),
-            "sub_scores": sig.get("sub_scores"),
-        })
+        universe.append(
+            {
+                "ticker": ticker,
+                "signal": sig["signal"],
+                "score": sig["score"],
+                "rating": sig["rating"],
+                "conviction": sig["conviction"],
+                "price_target_upside": pop_entry.get("price_target_upside"),
+                "sector_rating": sr.get("rating", "market_weight"),
+                "sector": sector,
+                "thesis_summary": sig["thesis_summary"],
+                # Propagate pick provenance to the v1 universe entries the
+                # evaluator's stance_source_provenance grader reads (config#859).
+                "stance_source": sig.get("stance_source"),
+                "factor_quality_score": sig.get("factor_quality_score"),
+                "sub_scores": sig.get("sub_scores"),
+            }
+        )
 
     # v1-compatible buy_candidates list (ENTER signals with enriched theses).
     #
@@ -4768,12 +4842,14 @@ def _build_signals_payload(state: ResearchState) -> dict:
             and entry.get("sector_rating") == "underweight"
             and (entry.get("score") or 0) < SECTOR_COHERENCE_UW_MIN_SCORE
         ):
-            blocked_by_coherence_gate.append({
-                "ticker": entry["ticker"],
-                "sector": entry["sector"],
-                "score": entry["score"],
-                "uw_min_score": SECTOR_COHERENCE_UW_MIN_SCORE,
-            })
+            blocked_by_coherence_gate.append(
+                {
+                    "ticker": entry["ticker"],
+                    "sector": entry["sector"],
+                    "score": entry["score"],
+                    "uw_min_score": SECTOR_COHERENCE_UW_MIN_SCORE,
+                }
+            )
             continue
         # Factor quality floor: skip when the ticker has no factor profile
         # (graceful degrade — same pattern as the rest of the factor blend)
@@ -4785,12 +4861,14 @@ def _build_signals_payload(state: ResearchState) -> dict:
             and entry["sector"] not in FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS
             and entry["factor_quality_score"] < FACTOR_QUALITY_FLOOR_MIN_PERCENTILE
         ):
-            blocked_by_quality_floor.append({
-                "ticker": entry["ticker"],
-                "sector": entry["sector"],
-                "quality_pct": entry["factor_quality_score"],
-                "floor": FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
-            })
+            blocked_by_quality_floor.append(
+                {
+                    "ticker": entry["ticker"],
+                    "sector": entry["sector"],
+                    "quality_pct": entry["factor_quality_score"],
+                    "floor": FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
+                }
+            )
             continue
         candidate = dict(entry)
         et = entry_theses.get(entry["ticker"], {})
@@ -4800,16 +4878,14 @@ def _build_signals_payload(state: ResearchState) -> dict:
         buy_candidates.append(candidate)
     if blocked_by_coherence_gate:
         logger.info(
-            "macro_sector_coherence_gate blocked %d ENTER signal(s) "
-            "from UNDERWEIGHT sectors (uw_min_score=%.1f): %s",
+            "macro_sector_coherence_gate blocked %d ENTER signal(s) from UNDERWEIGHT sectors (uw_min_score=%.1f): %s",
             len(blocked_by_coherence_gate),
             SECTOR_COHERENCE_UW_MIN_SCORE,
             [f"{b['ticker']}({b['sector']},{b['score']:.1f})" for b in blocked_by_coherence_gate],
         )
     if blocked_by_quality_floor:
         logger.info(
-            "factor_quality_floor blocked %d ENTER signal(s) "
-            "with quality_score below %.1f-percentile: %s",
+            "factor_quality_floor blocked %d ENTER signal(s) with quality_score below %.1f-percentile: %s",
             len(blocked_by_quality_floor),
             FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
             [f"{b['ticker']}({b['sector']},quality={b['quality_pct']:.1f})" for b in blocked_by_quality_floor],
@@ -4825,6 +4901,13 @@ def _build_signals_payload(state: ResearchState) -> dict:
         "population": [p["ticker"] for p in pop],
         "universe": universe,
         "buy_candidates": buy_candidates,
+        # The RAG corpus's fetch set (config-I5700, rag-corpus-policy.md §2.1).
+        # NOT `universe` — that is the wider v1 executor key. See
+        # _build_rag_scope for why the two are deliberately different.
+        "rag_scope": _build_rag_scope(
+            state,
+            {s["ticker"] for s in signals.values() if s.get("signal") == "EXIT"},
+        ),
         # Per-ticker quarantine (config#2247) — the explicit-absence contract.
         # Additive, backward-compatible: consumers that don't read it are
         # unaffected (they already must tolerate a ticker being absent per the
@@ -4887,9 +4970,7 @@ def _build_research_intel_payload(state: ResearchState) -> dict:
     are gitignored and never touch this path.
     """
     macro_data = state.get("macro_data", {}) or {}
-    market_breadth = {
-        k: macro_data.get(k) for k in _RESEARCH_INTEL_BREADTH_KEYS
-    }
+    market_breadth = {k: macro_data.get(k) for k in _RESEARCH_INTEL_BREADTH_KEYS}
 
     # sector_ratings: carry ONLY {rating, rationale} (the neutral macro call).
     # Any extra keys an upstream might attach are dropped by construction.
@@ -4920,14 +5001,9 @@ def _build_research_intel_payload(state: ResearchState) -> dict:
             "breakdown": {
                 "quant_score": thesis.get("quant_score"),
                 "qual_score": thesis.get("qual_score"),
-                "factor_subscore": (
-                    legacy.get("factor_subscore")
-                    if legacy else thesis.get("factor_subscore")
-                ),
-                "weighted_base": breakdown.get("weighted_base")
-                if breakdown else thesis.get("weighted_base"),
-                "macro_shift": breakdown.get("macro_shift")
-                if breakdown else thesis.get("macro_shift"),
+                "factor_subscore": (legacy.get("factor_subscore") if legacy else thesis.get("factor_subscore")),
+                "weighted_base": breakdown.get("weighted_base") if breakdown else thesis.get("weighted_base"),
+                "macro_shift": breakdown.get("macro_shift") if breakdown else thesis.get("macro_shift"),
             },
             # Generic sector-team narrative only — NOT a position judgment.
             "thesis": {
@@ -4950,6 +5026,7 @@ def _build_research_intel_payload(state: ResearchState) -> dict:
 
 
 # ── Graph Builder ─────────────────────────────────────────────────────────────
+
 
 def build_graph() -> StateGraph:
     """
@@ -5065,12 +5142,8 @@ def build_graph() -> StateGraph:
     # 6-pillar profiles and (when ATTRACTIVENESS_FEED_ENABLED) overwrites
     # agent_input_set with the top-N attractiveness selection. Default OFF → a
     # pass-through no-op, so the existing tech_score feed is unchanged.
-    graph.add_edge(
-        "compute_factor_profiles_node", "rank_candidates_by_attractiveness_node"
-    )
-    graph.add_edge(
-        "rank_candidates_by_attractiveness_node", "compute_focus_list_node"
-    )
+    graph.add_edge("compute_factor_profiles_node", "rank_candidates_by_attractiveness_node")
+    graph.add_edge("rank_candidates_by_attractiveness_node", "compute_focus_list_node")
 
     # Fan-out AFTER focus list: dispatch to 6 sector teams + exit evaluator.
     graph.add_conditional_edges("compute_focus_list_node", dispatch_sectors_and_exit)
