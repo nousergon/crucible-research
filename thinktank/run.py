@@ -250,7 +250,20 @@ def run_daily(
         )
         return manifest
 
-    client = client or ThinktankClient(settings=settings, run_id=run_id)
+    # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
+    from krepis.cost_sink import S3JsonlCostSink
+
+    cost_sink = S3JsonlCostSink(
+        bucket=settings.bucket,
+        prefix="decision_artifacts/_cost",
+        run_id=run_id,
+        register_atexit=True,
+    )
+    client = client or ThinktankClient(
+        settings=settings,
+        run_id=run_id,
+        cost_sink=cost_sink,
+    )
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
 
     # Bound BEFORE the guarded section: an exception anywhere inside
