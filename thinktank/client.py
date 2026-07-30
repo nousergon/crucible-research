@@ -79,7 +79,29 @@ def _transient_provider_errors() -> tuple[type[Exception], ...]:
     # (mirrors ``_client_for``'s lazy OpenAI import below).
     from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 
-    return (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
+    # ``json.JSONDecodeError`` belongs in this class even though it is not an
+    # openai exception: the SDK parses the body only AFTER it has decided the
+    # transaction succeeded, so a malformed body is invisible to the client's
+    # own ``max_retries`` (which is status/connection-driven) and escapes as a
+    # raw, context-free decode error. Live incident 2026-07-30 (report
+    # 019fb37b8b792803c2a92b924042): OpenRouter answered 200 with 8228 bytes of
+    # keep-alive whitespace and no payload, and the resulting
+    # ``JSONDecodeError`` killed the daily Think Tank run ~14 min in.
+    #
+    # STOPGAP. ``krepis.llm`` already classifies this failure exactly here for
+    # the same reason (krepis#38, live incident 2026-07-20) — this file is a
+    # fork of that chokepoint, which is why the fix did not reach it.
+    # crucible-research#530 / alpha-engine-config#5223 migrate these call sites
+    # onto ``krepis.llm`` and DELETE this function; it is blocked
+    # (``gate:dependency``) and CI-red, so the class is closed here in the
+    # meantime rather than left open on the daily path.
+    return (
+        APIConnectionError,
+        APITimeoutError,
+        InternalServerError,
+        RateLimitError,
+        json.JSONDecodeError,
+    )
 
 
 class ThinktankLLMError(RuntimeError):
@@ -307,9 +329,10 @@ class ThinktankClient:
         agent_id: str,
     ) -> Any:
         """One provider call, retried with jittered backoff on transient
-        errors (timeout / connection reset / 5xx / rate-limit) — provider
-        flakiness, not a model mistake, so it's retried fresh rather than
-        burning the schema-corrective budget in ``complete``."""
+        errors (timeout / connection reset / 5xx / rate-limit / a body the
+        SDK could not decode) — provider flakiness, not a model mistake, so
+        it's retried fresh rather than burning the schema-corrective budget
+        in ``complete``."""
         errors = _transient_provider_errors()
         last_exc: Exception | None = None
         for attempt in range(_HTTP_RETRY_ATTEMPTS):
