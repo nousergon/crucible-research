@@ -32,8 +32,12 @@ def _settings() -> ThinktankSettings:
         providers={"fake": ProviderSpec(name="fake", base_url="http://x", key_secret="OPENROUTER_API_KEY")},
         tiers={
             "thesis": TierSpec(
-                name="thesis", provider="fake", model="fake/model",
-                max_tokens=100, price_in_per_m=1.0, price_out_per_m=2.0,
+                name="thesis",
+                provider="fake",
+                model="fake/model",
+                max_tokens=100,
+                price_in_per_m=1.0,
+                price_out_per_m=2.0,
                 structured_outputs=True,
             )
         },
@@ -68,9 +72,7 @@ def _client(bodies: list[str], monkeypatch) -> tuple[ThinktankClient, _FakeCompl
 
 def test_valid_response_parses_and_costs(monkeypatch):
     client, fake = _client([json.dumps({"answer": "yes", "score": 7})], monkeypatch)
-    result = client.complete(
-        "thesis", agent_id="a", system="s", user="u", response_model=_Out
-    )
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert result.parsed.answer == "yes"
     # 1M in @ $1/M + 0.5M out @ $2/M = $2.00
     assert result.cost_usd == pytest.approx(2.0)
@@ -100,9 +102,7 @@ def test_bounded_retry_recovers_once(monkeypatch):
 
 
 def test_fails_loud_after_bounded_retry(monkeypatch):
-    client, fake = _client(
-        [json.dumps({"answer": "bad"}), json.dumps({"answer": "still bad"})], monkeypatch
-    )
+    client, fake = _client([json.dumps({"answer": "bad"}), json.dumps({"answer": "still bad"})], monkeypatch)
     with pytest.raises(ThinktankLLMError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert len(fake.calls) == 2
@@ -150,16 +150,15 @@ def test_transient_provider_error_retried_with_backoff(monkeypatch):
             if self.calls < 3:
                 raise APIConnectionError(request=SimpleNamespace())
             return SimpleNamespace(
-                choices=[SimpleNamespace(
-                    message=SimpleNamespace(content=json.dumps({"answer": "ok", "score": 9}))
-                )],
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"answer": "ok", "score": 9})))],
                 usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
             )
 
     fake = _FlakyCompletions()
     holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
     client = ThinktankClient(
-        settings=_settings(), run_id="testrun",
+        settings=_settings(),
+        run_id="testrun",
         client_factory=lambda provider, key: holder,
     )
     result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
@@ -184,10 +183,90 @@ def test_fails_loud_after_transient_retries_exhausted(monkeypatch):
     fake = _AlwaysFlaky()
     holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
     client = ThinktankClient(
-        settings=_settings(), run_id="testrun",
+        settings=_settings(),
+        run_id="testrun",
         client_factory=lambda provider, key: holder,
     )
     with pytest.raises(APIConnectionError):
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert fake.calls == 3
+
+
+def _decode_error_of_a_keepalive_only_body() -> json.JSONDecodeError:
+    """The exact exception the OpenAI SDK propagates when the gateway answers
+    200 with keep-alive padding and no payload.
+
+    Live incident 2026-07-30, flow-doctor report 019fb37b8b792803c2a92b924042:
+    ``JSONDecodeError: Expecting value: line 1497 column 1 (char 8228)`` —
+    ``json.loads`` skips leading whitespace before its first decode, so the
+    reported offset IS the length of the whitespace run.
+    """
+    body = "    \n" * 1495 + " " * 752 + "\n"
+    assert len(body) == 8228 and body.count("\n") == 1496
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        json.loads(body)
+    assert str(exc_info.value) == "Expecting value: line 1497 column 1 (char 8228)"
+    return exc_info.value
+
+
+def test_transport_decode_error_is_transient_and_retried(monkeypatch):
+    """A body the SDK cannot decode is provider flakiness, not a model mistake.
+
+    It is invisible to the SDK's own ``max_retries`` (parsing happens after the
+    transaction is already considered final), so unless it is classified here it
+    escapes the retry loop entirely — which is how one gateway hiccup killed the
+    2026-07-30 daily Think Tank run. ``krepis.llm`` classifies it in the same
+    place for the same reason (krepis#38).
+    """
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    class _KeepaliveThenBody:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise _decode_error_of_a_keepalive_only_body()
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"answer": "ok", "score": 4})))],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+            )
+
+    fake = _KeepaliveThenBody()
+    holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+    client = ThinktankClient(
+        settings=_settings(),
+        run_id="testrun",
+        client_factory=lambda provider, key: holder,
+    )
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert result.parsed.answer == "ok"
+    assert fake.calls == 3
+
+
+def test_transport_decode_error_fails_loud_after_retries_exhausted(monkeypatch):
+    """Bounded, not swallowed: a PERSISTENT decode failure still raises."""
+    monkeypatch.setattr("thinktank.client.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    class _AlwaysKeepalive:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            raise _decode_error_of_a_keepalive_only_body()
+
+    fake = _AlwaysKeepalive()
+    holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+    client = ThinktankClient(
+        settings=_settings(),
+        run_id="testrun",
+        client_factory=lambda provider, key: holder,
+    )
+    with pytest.raises(json.JSONDecodeError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
     assert fake.calls == 3
 
@@ -209,9 +288,7 @@ def test_sft_flush_writes_jsonl_and_raises_loud(monkeypatch):
         flushed = client.flush_sft(s3, "alpha-engine-research", "2026-07-02")
         assert flushed == 1
         key = "decision_artifacts/_sft_raw/2026-07-02/testrun/a.jsonl"
-        row = json.loads(
-            s3.get_object(Bucket="alpha-engine-research", Key=key)["Body"].read()
-        )
+        row = json.loads(s3.get_object(Bucket="alpha-engine-research", Key=key)["Body"].read())
         assert row["producer"] == "crucible_thinktank"
         assert row["meta"]["tier"] == "thesis"
 
@@ -225,7 +302,11 @@ def test_sft_flush_writes_jsonl_and_raises_loud(monkeypatch):
 def test_sft_meta_rides_into_row_meta(monkeypatch):
     client, _ = _client([json.dumps({"answer": "y", "score": 1})], monkeypatch)
     client.complete(
-        "thesis", agent_id="a", system="s", user="u", response_model=_Out,
+        "thesis",
+        agent_id="a",
+        system="s",
+        user="u",
+        response_model=_Out,
         sft_meta={"ticker": "AAPL", "thesis_version": 3, "capture_run_id": "testrun-AAPL-v3"},
     )
     row = client._sft_rows["a"][0]

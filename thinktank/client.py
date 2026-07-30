@@ -31,7 +31,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 import boto3
@@ -139,11 +139,7 @@ class ThinktankClient:
                 spec,
                 callsite_id=callsite_id,
                 api_key=api_key,
-                client_factory=(
-                    self._adapt_client_factory()
-                    if self.client_factory is not None
-                    else None
-                ),
+                client_factory=(self._adapt_client_factory() if self.client_factory is not None else None),
                 max_retries=3,
                 timeout=180.0,
                 cost_sink=self.cost_sink,
@@ -235,8 +231,7 @@ class ThinktankClient:
                 sft_meta=sft_meta,
             )
             raise ThinktankLLMError(
-                f"tier={tier.name} model={tier.model} agent={agent_id}: "
-                f"response failed after bounded retries: {exc}"
+                f"tier={tier.name} model={tier.model} agent={agent_id}: response failed after bounded retries: {exc}"
             ) from exc
 
         usage = result.usage
@@ -293,7 +288,7 @@ class ThinktankClient:
         self._call_seq += 1
         self._sft_rows.setdefault(agent_id, []).append(
             _SftRow(
-                captured_at=datetime.now(timezone.utc).isoformat(),
+                captured_at=datetime.now(UTC).isoformat(),
                 model=tier.model,
                 call_seq=self._call_seq,
                 input_messages=messages,
@@ -407,6 +402,7 @@ def _callsite_id_for(tier_name: str, agent_id: str) -> str:
     # Fallback — should not be reached for registered tiers
     logger.warning(
         "unregistered callsite for tier=%r agent=%r — using derived id",
-        tier_name, agent_id,
+        tier_name,
+        agent_id,
     )
     return f"thinktank-{tier_name}"
