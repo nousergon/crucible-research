@@ -52,6 +52,24 @@ T = TypeVar("T", bound=BaseModel)
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
+# Retry budget handed to ``krepis.llm.LLMClient.structured()``.
+#
+# The library defaults to ``attempts=2``. The fork this file replaces ran THREE
+# transport attempts and THREE non-JSON-body attempts, each on its own budget,
+# plus one schema-corrective retry (config#3072). Taking the library default
+# would therefore have SHRUNK the budget as a side effect of consolidating —
+# and shrunk it on exactly the failure that motivated this work: live incident
+# 2026-07-30 (flow-doctor report 019fb37b8b792803c2a92b924042), where OpenRouter
+# answered 200 with 8228 bytes of keep-alive padding and no payload, would get
+# one retry instead of three.
+#
+# 3 is the fork's per-class budget, preserved. It now covers every retryable
+# cause at once (non-JSON body, null-choices body, schema validation) because
+# the library uses one budget for all of them — a consolidation of BUDGETS,
+# never a reduction of the number of attempts any single failure gets. krepis
+# >= 0.25.0 backs off between attempts (krepis#93), so this is not a tight loop.
+_STRUCTURED_ATTEMPTS = 3
+
 
 class ThinktankLLMError(RuntimeError):
     """A tier call failed validation after its bounded retry — fail loud."""
@@ -186,12 +204,13 @@ class ThinktankClient:
 
         **I5223:** routes through ``krepis.llm.LLMClient.structured()``
         instead of the forked ``OpenAI(...).chat.completions.create()``
-        this module used before. The retry semantics are slightly different
-        (the library uses a single ``attempts`` budget for both non-JSON
-        transport errors and schema validation failures, whereas the old
-        fork kept separate budgets) — behaviourally equivalent for the
-        common case and delegated to the library per the consolidation
-        mandate.
+        this module used before.
+
+        The library collapses into ONE ``attempts`` budget what the fork kept
+        as two (a transport-failure budget and a schema-corrective budget).
+        That is the intended consolidation — but the budget must not SHRINK on
+        the way through, so it is passed explicitly rather than defaulted. See
+        ``_STRUCTURED_ATTEMPTS``.
         """
         tier = self.settings.tier(tier_name)
         callsite_id = _callsite_id_for(tier_name, agent_id)
@@ -204,6 +223,7 @@ class ThinktankClient:
                 schema=response_model,
                 schema_name=response_model.__name__,
                 max_tokens=tier.max_tokens,
+                attempts=_STRUCTURED_ATTEMPTS,
             )
         except LLMError as exc:
             # LLMClient raises LLMError on exhaustion. Record the failed
