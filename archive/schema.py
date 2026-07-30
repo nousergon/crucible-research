@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
