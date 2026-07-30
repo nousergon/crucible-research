@@ -87,6 +87,7 @@ def write_challenger_selection(
     calendar_date: str,
     board_date: str | None,
     coverage_gap: dict,
+    update_latest_pointer: bool = True,
 ) -> ChallengerSelection:
     """Upsert this run's top-``CHALLENGER_TOP_N`` rated names and persist
     dated + latest. ``coverage_gap`` must be a ``_compute_coverage_gap``
@@ -94,7 +95,21 @@ def write_challenger_selection(
     writes — the run that fills the last gap must self-report complete, or
     the leaderboard shadow view slips to the next run (the caller in
     ``run.py`` recomputes it post-write; ``manifest.coverage_gap`` keeps
-    its separate pre-run convention)."""
+    its separate pre-run convention).
+
+    ``update_latest_pointer=False`` writes the dated key and SKIPS
+    ``latest.json`` — used only by ``run.py``'s abort path. That pointer is the
+    single end-to-end signal that this challenger arm produced a result
+    (ARTIFACT_REGISTRY ``thinktank_challenger_selection``: the async spot
+    dispatcher can only see "no box was ever launched", and the freshness
+    monitor probes with a HEAD, so freshness IS the health verdict). Advancing
+    it from a dead run makes the failure read as healthy to the only detector
+    that can see it. The dated key still lands — the partial cohort is real
+    evidence, it just is not a claim that the run succeeded.
+
+    The shadow leaderboard view is likewise pointer-scoped: it is already gated
+    on ``coverage_complete``, and an aborted run must never contribute
+    leaderboard evidence regardless."""
     covered = ledger.covered()
     if covered and not ratings_board.rows:
         # Fleet rule: a missing/empty ratings board when the ledger is
@@ -142,10 +157,20 @@ def write_challenger_selection(
     )
     payload = selection.model_dump()
     store.put_json(CHALLENGER_SELECTION_KEY_TMPL.format(trading_day=trading_day), payload)
-    store.put_json(CHALLENGER_SELECTION_LATEST_KEY, payload)
+    if update_latest_pointer:
+        store.put_json(CHALLENGER_SELECTION_LATEST_KEY, payload)
+    else:
+        logger.warning(
+            "challenger selection LATEST pointer withheld for %s — this run "
+            "aborted, and %s is the only end-to-end health signal for this arm "
+            "(ARTIFACT_REGISTRY thinktank_challenger_selection). Advancing it "
+            "would hide the failure from the freshness monitor, which probes "
+            "by HEAD and never reads content. The dated key was written.",
+            trading_day,
+            CHALLENGER_SELECTION_LATEST_KEY,
+        )
     logger.info(
-        "challenger selection written: %d/%d names, coverage_complete=%s "
-        "(uncovered=%d) for %s",
+        "challenger selection written: %d/%d names, coverage_complete=%s (uncovered=%d) for %s",
         len(selection.selections),
         CHALLENGER_TOP_N,
         selection.coverage_complete,
@@ -153,9 +178,10 @@ def write_challenger_selection(
         trading_day,
     )
 
-    shadow_key = _write_shadow_signals(store, selection)
-    if shadow_key:
-        logger.info("challenger shadow signals written: %s", shadow_key)
+    if update_latest_pointer:
+        shadow_key = _write_shadow_signals(store, selection)
+        if shadow_key:
+            logger.info("challenger shadow signals written: %s", shadow_key)
 
     return selection
 

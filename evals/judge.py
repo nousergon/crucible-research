@@ -66,6 +66,7 @@ from krepis.judge import decode_custom_id as _lib_decode_custom_id
 from krepis.judge import encode_custom_id as _lib_encode_custom_id
 from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
 from krepis.judge import render_rubric as _lib_render_rubric
+from krepis.llm import LLMClient
 from krepis.llm_config import ModelSpec
 from nousergon_lib.decision_capture import DecisionArtifact
 from nousergon_lib.eval_artifacts import (
@@ -73,7 +74,6 @@ from nousergon_lib.eval_artifacts import (
     eval_latest_key,
     new_eval_run_id,
 )
-from openai import OpenAI
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
@@ -752,6 +752,7 @@ def evaluate_artifact(
         api_key=api_key,
         max_retries=max_retries,
         log_prefix="[eval_judge]",
+        callsite_id="evaljudge-sync",
     )
 
     logger.info(
@@ -786,17 +787,14 @@ def evaluate_artifact(
 # Runs the SAME rubric/artifact through the SAME ``RubricEvalArtifact``
 # output shape as the pre-migration Anthropic path (no bespoke third judge
 # implementation, per config#2575's binding constraint carried forward
-# from config#1676/#1675), but via a bare ``openai.OpenAI`` client pointed
-# at OpenRouter with a FORCED tool call (``tool_choice``) instead of
-# LangChain's ``ChatAnthropic`` — the Anthropic-specific
-# ``with_structured_output`` + ``invoke_structured_with_validation_retry``
-# chokepoint has no OpenRouter equivalent. (Not
-# ``krepis.llm.LLMClient.structured()`` either: live-verified
-# 2026-07-19 that OpenRouter's strict ``response_format=json_schema`` mode
-# — that method's ``structured_outputs=True`` path — is unreliable for
-# DeepSeek-family models, intermittently renaming/dropping required field
-# names; forced tool-calling, as implemented here, is the mechanism this
-# repo has already validated live for the judge's schema, config#2575.)
+# from config#1676/#1675), but via ``krepis.llm.LLMClient.complete()``
+# with forced tool_choice in the ``extra`` kwargs rather than a bare
+# ``openai.OpenAI`` client. (alpha-engine-config-I5223: migrated onto the
+# shared ``krepis.llm`` chokepoint for cost attribution — the pre-I5223
+# code constructed a bare ``OpenAI(...)`` directly and bypassed cost
+# telemetry entirely. The forced-tool-call approach is still needed because
+# OpenRouter's strict ``response_format=json_schema`` mode is unreliable
+# for DeepSeek-family models, and ``LLMClient.structured()`` uses it.)
 #
 # ``evaluate_artifact_openrouter`` is SHADOW-only (see its own docstring);
 # ``evaluate_artifact`` (the sync primary path) uses this SAME call core
@@ -855,6 +853,7 @@ def _call_openrouter_judge_llm(
     api_key: str | None,
     max_retries: int,
     log_prefix: str,
+    callsite_id: str = "evaljudge-sync",
 ) -> _OpenRouterJudgeCallResult:
     """Shared OpenRouter judge-call core: forced-tool-call request + leak
     guard + bounded retry loop. Used by BOTH ``evaluate_artifact`` (sync
@@ -879,18 +878,10 @@ def _call_openrouter_judge_llm(
     guard trip or schema validation failure).
     """
     spec = _openrouter_judge_model_spec(request_model=request_model, max_tokens=max_tokens)
-    client = OpenAI(
-        base_url=spec.resolved_base_url(),
+    llm_client = LLMClient(
+        spec,
+        callsite_id=callsite_id,
         api_key=_resolve_openrouter_api_key(api_key),
-        # Same 180s convention as thinktank/client.py's OpenAI construction.
-        # max_retries=0: the SDK's own retry-on-transport-error would stack
-        # underneath this function's own bounded attempt loop (max_retries
-        # attempts, above) and silently blow past the "3 full model calls"
-        # worst-case-latency bound documented on MAX_OPENROUTER_JUDGE_RETRIES.
-        # Without an explicit timeout, a hung OpenRouter response blocks on
-        # the SDK's 600s default — past the judge-perturbation-smoke
-        # workflow's 8-minute job timeout — killing the job with zero
-        # diagnostic output instead of a clear TimeoutError.
         timeout=180.0,
         max_retries=0,
     )
@@ -915,16 +906,14 @@ def _call_openrouter_judge_llm(
 
     for attempt in range(1, max_retries + 1):
         try:
-            resp = client.chat.completions.create(
-                model=spec.model,
+            result = llm_client.complete(
+                system="You are a strict, evidence-grounded rubric judge.",
+                user_content=rendered,
                 max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": "You are a strict, evidence-grounded rubric judge."},
-                    {"role": "user", "content": rendered},
-                ],
-                tools=tools,
-                tool_choice={"type": "function", "function": {"name": tool_name}},
-                extra_body={"reasoning": spec.reasoning} if spec.reasoning else {},
+                extra={
+                    "tools": tools,
+                    "tool_choice": {"type": "function", "function": {"name": tool_name}},
+                },
             )
         except Exception as exc:  # noqa: BLE001 — transport error, bounded retry below
             last_error = exc
@@ -943,14 +932,9 @@ def _call_openrouter_judge_llm(
         # alongside it. The SDK constructs the object happily, so this is not a
         # transport exception and the except above never sees it.
         #
-        # `resp.choices[0]` then raised TypeError: 'NoneType' object is not
-        # subscriptable — OUTSIDE the retry loop's guard, killing the whole
-        # batch on one transient upstream hiccup, with the provider's own error
-        # message discarded unread. This is the failure that has been reddening
-        # the judge perturbation smoke since 2026-07-25.
-        #
-        # Treat it as what it is: a retryable provider error, on the same
-        # bounded-retry path as a transport error, and surface the payload.
+        # Detect it here on the raw_response. LLMClient exposes the raw
+        # ChatCompletion on LLMResult.raw_response.
+        resp = result.raw_response
         choices = getattr(resp, "choices", None)
         if not choices:
             provider_error = getattr(resp, "error", None)
@@ -969,10 +953,13 @@ def _call_openrouter_judge_llm(
 
         choice = choices[0]
         resolved_model = getattr(resp, "model", None) or resolved_model
-        usage = getattr(resp, "usage", None)
-        cost = getattr(usage, "cost", None) if usage is not None else None
-        if isinstance(cost, (int, float)):
-            total_usd += float(cost)
+
+        # Cost from LLMResult.usage — LLMClient's _usage_from_openai()
+        # already extracted provider_cost_usd from usage.cost when
+        # OpenRouter opted in (which it does via _openai_extra_body).
+        provider_cost = result.usage.provider_cost_usd
+        if provider_cost is not None:
+            total_usd += float(provider_cost)
 
         try:
             check_openai_tool_response_for_leak(choice, tool_name=tool_name)
@@ -1129,6 +1116,7 @@ def evaluate_artifact_openrouter(
         api_key=api_key,
         max_retries=max_retries,
         log_prefix="[eval_judge_openrouter]",
+        callsite_id="evaljudge-shadow",
     )
 
     logger.info(

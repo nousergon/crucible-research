@@ -382,6 +382,13 @@ class RunManifest(_Artifact):
     deadline_skipped_new: list[str] = Field(default_factory=list)
     deadline_skipped_refresh: list[str] = Field(default_factory=list)
     deadline_skipped_sweep: bool = False
+    # ── Error truncation (same invariant, different cause) ───────────────────
+    # The deadline fields above cover a run that ran out of TIME. A run killed
+    # by an exception mid-loop lands in the identical state — completed work,
+    # unwritten terminal artifacts — so it persists the same way and records
+    # the cause here. Non-empty means the run RAISED: partial, and never to be
+    # read as a healthy run.
+    aborted_by_error: str = ""
 
 
 class MonthlyCostLedger(_Artifact):
