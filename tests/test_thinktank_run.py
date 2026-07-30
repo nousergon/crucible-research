@@ -65,10 +65,17 @@ class _FakeBackend:
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             body = {
-                "business_summary": "b", "moat": "m", "filings_review": "f",
-                "news_sentiment": "n", "valuation": "v", "market_dynamics": "md",
-                "risks": ["r1"], "catalysts": ["c1"], "stance": "attractive",
-                "conviction": 70, "summary": "s",
+                "business_summary": "b",
+                "moat": "m",
+                "filings_review": "f",
+                "news_sentiment": "n",
+                "valuation": "v",
+                "market_dynamics": "md",
+                "risks": ["r1"],
+                "catalysts": ["c1"],
+                "stance": "attractive",
+                "conviction": 70,
+                "summary": "s",
                 "rating": self.ratings.get(ticker, 72),
                 "rating_rationale": "evidence-driven number",
             }
@@ -79,15 +86,21 @@ class _FakeBackend:
 
             def _sub(pillar: str) -> dict:
                 return {
-                    "pillar": pillar, "score": score, "confidence": "medium",
+                    "pillar": pillar,
+                    "score": score,
+                    "confidence": "medium",
                     "evidence": ["e1"],
                 }
 
             body = {
                 "quality": _sub("quality"),
                 "quality_moat": {
-                    "primary_type": "none", "secondary_types": [], "width": "none",
-                    "durability_years": 0, "trend": "stable", "evidence": [],
+                    "primary_type": "none",
+                    "secondary_types": [],
+                    "width": "none",
+                    "durability_years": 0,
+                    "trend": "stable",
+                    "evidence": [],
                 },
                 "value": _sub("value"),
                 "momentum": _sub("momentum"),
@@ -130,13 +143,14 @@ def tt_config(tmp_path, monkeypatch):
             "coverage": {"daily_new_names": 3, "rank_ceiling": 150, "sweep_chunk_size": 25},
             "budget": {"monthly_usd_default": 25.0, "ssm_param": "/thinktank/monthly_budget_usd"},
             "llm": {
-                "providers": {
-                    "fake": {"base_url": "http://fake", "key_secret": "OPENROUTER_API_KEY"}
-                },
+                "providers": {"fake": {"base_url": "http://fake", "key_secret": "OPENROUTER_API_KEY"}},
                 "tiers": {
                     t: {
-                        "provider": "fake", "model": f"fake/{t}", "max_tokens": 1000,
-                        "price_in_per_m": 1.0, "price_out_per_m": 2.0,
+                        "provider": "fake",
+                        "model": f"fake/{t}",
+                        "max_tokens": 1000,
+                        "price_in_per_m": 1.0,
+                        "price_out_per_m": 2.0,
                         "structured_outputs": True,
                     }
                     for t in ("sweep", "themes", "thesis", "pillar")
@@ -157,10 +171,7 @@ def tt_config(tmp_path, monkeypatch):
 
 def _seed_read_side(s3, *, signals_date="2026-06-28"):
     s3.create_bucket(Bucket=BUCKET)
-    stocks = [
-        {"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": 100 - i}
-        for i in range(8)
-    ]
+    stocks = [{"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": 100 - i} for i in range(8)]
     s3.put_object(
         Bucket=BUCKET,
         Key="scanner/universe/latest.json",
@@ -178,9 +189,7 @@ def _seed_read_side(s3, *, signals_date="2026-06-28"):
             }
         ),
     )
-    s3.put_object(
-        Bucket=BUCKET, Key="archive/macro/macro_report.md", Body=b"# Macro\nSteady."
-    )
+    s3.put_object(Bucket=BUCKET, Key="archive/macro/macro_report.md", Body=b"# Macro\nSteady.")
 
 
 def _run(settings_env, backend, s3, **kw):
@@ -334,6 +343,72 @@ def test_gap_fill_checkpoints_ledger_so_a_retry_only_rebuilds_the_remaining_gap(
         assert set(ledger.entries) == {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"}
 
 
+def test_mid_loop_crash_still_persists_terminal_artifacts_then_raises(tt_config):
+    """A run killed mid-loop reaches its terminal writes, exactly like a run
+    killed by the deadline (alpha-engine-config-I5208).
+
+    Live incident 2026-07-30: an OpenRouter 200 carrying only keep-alive
+    whitespace raised ``JSONDecodeError`` out of the thesis loop ~14 min into
+    the daily run. Every terminal write was skipped — ratings board, challenger
+    selection, events, the manifest, the SFT flush, and ``guard.record_run``,
+    so the run's spend never reached the monthly cost ledger either. The
+    deadline guard was built to prevent precisely that loss; it only fired on
+    time, so an exception reproduced the outcome it exists to prevent.
+    """
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # T0 and T1 complete; T2 raises. tt_config's daily_new_names=3.
+        backend.raise_on_ticker = "T2"
+        with pytest.raises(RuntimeError, match="simulated crash building T2"):
+            _run(tt_config, backend, s3)
+
+        store = ThinktankStore(BUCKET, s3)
+        ledger = CoverageLedger.model_validate(store.get_json(LEDGER_KEY))
+        assert set(ledger.entries) == {"T0", "T1"}
+
+        # The terminal artifacts exist and describe the PARTIAL run.
+        board = store.get_json("thinktank/ratings/latest.json")
+        assert set(board["rows"]) == {"T0", "T1"}
+        # ...but the challenger-selection LATEST pointer is deliberately NOT
+        # advanced. It is the ONLY end-to-end health signal for this arm
+        # (ARTIFACT_REGISTRY thinktank_challenger_selection: the async spot
+        # dispatcher can only see "no box was ever launched"), and the
+        # freshness monitor probes it by HEAD — LastModified/ContentLength,
+        # never content. A fresh pointer from a dead run reads as a healthy run.
+        keys_now = {
+            o["Key"]
+            for o in s3.list_objects_v2(Bucket=BUCKET, Prefix="thinktank/challenger_selection/").get("Contents", [])
+        }
+        assert "thinktank/challenger_selection/latest.json" not in keys_now
+        # The DATED key still lands — the partial cohort is real evidence, it
+        # just is not a claim that this run produced a result.
+        dated = store.get_json(f"thinktank/challenger_selection/{board['trading_day']}.json")
+        assert dated["trading_day"] == board["trading_day"]
+        # And no leaderboard shadow evidence from a dead run.
+        assert not [k for k in keys_now if "signals_shadow" in k]
+
+        # The manifest names the cause and is not readable as a healthy run.
+        prefix = f"thinktank/runs/{board['trading_day']}/"
+        keys = [o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])]
+        assert len(keys) == 1, keys
+        manifest = store.get_json(keys[0])
+        assert manifest["aborted_by_error"].startswith("RuntimeError:")
+        assert "simulated crash building T2" in manifest["aborted_by_error"]
+        assert manifest["errors"] == [manifest["aborted_by_error"]]
+        assert manifest["theses_written"] == 2
+        assert manifest["challenger_selection_written"] is False
+
+        # Spend is recorded: guard.record_run lives in the terminal block, so
+        # skipping it silently under-counted the month against the budget cap.
+        month = board["trading_day"][:7]
+        costs = store.get_json(f"thinktank/costs/{month}.json")
+        assert [r["run_id"] for r in costs["runs"]] == [manifest["run_id"]]
+        assert costs["spent_usd"] == pytest.approx(manifest["total_cost_usd"])
+
+
 def test_budget_breach_refuses_run(tt_config, monkeypatch):
     monkeypatch.setenv("THINKTANK_MONTHLY_BUDGET_USD", "0.0")
     with mock_aws():
@@ -389,17 +464,12 @@ def test_ratings_board_and_prompt_independence(tt_config):
         assert row["rating_minus_attractiveness"] == -28.0
         assert row["thesis_version"] == 1
         # dated partition written alongside latest
-        dated = store.get_json(
-            f"thinktank/ratings/{manifest.trading_day}.json"
-        )
+        dated = store.get_json(f"thinktank/ratings/{manifest.trading_day}.json")
         assert dated["rows"].keys() == board["rows"].keys()
 
         # the anchoring pin: no scanner-opinion JSON keys in any thesis OR
         # pillar-extraction prompt (config#2678 must not reverse this)
-        opinion_prompts = [
-            u for n, u in backend.users
-            if n in ("CompanyThesisRatedLLM", "QualitativePillarAssessment")
-        ]
+        opinion_prompts = [u for n, u in backend.users if n in ("CompanyThesisRatedLLM", "QualitativePillarAssessment")]
         assert opinion_prompts, "no thesis/pillar calls captured"
         for user in opinion_prompts:
             for banned in ('"attractiveness_score"', '"pillars"', '"focus_score"', '"tech_score"'):
@@ -445,9 +515,7 @@ def test_operator_refresh_mode(tt_config):
             Body=json.dumps(t0),
         )
 
-        manifest, store = _run(
-            tt_config, backend, s3, refresh_tickers=["T0"]
-        )
+        manifest, store = _run(tt_config, backend, s3, refresh_tickers=["T0"])
         assert manifest.mode == "operator_refresh"
         assert manifest.names_added == []
         assert manifest.names_refreshed == ["T0"]
@@ -497,9 +565,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         s3 = boto3.client("s3", region_name="us-east-1")
         _seed_read_side(s3)
         # stamp an as_of on the universe board so board_date propagates
-        board = json.loads(
-            s3.get_object(Bucket=BUCKET, Key="scanner/universe/latest.json")["Body"].read()
-        )
+        board = json.loads(s3.get_object(Bucket=BUCKET, Key="scanner/universe/latest.json")["Body"].read())
         board["as_of"] = "2026-07-11"
         s3.put_object(Bucket=BUCKET, Key="scanner/universe/latest.json", Body=json.dumps(board))
 
@@ -534,9 +600,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
 
         dated = store.get_json(f"thinktank/challenger_selection/{manifest.trading_day}.json")
         assert dated == sel
-        assert store.get_json(
-            f"signals_shadow/thinktank_coverage/{manifest.trading_day}/signals.json"
-        ) is None
+        assert store.get_json(f"signals_shadow/thinktank_coverage/{manifest.trading_day}/signals.json") is None
 
         # RUN 2 — gap_fill_only shores up T3-T7 (the whole remaining gap)
         backend.ratings.update({"T3": 95, "T4": 50, "T5": 85, "T6": 40, "T7": 70})
@@ -552,15 +616,27 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert sel2["uncovered_count"] == 0
         assert sel2["coverage_complete"] is True
         assert [row["ticker"] for row in sel2["selections"]] == [
-            "T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6",
+            "T3",
+            "T1",
+            "T5",
+            "T2",
+            "T7",
+            "T0",
+            "T4",
+            "T6",
         ]
         assert [row["rating"] for row in sel2["selections"]] == [
-            95, 90, 85, 75, 70, 60, 50, 40,
+            95,
+            90,
+            85,
+            75,
+            70,
+            60,
+            50,
+            40,
         ]
         # conforming shadow view written on the completing run itself
-        assert store.get_json(
-            f"signals_shadow/thinktank_coverage/{manifest2.trading_day}/signals.json"
-        ) is not None
+        assert store.get_json(f"signals_shadow/thinktank_coverage/{manifest2.trading_day}/signals.json") is not None
 
         # RUN 3 — gap_fill_only no-op: still fully covered → complete stays
         # True, shadow refreshed.
@@ -572,12 +648,17 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert sel3["uncovered_count"] == 0
         assert sel3["coverage_complete"] is True
         assert [row["ticker"] for row in sel3["selections"]] == [
-            "T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6",
+            "T3",
+            "T1",
+            "T5",
+            "T2",
+            "T7",
+            "T0",
+            "T4",
+            "T6",
         ]
 
-        shadow = store.get_json(
-            f"signals_shadow/thinktank_coverage/{manifest3.trading_day}/signals.json"
-        )
+        shadow = store.get_json(f"signals_shadow/thinktank_coverage/{manifest3.trading_day}/signals.json")
         assert shadow is not None
         assert shadow["date"] == manifest3.trading_day
         assert shadow["run_date"] == manifest3.calendar_date
@@ -587,8 +668,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
             assert row["signal"] == "ENTER"
             assert isinstance(row["score"], float)
         # scores strictly descending in the same rank order as selections
-        ordered_scores = [signals[t]["score"] for t in
-                           ["T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6"]]
+        ordered_scores = [signals[t]["score"] for t in ["T3", "T1", "T5", "T2", "T7", "T0", "T4", "T6"]]
         assert ordered_scores == sorted(ordered_scores, reverse=True)
         assert ordered_scores == [95.0, 90.0, 85.0, 75.0, 70.0, 60.0, 50.0, 40.0]
 
@@ -602,15 +682,19 @@ def test_challenger_selection_truncates_to_top_n_by_rating():
     ledger = CoverageLedger(
         entries={
             f"X{i}": LedgerEntry(
-                ticker=f"X{i}", covered_since="2026-07-01",
-                thesis_version=1, thesis_updated_on="2026-07-01",
+                ticker=f"X{i}",
+                covered_since="2026-07-01",
+                thesis_version=1,
+                thesis_updated_on="2026-07-01",
             )
             for i in range(n_extra)
         }
         | {
             "UNRATED": LedgerEntry(
-                ticker="UNRATED", covered_since="2026-07-01",
-                thesis_version=1, thesis_updated_on="2026-07-01",
+                ticker="UNRATED",
+                covered_since="2026-07-01",
+                thesis_version=1,
+                thesis_updated_on="2026-07-01",
             )
         }
     )
@@ -618,15 +702,23 @@ def test_challenger_selection_truncates_to_top_n_by_rating():
         trading_day="2026-07-14",
         rows={
             f"X{i}": RatingRow(
-                ticker=f"X{i}", rating=i, stance="attractive",
-                conviction=50, thesis_version=1, attractiveness_rank=n_extra - i,
+                ticker=f"X{i}",
+                rating=i,
+                stance="attractive",
+                conviction=50,
+                thesis_version=1,
+                attractiveness_rank=n_extra - i,
             )
             for i in range(n_extra)
         }
         | {
             "UNRATED": RatingRow(
-                ticker="UNRATED", rating=None, stance="neutral",
-                conviction=None, thesis_version=1, attractiveness_rank=1,
+                ticker="UNRATED",
+                rating=None,
+                stance="neutral",
+                conviction=None,
+                thesis_version=1,
+                attractiveness_rank=1,
             )
         },
     )
@@ -636,9 +728,13 @@ def test_challenger_selection_truncates_to_top_n_by_rating():
         s3.create_bucket(Bucket=BUCKET)
         store = ThinktankStore(BUCKET, s3)
         selection = write_challenger_selection(
-            store, ledger, board,
-            run_id="run1", mode="daily",
-            trading_day="2026-07-14", calendar_date="2026-07-14",
+            store,
+            ledger,
+            board,
+            run_id="run1",
+            mode="daily",
+            trading_day="2026-07-14",
+            calendar_date="2026-07-14",
             board_date="2026-07-11",
             coverage_gap={"uncovered_count": 3},
         )
@@ -653,9 +749,7 @@ def test_challenger_selection_truncates_to_top_n_by_rating():
 
         # incomplete coverage (uncovered_count=3) → conforming shadow NOT written
         assert selection.coverage_complete is False
-        assert store.get_json(
-            "signals_shadow/thinktank_coverage/2026-07-14/signals.json"
-        ) is None
+        assert store.get_json("signals_shadow/thinktank_coverage/2026-07-14/signals.json") is None
 
 
 def test_challenger_selection_shadow_signals_conforming_shape():
@@ -667,8 +761,10 @@ def test_challenger_selection_shadow_signals_conforming_shape():
     ledger = CoverageLedger(
         entries={
             t: LedgerEntry(
-                ticker=t, covered_since="2026-07-01",
-                thesis_version=1, thesis_updated_on="2026-07-01",
+                ticker=t,
+                covered_since="2026-07-01",
+                thesis_version=1,
+                thesis_updated_on="2026-07-01",
             )
             for t in ("A", "B", "C")
         }
@@ -676,9 +772,15 @@ def test_challenger_selection_shadow_signals_conforming_shape():
     board = RatingsBoard(
         trading_day="2026-07-14",
         rows={
-            "A": RatingRow(ticker="A", rating=80, stance="attractive", conviction=60, thesis_version=1, attractiveness_rank=2),
-            "B": RatingRow(ticker="B", rating=95, stance="attractive", conviction=90, thesis_version=2, attractiveness_rank=1),
-            "C": RatingRow(ticker="C", rating=40, stance="avoid", conviction=30, thesis_version=1, attractiveness_rank=3),
+            "A": RatingRow(
+                ticker="A", rating=80, stance="attractive", conviction=60, thesis_version=1, attractiveness_rank=2
+            ),
+            "B": RatingRow(
+                ticker="B", rating=95, stance="attractive", conviction=90, thesis_version=2, attractiveness_rank=1
+            ),
+            "C": RatingRow(
+                ticker="C", rating=40, stance="avoid", conviction=30, thesis_version=1, attractiveness_rank=3
+            ),
         },
     )
 
@@ -687,9 +789,13 @@ def test_challenger_selection_shadow_signals_conforming_shape():
         s3.create_bucket(Bucket=BUCKET)
         store = ThinktankStore(BUCKET, s3)
         selection = write_challenger_selection(
-            store, ledger, board,
-            run_id="run1", mode="gap_fill",
-            trading_day="2026-07-14", calendar_date="2026-07-14",
+            store,
+            ledger,
+            board,
+            run_id="run1",
+            mode="gap_fill",
+            trading_day="2026-07-14",
+            calendar_date="2026-07-14",
             board_date="2026-07-11",
             coverage_gap={"uncovered_count": 0},  # coverage complete
         )
@@ -715,8 +821,10 @@ def test_challenger_selection_raises_on_empty_board_with_nonempty_ledger():
     ledger = CoverageLedger(
         entries={
             "A": LedgerEntry(
-                ticker="A", covered_since="2026-07-01",
-                thesis_version=1, thesis_updated_on="2026-07-01",
+                ticker="A",
+                covered_since="2026-07-01",
+                thesis_version=1,
+                thesis_updated_on="2026-07-01",
             )
         }
     )
@@ -728,9 +836,13 @@ def test_challenger_selection_raises_on_empty_board_with_nonempty_ledger():
         store = ThinktankStore(BUCKET, s3)
         with pytest.raises(RuntimeError, match="out of sync"):
             write_challenger_selection(
-                store, ledger, board,
-                run_id="run1", mode="daily",
-                trading_day="2026-07-14", calendar_date="2026-07-14",
+                store,
+                ledger,
+                board,
+                run_id="run1",
+                mode="daily",
+                trading_day="2026-07-14",
+                calendar_date="2026-07-14",
                 board_date=None,
                 coverage_gap={"uncovered_count": 1},
             )
