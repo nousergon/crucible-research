@@ -15,14 +15,14 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
     make_agent_llm,
 )
 from agents.prompt_loader import load_prompt
 from config import (
     MAX_TOKENS_STRATEGIC,
+    PER_STOCK_CLASS,
+    STRATEGIC_CLASS,
 )
 from strict_mode import is_strict_validation_enabled
 
@@ -175,7 +175,7 @@ def run_cio(
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     llm = make_agent_llm(
-        model_class="strategic",
+        model_class=STRATEGIC_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
         api_key=api_key,
         callbacks=[get_cost_telemetry_callback()],
@@ -342,7 +342,7 @@ def run_cio_critic(
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     llm = make_agent_llm(
-        model_class="per_stock",
+        model_class=PER_STOCK_CLASS,
         max_tokens=_CRITIC_MAX_TOKENS,
         api_key=api_key,
         callbacks=[get_cost_telemetry_callback()],

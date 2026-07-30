@@ -176,16 +176,16 @@ def probe_validation_retry(api_key: str | None) -> dict:
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
-        make_agent_llm,
         invoke_structured_with_validation_retry,
+        make_agent_llm,
     )
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC
+    from config import MAX_TOKENS_STRATEGIC, PER_STOCK_CLASS
 
     start = time.monotonic()
     try:
         llm = make_agent_llm(
-            model_class="per_stock",
+            model_class=PER_STOCK_CLASS,
             max_tokens=MAX_TOKENS_STRATEGIC,
             api_key=api_key,
         )
