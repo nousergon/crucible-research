@@ -26,6 +26,7 @@ from __future__ import annotations
 import types
 
 import pytest
+from pydantic import BaseModel
 
 
 class _NullChoicesResponse:
@@ -65,79 +66,105 @@ def _make_client(responses):
     return types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
 
 
-@pytest.mark.parametrize("empty", [None, []])
-def test_thinktank_retries_a_null_choices_body_instead_of_crashing(monkeypatch, empty):
-    """The regression: null choices must be retried, not raised as TypeError."""
-    from thinktank import client as tt
+def _tt_settings():
+    from thinktank.settings import ProviderSpec, ThinktankSettings, TierSpec
 
-    monkeypatch.setattr(tt, "_backoff_sleep", lambda *a, **k: None)
-
-    ok = _OkResponse()
-    stub = _make_client([_NullChoicesResponse(empty), ok])
-
-    inst = tt.ThinktankClient.__new__(tt.ThinktankClient)
-    resp = tt.ThinktankClient._create_completion(
-        inst,
-        stub,
-        [{"role": "user", "content": "hi"}],
-        {},
-        tier_name="t",
-        agent_id="a",
+    return ThinktankSettings(
+        bucket="alpha-engine-research",
+        daily_new_names=5,
+        rank_ceiling=150,
+        sweep_chunk_size=25,
+        stale_after_days=30,
+        monthly_budget_usd_default=25.0,
+        budget_ssm_param="/thinktank/monthly_budget_usd",
+        providers={"fake": ProviderSpec(name="fake", base_url="http://x", key_secret="OPENROUTER_API_KEY")},
+        tiers={
+            "thesis": TierSpec(
+                name="thesis",
+                provider="fake",
+                model="fake/model",
+                max_tokens=100,
+                price_in_per_m=1.0,
+                price_out_per_m=2.0,
+                structured_outputs=True,
+            )
+        },
     )
 
-    assert resp is ok, "a null-choices body must be retried, not returned"
-    # The whole point: the caller can subscript the result.
-    assert resp.choices[0].message.content
+
+class _Out(BaseModel):
+    ok: bool
 
 
-def test_thinktank_gives_up_with_a_diagnosable_error_not_a_typeerror(monkeypatch):
+@pytest.fixture()
+def _tt(monkeypatch):
+    """A ThinktankClient over a scripted transport, exercised through its
+    PUBLIC surface.
+
+    Post-migration (alpha-engine-config#5223) the retry loop lives in
+    ``krepis.llm``, not in a private ``_create_completion`` on this class — so
+    the guard is asserted where a caller actually meets it. krepis >= 0.25.0
+    sleeps between body-level retries (krepis#93); tests assert the retry
+    happened, not how long it waited.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("krepis.llm._retry_backoff_sleep", lambda _attempt: None)
+
+    from thinktank.client import ThinktankClient
+
+    def build(responses):
+        stub = _make_client(responses)
+        return ThinktankClient(
+            settings=_tt_settings(),
+            run_id="testrun",
+            client_factory=lambda _provider, _key: stub,
+        )
+
+    return build
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_thinktank_retries_a_null_choices_body_instead_of_crashing(_tt, empty):
+    """The regression: null choices must be retried, not raised as TypeError.
+
+    Re-confirmed 2026-07-30 while migrating onto ``krepis.llm``: on krepis
+    0.24.x this raised the original ``TypeError`` again, because the library
+    had no guard at any of its five ``choices[0]`` reads. The fork's protection
+    was being dropped by adopting the shared code. krepis#93 fixed it at the
+    chokepoint; requirements.txt floors at >= 0.25.0 for exactly this.
+    """
+    client = _tt([_NullChoicesResponse(empty), _OkResponse()])
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert result.parsed.ok is True, "a null-choices body must be retried, not fatal"
+
+
+def test_thinktank_gives_up_with_a_diagnosable_error_not_a_typeerror(_tt):
     """After exhausting retries the caller must learn WHAT the provider said.
 
     A bare TypeError names none of it — the original failure discarded the
     provider payload entirely.
     """
-    from thinktank import client as tt
+    from thinktank.client import _STRUCTURED_ATTEMPTS, ThinktankLLMError
 
-    monkeypatch.setattr(tt, "_backoff_sleep", lambda *a, **k: None)
-    stub = _make_client([_NullChoicesResponse() for _ in range(tt._HTTP_RETRY_ATTEMPTS)])
-    inst = tt.ThinktankClient.__new__(tt.ThinktankClient)
-
+    client = _tt([_NullChoicesResponse() for _ in range(_STRUCTURED_ATTEMPTS)])
     with pytest.raises(Exception) as exc_info:
-        tt.ThinktankClient._create_completion(
-            inst,
-            stub,
-            [{"role": "user", "content": "hi"}],
-            {},
-            tier_name="t",
-            agent_id="a",
-        )
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
 
     assert not isinstance(exc_info.value, TypeError), (
         "a null-choices body must not surface as TypeError: 'NoneType' object "
         "is not subscriptable — that was the undiagnosable original failure"
     )
+    assert isinstance(exc_info.value, ThinktankLLMError)
     text = str(exc_info.value)
     assert "no choices" in text
     assert "upstream provider error" in text, "provider payload must be surfaced"
 
 
-def test_thinktank_still_returns_a_healthy_response_unchanged(monkeypatch):
+def test_thinktank_still_returns_a_healthy_response_unchanged(_tt):
     """The guard must not intercept the happy path."""
-    from thinktank import client as tt
-
-    monkeypatch.setattr(tt, "_backoff_sleep", lambda *a, **k: None)
-    ok = _OkResponse()
-    inst = tt.ThinktankClient.__new__(tt.ThinktankClient)
-
-    resp = tt.ThinktankClient._create_completion(
-        inst,
-        _make_client([ok]),
-        [{"role": "user", "content": "hi"}],
-        {},
-        tier_name="t",
-        agent_id="a",
-    )
-    assert resp is ok
+    client = _tt([_OkResponse()])
+    result = client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    assert result.parsed.ok is True
 
 
 # ── evals/judge.py — the same shape, guarded inline ───────────────────────
