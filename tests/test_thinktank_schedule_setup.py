@@ -1,29 +1,39 @@
-"""Lock the think-tank daily schedule + failure alarm against drift
-(config#1579 P1).
+"""``setup-thinktank-schedule.sh`` is SUPERSEDED and must stay refusing
+(alpha-engine-config-I5720).
 
-The daily cadence only works if four things stay in sync:
+This module used to lock the daily schedule and failure alarm against
+drift (config#1579 P1) by pinning what the script provisions. The §47
+spot cutover (alpha-engine-config-I5208) moved the daily Think Tank off
+``alpha-engine-research-thinktank`` onto a spot box behind
+``alpha-engine-thinktank-spot-dispatcher`` (nousergon-data), which
+repointed the SAME EventBridge rule and deleted the two alarms this
+script creates.
 
-  1. ``infrastructure/setup-thinktank-schedule.sh`` schedules the rule at
-     14:30 UTC daily — AFTER the weekday SF's RunDailyNews (~13:15-13:30
-     UTC) so the events sweep sees same-day news, and after the Saturday
-     SF's fresh weekly artifacts so themes reconcile the same day.
-  2. The rule targets the ``live`` alias (deploy.sh publishes a version +
-     moves ``live`` on every merge), so an alias revert governs the
-     schedule immediately.
-  3. ``lambda/thinktank_handler.py`` raises on failure (pinned in
-     test_thinktank_handler.py), producing exactly 3 Errors datapoints
-     for a definitively-failed run (initial + 2 EventBridge async
-     retries).
-  4. The alarm threshold is 3/day — it pages on "the run failed after
-     all retries", not on self-healed transient blips.
+**Those pins therefore became actively wrong.** They asserted that the
+script aims the live rule at the retired Lambda — the one thing that must
+never happen again, because ``put-targets`` is an upsert and two repos now
+aim the same rule at different functions, last writer wins. A test can pin
+a contract into place long after the contract stopped being the one we
+want; that is what these did, and it is why they are inverted here rather
+than deleted.
 
-If any drifts, the daily run silently stops or silently fails — the
-bug classes these pins exist to prevent.
+What is pinned now:
+
+  1. The script REFUSES — non-zero exit, before any AWS call.
+  2. It names where the schedule actually lives, so the refusal is a
+     redirect rather than a dead end.
+  3. ``deploy.sh`` still builds the Lambda: the function is not retired,
+     only the daily EventBridge path to it is. ``mode=gap_fill`` and the
+     Step Functions fan-out modes still invoke it.
+
+The 14:30 cadence and the dispatch alarm now belong to the dispatcher's
+own ``deploy.sh`` and are pinned in nousergon-data.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,33 +49,57 @@ def test_setup_script_exists():
     assert _SCRIPT.is_file()
 
 
-def test_schedule_is_1430_utc_daily_seven_days():
-    """cron(30 14 * * ? *) — 14:30 UTC every day, no day-of-week filter.
-    Weekend runs are by-design (trading-day partitioning absorbs them)."""
-    assert "cron(30 14 * * ? *)" in _script_text()
+def test_script_refuses_to_run():
+    """The operative pin. Running it would repoint the live rule back at the
+    retired Lambda and re-create two alarms that read GREEN on zero
+    invocations — the exact silence class the cutover closed."""
+    result = subprocess.run(
+        ["bash", str(_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0, "a superseded provisioning script must not exit 0"
+    assert "REFUSING TO RUN" in result.stderr
+    # Non-zero alone is not the property under test: with `set -e`, a script
+    # that ran on past the guard and then failed on a missing credential also
+    # exits non-zero. What must be true is that it STOPPED — the provisioning
+    # banner, which prints immediately before `aws events put-rule`, never
+    # appears.
+    assert "rule=" not in result.stdout, (
+        f"the script proceeded past the guard — it printed the provisioning banner: {result.stdout!r}"
+    )
 
 
-def test_rule_targets_live_alias():
+def test_refusal_happens_before_any_aws_call():
+    """The guard must sit above the first `aws` invocation, or a partial
+    provision lands before the refusal is printed."""
     text = _script_text()
-    assert 'FUNCTION_THINKTANK="alpha-engine-research-thinktank"' in text
-    assert ":function:${FUNCTION_THINKTANK}:live" in text
-    assert "--qualifier live" in text
+    guard_at = text.index("REFUSING TO RUN")
+    first_aws = text.index("\naws ")
+    assert guard_at < first_aws
 
 
-def test_alarm_threshold_is_all_retries_exhausted():
-    """Threshold 3 = initial invoke + both EventBridge async retries all
-    raised. Lower would page on self-healed blips; higher can never fire
-    (a day has at most 3 error datapoints from one scheduled run)."""
+def test_refusal_names_where_the_schedule_actually_lives():
+    """A refusal that does not redirect is a dead end."""
     text = _script_text()
-    assert re.search(r"--threshold 3\b", text)
-    assert "--treat-missing-data notBreaching" in text
-    assert re.search(r"--period 86400\b", text)
+    assert "thinktank-spot-dispatcher/deploy.sh --cutover" in text
+    assert "alpha-engine-config-I5208" in text
 
 
-def test_alarm_uses_shared_sns_topic():
-    text = _script_text()
-    assert "alpha-engine-alerts" in text
-    assert "alpha-engine-thinktank-daily-run-failed" in text
+def test_the_deleted_alarms_are_not_resurrected_elsewhere():
+    """The cutover DELETED these two alarms because both carry
+    ``--treat-missing-data notBreaching`` and would sit green on zero
+    invocations. They may only appear inside the refusing script."""
+    infra = _REPO_ROOT / "infrastructure"
+    for name in (
+        "alpha-engine-thinktank-daily-run-failed",
+        "alpha-engine-thinktank-daily-run-failed-timeout",
+    ):
+        for path in sorted(infra.glob("*.sh")):
+            if path == _SCRIPT:
+                continue
+            assert name not in path.read_text(encoding="utf-8"), f"{path.name} references the deleted alarm {name}"
 
 
 def test_deploy_sh_ships_the_thinktank_target():

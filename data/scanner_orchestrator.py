@@ -62,7 +62,7 @@ import boto3
 logger = logging.getLogger(__name__)
 
 
-SCANNER_VERSION = "v1.0"
+SCANNER_VERSION = "v2.0"
 _DEFAULT_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _CANDIDATES_PREFIX = "candidates"
 # Champion/challenger OBSERVE substrate (config#1221): challenger candidate-gen
@@ -77,7 +77,8 @@ class ScannerOrchestratorError(RuntimeError):
 
 
 def _read_prior_signals_universe_tickers(
-    s3_client: Any, bucket: str,
+    s3_client: Any,
+    bucket: str,
 ) -> tuple[list[str], list[str], str | None]:
     """Read the prior week's ``signals/latest.json`` pointer + the
     ``signals.json`` it points at, and return
@@ -93,8 +94,8 @@ def _read_prior_signals_universe_tickers(
         ptr_obj = s3_client.get_object(Bucket=bucket, Key=_SIGNALS_LATEST_KEY)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[scanner_orchestrator] signals/latest.json unreadable "
-            "(cold-start case — diff will be empty): %s", exc,
+            "[scanner_orchestrator] signals/latest.json unreadable (cold-start case — diff will be empty): %s",
+            exc,
         )
         return [], [], None
 
@@ -111,8 +112,8 @@ def _read_prior_signals_universe_tickers(
     prior_date = pointer.get("date") or pointer.get("run_date")
     if not prior_key:
         logger.warning(
-            "[scanner_orchestrator] signals/latest.json has no s3_key "
-            "or key field: %r", pointer,
+            "[scanner_orchestrator] signals/latest.json has no s3_key or key field: %r",
+            pointer,
         )
         return [], [], None
 
@@ -122,7 +123,9 @@ def _read_prior_signals_universe_tickers(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[scanner_orchestrator] prior signals at s3://%s/%s unreadable: %s",
-            bucket, prior_key, exc,
+            bucket,
+            prior_key,
+            exc,
         )
         return [], [], None
 
@@ -131,9 +134,7 @@ def _read_prior_signals_universe_tickers(
     # at top level or nested. Normalize to a flat ticker list.
     universe_raw = prior_signals.get("universe") or []
     if universe_raw and isinstance(universe_raw[0], dict):
-        prior_universe_tickers = [
-            u.get("ticker") for u in universe_raw if u.get("ticker")
-        ]
+        prior_universe_tickers = [u.get("ticker") for u in universe_raw if u.get("ticker")]
     else:
         prior_universe_tickers = list(universe_raw)
 
@@ -146,19 +147,28 @@ def _read_prior_signals_universe_tickers(
 
 
 def _build_technical_scores_from_feature_store(
-    constituents: list[str], sector_map: dict[str, str],
+    constituents: list[str],
+    sector_map: dict[str, str],
 ) -> tuple[dict[str, dict], int]:
     """Load technical scores via the feature-store reader. Returns
     ``(technical_scores, n_enriched)``. Tickers missing from the feature
     store are absent from the returned dict — the caller's scanner pass
     will mark them ``no_data`` per its existing contract.
 
-    Phase 1 deliberately skips the ArcticDB OHLCV fallback that
-    ``fetch_data_node`` uses for feature-store misses. The feature store
-    has covered the full universe since the 2026-04-14 cutover; if any
-    ticker is missing, the divergence will surface in the Phase 3 soak
-    and the fallback can be added then. Per
-    [[feedback_no_silent_fails]] the miss is loudly logged.
+    Reads the ArcticDB ``universe`` library, rewritten every trading day by
+    alpha-engine-data's weekday MorningEnrich. Passing ``constituents``
+    is what selects that source: ArcticDB is keyed per symbol, so the
+    reader cannot enumerate a universe on its own.
+
+    This supersedes the Phase 1 note that "deliberately skips the ArcticDB
+    fallback ... the fallback can be added then" — this IS that follow-on.
+    The motivation was not feature-store misses but FRESHNESS: the S3
+    ``features/{date}/`` snapshot is written only by Saturday DataPhase1,
+    so a weekday scanner run scored every name off a snapshot up to 5
+    trading days old while pairing it with a live ``current_price``.
+    Per [[feedback_no_silent_fails]] a stale or unreadable source raises
+    rather than degrading — this function feeds the load-bearing
+    ``universe_membership`` write.
     """
     from data.fetchers.feature_store_reader import (
         read_latest_daily_closes,
@@ -166,7 +176,7 @@ def _build_technical_scores_from_feature_store(
     )
     from scoring.technical import compute_technical_score
 
-    fs_features = read_latest_features() or {}
+    fs_features = read_latest_features(constituents) or {}
     if not fs_features:
         logger.error(
             "[scanner_orchestrator] feature store empty — scanner cannot "
@@ -174,8 +184,7 @@ def _build_technical_scores_from_feature_store(
             "Scanner."
         )
         raise ScannerOrchestratorError(
-            "feature store empty — upstream DataPhase1 did not produce "
-            "feature_list.json or the file is unreadable"
+            "feature store empty — upstream DataPhase1 did not produce feature_list.json or the file is unreadable"
         )
 
     daily_closes = read_latest_daily_closes() or {}
@@ -218,7 +227,8 @@ def _build_technical_scores_from_feature_store(
             "[scanner_orchestrator] feature store missing %d / %d "
             "constituents — these will be tagged 'no_data' by the scanner "
             "and excluded from candidates",
-            n_missing, len(constituents),
+            n_missing,
+            len(constituents),
         )
     return technical_scores, n_enriched
 
@@ -252,10 +262,7 @@ def _json_safe_eval_log(eval_log: list[dict]) -> list[dict]:
     """Return a copy of ``eval_log`` with every value cast JSON-safe (see
     :func:`_json_safe_scalar`) so ``write_candidates_artifact``'s
     ``json.dumps`` can never choke on a stray numpy/pandas scalar."""
-    return [
-        {k: _json_safe_scalar(v) for k, v in rec.items()}
-        for rec in (eval_log or [])
-    ]
+    return [{k: _json_safe_scalar(v) for k, v in rec.items()} for rec in (eval_log or [])]
 
 
 def _resolved_scanner_params() -> dict:
@@ -307,19 +314,17 @@ def build_candidates_artifact(
     constituents, sector_map = fetch_sp500_sp400_with_sectors()
     if len(constituents) < 800:
         raise ScannerOrchestratorError(
-            f"constituents.json has {len(constituents)} tickers — "
-            f"refusing to scan (expected >= 800 for S&P 500+400)"
+            f"constituents.json has {len(constituents)} tickers — refusing to scan (expected >= 800 for S&P 500+400)"
         )
 
     # ── 2. Prior cycle: population + scanner picks for diff ──────────────
-    prior_population, prior_scanner_picks, prior_run_date = (
-        _read_prior_signals_universe_tickers(s3, bucket)
-    )
+    prior_population, prior_scanner_picks, prior_run_date = _read_prior_signals_universe_tickers(s3, bucket)
     baseline_missing = prior_run_date is None
 
     # ── 3. Technical scores via feature store ─────────────────────────────
     technical_scores, n_enriched = _build_technical_scores_from_feature_store(
-        constituents, sector_map,
+        constituents,
+        sector_map,
     )
 
     # ── 4. Quant filter — same code Research uses internally ─────────────
@@ -343,9 +348,46 @@ def build_candidates_artifact(
     # alpha-engine-config#1458 — the stash read in Research's archive_writer
     # was always empty by construction, producing quant_filter_pass=0 for
     # 100% of rows every cycle post-PR#344).
-    eval_log = _json_safe_eval_log(
-        getattr(run_quant_filter, "_last_eval_log", None) or []
-    )
+    eval_log = _json_safe_eval_log(getattr(run_quant_filter, "_last_eval_log", None) or [])
+
+    # ── 4b. config#1186 momentum-sleeve cutover (2026-07-22 Option A) ──────
+    # Replace the technical composite (RSI/MACD/MA) ranking with the
+    # shadow-validated momentum sleeve z(momentum_20d)+z(return_60d) formula.
+    # The per-ticker gate decisions from run_quant_filter (liquidity_pass,
+    # volatility_pass) are held CONSTANT — only the ranking signal changes.
+    # Falls back to the original tech_score ranking if factor loadings or
+    # the sleeve ranker is unavailable (graceful degradation, never raises).
+    try:
+        from data.fetchers.feature_store_reader import read_latest_factor_loadings
+        from data.scanner_specs import _rank_momentum_sleeve
+
+        _factor_loadings = read_latest_factor_loadings()
+        if _factor_loadings and eval_log:
+            _params = _resolved_scanner_params()
+            _ms_tickers = _rank_momentum_sleeve(
+                eval_log, _factor_loadings, _params,
+            )
+            if _ms_tickers:
+                scanner_tickers = _ms_tickers
+                # Re-mark quant_filter_pass per momentum sleeve ordering
+                # (was set by run_quant_filter's tech_score ranking).
+                _ms_set = set(_ms_tickers)
+                for rec in eval_log:
+                    rec["quant_filter_pass"] = (
+                        1 if rec["ticker"] in _ms_set else 0
+                    )
+                    if rec["ticker"] not in _ms_set and not rec.get("filter_fail_reason"):
+                        rec["filter_fail_reason"] = "rank_cutoff"
+                logger.info(
+                    "[scanner_orchestrator] re-ranked by momentum sleeve "
+                    "z(momentum_20d)+z(return_60d): %d candidates (config#1186)",
+                    len(scanner_tickers),
+                )
+    except Exception as _exc:
+        logger.warning(
+            "[scanner_orchestrator] momentum sleeve re-ranking unavailable "
+            "(falling back to tech_score ranking): %s", _exc,
+        )
 
     # ── 5. Build artifact ─────────────────────────────────────────────────
     # Population = prior cycle's holdings list. Phase 1 reads it from the
@@ -354,9 +396,7 @@ def build_candidates_artifact(
     population_tickers = list(prior_population)
     # agent_input_set = population ∪ top-50 scanner picks (the Research
     # Lambda's existing convention at research_graph.py:734).
-    agent_input_set = list(
-        dict.fromkeys(population_tickers + scanner_tickers[:50])
-    )
+    agent_input_set = list(dict.fromkeys(population_tickers + scanner_tickers[:50]))
 
     # Diff vs prior cycle's scanner picks (the operationally interesting
     # diff for RAGIngestion's new-corpus-fetch decisions). On
@@ -422,7 +462,8 @@ def write_candidates_artifact(
     logger.info(
         "[scanner_orchestrator] wrote artifact: s3://%s/%s "
         "(scanner_tickers=%d population=%d agent_input=%d new=%d dropped=%d)",
-        bucket, key,
+        bucket,
+        key,
         len(artifact["scanner_tickers"]),
         len(artifact["population_tickers"]),
         len(artifact["agent_input_set"]),
@@ -454,7 +495,23 @@ def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
             "shadow candidate-gen specs (live artifact unaffected)",
         )
         return {}
-    factor_loadings = read_latest_factor_loadings()
+    # Tickers come from the eval log so this read uses the ArcticDB (daily)
+    # source like the live path, rather than silently dropping to the weekly
+    # snapshot and comparing a fresh champion against stale shadow specs.
+    shadow_tickers = [t for t in (row.get("ticker") for row in eval_log) if t]
+    # Fail-soft is preserved DELIBERATELY here, unlike the live path above:
+    # this builds the champion/challenger SHADOW substrate, which must never
+    # jeopardize candidates.json. A staleness raise from the reader is caught
+    # and downgraded to the same skip as any other missing input.
+    try:
+        factor_loadings = read_latest_factor_loadings(tickers=shadow_tickers)
+    except Exception as exc:
+        logger.warning(
+            "[scanner_orchestrator] factor-loading read failed (%s) — "
+            "skipping shadow candidate-gen specs (live artifact unaffected)",
+            exc,
+        )
+        return {}
     if not factor_loadings:
         logger.warning(
             "[scanner_orchestrator] factor loadings unavailable — skipping "
@@ -568,25 +625,35 @@ def write_universe_board_for_scanner_run(
 
     try:
         compute_and_write_factor_profiles(
-            run_date=run_date, sector_map=sector_map, bucket=bucket,
+            run_date=run_date,
+            sector_map=sector_map,
+            bucket=bucket,
         )
     except Exception as exc:  # noqa: BLE001 — board-support only, see docstring
         logger.warning(
             "[scanner_orchestrator] factor-profile production failed for "
             "board support (non-fatal — board pillars degrade to null via "
-            "build_universe_board's own fail-soft read): %s", exc,
+            "build_universe_board's own fail-soft read): %s",
+            exc,
         )
 
     focus_lookup = build_pure_quant_focus_lookup(
-        market_regime=market_regime, run_date=run_date, bucket=bucket,
+        market_regime=market_regime,
+        run_date=run_date,
+        bucket=bucket,
     )
     # artifact["scanner_eval_log"] is already JSON-safe-cast by
     # build_candidates_artifact (_json_safe_eval_log) — no re-cast needed.
     scanner_evals = build_scanner_eval_rows_for_board(
-        artifact.get("scanner_eval_log") or [], focus_lookup, run_date,
+        artifact.get("scanner_eval_log") or [],
+        focus_lookup,
+        run_date,
     )
     return compute_and_write_universe_board(
-        run_date, scanner_evals, bucket=bucket, s3_client=s3,
+        run_date,
+        scanner_evals,
+        bucket=bucket,
+        s3_client=s3,
     )
 
 
@@ -612,8 +679,10 @@ def write_shadow_candidates_artifact(
         ContentType="application/json",
     )
     logger.info(
-        "[scanner_orchestrator] wrote SHADOW artifact: s3://%s/%s "
-        "(spec=%s scanner_tickers=%d)",
-        bucket, key, spec_name, len(artifact["scanner_tickers"]),
+        "[scanner_orchestrator] wrote SHADOW artifact: s3://%s/%s (spec=%s scanner_tickers=%d)",
+        bucket,
+        key,
+        spec_name,
+        len(artifact["scanner_tickers"]),
     )
     return key

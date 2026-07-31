@@ -24,7 +24,7 @@ from producers.experiment_record import (
     build_challenger_experiment_record,
     write_challenger_experiment_record,
 )
-from producers.registry import challenger_producers
+from producers.registry import buildable_challenger_producers
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +45,21 @@ def run_challengers(
     generated_at = run_time or run_date
     written: dict[str, str] = {}
     errors: dict[str, str] = {}
-    for spec in challenger_producers():
+    for spec in buildable_challenger_producers():
         shadow_key: str | None = None
         build_error: str | None = None
         try:
             payload = spec.build(
-                run_date, archive_manager, run_time=run_time, population=population,
+                run_date,
+                archive_manager,
+                run_time=run_time,
+                population=population,
             )
             key = archive_manager.write_shadow_signals_json(
-                spec.name, run_date, generated_at, payload,
+                spec.name,
+                run_date,
+                generated_at,
+                payload,
             )
             written[spec.name] = key
             shadow_key = key
@@ -61,7 +67,9 @@ def run_challengers(
             logger.error(
                 "[producers] challenger %s failed (other challengers still get "
                 "their attempt; the gap raises after the loop — config#1683): %s",
-                spec.name, exc, exc_info=True,
+                spec.name,
+                exc,
+                exc_info=True,
             )
             errors[spec.name] = str(exc)
             build_error = str(exc)
@@ -75,14 +83,19 @@ def run_challengers(
         # and it never suppresses/masks the real gap detection below.
         try:
             record = build_challenger_experiment_record(
-                spec, run_date, shadow_signals_key=shadow_key, error=build_error,
+                spec,
+                run_date,
+                shadow_signals_key=shadow_key,
+                error=build_error,
             )
             write_challenger_experiment_record(archive_manager, spec.name, run_date, record)
         except Exception as exc:  # noqa: BLE001 — fail-soft, isolated from shadow-write doctrine
             logger.warning(
                 "[producers] experiment_record emission failed for challenger "
                 "%s (shadow-signal write above is unaffected by this): %s",
-                spec.name, exc, exc_info=True,
+                spec.name,
+                exc,
+                exc_info=True,
             )
             publish_observe_alert(
                 message=(
@@ -96,7 +109,10 @@ def run_challengers(
             )
     logger.info(
         "[producers] challenger shadows: wrote %d (%s), %d failed (%s)",
-        len(written), list(written), len(errors), list(errors),
+        len(written),
+        list(written),
+        len(errors),
+        list(errors),
     )
 
     # FAIL-HARD on an always-on producer that emitted nothing (config#1403 +
@@ -108,7 +124,11 @@ def run_challengers(
     # audit, then AGAIN on 2026-07-03 behind a WARN swallow). The observe alert
     # fires first (deduped page even if a caller catches), then the gap RAISES
     # so the run goes red instead of silently thin.
-    expected = [spec.name for spec in challenger_producers()]
+    # Only arms this run is responsible for BUILDING. An externally
+    # produced arm (build=None, e.g. thinktank_coverage) writes its own
+    # shadow on its own cadence, so counting it here would fail every
+    # weekly run for a gap that is not this run's to fill.
+    expected = [spec.name for spec in buildable_challenger_producers()]
     missing = [name for name in expected if name not in written]
     if missing or errors:
         publish_observe_alert(

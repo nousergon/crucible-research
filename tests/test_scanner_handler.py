@@ -64,10 +64,28 @@ def stub_universe_membership():
     S3 and raise, failing every test in this module for a reason unrelated to
     what each one asserts. Tests that care about membership behavior patch the
     same target again inside their own `with`, which takes precedence.
+
+    The factor-loading read is stubbed for the same reason, one layer along:
+    ``build_shadow_candidate_artifacts`` now reads the DAILY ArcticDB source,
+    and arcticdb ABORTS the interpreter (not a catchable exception) when it
+    cannot reach a store, so the builder's own fail-soft ``except`` cannot
+    contain it. Returning ``{}`` exercises the real degrade path — the
+    builder logs and returns ``{}`` without touching the live artifact.
+
+    This only surfaced in a FULL-suite run: ``run_quant_filter`` stashes
+    ``_last_eval_log`` as a module attribute, so these tests reach the
+    shadow path only once an earlier file has populated it. Alone, the
+    empty stash short-circuits before the read.
     """
-    with patch(
-        "scoring.universe_membership.compute_and_write_universe_membership",
-        return_value="universe_membership/2026-05-29/membership.json",
+    with (
+        patch(
+            "scoring.universe_membership.compute_and_write_universe_membership",
+            return_value="universe_membership/2026-05-29/membership.json",
+        ),
+        patch(
+            "data.fetchers.feature_store_reader.read_latest_factor_loadings",
+            return_value={},
+        ),
     ):
         yield
 

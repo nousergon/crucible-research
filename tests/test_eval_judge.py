@@ -45,6 +45,32 @@ from graph.state_schemas import (
 #    one and a back-import would cycle. ──────────────────────────────────
 
 
+def _patch_llm_client(judge_mod, fake_client):
+    """Patch ``judge_mod.LLMClient`` so it builds a REAL ``krepis.llm.LLMClient``
+    over *fake_client*.
+
+    alpha-engine-config#5223 moved the judge off a bare ``openai.OpenAI`` onto
+    the shared chokepoint, so ``patch.object(judge_mod, "OpenAI", ...)`` no
+    longer intercepts anything. Substituting the TRANSPORT rather than the whole
+    client keeps these tests exercising the real krepis call path — including
+    its null-choices guard and retry classification — while assertions on
+    ``fake_client.chat.completions.create.call_args`` still hold.
+    """
+    from krepis.llm import LLMClient as _RealLLMClient
+
+    def _factory(spec, **kwargs):
+        kwargs.pop("client_factory", None)
+        return _RealLLMClient(spec, client_factory=lambda _s, _k: fake_client, **kwargs)
+
+    return patch.object(judge_mod, "LLMClient", side_effect=_factory)
+
+
+def _spec_of(mock_llm_cls):
+    """The ModelSpec the judge handed to LLMClient — where base_url/api_key
+    configuration lives now that the judge no longer builds OpenAI(...)."""
+    return mock_llm_cls.call_args.args[0]
+
+
 def _openai_tool_call(name: str, arguments: dict):
     return SimpleNamespace(
         id="call_1",
@@ -54,8 +80,12 @@ def _openai_tool_call(name: str, arguments: dict):
 
 
 def _openai_response(
-    *, finish_reason: str, tool_calls=None, content=None,
-    model="deepseek/deepseek-v4-flash", cost: float = 0.0001,
+    *,
+    finish_reason: str,
+    tool_calls=None,
+    content=None,
+    model="deepseek/deepseek-v4-flash",
+    cost: float = 0.0001,
 ):
     message = SimpleNamespace(content=content, tool_calls=tool_calls)
     choice = SimpleNamespace(finish_reason=finish_reason, message=message)
@@ -106,27 +136,33 @@ def _make_llm_output() -> RubricEvalLLMOutput:
     return RubricEvalLLMOutput(
         dimension_scores=[
             RubricDimensionScore(
-                dimension="numerical_grounding", score=4,
+                dimension="numerical_grounding",
+                score=4,
                 reasoning="Both picks cite specific RSI + TS values.",
             ),
             RubricDimensionScore(
-                dimension="signal_calibration", score=3,
+                dimension="signal_calibration",
+                score=3,
                 reasoning="Score gradient is directional but tight.",
             ),
             RubricDimensionScore(
-                dimension="ranking_coherence", score=4,
+                dimension="ranking_coherence",
+                score=4,
                 reasoning="Rank matches scores; reasoning differentiates picks.",
             ),
             RubricDimensionScore(
-                dimension="regime_awareness", score=3,
+                dimension="regime_awareness",
+                score=3,
                 reasoning="Regime mentioned once but doesn't shape picks.",
             ),
             RubricDimensionScore(
-                dimension="reasoning_complexity", score=2,
+                dimension="reasoning_complexity",
+                score=2,
                 reasoning="Threshold-summing pattern; reproducible by short script.",
             ),
             RubricDimensionScore(
-                dimension="output_completeness", score=4,
+                dimension="output_completeness",
+                score=4,
                 reasoning="2 picks emitted with full rationales — adequate coverage.",
             ),
         ],
@@ -140,23 +176,28 @@ def _make_llm_output() -> RubricEvalLLMOutput:
 class TestResolveRubricForAgent:
     def test_sector_quant_with_team(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("sector_quant:technology") == "eval_rubric_sector_quant"
         assert resolve_rubric_for_agent("sector_quant:financials") == "eval_rubric_sector_quant"
 
     def test_sector_qual_with_team(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("sector_qual:healthcare") == "eval_rubric_sector_qual"
 
     def test_sector_peer_review_with_team(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("sector_peer_review:industrials") == "eval_rubric_sector_peer_review"
 
     def test_macro_economist_exact_match(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("macro_economist") == "eval_rubric_macro_economist"
 
     def test_ic_cio_exact_match(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("ic_cio") == "eval_rubric_ic_cio"
 
     def test_thesis_update_with_team_and_ticker(self):
@@ -167,12 +208,14 @@ class TestResolveRubricForAgent:
         # ``thesis_update:{team}:{ticker}`` per
         # research_graph._capture_if_enabled.
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("thesis_update:technology:AAPL") == "eval_rubric_thesis_update"
         assert resolve_rubric_for_agent("thesis_update:financials:JHG") == "eval_rubric_thesis_update"
         assert resolve_rubric_for_agent("thesis_update:healthcare:LLY") == "eval_rubric_thesis_update"
 
     def test_unknown_agent_returns_none(self):
         from evals.judge import resolve_rubric_for_agent
+
         assert resolve_rubric_for_agent("totally_made_up_agent") is None
         assert resolve_rubric_for_agent("") is None
 
@@ -190,6 +233,7 @@ class TestBuildEvalS3Key:
 
     def test_canonical_flat_path_groups_on_judge_run_id(self):
         from evals.judge import build_eval_s3_key
+
         key = build_eval_s3_key(
             judged_agent_id="sector_quant:technology",
             run_id="run-abc-123",
@@ -197,10 +241,7 @@ class TestBuildEvalS3Key:
             judge_model="claude-haiku-4-5",
         )
         # Flat: {prefix}{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json
-        assert key == (
-            "decision_artifacts/_eval/2605092230_"
-            "sector_quant:technology.run-abc-123.claude-haiku-4-5.json"
-        )
+        assert key == ("decision_artifacts/_eval/2605092230_sector_quant:technology.run-abc-123.claude-haiku-4-5.json")
 
     def test_uses_lib_helper_as_single_source_of_truth(self):
         """The key is built by alpha_engine_lib.eval_artifacts.eval_artifact_key
@@ -209,13 +250,16 @@ class TestBuildEvalS3Key:
         from nousergon_lib.eval_artifacts import eval_artifact_key
 
         from evals.judge import DEFAULT_EVAL_PREFIX, build_eval_s3_key
+
         key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
         expected = eval_artifact_key(
-            DEFAULT_EVAL_PREFIX, "2605092230",
+            DEFAULT_EVAL_PREFIX,
+            "2605092230",
             basename="ic_cio.r1.claude-haiku-4-5.json",
         )
         assert key == expected
@@ -225,22 +269,26 @@ class TestBuildEvalS3Key:
         batch and propagate. Solo callers go through evaluate_artifact
         which defaults one; build_eval_s3_key itself is strict."""
         from evals.judge import build_eval_s3_key
+
         with pytest.raises(ValueError, match="judge_run_id"):
             build_eval_s3_key(
-                judged_agent_id="ic_cio", run_id="r1",
+                judged_agent_id="ic_cio",
+                run_id="r1",
                 judge_run_id="",
                 judge_model="claude-haiku-4-5",
             )
 
     def test_no_date_subpartition(self):
         from evals.judge import build_eval_s3_key
+
         key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
         # Flat — the relative key under the prefix has no further "/".
-        rel = key[len("decision_artifacts/_eval/"):]
+        rel = key[len("decision_artifacts/_eval/") :]
         assert "/" not in rel
         assert rel.startswith("2605092230_")
 
@@ -249,13 +297,16 @@ class TestBuildEvalS3Key:
         coexist — the judge_model segment in the basename is what keeps
         the two writes from clobbering each other."""
         from evals.judge import build_eval_s3_key
+
         haiku_key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
         sonnet_key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-sonnet-4-6",
         )
@@ -270,9 +321,11 @@ class TestBuildEvalS3Key:
         run_ids. Operator query 'show me batch X's outputs' =
         `aws s3 ls _eval/ | grep {judge_run_id}`."""
         from evals.judge import build_eval_s3_key
+
         keys = [
             build_eval_s3_key(
-                judged_agent_id=aid, run_id=rid,
+                judged_agent_id=aid,
+                run_id=rid,
                 judge_run_id="2605092230",
                 judge_model="claude-haiku-4-5",
             )
@@ -291,13 +344,16 @@ class TestBuildEvalS3Key:
         DIFFERENT judge_run_id prefix — preserves audit history of
         re-runs (vs an overwrite-on-rerun shape)."""
         from evals.judge import build_eval_s3_key
+
         original = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
         rerun = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605100915",
             judge_model="claude-haiku-4-5",
         )
@@ -308,13 +364,16 @@ class TestBuildEvalS3Key:
     def test_prefix_override_for_judge_only_mode(self):
         """``judge_only=True`` test runs persist under a non-prod prefix."""
         from evals.judge import build_eval_s3_key
+
         prod_key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
         )
         test_key = build_eval_s3_key(
-            judged_agent_id="ic_cio", run_id="r1",
+            judged_agent_id="ic_cio",
+            run_id="r1",
             judge_run_id="2605092230",
             judge_model="claude-haiku-4-5",
             prefix="decision_artifacts/_eval_judge_only/",
@@ -330,6 +389,7 @@ class TestNewJudgeRunId:
 
     def test_returns_yymmddhhmm_shape(self):
         from evals.judge import _new_judge_run_id
+
         rid = _new_judge_run_id()
         assert rid.isdigit()
         assert len(rid) == 10
@@ -338,6 +398,7 @@ class TestNewJudgeRunId:
         from datetime import datetime
 
         from nousergon_lib.eval_artifacts import new_eval_run_id
+
         earlier = new_eval_run_id(now=datetime(2026, 5, 9, 22, 30, tzinfo=UTC))
         later = new_eval_run_id(now=datetime(2026, 5, 10, 9, 15, tzinfo=UTC))
         assert earlier < later  # lexicographic = chronological
@@ -349,6 +410,7 @@ class TestBuildLegacyEvalS3Key:
 
     def test_legacy_nested_shape(self):
         from evals.judge import build_legacy_eval_s3_key
+
         ts = datetime(2026, 5, 9, 22, 30, tzinfo=UTC)
         key = build_legacy_eval_s3_key(
             judged_agent_id="sector_quant:technology",
@@ -375,6 +437,7 @@ class TestEvaluateArtifact:
 
     def test_unmapped_agent_raises(self):
         from evals.judge import evaluate_artifact
+
         artifact = _make_artifact("totally_made_up_agent")
         with pytest.raises(ValueError, match="No rubric mapped"):
             evaluate_artifact(artifact)
@@ -388,7 +451,7 @@ class TestEvaluateArtifact:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client) as mock_openai_cls:
+        with _patch_llm_client(judge_mod, fake_client) as mock_llm_cls:
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
                 artifact,
@@ -422,11 +485,20 @@ class TestEvaluateArtifact:
         # First-attempt success — should NOT have called create more than once
         assert fake_client.chat.completions.create.call_count == 1
         # base_url must resolve to the OpenRouter endpoint.
-        mock_openai_cls.assert_called_once()
-        assert mock_openai_cls.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
-        assert mock_openai_cls.call_args.kwargs["api_key"] == "sk-or-test"
+        mock_llm_cls.assert_called_once()
+        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://openrouter.ai/api/v1"
+        assert mock_llm_cls.call_args.kwargs["api_key"] == "sk-or-test"
         # reasoning={"exclude": True} forwarded (truncation-avoidance default).
-        assert call_kwargs["extra_body"] == {"reasoning": {"exclude": True}}
+        assert call_kwargs["extra_body"] == {
+            # Truncation-avoidance default, forwarded from the ModelSpec.
+            "reasoning": {"exclude": True},
+            # OpenRouter usage-accounting opt-in, added by krepis's
+            # _openai_extra_body() since alpha-engine-config#5223. It is what
+            # populates LLMResult.usage.provider_cost_usd — the field the
+            # migrated judge now reads for per-call cost, replacing the raw
+            # `usage.cost` read it did against a bare OpenAI client.
+            "usage": {"include": True},
+        }
 
     def test_sonnet_tier_also_routes_to_the_same_openrouter_default(self):
         """Brian's ruling collapses BOTH tiers' physical call onto the SAME
@@ -440,10 +512,12 @@ class TestEvaluateArtifact:
             finish_reason="tool_calls",
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
-                artifact, judge_model="claude-sonnet-4-6", api_key="sk-or-test",
+                artifact,
+                judge_model="claude-sonnet-4-6",
+                api_key="sk-or-test",
             )
 
         assert result.judge_model == "claude-sonnet-4-6"
@@ -462,7 +536,7 @@ class TestEvaluateArtifact:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
             model="deepseek/deepseek-v4-flash",
         )
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             result = judge_mod.evaluate_artifact(
                 _make_artifact("sector_quant:technology"),
                 judge_model="claude-haiku-4-5",
@@ -480,7 +554,7 @@ class TestEvaluateArtifact:
             finish_reason="tool_calls",
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
@@ -510,11 +584,12 @@ class TestEvaluateArtifact:
             ),
         ]
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client), \
-             caplog.at_level(logging.WARNING):
+        with _patch_llm_client(judge_mod, fake_client), caplog.at_level(logging.WARNING):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
-                artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
+                artifact,
+                judge_model="claude-haiku-4-5",
+                api_key="sk-or-test",
             )
 
         assert isinstance(result, RubricEvalArtifact)
@@ -530,14 +605,18 @@ class TestEvaluateArtifact:
 
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = _openai_response(
-            finish_reason="length", tool_calls=None, content=None,
+            finish_reason="length",
+            tool_calls=None,
+            content=None,
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
-                    artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
+                    artifact,
+                    judge_model="claude-haiku-4-5",
+                    api_key="sk-or-test",
                 )
 
         # All 3 attempts fired (default MAX_JUDGE_RETRIES=3).
@@ -551,14 +630,18 @@ class TestEvaluateArtifact:
 
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = _openai_response(
-            finish_reason="length", tool_calls=None, content=None,
+            finish_reason="length",
+            tool_calls=None,
+            content=None,
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with pytest.raises(RuntimeError):
                 judge_mod.evaluate_artifact(
-                    artifact, max_retries=1, api_key="sk-or-test",
+                    artifact,
+                    max_retries=1,
+                    api_key="sk-or-test",
                 )
 
         # Single attempt only.
@@ -583,16 +666,13 @@ class TestEvaluateArtifact:
             ),
         ]
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client), \
-             caplog.at_level("WARNING"):
+        with _patch_llm_client(judge_mod, fake_client), caplog.at_level("WARNING"):
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
         assert isinstance(result, RubricEvalArtifact)
         assert len(result.dimension_scores) == 6
-        assert result.overall_reasoning == (
-            "Solid grounding; regime engagement weakest."
-        )
+        assert result.overall_reasoning == ("Solid grounding; regime engagement weakest.")
         assert fake_client.chat.completions.create.call_count == 2
         assert any("leak_guard_triggered" in rec.message for rec in caplog.records)
 
@@ -604,14 +684,18 @@ class TestEvaluateArtifact:
 
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = _openai_response(
-            finish_reason="length", tool_calls=None, content=None,
+            finish_reason="length",
+            tool_calls=None,
+            content=None,
         )
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             artifact = _make_artifact("sector_quant:technology")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
-                    artifact, judge_model="claude-haiku-4-5", api_key="sk-or-test",
+                    artifact,
+                    judge_model="claude-haiku-4-5",
+                    api_key="sk-or-test",
                 )
 
         # Full budget exhausted (MAX_JUDGE_RETRIES=3 → 3 attempts).
@@ -662,7 +746,7 @@ class TestEmptyInputShortCircuit:
 
         fake_client = MagicMock()
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             result = judge_mod.evaluate_artifact(
                 self._make_empty_qual_artifact(),
                 judge_model="claude-haiku-4-5",
@@ -732,7 +816,7 @@ class TestEmptyInputShortCircuit:
         # — the agent-failure pattern from workstream #2 (separate).
         artifact.agent_output = {"ranked_picks": [], "tool_calls": [{}] * 22, "iterations": 22}
 
-        with patch.object(judge_mod, "OpenAI", return_value=fake_client):
+        with _patch_llm_client(judge_mod, fake_client):
             result = judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
         # Judge MUST have run — empty ranked_picks is not the structural
@@ -771,14 +855,13 @@ class TestPersistEvalArtifact:
             overall_reasoning="solid grounding",
         )
         key = persist_eval_artifact(
-            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+            artifact,
+            s3_client=mocked_s3,
+            bucket="alpha-engine-research",
         )
 
         # Flat: {prefix}{judge_run_id}_{agent_id}.{run_id}.{judge_model}.json
-        assert key == (
-            "decision_artifacts/_eval/2605092230_"
-            "sector_quant:technology.run-1.claude-haiku-4-5.json"
-        )
+        assert key == ("decision_artifacts/_eval/2605092230_sector_quant:technology.run-1.claude-haiku-4-5.json")
         obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=key)
         roundtrip = RubricEvalArtifact.model_validate(json.loads(obj["Body"].read()))
         assert roundtrip.judge_model == "claude-haiku-4-5"
@@ -808,19 +891,23 @@ class TestPersistEvalArtifact:
             overall_reasoning="x",
         )
         key = persist_eval_artifact(
-            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+            artifact,
+            s3_client=mocked_s3,
+            bucket="alpha-engine-research",
         )
         sidecar_key = eval_latest_key(DEFAULT_EVAL_PREFIX)
         sidecar = json.loads(
             mocked_s3.get_object(
-                Bucket="alpha-engine-research", Key=sidecar_key,
+                Bucket="alpha-engine-research",
+                Key=sidecar_key,
             )["Body"].read()
         )
         assert sidecar["artifact_key"] == key
         assert sidecar["judge_run_id"] == "2605092230"
         # The lib reader resolves sidecar → artifact body end-to-end.
         loaded = load_latest_eval_artifact(
-            mocked_s3, bucket="alpha-engine-research",
+            mocked_s3,
+            bucket="alpha-engine-research",
             prefix=DEFAULT_EVAL_PREFIX,
         )
         assert loaded is not None
@@ -844,7 +931,9 @@ class TestPersistEvalArtifact:
             overall_reasoning="x",
         )
         persist_eval_artifact(
-            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+            artifact,
+            s3_client=mocked_s3,
+            bucket="alpha-engine-research",
             update_latest=False,
         )
         with pytest.raises(ClientError):
@@ -883,10 +972,14 @@ class TestPersistEvalArtifact:
             overall_reasoning="x",
         )
         key_a = persist_eval_artifact(
-            artifact_a, s3_client=mocked_s3, bucket="alpha-engine-research",
+            artifact_a,
+            s3_client=mocked_s3,
+            bucket="alpha-engine-research",
         )
         key_b = persist_eval_artifact(
-            artifact_b, s3_client=mocked_s3, bucket="alpha-engine-research",
+            artifact_b,
+            s3_client=mocked_s3,
+            bucket="alpha-engine-research",
         )
         # Same judge_run_id prefix; different basenames.
         common_prefix = f"decision_artifacts/_eval/{shared_batch}_"
@@ -910,11 +1003,13 @@ class TestRubricEvalLLMOutputStringDefense:
         out = RubricEvalLLMOutput(
             dimension_scores=[
                 RubricDimensionScore(
-                    dimension="numerical_grounding", score=4,
+                    dimension="numerical_grounding",
+                    score=4,
                     reasoning="cited multiples match filing",
                 ),
                 RubricDimensionScore(
-                    dimension="signal_calibration", score=3,
+                    dimension="signal_calibration",
+                    score=3,
                     reasoning="confidence within range",
                 ),
             ],
@@ -927,10 +1022,13 @@ class TestRubricEvalLLMOutputStringDefense:
         """The exact failure shape Haiku produced 2026-05-03: a string
         whose contents are valid JSON for the expected list."""
         import logging
-        payload = json.dumps([
-            {"dimension": "numerical_grounding", "score": 4, "reasoning": "ok"},
-            {"dimension": "signal_calibration", "score": 3, "reasoning": "tight"},
-        ])
+
+        payload = json.dumps(
+            [
+                {"dimension": "numerical_grounding", "score": 4, "reasoning": "ok"},
+                {"dimension": "signal_calibration", "score": 3, "reasoning": "tight"},
+            ]
+        )
 
         with caplog.at_level(logging.WARNING):
             out = RubricEvalLLMOutput(
@@ -940,11 +1038,7 @@ class TestRubricEvalLLMOutputStringDefense:
 
         assert len(out.dimension_scores) == 2
         assert out.dimension_scores[0].dimension == "numerical_grounding"
-        assert any(
-            "schema-vs-LLM drift" in rec.message
-            or "JSON-string" in rec.message
-            for rec in caplog.records
-        )
+        assert any("schema-vs-LLM drift" in rec.message or "JSON-string" in rec.message for rec in caplog.records)
 
     def test_invalid_json_string_raises_normal_pydantic_error(self):
         from pydantic import ValidationError

@@ -10,6 +10,7 @@ ARTIFACT SHAPE, not numerical scanner behavior (which lives in
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -41,9 +42,11 @@ class TestReadPriorSignalsUniverseTickers:
         from data.scanner_orchestrator import (
             _read_prior_signals_universe_tickers,
         )
+
         s3 = _make_s3_get(None)  # raises on get_object
         pop, picks, date = _read_prior_signals_universe_tickers(
-            s3, "test-bucket",
+            s3,
+            "test-bucket",
         )
         assert pop == []
         assert picks == []
@@ -53,13 +56,16 @@ class TestReadPriorSignalsUniverseTickers:
         from data.scanner_orchestrator import (
             _read_prior_signals_universe_tickers,
         )
+
         # Mock two get_object calls: pointer + the signals.json itself.
         pointer = {"s3_key": "signals/2026-05-23/signals.json", "date": "2026-05-23"}
         signals = {
             "population": ["AAPL", "GOOG"],
             "universe": [
-                {"ticker": "AAPL"}, {"ticker": "GOOG"},
-                {"ticker": "AMD"}, {"ticker": "BNY"},
+                {"ticker": "AAPL"},
+                {"ticker": "GOOG"},
+                {"ticker": "AMD"},
+                {"ticker": "BNY"},
             ],
         }
         s3 = MagicMock()
@@ -68,7 +74,8 @@ class TestReadPriorSignalsUniverseTickers:
             {"Body": MagicMock(read=lambda: json.dumps(signals).encode())},
         ]
         pop, picks, date = _read_prior_signals_universe_tickers(
-            s3, "test-bucket",
+            s3,
+            "test-bucket",
         )
         assert pop == ["AAPL", "GOOG"]
         # universe - population = scanner picks
@@ -81,6 +88,7 @@ class TestReadPriorSignalsUniverseTickers:
         from data.scanner_orchestrator import (
             _read_prior_signals_universe_tickers,
         )
+
         pointer = {"s3_key": "signals/old/signals.json", "date": "2026-04-01"}
         signals = {
             "population": ["AAPL"],
@@ -92,7 +100,8 @@ class TestReadPriorSignalsUniverseTickers:
             {"Body": MagicMock(read=lambda: json.dumps(signals).encode())},
         ]
         pop, picks, date = _read_prior_signals_universe_tickers(
-            s3, "test-bucket",
+            s3,
+            "test-bucket",
         )
         assert pop == ["AAPL"]
         assert set(picks) == {"MSFT", "NVDA"}
@@ -137,10 +146,16 @@ class TestBuildCandidatesArtifact:
                 "data.scanner.run_quant_filter",
                 return_value=quant_result,
             ),
+            "read_latest_factor_loadings": patch(
+                "data.fetchers.feature_store_reader.read_latest_factor_loadings",
+                return_value=None,
+            ),
             "_read_prior_signals_universe_tickers": patch(
                 "data.scanner_orchestrator._read_prior_signals_universe_tickers",
                 return_value=(
-                    prior_pop or [], prior_picks or [], prior_date,
+                    prior_pop or [],
+                    prior_picks or [],
+                    prior_date,
                 ),
             ),
         }
@@ -148,6 +163,7 @@ class TestBuildCandidatesArtifact:
     def _apply_patches(self, patches: dict[str, Any]):
         """Helper: apply all patches as context managers."""
         from contextlib import ExitStack
+
         stack = ExitStack()
         for p in patches.values():
             stack.enter_context(p)
@@ -164,8 +180,10 @@ class TestBuildCandidatesArtifact:
         quant_result = [{"ticker": f"T{i}"} for i in range(60)]
 
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features=fs_features, daily_closes=daily_closes,
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features=fs_features,
+            daily_closes=daily_closes,
             quant_result=quant_result,
             prior_pop=["T0", "T1"],
             prior_picks=["T2", "T3"],
@@ -180,9 +198,15 @@ class TestBuildCandidatesArtifact:
 
         # Required top-level fields per plan-doc §3 artifact contract.
         for key in (
-            "run_date", "scanner_version", "generated_at",
-            "population_tickers", "scanner_tickers", "agent_input_set",
-            "scanner_eval_log", "filters_applied", "stats",
+            "run_date",
+            "scanner_version",
+            "generated_at",
+            "population_tickers",
+            "scanner_tickers",
+            "agent_input_set",
+            "scanner_eval_log",
+            "filters_applied",
+            "stats",
         ):
             assert key in artifact, f"artifact missing field: {key}"
 
@@ -216,8 +240,10 @@ class TestBuildCandidatesArtifact:
         # → new this cycle: T2..T9 (8 tickers)
         # → dropped this cycle: X1, X2 (2 tickers)
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features=fs_features, daily_closes=daily_closes,
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features=fs_features,
+            daily_closes=daily_closes,
             quant_result=quant_result,
             prior_picks=["T0", "T1", "X1", "X2"],
             prior_date="2026-05-23",
@@ -243,8 +269,10 @@ class TestBuildCandidatesArtifact:
 
         # No prior signals.json — diff fields should be empty + flag set.
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features=fs_features, daily_closes={},
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features=fs_features,
+            daily_closes={},
             quant_result=[{"ticker": "T0"}],
             prior_date=None,  # None → baseline_missing
         )
@@ -270,8 +298,11 @@ class TestBuildCandidatesArtifact:
         constituents = ["AAPL", "MSFT"]
         sector_map = {"AAPL": "Tech", "MSFT": "Tech"}
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features={}, daily_closes={}, quant_result=[],
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features={},
+            daily_closes={},
+            quant_result=[],
         )
         with self._apply_patches(patches):
             with pytest.raises(ScannerOrchestratorError, match="constituents.json"):
@@ -291,8 +322,11 @@ class TestBuildCandidatesArtifact:
         sector_map = dict.fromkeys(constituents, "Tech")
         # Empty feature store — upstream DataPhase1 didn't run.
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features={}, daily_closes={}, quant_result=[],
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features={},
+            daily_closes={},
+            quant_result=[],
         )
         with self._apply_patches(patches):
             with pytest.raises(ScannerOrchestratorError, match="feature store"):
@@ -309,8 +343,10 @@ class TestBuildCandidatesArtifact:
         sector_map = dict.fromkeys(constituents, "Tech")
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features=fs_features, daily_closes={},
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features=fs_features,
+            daily_closes={},
             quant_result=[],
         )
         with self._apply_patches(patches):
@@ -324,7 +360,10 @@ class TestBuildCandidatesArtifact:
         # Pin the schema — these keys are the operationally interesting
         # snapshot of THIS cycle's S3-configured params.
         for key in (
-            "min_avg_volume", "min_price", "max_atr_pct", "tech_score_min",
+            "min_avg_volume",
+            "min_price",
+            "max_atr_pct",
+            "tech_score_min",
         ):
             assert key in fa
 
@@ -356,12 +395,15 @@ class TestScannerEvalLogPassthrough:
         fs_features = {t: {"rsi_14": 55.0} for t in constituents}
 
         patches = self._setup_patches(
-            constituents=constituents, sector_map=sector_map,
-            fs_features=fs_features, daily_closes={},
+            constituents=constituents,
+            sector_map=sector_map,
+            fs_features=fs_features,
+            daily_closes={},
             quant_result=quant_result if quant_result is not None else [],
         )
         with self._apply_patches(patches):
             import data.scanner as scanner_mod
+
             if eval_log is not None:
                 scanner_mod.run_quant_filter._last_eval_log = eval_log
             else:
@@ -380,11 +422,11 @@ class TestScannerEvalLogPassthrough:
         eval log into the artifact's ``scanner_eval_log`` field."""
         eval_log = [
             {"ticker": "T0", "quant_filter_pass": 1, "scan_path": "momentum"},
-            {"ticker": "T1", "quant_filter_pass": 0,
-             "filter_fail_reason": "liquidity"},
+            {"ticker": "T1", "quant_filter_pass": 0, "filter_fail_reason": "liquidity"},
         ]
         artifact = self._build_with_eval_log(
-            eval_log, quant_result=[{"ticker": "T0"}],
+            eval_log,
+            quant_result=[{"ticker": "T0"}],
         )
         assert artifact["scanner_eval_log"] == eval_log
 
@@ -405,11 +447,16 @@ class TestScannerEvalLogPassthrough:
         from data.scanner_orchestrator import write_candidates_artifact
 
         eval_log = [
-            {"ticker": "T0", "quant_filter_pass": np.int64(1),
-             "tech_score": np.float64(72.5), "avg_volume_20d": np.float32(1e6)},
+            {
+                "ticker": "T0",
+                "quant_filter_pass": np.int64(1),
+                "tech_score": np.float64(72.5),
+                "avg_volume_20d": np.float32(1e6),
+            },
         ]
         artifact = self._build_with_eval_log(
-            eval_log, quant_result=[{"ticker": "T0"}],
+            eval_log,
+            quant_result=[{"ticker": "T0"}],
         )
 
         # Values still numerically correct, but now plain python scalars.
@@ -436,13 +483,18 @@ class TestScannerEvalLogPassthrough:
         from data.scanner_orchestrator import write_candidates_artifact
 
         eval_log = [
-            {"ticker": "T0", "quant_filter_pass": 1, "scan_path": "momentum",
-             "tech_score": 81.3, "sector": "Technology"},
-            {"ticker": "T1", "quant_filter_pass": 0,
-             "filter_fail_reason": "rank_cutoff"},
+            {
+                "ticker": "T0",
+                "quant_filter_pass": 1,
+                "scan_path": "momentum",
+                "tech_score": 81.3,
+                "sector": "Technology",
+            },
+            {"ticker": "T1", "quant_filter_pass": 0, "filter_fail_reason": "rank_cutoff"},
         ]
         artifact = self._build_with_eval_log(
-            eval_log, quant_result=[{"ticker": "T0"}],
+            eval_log,
+            quant_result=[{"ticker": "T0"}],
         )
 
         # Fake S3 store: capture the put_object body, serve it back on get_object.
@@ -511,8 +563,13 @@ class TestBuildScannerEvalRowsForBoard:
         from data.scanner_orchestrator import build_scanner_eval_rows_for_board
 
         eval_log = [
-            {"ticker": "AAPL", "sector": "Technology", "tech_score": 80.0,
-             "quant_filter_pass": 1, "filter_fail_reason": None},
+            {
+                "ticker": "AAPL",
+                "sector": "Technology",
+                "tech_score": 80.0,
+                "quant_filter_pass": 1,
+                "filter_fail_reason": None,
+            },
         ]
         rows = build_scanner_eval_rows_for_board(eval_log, {}, "2026-06-06")
         assert len(rows) == 1
@@ -528,10 +585,14 @@ class TestBuildScannerEvalRowsForBoard:
         eval_log = [{"ticker": "AAPL", "quant_filter_pass": 1}]
         focus_lookup = {
             "AAPL": {
-                "focus_score": 88.0, "focus_stance": "momentum",
-                "focus_team_id": "technology", "focus_rank_in_team": 1,
-                "focus_rank_in_sector": 1, "focus_list_passed": 1,
-                "agent_override": 0, "override_team_id": None,
+                "focus_score": 88.0,
+                "focus_stance": "momentum",
+                "focus_team_id": "technology",
+                "focus_rank_in_team": 1,
+                "focus_rank_in_sector": 1,
+                "focus_list_passed": 1,
+                "agent_override": 0,
+                "override_team_id": None,
             },
         }
         rows = build_scanner_eval_rows_for_board(eval_log, focus_lookup, "2026-06-06")
@@ -575,8 +636,10 @@ class TestWriteUniverseBoardForScannerRun:
     _RUN_DATE = "2026-06-06"
     _TICKERS = ["NVDA", "MSFT", "JNJ", "PFE"]
     _SECTOR_MAP = {
-        "NVDA": "Technology", "MSFT": "Technology",
-        "JNJ": "Health Care", "PFE": "Health Care",
+        "NVDA": "Technology",
+        "MSFT": "Technology",
+        "JNJ": "Health Care",
+        "PFE": "Health Care",
     }
 
     def _seed_features(self, s3):
@@ -584,34 +647,38 @@ class TestWriteUniverseBoardForScannerRun:
 
         import pandas as pd
 
-        technical = pd.DataFrame({
-            "ticker": self._TICKERS,
-            "date": [self._RUN_DATE] * 4,
-            "momentum_20d": [0.15, 0.05, -0.02, -0.08],
-            "momentum_5d": [0.05, 0.02, -0.01, -0.03],
-            "return_60d": [0.30, 0.10, -0.05, -0.10],
-            "return_120d": [0.50, 0.20, -0.08, -0.15],
-            "dist_from_52w_high": [-0.02, -0.10, -0.20, -0.35],
-            "realized_vol_20d": [0.40, 0.20, 0.15, 0.10],
-            "vol_ratio_10_60": [1.30, 1.05, 0.95, 0.80],
-            "atr_14_pct": [3.5, 2.0, 1.5, 1.0],
-        })
-        fundamental = pd.DataFrame({
-            "ticker": self._TICKERS,
-            "date": [self._RUN_DATE] * 4,
-            "roe": [0.40, 0.35, 0.20, 0.05],
-            "debt_to_equity": [0.30, 0.50, 1.20, 2.50],
-            "gross_margin": [0.75, 0.65, 0.45, 0.30],
-            "current_ratio": [4.0, 2.5, 1.5, 0.9],
-            "pe_ratio": [50.0, 30.0, 18.0, 10.0],
-            "pb_ratio": [40.0, 12.0, 4.0, 1.5],
-            "fcf_yield": [0.02, 0.04, 0.06, 0.10],
-            "revenue_growth_3y": [0.45, 0.18, 0.06, -0.02],
-            "eps_growth_3y": [0.60, 0.20, 0.05, -0.10],
-            "payout_ratio": [0.0, 0.30, 0.55, 0.85],
-            "dividend_yield": [0.0, 0.008, 0.025, 0.045],
-            "capex_growth_5y": [0.35, 0.12, 0.04, -0.05],
-        })
+        technical = pd.DataFrame(
+            {
+                "ticker": self._TICKERS,
+                "date": [self._RUN_DATE] * 4,
+                "momentum_20d": [0.15, 0.05, -0.02, -0.08],
+                "momentum_5d": [0.05, 0.02, -0.01, -0.03],
+                "return_60d": [0.30, 0.10, -0.05, -0.10],
+                "return_120d": [0.50, 0.20, -0.08, -0.15],
+                "dist_from_52w_high": [-0.02, -0.10, -0.20, -0.35],
+                "realized_vol_20d": [0.40, 0.20, 0.15, 0.10],
+                "vol_ratio_10_60": [1.30, 1.05, 0.95, 0.80],
+                "atr_14_pct": [3.5, 2.0, 1.5, 1.0],
+            }
+        )
+        fundamental = pd.DataFrame(
+            {
+                "ticker": self._TICKERS,
+                "date": [self._RUN_DATE] * 4,
+                "roe": [0.40, 0.35, 0.20, 0.05],
+                "debt_to_equity": [0.30, 0.50, 1.20, 2.50],
+                "gross_margin": [0.75, 0.65, 0.45, 0.30],
+                "current_ratio": [4.0, 2.5, 1.5, 0.9],
+                "pe_ratio": [50.0, 30.0, 18.0, 10.0],
+                "pb_ratio": [40.0, 12.0, 4.0, 1.5],
+                "fcf_yield": [0.02, 0.04, 0.06, 0.10],
+                "revenue_growth_3y": [0.45, 0.18, 0.06, -0.02],
+                "eps_growth_3y": [0.60, 0.20, 0.05, -0.10],
+                "payout_ratio": [0.0, 0.30, 0.55, 0.85],
+                "dividend_yield": [0.0, 0.008, 0.025, 0.045],
+                "capex_growth_5y": [0.35, 0.12, 0.04, -0.05],
+            }
+        )
         for name, df in (("technical", technical), ("fundamental", fundamental)):
             buf = io.BytesIO()
             df.to_parquet(buf, engine="pyarrow", index=False)
@@ -623,30 +690,69 @@ class TestWriteUniverseBoardForScannerRun:
 
     def _eval_log(self):
         return [
-            {"ticker": "NVDA", "sector": "Technology", "tech_score": 82.0,
-             "rsi_14": 61.0, "current_price": 120.0, "avg_volume_20d": 5_000_000.0,
-             "price_vs_ma200": 0.12, "atr_pct": 2.1, "scan_path": "momentum",
-             "quant_filter_pass": 1, "filter_fail_reason": None,
-             "liquidity_pass": 1, "volatility_pass": 1},
-            {"ticker": "MSFT", "sector": "Technology", "tech_score": 55.0,
-             "rsi_14": 48.0, "current_price": 300.0, "avg_volume_20d": 4_000_000.0,
-             "price_vs_ma200": 0.02, "atr_pct": 1.5, "scan_path": None,
-             "quant_filter_pass": 0, "filter_fail_reason": "below_thresholds",
-             "liquidity_pass": 1, "volatility_pass": 1},
-            {"ticker": "JNJ", "sector": "Health Care", "tech_score": None,
-             "rsi_14": None, "current_price": None, "avg_volume_20d": 100.0,
-             "price_vs_ma200": None, "atr_pct": None, "scan_path": None,
-             "quant_filter_pass": 0, "liquidity_pass": 0,
-             "filter_fail_reason": "liquidity"},
-            {"ticker": "PFE", "sector": "Health Care",
-             "quant_filter_pass": 0, "liquidity_pass": 0,
-             "filter_fail_reason": "no_data"},
+            {
+                "ticker": "NVDA",
+                "sector": "Technology",
+                "tech_score": 82.0,
+                "rsi_14": 61.0,
+                "current_price": 120.0,
+                "avg_volume_20d": 5_000_000.0,
+                "price_vs_ma200": 0.12,
+                "atr_pct": 2.1,
+                "scan_path": "momentum",
+                "quant_filter_pass": 1,
+                "filter_fail_reason": None,
+                "liquidity_pass": 1,
+                "volatility_pass": 1,
+            },
+            {
+                "ticker": "MSFT",
+                "sector": "Technology",
+                "tech_score": 55.0,
+                "rsi_14": 48.0,
+                "current_price": 300.0,
+                "avg_volume_20d": 4_000_000.0,
+                "price_vs_ma200": 0.02,
+                "atr_pct": 1.5,
+                "scan_path": None,
+                "quant_filter_pass": 0,
+                "filter_fail_reason": "below_thresholds",
+                "liquidity_pass": 1,
+                "volatility_pass": 1,
+            },
+            {
+                "ticker": "JNJ",
+                "sector": "Health Care",
+                "tech_score": None,
+                "rsi_14": None,
+                "current_price": None,
+                "avg_volume_20d": 100.0,
+                "price_vs_ma200": None,
+                "atr_pct": None,
+                "scan_path": None,
+                "quant_filter_pass": 0,
+                "liquidity_pass": 0,
+                "filter_fail_reason": "liquidity",
+            },
+            {
+                "ticker": "PFE",
+                "sector": "Health Care",
+                "quant_filter_pass": 0,
+                "liquidity_pass": 0,
+                "filter_fail_reason": "no_data",
+            },
         ]
 
     def test_writes_both_board_keys_with_expected_schema(self):
         from data.scanner_orchestrator import write_universe_board_for_scanner_run
 
-        with mock_aws():
+        # This test seeds real feature parquets into a moto-mocked S3, so it
+        # exercises the SCANNER_FEATURE_SOURCE=s3 rollback path rather than
+        # the ArcticDB default. moto does not back an ArcticDB library, and
+        # arcticdb aborts natively (not a catchable exception) when it cannot
+        # reach a real store. The ArcticDB source has its own coverage in
+        # tests/test_feature_store_reader_source.py.
+        with mock_aws(), patch.dict(os.environ, {"SCANNER_FEATURE_SOURCE": "s3"}):
             s3 = boto3.client("s3", region_name="us-east-1")
             s3.create_bucket(Bucket=self._BUCKET)
             self._seed_features(s3)
@@ -656,21 +762,24 @@ class TestWriteUniverseBoardForScannerRun:
                 "scanner_eval_log": self._eval_log(),
             }
 
-            with patch(
-                "data.fetchers.price_fetcher.fetch_sp500_sp400_with_sectors",
-                return_value=(self._TICKERS, self._SECTOR_MAP),
-            ), patch("config.FACTOR_BLEND_ENABLED", True):
+            with (
+                patch(
+                    "data.fetchers.price_fetcher.fetch_sp500_sp400_with_sectors",
+                    return_value=(self._TICKERS, self._SECTOR_MAP),
+                ),
+                patch("config.FACTOR_BLEND_ENABLED", True),
+            ):
                 key = write_universe_board_for_scanner_run(
-                    artifact, market_regime="neutral",
-                    s3_client=s3, bucket=self._BUCKET,
+                    artifact,
+                    market_regime="neutral",
+                    s3_client=s3,
+                    bucket=self._BUCKET,
                 )
 
             assert key == f"scanner/universe/{self._RUN_DATE}/universe.json"
 
             for board_key in (key, "scanner/universe/latest.json"):
-                body = json.loads(
-                    s3.get_object(Bucket=self._BUCKET, Key=board_key)["Body"].read()
-                )
+                body = json.loads(s3.get_object(Bucket=self._BUCKET, Key=board_key)["Body"].read())
                 assert body["schema_version"] == 3
                 assert body["as_of"] == self._RUN_DATE
                 assert body["universe_count"] == 4
@@ -708,7 +817,7 @@ class TestWriteUniverseBoardForScannerRun:
         the shadow-artifact / leaderboard pattern in scanner_handler.py)."""
         from data.scanner_orchestrator import write_universe_board_for_scanner_run
 
-        with mock_aws():
+        with mock_aws(), patch.dict(os.environ, {"SCANNER_FEATURE_SOURCE": "s3"}):
             s3 = boto3.client("s3", region_name="us-east-1")
             s3.create_bucket(Bucket=self._BUCKET)
             # No features/*.parquet seeded and an empty scanner_eval_log —
@@ -722,5 +831,7 @@ class TestWriteUniverseBoardForScannerRun:
             ):
                 with pytest.raises(ValueError, match="scanner_evals is empty"):
                     write_universe_board_for_scanner_run(
-                        artifact, s3_client=s3, bucket=self._BUCKET,
+                        artifact,
+                        s3_client=s3,
+                        bucket=self._BUCKET,
                     )
