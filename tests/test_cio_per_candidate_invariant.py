@@ -74,7 +74,7 @@ def _make_raw_output_with(decisions_count: int):
 
 
 def _patch_llm(monkeypatch, raw_output):
-    """Patch ChatAnthropic so the LLM mock returns ``raw_output`` from
+    """Patch make_agent_llm so the LLM mock returns ``raw_output`` from
     its structured-output ``.invoke``. Bypasses the real Anthropic call
     entirely; only the post-call invariant code path is exercised."""
     from agents.investment_committee import ic_cio
@@ -84,7 +84,7 @@ def _patch_llm(monkeypatch, raw_output):
     fake_structured.invoke.return_value = raw_output
     fake_llm.with_structured_output.return_value = fake_structured
 
-    monkeypatch.setattr(ic_cio, "ChatAnthropic", lambda **kw: fake_llm)
+    monkeypatch.setattr(ic_cio, "make_agent_llm", lambda **kw: fake_llm)
 
 
 class TestCIOPerCandidateInvariant:

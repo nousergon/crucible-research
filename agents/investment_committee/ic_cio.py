@@ -11,21 +11,18 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
 from agents.langchain_utils import (
-    SECTOR_TEAM_LLM_MAX_RETRIES,
-    SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
     invoke_anthropic_safe,
+    make_agent_llm,
 )
 from agents.prompt_loader import load_prompt
 from config import (
-    ANTHROPIC_API_KEY,
     MAX_TOKENS_STRATEGIC,
-    PER_STOCK_MODEL,
-    STRATEGIC_MODEL,
+    PER_STOCK_CLASS,
+    STRATEGIC_CLASS,
 )
 from strict_mode import is_strict_validation_enabled
 
@@ -177,12 +174,10 @@ def run_cio(
 
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-    llm = ChatAnthropic(
-        model=STRATEGIC_MODEL,
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=STRATEGIC_CLASS,
         max_tokens=MAX_TOKENS_STRATEGIC,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+        api_key=api_key,
         callbacks=[get_cost_telemetry_callback()],
     )
 
@@ -346,12 +341,10 @@ def run_cio_critic(
     """
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-    llm = ChatAnthropic(
-        model=PER_STOCK_MODEL,  # Claude Haiku 4.5 — the requested cheap critic
-        anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
         max_tokens=_CRITIC_MAX_TOKENS,
-        max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-        default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+        api_key=api_key,
         callbacks=[get_cost_telemetry_callback()],
     )
 
