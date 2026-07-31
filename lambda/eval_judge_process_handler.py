@@ -110,6 +110,7 @@ def handler(event, context):
         batch_id, plan_s3_key,
     )
 
+    _process_error: str | None = None
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         summary = process_batch_results(
@@ -120,15 +121,24 @@ def handler(event, context):
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_process_handler] process failed hard")
-        return {"status": "ERROR", "batch_id": batch_id, "error": str(exc)}
+        _process_error = str(exc)
+        summary = None
 
-    # Maintain the _eval_by_capture index at write time (config#1579 P2):
-    # the batch-plan's already-judged dedup reads these manifests, and no
-    # scheduled aggregator exists — the write path owns its index. Secondary
-    # observability off the primary path: a failure here is WARN + summary
-    # field (the dedup then no-ops for the affected dates and the failure
-    # mode is a harmless duplicate eval next week, never a silent skip);
-    # build_manifests is idempotent, so any later run self-heals the index.
+    # Build the _eval_by_capture index AFTER every eval persist, regardless
+    # of whether process_batch_results succeeded or raised partway through.
+    # config#4776: the previous arrangement placed build_manifests AFTER the
+    # try/except — meaning a failure in process_batch_results (e.g. the
+    # Sonnet-escalation tail's OpenRouter transport raising RuntimeError
+    # after the Haiku batch results were already persisted) skipped manifest
+    # maintenance entirely. The manifests went stale, dedup no-oped on
+    # every retry, and the same 295-artifact corpus was re-judged ~10 times
+    # (~28M input tokens wasted).
+    #
+    # build_manifests scans what was ACTUALLY persisted on S3, so it
+    # correctly indexes whatever evals made it to disk before the failure.
+    # Idempotent: any later run self-heals the index for dates it touches.
+    # config#1579 P2: a failure here is WARN (the dedup then no-ops for the
+    # affected dates — duplicate evals possible, never a silent skip).
     manifest_dates: list[str] = []
     try:
         from datetime import datetime
@@ -147,6 +157,15 @@ def handler(event, context):
             "failed — dedup will no-op for this batch's capture dates "
             "(duplicate evals possible, never skips)", exc_info=True,
         )
+
+    if _process_error is not None:
+        return {
+            "status": "ERROR",
+            "batch_id": batch_id,
+            "error": _process_error,
+            "manifest_capture_dates": manifest_dates,
+        }
+
     summary["manifest_capture_dates"] = manifest_dates
 
     status = "PARTIAL" if summary["failed"] else "OK"
