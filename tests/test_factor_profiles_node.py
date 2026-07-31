@@ -246,28 +246,20 @@ def test_factor_profiles_node_runs_after_fetch_data_via_macro_chain():
 def test_factor_profiles_node_runs_strictly_before_compute_focus_list():
     """compute_focus_list_node reads factors/profiles/latest.json from
     S3 — it must run AFTER the producer node. The attractiveness
-    champion-feed node (config#1400) is spliced strictly between them
-    (compute_factor_profiles_node → rank_candidates_by_attractiveness_node →
-    compute_focus_list_node); it reads — never mutates — the substrate, so
-    the focus-list consumer still reads a freshly-written substrate this same
-    run. Pin that transitive ordering and assert macro no longer edges
-    straight to the focus list."""
+    champion feed is now delivered through the membership artifact
+    (alpha-engine-config-I4983 / crucible-research-PR511), so the
+    factor-profiles producer edges directly into the focus-list node
+    (the former intermediate rank_candidates_by_attractiveness_node
+    was removed per alpha-engine-config-I4980). Pin the direct edge
+    and assert macro no longer edges straight to the focus list."""
     body = _build_graph_source()
     assert (
-        'graph.add_edge(\n        "compute_factor_profiles_node", "rank_candidates_by_attractiveness_node"'
+        'graph.add_edge(\n        "compute_factor_profiles_node", "compute_focus_list_node"'
         in body
     ), (
-        "compute_factor_profiles_node must edge into "
-        "rank_candidates_by_attractiveness_node (the spliced attractiveness "
-        "feed) so the profiles substrate is written before any consumer."
-    )
-    assert (
-        'graph.add_edge(\n        "rank_candidates_by_attractiveness_node", "compute_focus_list_node"'
-        in body
-    ), (
-        "rank_candidates_by_attractiveness_node must edge into "
-        "compute_focus_list_node so the focus-list consumer reads a "
-        "freshly-written substrate this same run (profiles strictly upstream)."
+        "compute_factor_profiles_node must edge directly into "
+        "compute_focus_list_node so the profiles substrate is written "
+        "before any consumer reads it."
     )
     assert (
         'graph.add_edge("macro_economist_node", "compute_focus_list_node")'
