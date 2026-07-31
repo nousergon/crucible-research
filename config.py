@@ -185,14 +185,6 @@ MAX_QUARANTINED_TICKERS: int = int(_AGGREGATOR_CFG.get("max_quarantined_tickers"
 # the candidate selection. Fixes the 3.9%-recall bottleneck (the binary gate
 # amputates winners — 2026-06-29 e2e_lift). Default OFF — flipping ON is the
 # reversible cut; the tech_score `candidates.json` stays the shadow baseline.
-# Wired in graph.research_graph.rank_candidates_by_attractiveness_node (spliced
-# between compute_factor_profiles_node and dispatch). top_n=60 is count-matched
-# to the current gate (the measured +0.91% sn lift); widen via config to lean
-# into recall once cycle-1 is validated live.
-_ATTRACTIVENESS_FEED_CFG: dict = _scoring_cfg.get("attractiveness_feed", {})
-ATTRACTIVENESS_FEED_ENABLED: bool = bool(_ATTRACTIVENESS_FEED_CFG.get("enabled", False))
-ATTRACTIVENESS_FEED_TOP_N: int = int(_ATTRACTIVENESS_FEED_CFG.get("top_n", 60))
-
 # ── Factor blend (Phase 3 of factor substrate, 260513 plan) ──────────────────
 # Regime-conditional blend of the 4 factor composites (quality / momentum /
 # value / low_vol — produced by scoring.factor_scoring) into the composite
