@@ -553,6 +553,22 @@ def build_batch_plan(
                     "[batch_plan] skipped %d already-judged captures (dedup)",
                     skipped_already_judged,
                 )
+        # Anomaly guard: dedup returned zero skips despite a multi-date
+        # lookback with actual captures. On a retry (the 2nd+ batch plan
+        # for the same corpus), this means the _eval_by_capture manifests
+        # are missing or stale — the exact failure mode from config#4776
+        # (index not written since 2026-07-17 → 295-artifact corpus
+        # re-judged ~10 times). On a first run, zero skips is normal.
+        # The warning gives operators diagnostic breadcrumbs in CW Logs
+        # without falsely alarming (the caller decides what's a retry).
+        if skipped_already_judged == 0 and capture_keys:
+            logger.warning(
+                "[batch_plan] already-judged dedup returned zero skips for "
+                "%d capture keys across %d dates — the _eval_by_capture "
+                "manifests may be stale or missing (expected on the first "
+                "run; anomalous on a retry of a previously-judged corpus)",
+                len(capture_keys), len(all_dates),
+            )
     requests: list[dict[str, Any]] = []
     plan_entries: list[dict[str, Any]] = []
     client_side_skips: list[dict[str, Any]] = []
