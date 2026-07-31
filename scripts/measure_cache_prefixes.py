@@ -53,7 +53,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import anthropic  # noqa: E402
-from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 # ── Model-specific cache minimums (tokens) ────────────────────────────────
 # Imported from ``krepis.cache_minimums`` (the canonical source per
@@ -63,6 +62,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa
 # and caused three fixes to be deferred against inflated thresholds.
 # See alpha-engine-config-I4930 for the full worklist.
 from krepis.cache_minimums import cache_minimum  # noqa: E402
+from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 
 @dataclass
