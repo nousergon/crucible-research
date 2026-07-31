@@ -14,14 +14,13 @@ updates:
     cooldown:
       semver-major-days: 30
     # Deferred to the tracked migration alpha-engine-config-I5214. Dependabot re-proposing
-    # this every week is pure queue noise while the migration is unscheduled, and
+    # these every week is pure queue noise while the migration is unscheduled, and
     # it re-enters /backlog-triage each cycle. Narrow by dependency-name ON
     # PURPOSE: a blanket "*" major ignore would also suppress future
-    # security-relevant majors. REMOVING THESE THREE ENTRIES IS PART OF alpha-engine-config-I5214's closes-when.
+    # security-relevant majors. REMOVING THESE TWO REMAINING ENTRIES IS PART OF I5214's closes-when.
+    # (pytz ignore was removed in crucible-research#539; pytest ignore removed in this PR.)
     ignore:
       - dependency-name: "pytz"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "pytest"
         update-types: ["version-update:semver-major"]
       - dependency-name: "langchain-anthropic"
         update-types: ["version-update:semver-major"]
