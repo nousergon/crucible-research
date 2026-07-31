@@ -173,23 +173,21 @@ def probe_validation_retry(api_key: str | None) -> dict:
     #2246's third probe) — confirms the retry/recovery path recovers
     weekly, rather than relying on a real thesis-update call happening to
     trip it (which it may or may not do on any given run)."""
-    from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
-        SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         invoke_structured_with_validation_retry,
+        make_agent_llm,
     )
     from agents.prompt_loader import load_prompt
-    from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL
+    from config import MAX_TOKENS_STRATEGIC, PER_STOCK_CLASS
 
     start = time.monotonic()
     try:
-        llm = ChatAnthropic(
-            model=PER_STOCK_MODEL,
-            anthropic_api_key=api_key or ANTHROPIC_API_KEY,
+        llm = make_agent_llm(
+            model_class=PER_STOCK_CLASS,
             max_tokens=MAX_TOKENS_STRATEGIC,
-            default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
+            api_key=api_key,
         )
         structured_llm = llm.with_structured_output(
             _CanaryConfidenceProbe, include_raw=True
