@@ -475,10 +475,9 @@ def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dic
         # term. The consumer (terminal notification, dashboard) reads this
         # flag before displaying "$X.XX per run" — it MUST be False to be
         # meaningful.
-        "ec2_cost_present": any(
-            row.get("cost_source", "llm") in _EC2_COST_SOURCES
-            for row in clean_rows
-        ),
+        "ec2_cost_present": bool(
+            df["cost_source"].fillna("llm").isin(_EC2_COST_SOURCES).any()
+        ) if "cost_source" in df.columns else False,
     }
 
 
