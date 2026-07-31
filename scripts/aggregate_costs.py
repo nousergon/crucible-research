@@ -23,10 +23,19 @@ Schema posture (matches the JSONL row shape):
   ``output_tokens``, ``cache_read_tokens``, ``cache_create_tokens``,
   ``web_search_requests`` (schema v2), ``web_fetch_requests`` (schema v2),
   ``cost_usd``.
+- ``execution_id`` (schema v3, additive, config#5504): the owning SF execution
+  ID — the per-run grouping key that distinguishes N executions on the same
+  date. When absent (pre-v3 rows), aggregator groups under "(unknown)" and
+  per-execution drilldown is suppressed.
+- ``cost_source`` (schema v3, additive, config#5504): ``"llm"`` (LLM API calls,
+  the v1/v2 default), ``"ec2_spot"``, or ``"ec2_on_demand"``. EC2 rows carry
+  zero token columns and a single ``cost_usd`` — one row per launched instance.
 - All additive going forward — never rename or remove a column without a
   ``schema_version`` bump per CLAUDE.md S3 contract safety rules. v1 rows
   predate the tool-fee columns; the aggregator treats missing as zero so
-  v1 + v2 rows can be summed in the same daily parquet.
+  v1 + v2 rows can be summed in the same daily parquet. v1/v2 rows predate
+  ``execution_id`` + ``cost_source``; both are treated as "llm" rows with an
+  unknown execution.
 
 Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708.
 """
@@ -71,6 +80,11 @@ _COST_CW_NAMESPACE = "AlphaEngine/Cost"
 # NOTE: ``_RUN_ID_RE`` (an ISO-date-prefix test-pollution discriminator)
 # was REMOVED 2026-07-28 — see ``_is_plausible_cost_row`` for the incident
 # it caused (I5206). Do not reintroduce a run_id-shape check here.
+
+# cost_source values that represent EC2/spot compute (config#5504) — distinct
+# from LLM rows, used by the completeness check below so "spot rows stopped
+# arriving" cannot read as "the run was cheap."
+_EC2_COST_SOURCES = frozenset({"ec2_spot", "ec2_on_demand"})
 
 # Anthropic's largest context window (Claude Opus 4.7) is ~1M tokens.
 # A single API response cannot exceed that. 5M is 5x the API ceiling
@@ -454,6 +468,16 @@ def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dic
         "by_model": _group_sum("model_name"),
         "by_run_type": _group_sum("run_type"),
         "by_agent_id": _group_sum("agent_id"),
+        "by_execution_id": _group_sum("execution_id"),
+        "by_cost_source": _group_sum("cost_source"),
+        # config#5504: the completeness check — a parquet with only LLM rows
+        # CANNOT report a per-run total because EC2/spot is the dominant cost
+        # term. The consumer (terminal notification, dashboard) reads this
+        # flag before displaying "$X.XX per run" — it MUST be False to be
+        # meaningful.
+        "ec2_cost_present": bool(
+            df["cost_source"].fillna("llm").isin(_EC2_COST_SOURCES).any()
+        ) if "cost_source" in df.columns else False,
     }
 
 
@@ -478,12 +502,18 @@ def print_summary(summary: dict, *, target_date: date_type) -> None:
     print(f"- Total cache_create tokens:{summary['total_cache_create_tokens']:,}")
     print(f"- Total web_search requests:{summary.get('total_web_search_requests', 0):,}")
     print(f"- Total web_fetch requests: {summary.get('total_web_fetch_requests', 0):,}")
+    # config#5504: EC2 cost presence — the completeness signal. A per-run
+    # total is only meaningful when EC2 rows exist; without them the dominant
+    # cost term is absent and the number silently undercounts.
+    ec2_present = summary.get("ec2_cost_present", False)
+    print(f"- EC2/spot cost rows:       {'present' if ec2_present else 'ABSENT — per-run total UNDERCOUNTED'}")
     print()
     for label, key in (
         ("By sector team", "by_sector_team"),
         ("By model", "by_model"),
         ("By run_type", "by_run_type"),
         ("By agent_id", "by_agent_id"),
+        ("By cost source", "by_cost_source"),
     ):
         breakdown = summary.get(key, {})
         if not breakdown:
@@ -491,6 +521,16 @@ def print_summary(summary: dict, *, target_date: date_type) -> None:
         print(f"## {label}")
         for k, v in sorted(breakdown.items(), key=lambda x: -x[1]):
             print(f"  {k:<32s} ${v:.4f}")
+        print()
+    # Per-execution breakdown (config#5504): the per-run grouping that lets
+    # N executions on the same date report N rows. Suppressed when there is
+    # only the "(unknown)" sentinel (pre-v3 rows with no execution_id).
+    by_exec = summary.get("by_execution_id", {})
+    if by_exec and by_exec.keys() != {"(none)"}:
+        print(f"## By execution ({len(by_exec)} runs)")
+        for k, v in sorted(by_exec.items(), key=lambda x: -x[1]):
+            short = k if len(k) <= 48 else k[:45] + "..."
+            print(f"  {short:<48s} ${v:.4f}")
         print()
 
 
