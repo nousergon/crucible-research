@@ -82,8 +82,6 @@ from archive.manager import ArchiveManager
 from archive.tool_usage_analysis import TEAM_RESOURCE_TICKER
 from config import (
     ADAPTIVE_SLOT_ALLOCATION_ENABLED,
-    ATTRACTIVENESS_FEED_ENABLED,
-    ATTRACTIVENESS_FEED_TOP_N,
     CIO_CRITIC_ENABLED,
     CIO_DEBLENDED_ORCHESTRATION,
     CIO_FORCE_FILL_CONVICTION_FLOOR,
@@ -1674,69 +1672,6 @@ def compute_factor_profiles_node(state: ResearchState) -> dict:
             run_date, e, run_date,
         )
         raise
-
-
-def rank_candidates_by_attractiveness_node(state: ResearchState) -> dict:
-    """CHAMPION-FEED CUT (config#1400 / ARCHITECTURE §43): re-select the
-    sector-team candidate feed by ranking the scanned universe on the live
-    6-pillar attractiveness composite, REPLACING the momentum-only tech_score
-    gate's ~60 with the top-N attractiveness names.
-
-    WHY: the live tech_score gate has 3.9% 21d recall (2026-06-29 e2e_lift) —
-    a binary gate that amputates ~96% of eventual winners before the agents see
-    them. Ranking the scanned universe by attractiveness (the measured +0.91%
-    sector-neutral lift at matched N) feeds the agents a better-selected pool.
-    Spliced AFTER ``compute_factor_profiles_node`` (which wrote the 6-pillar
-    profiles this run) and BEFORE dispatch, so attractiveness is computable.
-
-    Gated by ``ATTRACTIVENESS_FEED_ENABLED`` (default OFF — flipping ON is the
-    reversible cut). The held population is ALWAYS retained (agents must still
-    evaluate current holdings for HOLD/EXIT). FAIL-SAFE: any error returns ``{}``
-    so the existing tech_score ``agent_input_set`` stands — the cut can never
-    break the research run. The tech_score ``candidates.json`` remains the
-    shadow baseline for the realized-alpha revert signal.
-    """
-    if not ATTRACTIVENESS_FEED_ENABLED:
-        return {}
-    run_date = state.get("run_date")
-    try:
-        from scoring.universe_board import (
-            _read_factor_profiles,
-            attractiveness_from_factor_profiles,
-        )
-
-        profiles = _read_factor_profiles(run_date, None, None) or {}
-        if not profiles:
-            raise RuntimeError(
-                f"attractiveness feed: no factor profiles readable for {run_date}"
-            )
-        scores = attractiveness_from_factor_profiles(profiles)
-        ranked = sorted(
-            (t for t, v in scores.items() if v.get("attractiveness_score") is not None),
-            key=lambda t: scores[t]["attractiveness_score"],
-            reverse=True,
-        )
-        top_n = int(ATTRACTIVENESS_FEED_TOP_N)
-        selected = ranked[:top_n]
-        if not selected:
-            raise RuntimeError("attractiveness feed: no ranked candidates produced")
-        population_tickers = state.get("population_tickers") or []
-        new_set = sorted(set(selected) | set(population_tickers))
-        prior = state.get("agent_input_set") or []
-        logger.info(
-            "[attractiveness_feed] CHAMPION feed ON: %d tickers "
-            "(top-%d attractiveness ∪ held population %d) — replacing tech_score "
-            "feed of %d. Scored %d of %d profiled names.",
-            len(new_set), top_n, len(population_tickers), len(prior),
-            len(ranked), len(profiles),
-        )
-        return {"agent_input_set": new_set}
-    except Exception as e:  # FAIL-SAFE: keep the existing tech_score feed
-        logger.warning(
-            "[attractiveness_feed] FAILED — falling back to existing tech_score "
-            "candidate feed (the cut is inert this run): %s", e,
-        )
-        return {}
 
 
 def compute_focus_list_node(state: ResearchState) -> dict:
@@ -3546,6 +3481,7 @@ def _build_scanner_eval_rows(
     scanner_eval_log: list,
     focus_lookup: dict,
     run_date: str,
+    market_regime: str = "neutral",
 ) -> list:
     """Assemble the ``scanner_evaluations`` rows for the cycle (pure, so the
     join is unit-testable independently of the archive_writer graph node).
@@ -3569,6 +3505,16 @@ def _build_scanner_eval_rows(
     universe; or a cycle where the stash was unavailable) degrade to
     ``quant_filter_pass=0`` + null reason — honest "not scanner-evaluated", with
     metrics still carried from ``technical_scores``.
+
+    Per-sub-signal scores (``rsi_sub_score`` / ``macd_sub_score`` /
+    ``ma50_sub_score`` / ``ma200_sub_score`` / ``momentum_sub_score``) are
+    computed from the feature-store indicator values via
+    ``scoring.technical.compute_technical_sub_scores`` and persisted so the
+    backtester's ``tech_weight_ablation`` optimizer (alpha-engine-config#841)
+    can re-rank the full scanner universe under alternate composite weights
+    without re-running the scanner pipeline. NULL for tickers whose indicator
+    values are unreadable this cycle — the backtester treats those rows as
+    "no sub-score data, ablation skips this row."
     """
     eval_by_ticker = {
         e.get("ticker"): e for e in (scanner_eval_log or []) if e.get("ticker")
@@ -3617,6 +3563,30 @@ def _build_scanner_eval_rows(
         fl_entry = focus_lookup.get(ticker)
         if fl_entry is not None:
             row.update(fl_entry)
+        # ── Per-sub-signal scores for tech-weight ablation ─────────────────
+        # Computed from the feature-store indicator values (the same values
+        # the scanner uses to compute tech_score). Ticker rows with missing
+        # indicators get NULL sub-scores — the backtester's ablation
+        # optimizer treats NULL as "no data, skip this row" (same contract
+        # as team_candidates migration 15).
+        from scoring.technical import compute_technical_sub_scores
+
+        sub_scores = compute_technical_sub_scores(
+            {
+                "rsi_14": ts.get("rsi_14", 50.0),
+                "macd_cross": ts.get("macd_cross", 0.0),
+                "macd_above_zero": bool(ts.get("macd_above_zero", False)),
+                "price_vs_ma50": ts.get("price_vs_ma50"),
+                "price_vs_ma200": ts.get("price_vs_ma200"),
+                "momentum_20d": ts.get("momentum_20d"),
+            },
+            market_regime=market_regime,
+        )
+        row["rsi_sub_score"] = sub_scores["rsi"]
+        row["macd_sub_score"] = sub_scores["macd"]
+        row["ma50_sub_score"] = sub_scores["ma50"]
+        row["ma200_sub_score"] = sub_scores["ma200"]
+        row["momentum_sub_score"] = sub_scores["momentum"]
         rows.append(row)
     return rows
 
@@ -4068,6 +4038,7 @@ def archive_writer(state: ResearchState) -> dict:
         scanner_eval_log=scanner_eval_log,
         focus_lookup=focus_lookup,
         run_date=run_date,
+        market_regime=state.get("market_regime", "neutral"),
     )
 
     am.write_scanner_evaluations(scanner_evals)
@@ -5024,10 +4995,6 @@ def build_graph() -> StateGraph:
     # + score_aggregator) do their existing S3 read. Graceful-degrade
     # on any failure — never hard-fails the research run.
     graph.add_node("compute_factor_profiles_node", compute_factor_profiles_node)
-    graph.add_node(
-        "rank_candidates_by_attractiveness_node",
-        rank_candidates_by_attractiveness_node,
-    )
     # PR 4 of scanner-placement arc: compute the per-team regime-blended
     # focus list AFTER macro has written market_regime to state, BEFORE
     # the sector team dispatch reads it.
@@ -5060,16 +5027,16 @@ def build_graph() -> StateGraph:
     # in S3 before compute_focus_list_node AND score_aggregator do their
     # existing read_factor_profiles_from_s3() this same run.
     graph.add_edge("macro_economist_node", "compute_factor_profiles_node")
-    # Splice the attractiveness champion-feed re-rank (config#1400) between the
-    # factor substrate (just written) and the focus list / dispatch: it reads the
-    # 6-pillar profiles and (when ATTRACTIVENESS_FEED_ENABLED) overwrites
-    # agent_input_set with the top-N attractiveness selection. Default OFF → a
-    # pass-through no-op, so the existing tech_score feed is unchanged.
+    # factor substrate (just written) flows directly into the focus list:
+    # the attractiveness champion feed is now delivered through the
+    # membership artifact (universe_membership → attractiveness_top_20,
+    # wired per alpha-engine-config-I4983 / crucible-research-PR511).
+    # The former graph-node splice (config#1400, rank_candidates_by_
+    # attractiveness_node) was removed when the ranking moved to the
+    # no-agent champion path — leaving both would advertise two live
+    # champion feeds on a single path (alpha-engine-config-I4980).
     graph.add_edge(
-        "compute_factor_profiles_node", "rank_candidates_by_attractiveness_node"
-    )
-    graph.add_edge(
-        "rank_candidates_by_attractiveness_node", "compute_focus_list_node"
+        "compute_factor_profiles_node", "compute_focus_list_node"
     )
 
     # Fan-out AFTER focus list: dispatch to 6 sector teams + exit evaluator.
