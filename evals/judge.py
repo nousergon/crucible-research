@@ -77,6 +77,29 @@ from nousergon_lib.eval_artifacts import (
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
+
+# Process-scoped cost sink for every OpenRouter judge call. Constructed
+# lazily so importing this module costs nothing; shared across all
+# evaluate_artifact / evaluate_artifact_openrouter invocations in the
+# process so a judge Lambda's many calls flush as one JSONL object per
+# (date, run_id, callsite_id) rather than one object per call. Without
+# this the judge's per-call spend is invisible to AggregateCosts
+# (alpha-engine-config-I5206).
+_JUDGE_COST_SINK = None
+
+
+def _judge_cost_sink():
+    """Return the process-scoped S3JsonlCostSink, constructing it on first use."""
+    global _JUDGE_COST_SINK
+    if _JUDGE_COST_SINK is None:
+        from krepis.cost_sink import S3JsonlCostSink
+
+        _JUDGE_COST_SINK = S3JsonlCostSink(
+            bucket=S3_BUCKET,
+            prefix="decision_artifacts/_cost_raw",
+            register_atexit=True,
+        )
+    return _JUDGE_COST_SINK
 from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
 from graph.state_schemas import (
     RubricEvalArtifact,
@@ -884,6 +907,10 @@ def _call_openrouter_judge_llm(
         api_key=_resolve_openrouter_api_key(api_key),
         timeout=180.0,
         max_retries=0,
+        # Process-scoped sink — see ``_judge_cost_sink``. Without this the
+        # judge's per-call spend is invisible to AggregateCosts
+        # (alpha-engine-config-I5206).
+        cost_sink=_judge_cost_sink(),
     )
 
     tool_schema = _build_rubric_tool_spec()

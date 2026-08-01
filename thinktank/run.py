@@ -253,9 +253,15 @@ def run_daily(
     # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
     from krepis.cost_sink import S3JsonlCostSink
 
+    # prefix MUST be `_cost_raw` (not `_cost`). AggregateCosts reads
+    # `_cost_raw/**/*.jsonl` and writes the dashboard's
+    # `_cost/{date}/cost.parquet`. Writing JSONL into `_cost/` made
+    # every Think Tank run's cost rows invisible to the aggregator —
+    # the stream looked dead on the dashboard even though emission
+    # was live (alpha-engine-config-I5206, verified 2026-08-01).
     cost_sink = S3JsonlCostSink(
         bucket=settings.bucket,
-        prefix="decision_artifacts/_cost",
+        prefix="decision_artifacts/_cost_raw",
         run_id=run_id,
         register_atexit=True,
     )
