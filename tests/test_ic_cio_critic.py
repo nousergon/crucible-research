@@ -80,7 +80,7 @@ class _FakeLLM:
 
 
 def _patch_llm(monkeypatch, verdict):
-    monkeypatch.setattr(ic_cio, "ChatAnthropic", lambda **kw: _FakeLLM(verdict))
+    monkeypatch.setattr(ic_cio, "make_agent_llm", lambda **kw: _FakeLLM(verdict))
     # cost-telemetry callback factory is imported lazily inside run_cio_critic
     import graph.llm_cost_tracker as lct
     monkeypatch.setattr(lct, "get_cost_telemetry_callback", lambda: None)
