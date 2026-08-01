@@ -136,21 +136,11 @@ def test_agents_do_not_construct_chat_models_directly():
     # langchain_utils.py IS the factory — it necessarily constructs both a
     # router-mode and a direct-mode client; the two tests above cover it.
     #
-    # ic_cio (judge) and canary_replay (canary) are held back deliberately:
-    # policy section 8 requires a shadow/overlap window for a judge and a
-    # recorded re-baseline for a canary.
-    #
     # memory/ and scripts/ were tracked follow-ups in
     # alpha-engine-config-I4459 — migrated off direct construction in the
     # same issue arc. Removing an entry must make this test fail.
-    #
-    # ic_cio (judge) and canary_replay (canary) are STILL held back:
-    # policy section 8 requires a shadow/overlap window for a judge and a
-    # recorded re-baseline for a canary.
     SANCTIONED = {
         "agents/langchain_utils.py",
-        "agents/investment_committee/ic_cio.py",
-        "agents/canary_replay.py",
     }
     repo_root = _AGENTS_DIR.parent
     skip_dirs = {".git", "__pycache__", ".venv", "venv", "node_modules", "tests"}
