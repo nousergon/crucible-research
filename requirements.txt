@@ -28,7 +28,7 @@ openai>=2.51.0
 agentevals~=0.0
 
 # Data
-yfinance~=0.2.54
+yfinance~=1.5.2
 requests-ratelimiter~=0.7
 pandas~=2.2
 numpy~=1.26
