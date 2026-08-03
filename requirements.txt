@@ -5,11 +5,22 @@
 # pin exists solely to satisfy the security-audit gate.
 setuptools>=83.0.0
 anthropic~=0.120
-langgraph~=0.2
+# Raised floor 0.2 -> 0.4.0 (langchain-anthropic 1.x adoption, config#2570):
+# langchain-anthropic~=1.5 forces langchain-core 1.x, and langgraph <0.4.0
+# (the 0.2.x/0.3.x lines) pins langchain-core<0.4 — uninstallable alongside
+# it. Leaving the old floor lets pip backtrack through every incompatible
+# 0.2/0.3 release and die with `resolution-too-deep`; 0.4.0 is the first line
+# with an unbounded langchain-core floor.
+langgraph>=0.4.0,<1.0
 langchain-anthropic~=1.5
 # OpenAI-compatible chat model — how every research agent now reaches the
 # router (or OpenRouter in Lambda). See agents/langchain_utils.make_agent_llm.
-langchain-openai~=0.3
+# Raised floor 0.3 -> 0.3.34 (langchain-anthropic 1.x adoption, config#2570):
+# langchain-openai <0.3.34 pins langchain-core<1.0 — same incompatibility +
+# same pip resolver depth-explosion as langgraph above. 0.3.34 is the first
+# 0.3.x with a langchain-core<2.0 floor; `~=0.3` alone lets pip consider
+# 0.3.0-0.3.33 (all core-1.x-incompatible).
+langchain-openai>=0.3.34,<1.0
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
