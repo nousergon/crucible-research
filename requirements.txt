@@ -150,7 +150,18 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # `TypeError: 'NoneType' object is not subscriptable` through the migrated
 # client, reintroducing the bug tests/test_null_choices_provider_error.py
 # exists to prevent. The floor is load-bearing, not hygiene.
-krepis>=0.25.0
+# 0.31.0 adds `krepis.router.resolve_group_spec` (group -> ModelSpec, the
+# adapter every consumer was hand-writing) and KREPIS_ROUTER_CREDENTIAL_SECRET
+# (per-consumer router identity — the edge identifies a consumer BY its
+# credential value and krepis.secrets resolves SSM before os.environ, so two
+# consumers sharing a secret NAME collapse into one identity there). Both are
+# load-bearing for alpha-engine-config-I6367: this repo's thinktank tiers and
+# the single_agent_quant challenger now address model groups instead of
+# pinning provider="openrouter". 0.31.0 is also the first release where the
+# proxy route resolves as an OpenAI-compatible endpoint rather than the
+# in-process LiteLLM Router — an earlier krepis would send this repo's
+# Lambda straight to openrouter.ai, unscanned. (krepis-PR106.)
+krepis>=0.31.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13

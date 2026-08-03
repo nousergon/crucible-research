@@ -15,7 +15,8 @@ from pydantic import ValidationError  # noqa: E402
 
 from producers.registry import RESEARCH_PRODUCERS  # noqa: E402
 from producers.single_agent import (  # noqa: E402
-    CHALLENGER_MODEL,
+    CHALLENGER_EXEC_CONTEXT,
+    CHALLENGER_GROUP,
     RankingProducerOutput,
     assess_candidates,
     build_single_agent_signals,
@@ -125,8 +126,50 @@ def test_registry_has_single_agent_challenger():
     assert spec is not None and spec.kind == "challenger" and spec.build is not None
 
 
-# ── assess_candidates (alpha-engine-config-I2997: OpenRouter/DeepSeek V4 Pro,
-#    fake krepis.llm transport — no real network) ──────────────────────────
+# ── assess_candidates (alpha-engine-config-I6367: router group addressing,
+#    fake krepis.llm transport — no real network) ───────────────────────────
+
+
+def _fake_route(**over):
+    """What krepis.router.resolve_group_spec returns for the `high` group from
+    a Lambda: the synthesised litellm_proxy route, because the registry
+    declares `lambda` on no model entry."""
+    route = {
+        "schema_version": 2,
+        "group": "high",
+        "route": "litellm_proxy",
+        "provider": "litellm",
+        "deployment_id": "high",
+        "api_base_url": "https://router.example:8443",
+        "auth_token_type": "litellm_master_key",
+        "registry_id": "litellm:group:high",
+        "primary_registry_id": "deepseek-v4-pro-max",
+        "params": {},
+    }
+    route.update(over)
+    return route
+
+
+def _patch_router(monkeypatch, *, route=None, captured=None):
+    """Fake the RESOLVER, not the adapter.
+
+    `resolve_group_spec` is the thing under test at this call site — faking it
+    would leave the provider/transport decision (the defect that made the
+    proxy route import litellm in a Lambda) untested. So only
+    `resolve_group_structured`, krepis' registry read, is replaced.
+    """
+    import krepis.router as _kr
+
+    the_route = route or _fake_route()
+
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai"):
+        if captured is not None:
+            captured.append(
+                {"group": group, "exec_context": exec_context, "wire": wire}
+            )
+        return the_route
+
+    monkeypatch.setattr(_kr, "resolve_group_structured", fake_resolve_structured)
 
 
 class _FakeAgentPrompt:
@@ -137,11 +180,16 @@ class _FakeAgentPrompt:
         return {}
 
 
-def test_assess_candidates_uses_deepseek_pro_non_strict_structured_output(monkeypatch):
+def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch):
     import agents.prompt_loader as prompt_loader
 
     monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
 
+    # The router credential is resolved by NAME at call time — the registry
+    # says which name, this test provides a value for it.
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "router-consumer-test")
+    captured_resolves = []
+    _patch_router(monkeypatch, captured=captured_resolves)
     captured_specs = []
 
     class FakeCompletions:
@@ -181,19 +229,101 @@ def test_assess_candidates_uses_deepseek_pro_non_strict_structured_output(monkey
     ]
     assert len(captured_specs) == 1
     spec = captured_specs[0]
-    assert spec.provider == "openrouter"
-    assert spec.model == CHALLENGER_MODEL == "deepseek/deepseek-v4-pro"
-    # REQUIRED, not incidental — see producers/single_agent.py module docstring:
-    # strict json_schema is live-verified unreliable for DeepSeek on OpenRouter.
+    # The router decides provider and model. This call site must not.
+    assert spec.provider == "litellm_proxy"
+    assert spec.model == "high"
+
+    # The edge is a custom OpenAI-compatible endpoint. Provider "litellm"
+    # would bind TRANSPORT_LITELLM — the in-process Router, which calls
+    # providers directly from the consumer and needs litellm importable
+    # inside the Lambda.
+    from krepis.llm_config import TRANSPORT_OPENAI
+    assert spec.transport == TRANSPORT_OPENAI
+    assert spec.base_url == "https://router.example:8443"
+
+    assert len(captured_resolves) == 1
+    ask = captured_resolves[0]
+    assert ask["group"] == CHALLENGER_GROUP == "high"
+    assert ask["exec_context"] == CHALLENGER_EXEC_CONTEXT == "lambda"
+    # An anthropic-wire fallback would hand this openai-transport client a URL
+    # it cannot speak.
+    assert ask["wire"] == "openai"
+    # REQUIRED, not incidental — see producers/single_agent.py: strict
+    # json_schema is live-verified unreliable for DeepSeek-family models
+    # against this exact schema. Passed EXPLICITLY so a registry default
+    # cannot re-enable it.
     assert spec.structured_outputs is False
-    assert spec.reasoning == {"exclude": True}
 
 
-def test_assess_candidates_requires_api_key(monkeypatch):
+def test_assess_candidates_reads_no_openrouter_key(monkeypatch):
+    """Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent
+    directly linked to OpenRouter. This call site used to RAISE when
+    config.OPENROUTER_API_KEY was empty — the key was load-bearing. It must
+    now run without one, because the credential is named by the registry and
+    resolved by krepis at call time."""
     import agents.prompt_loader as prompt_loader
     monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
     import config
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "", raising=False)
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "router-consumer-test")
+    _patch_router(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="OpenRouter API key"):
-        assess_candidates(["AAA"], {}, {}, api_key=None)
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return type("Resp", (), {
+                "choices": [type("Choice", (), {
+                    "message": type("Msg", (), {
+                        "content": (
+                            '{"assessments": [{"ticker": "AAA", '
+                            '"qual_score": 50, "conviction": "stable", '
+                            '"brief_thesis": "x"}]}'
+                        ),
+                    })(),
+                })()],
+                "model": "deepseek-v4-pro-max",
+                "usage": None,
+            })()
+
+    def factory(spec, api_key):
+        return type("C", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})()})()
+
+    out = assess_candidates(["AAA"], {}, {}, api_key=None, client_factory=factory)
+    assert [a["ticker"] for a in out] == ["AAA"]
+
+
+def test_module_constructs_no_provider_pinned_spec():
+    """The pin is what died on 2026-08-02 when the OpenRouter balance went
+    negative, and its reintroduction would be silent — the call would simply
+    start working again against a provider nobody chose.
+
+    Structural, not textual: the prose in this module legitimately NAMES the
+    old pin to explain why it is gone. What must not come back is a
+    ``ModelSpec(...)`` built here, or a binding of ``OPENROUTER_API_KEY``.
+    Both are AST facts."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).parent.parent / "producers" / "single_agent.py"
+    tree = ast.parse(src.read_text())
+
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "ModelSpec" not in called, (
+        "producers/single_agent.py constructs a ModelSpec — model, endpoint "
+        "and credential are registry decisions resolved by "
+        "krepis.router.resolve_group_spec (alpha-engine-config-I6367)"
+    )
+
+    bound = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert "OPENROUTER_API_KEY" not in bound, (
+        "producers/single_agent.py binds OPENROUTER_API_KEY — no agent may be "
+        "directly linked to OpenRouter (Brian's ruling 2026-08-03)"
+    )
