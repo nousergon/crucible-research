@@ -5,8 +5,18 @@
 # pin exists solely to satisfy the security-audit gate.
 setuptools>=83.0.0
 anthropic~=0.120
-langgraph~=0.2
-langchain-anthropic~=0.3
+# Raised to the 1.x line (config#2570): langchain-openai~=1.4 requires
+# langchain-core>=1.5.1, and the transitive eval graph (agentevals~=0.0 ->
+# openevals -> langchain 1.x) already resolves to langchain-core>=1.4.9 +
+# langgraph>=1.2.5. langgraph <1.2.5 (the 0.x lines) pins langchain-core<1.0
+# — uninstallable alongside 1.x (pip dies with `resolution-too-deep`
+# backtracking every 0.x release). `~=1.2` tracks the line the eval graph
+# already pulls in.
+langgraph~=1.2
+# Raised to the 1.x line (config#2570): langchain-anthropic 0.3.x pins
+# langchain-core<1.0 — same incompatibility with langchain-openai~=1.4 as
+# langgraph above. The 1.5.x line is the current core-1.x-compatible series.
+langchain-anthropic~=1.5
 # OpenAI-compatible chat model — how every research agent now reaches the
 # router (or OpenRouter in Lambda). See agents/langchain_utils.make_agent_llm.
 langchain-openai~=1.4
