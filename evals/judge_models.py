@@ -135,8 +135,64 @@ OPENROUTER_SHADOW = JudgeModelSpec(
     ),
 )
 
-_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET, OPENROUTER_SHADOW)
+DEEPSEEK_V4_PRO = JudgeModelSpec(
+    logical_key="deepseek-v4-pro",
+    request_model="deepseek/deepseek-v4-pro",
+    tag="dsv4p",
+    pinned=False,
+    pin_note=(
+        "config#4775 (2026-08-03). Sync-path Sonnet escalation tier "
+        "model — restores a genuine two-tier physical split on the sync "
+        "judge path post-I2997. The batch path stays on direct Anthropic "
+        "(Haiku/Sonnet per the Batches API 50% discount retention ruling); "
+        "the sync path uses OpenRouter with DeepSeek V4 Flash for the "
+        "Haiku tier and V4 Pro for the Sonnet tier, so the escalation "
+        "from Haiku→Sonnet on the sync path invokes a genuinely more "
+        "capable model rather than a lateral re-roll of the same V4 Flash. "
+        "NOT pinned to a dated snapshot — OpenRouter does not publish one "
+        "for this model/provider-route combination; drift is detected "
+        "post-hoc via `judge_resolved_model` + the re-anchor protocol, "
+        "same as SONNET's un-pinnable-alias case above."
+    ),
+)
+
+_SPECS: tuple[JudgeModelSpec, ...] = (HAIKU, SONNET, OPENROUTER_SHADOW, DEEPSEEK_V4_PRO)
 _BY_LOGICAL: dict[str, JudgeModelSpec] = {s.logical_key: s for s in _SPECS}
+
+# ── Sync-path OpenRouter routing ─────────────────────────────────────────
+# Post-I2997, the sync path (evaluate_artifact) migrated off direct
+# Anthropic to OpenRouter (config#2575).  The batch path
+# (build_batch_request) stays on direct Anthropic per Brian's 2026-07-19
+# Batches API discount retention ruling and continues to use
+# request_model_for() above.
+#
+# config#4775 (2026-08-03): restore a genuine two-tier physical split
+# on the sync path.  Haiku-tier sync → DeepSeek V4 Flash (cheapest
+# capable); Sonnet-tier sync → DeepSeek V4 Pro (genuine nuance upgrade
+# from Flash, not a lateral re-roll of the same model).
+
+_SYNC_REQUEST_MODEL: dict[str, str] = {
+    HAIKU.logical_key: OPENROUTER_SHADOW.request_model,  # deepseek-v4-flash
+    SONNET.logical_key: DEEPSEEK_V4_PRO.request_model,  # deepseek-v4-pro
+}
+
+
+def sync_request_model_for(logical_key: str) -> str:
+    """OpenRouter request model for the **sync** judge path, per logical key.
+
+    The batch path uses ``request_model_for()`` (Anthropic snapshot pinning).
+    The sync path uses this function (OpenRouter routing).  Both accept the
+    same stable ``logical_key`` so the S3 eval-artifact path, CloudWatch
+    ``judge_model`` dimension, and rolling-mean time series are unchanged.
+    """
+    try:
+        return _SYNC_REQUEST_MODEL[logical_key]
+    except KeyError:
+        raise KeyError(
+            f"No sync-path OpenRouter model mapped for judge logical key "
+            f"{logical_key!r}; known keys: {sorted(_SYNC_REQUEST_MODEL)}. "
+            f"Add the mapping in evals/judge_models.py."
+        ) from None
 
 SHADOW_LOGICAL_KEYS: frozenset[str] = frozenset({OPENROUTER_SHADOW.logical_key})
 """Judge logical keys that are SHADOW-ONLY (config#2575 binding
