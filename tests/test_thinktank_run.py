@@ -403,7 +403,12 @@ def test_mid_loop_crash_still_persists_terminal_artifacts_then_raises(tt_config)
 
         # Spend is recorded: guard.record_run lives in the terminal block, so
         # skipping it silently under-counted the month against the budget cap.
-        month = board["trading_day"][:7]
+        # The ledger is keyed by calendar_date month (BudgetGuard.check and
+        # record_run both use calendar_date), NOT trading_day — on dates where
+        # the last closed trading day falls in the prior month (e.g. a run on
+        # 2026-08-01 whose trading_day is 2026-07-31) the two months differ and
+        # reading by trading_day misses the ledger the run just wrote.
+        month = manifest["calendar_date"][:7]
         costs = store.get_json(f"thinktank/costs/{month}.json")
         assert [r["run_id"] for r in costs["runs"]] == [manifest["run_id"]]
         assert costs["spent_usd"] == pytest.approx(manifest["total_cost_usd"])
