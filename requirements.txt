@@ -5,11 +5,23 @@
 # pin exists solely to satisfy the security-audit gate.
 setuptools>=83.0.0
 anthropic~=0.120
-langgraph~=0.2
-langchain-anthropic~=0.3
+# Raised to the 1.x line (config#2570): langchain-anthropic~=1.5 forces
+# langchain-core 1.x, and the transitive eval graph (agentevals~=0.0 ->
+# openevals -> langchain 1.x) already resolves to langchain-core>=1.4.9 +
+# langgraph>=1.2.5. langgraph <1.2.5 (the 0.x lines) pins langchain-core<1.0
+# — uninstallable alongside 1.x (pip dies with `resolution-too-deep`
+# backtracking every 0.x release). `~=1.2` tracks the line the eval graph
+# already pulls in.
+langgraph~=1.2
+langchain-anthropic~=1.5
 # OpenAI-compatible chat model — how every research agent now reaches the
 # router (or OpenRouter in Lambda). See agents/langchain_utils.make_agent_llm.
-langchain-openai~=0.3
+# Raised to the 1.x line (config#2570): the transitive eval graph
+# (agentevals~=0.0 -> openevals -> langchain 1.x) already resolves
+# langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
+# 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
+# current path.
+langchain-openai~=1.4
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
@@ -138,7 +150,37 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # `TypeError: 'NoneType' object is not subscriptable` through the migrated
 # client, reintroducing the bug tests/test_null_choices_provider_error.py
 # exists to prevent. The floor is load-bearing, not hygiene.
-krepis>=0.25.0
+# 0.31.0 adds `krepis.router.resolve_group_spec` (group -> ModelSpec, the
+# adapter every consumer was hand-writing) and KREPIS_ROUTER_CREDENTIAL_SECRET
+# (per-consumer router identity — the edge identifies a consumer BY its
+# credential value and krepis.secrets resolves SSM before os.environ, so two
+# consumers sharing a secret NAME collapse into one identity there). Both are
+# load-bearing for alpha-engine-config-I6367: this repo's thinktank tiers and
+# the single_agent_quant challenger now address model groups instead of
+# pinning provider="openrouter".
+# The floor is >=0.31.1 (krepis-PR107), NOT 0.31.0: 0.31.0 emitted the proxy
+# route with `provider: "litellm"`, which ModelSpec maps to TRANSPORT_LITELLM
+# — krepis' IN-PROCESS Router, which calls each provider directly from the
+# consumer and reads OPENROUTER_API_KEY out of the environment. That would
+# send this repo's Lambda straight to openrouter.ai, unscanned. 0.31.1 emits
+# `provider: "litellm_proxy"` (a name unknown to PROVIDER_REGISTRY), so
+# ModelSpec treats the edge as the custom OpenAI-compatible endpoint it is —
+# the chain is walked by the proxy, server-side. An earlier krepis reopens
+# the I6183 failure mode (scanned-route logging while egressing unscanned).
+# 0.31.2 raises the AppConfig registry-resolution failure from DEBUG to
+# WARNING. Load-bearing here, not cosmetic: krepis.logging pins the root
+# logger at INFO with no override, so on 0.31.1 that failure is unobservable
+# and surfaces only as a much later "LLM_MODEL_REGISTRY.yaml not found"
+# naming neither AppConfig nor the cause -- and suggesting a remedy
+# (LLM_MODEL_REGISTRY_PATH) that is wrong for a public-repo Lambda.
+# Measured 2026-08-04 on alpha-engine-research-runner: all six KREPIS_ vars
+# set, IAM simulating allowed, the same call succeeding from a laptop, and
+# AppConfig resolution still failing on every invocation
+# (alpha-engine-config-I6373).
+# Bumping the pin also changes this file's hash, which is what forces the
+# Docker layer to rebuild -- an unchanged requirements.txt reuses the cached
+# pip layer and keeps shipping 0.31.1 however many times the deploy runs.
+krepis>=0.31.2
 
 # Scheduling / calendar
 exchange-calendars~=4.13

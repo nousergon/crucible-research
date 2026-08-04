@@ -25,9 +25,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 
 from producers.no_agent import run_no_agent_producer
 from producers.single_agent import run_single_agent_producer
+
+# champion-challenger-policy.md §3: "A retired arm is scored for a trailing
+# window (default: 8 cycles past retired_date), so 'we retired the wrong
+# one' is detectable rather than a matter of opinion." Named constants
+# (config-I6427) rather than a magic number, since the policy explicitly
+# frames "8 cycles" as a default a slot could override, and a "cycle" here
+# is one weekly producer-leaderboard run (see scoring/leaderboard_producers.py).
+RETIRED_TRAILING_WINDOW_CYCLES = 8
+RETIRED_TRAILING_WINDOW_CYCLE_DAYS = 7
+RETIRED_TRAILING_WINDOW_DAYS = RETIRED_TRAILING_WINDOW_CYCLES * RETIRED_TRAILING_WINDOW_CYCLE_DAYS
 
 
 @dataclass(frozen=True)
@@ -125,6 +137,50 @@ def buildable_challenger_producers() -> list[ProducerSpec]:
     would raise TypeError and then fail the completeness gate on every run.
     """
     return [p for p in challenger_producers() if p.build is not None]
+
+
+def retired_producers(as_of: str | _date | None = None) -> list[ProducerSpec]:
+    """Retired arms still inside their trailing scoring window
+    (champion-challenger-policy.md §3): every ``kind=="retired"`` row whose
+    ``retired_date`` falls within ``RETIRED_TRAILING_WINDOW_DAYS`` of
+    ``as_of``.
+
+    This is the SCORING set for retired arms: ``scoring.leaderboard_producers``
+    feeds every row this returns into the producer leaderboard alongside the
+    champion and live challengers, tagged ``kind="retired"`` in the artifact
+    so a downstream reader (and any promotion engine filtering on
+    ``kind=="challenger"``) can tell historical-evidence-only rows apart from
+    a live challenger — retired arms are scored but never promotion-eligible.
+
+    A retired arm that has aged past the window is EXCLUDED (not returned
+    here), even though it stays in ``RESEARCH_PRODUCERS`` forever as a
+    historical record — retirement per §6 does not delete the registry row,
+    only the code, and this selector is what makes "still inside the trailing
+    window" a queryable fact rather than something a caller has to re-derive.
+
+    ``as_of`` is the cohort/run date driving the scoring pass — an ISO date
+    string (matches the ``date_str`` callers already thread through
+    ``scoring/leaderboard_producers.py``) or a ``date``. Defaults to today
+    (UTC) so callers that don't have an explicit run date still get a sane
+    answer; tests should always pass an explicit ``as_of`` rather than
+    relying on wall-clock time.
+    """
+    if as_of is None:
+        cutoff = _date.today()
+    elif isinstance(as_of, str):
+        cutoff = _date.fromisoformat(as_of)
+    else:
+        cutoff = as_of
+
+    out: list[ProducerSpec] = []
+    for p in RESEARCH_PRODUCERS.values():
+        if p.kind != "retired" or not p.retired_date:
+            continue
+        retired = _date.fromisoformat(p.retired_date)
+        window_end = retired + _timedelta(days=RETIRED_TRAILING_WINDOW_DAYS)
+        if retired <= cutoff <= window_end:
+            out.append(p)
+    return out
 
 
 def champion_producer() -> ProducerSpec | None:
