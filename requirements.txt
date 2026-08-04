@@ -157,11 +157,17 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # consumers sharing a secret NAME collapse into one identity there). Both are
 # load-bearing for alpha-engine-config-I6367: this repo's thinktank tiers and
 # the single_agent_quant challenger now address model groups instead of
-# pinning provider="openrouter". 0.31.0 is also the first release where the
-# proxy route resolves as an OpenAI-compatible endpoint rather than the
-# in-process LiteLLM Router — an earlier krepis would send this repo's
-# Lambda straight to openrouter.ai, unscanned. (krepis-PR106.)
-krepis>=0.31.0
+# pinning provider="openrouter".
+# The floor is >=0.31.1 (krepis-PR107), NOT 0.31.0: 0.31.0 emitted the proxy
+# route with `provider: "litellm"`, which ModelSpec maps to TRANSPORT_LITELLM
+# — krepis' IN-PROCESS Router, which calls each provider directly from the
+# consumer and reads OPENROUTER_API_KEY out of the environment. That would
+# send this repo's Lambda straight to openrouter.ai, unscanned. 0.31.1 emits
+# `provider: "litellm_proxy"` (a name unknown to PROVIDER_REGISTRY), so
+# ModelSpec treats the edge as the custom OpenAI-compatible endpoint it is —
+# the chain is walked by the proxy, server-side. An earlier krepis reopens
+# the I6183 failure mode (scanned-route logging while egressing unscanned).
+krepis>=0.31.1
 
 # Scheduling / calendar
 exchange-calendars~=4.13
