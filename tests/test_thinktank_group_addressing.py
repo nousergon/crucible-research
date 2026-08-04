@@ -27,7 +27,6 @@ from thinktank.settings import (  # noqa: E402
     _parse_tier,
 )
 
-
 # ── config parsing ───────────────────────────────────────────────────────
 
 
