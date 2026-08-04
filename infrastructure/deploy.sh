@@ -139,6 +139,83 @@ _verify_live_alias() {
 
 # ── Main function: container image deployment ────────────────────────────────
 
+# -- Router addressing for the research Lambda (config-I6367 / I6373) -------
+#
+# Brian's ruling 2026-08-03: no agent may be directly linked to OpenRouter.
+# `producers/single_agent.py` addresses the `high` model GROUP through the
+# authenticated router edge, and needs six facts it cannot derive for itself.
+#
+# MERGE, never replace. `update-function-configuration --environment` REPLACES
+# the whole variable map, and this function's other ~20 variables (provider
+# keys, RAG_DATABASE_URL, LangSmith config) are NOT codified anywhere in this
+# repo -- they exist only on the live function. Writing a fresh map here would
+# delete every one of them. That gap is tracked as its own issue; until it is
+# closed, the only safe shape is read-modify-write.
+#
+# Nothing is echoed. The current map carries live credentials, so it is read
+# into a file and merged by python, never printed, never passed on a command
+# line. Do NOT trace this script (see AGENTS.md: a shell trace expands the
+# variable JSON).
+_apply_router_env() {
+  local fn="$1"
+  echo "  Applying router addressing to $fn (merge, not replace)..."
+
+  local tmp_cur tmp_new
+  tmp_cur="$(mktemp)"; tmp_new="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp_cur' '$tmp_new'" RETURN
+
+  aws lambda get-function-configuration \
+    --function-name "$fn" --region "$REGION" \
+    --query "Environment.Variables" --output json > "$tmp_cur" 2>/dev/null \
+    || echo '{}' > "$tmp_cur"
+
+  ROUTER_URL="${ROUTER_URL:-https://router.nousergon.ai:8443}" \
+  ROUTER_CREDENTIAL_SECRET="${ROUTER_CREDENTIAL_SECRET:-ROUTER_CONSUMER_RESEARCH}" \
+  python3 - "$tmp_cur" "$tmp_new" <<'PYEOF'
+import json, os, sys
+
+cur_path, new_path = sys.argv[1], sys.argv[2]
+with open(cur_path) as fh:
+    variables = json.load(fh) or {}
+
+# exec_context names WHERE CODE RUNS (model-router-policy R28), never how it
+# is attached and never which routes are wanted. The registry declares
+# `lambda` on NO model entry, deliberately -- a Lambda has no local egress
+# proxy and no private-network peer, so the router is its only path and this
+# call site FAILS CLOSED rather than reaching a provider endpoint unscanned.
+variables.update({
+    "KREPIS_EXEC_CONTEXT": "lambda",
+    "KREPIS_LITELLM_PROXY_URL": os.environ["ROUTER_URL"],
+    # Its OWN secret, not LITELLM_MASTER_KEY: the edge identifies a consumer
+    # BY its credential VALUE and krepis.secrets resolves SSM BEFORE
+    # os.environ, so a shared name collapses this Lambda into the director's
+    # identity at the edge however the environment is set.
+    "KREPIS_ROUTER_CREDENTIAL_SECRET": os.environ["ROUTER_CREDENTIAL_SECRET"],
+    # crucible-research is PUBLIC, so private-docs/LLM_MODEL_REGISTRY.yaml is
+    # correctly absent from the image. All three are required: krepis'
+    # AppConfig path is opt-in on the application id and SWALLOWS its own
+    # errors, falling through to a filesystem walk that finds nothing here --
+    # so a missing one surfaces later as "LLM_MODEL_REGISTRY.yaml not found",
+    # naming neither AppConfig nor the cause.
+    "KREPIS_APPCONFIG_APPLICATION": "alpha-engine",
+    "KREPIS_APPCONFIG_CONFIG_PROFILE": "llm-model-registry",
+    "KREPIS_APPCONFIG_ENVIRONMENT": "production",
+})
+
+with open(new_path, "w") as fh:
+    json.dump({"Variables": variables}, fh)
+print(f"    merged 6 router variables into {len(variables)} total (values not shown)")
+PYEOF
+
+  aws lambda update-function-configuration \
+    --function-name "$fn" \
+    --environment "file://$tmp_new" \
+    --region "$REGION" > /dev/null
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  echo "    router addressing applied."
+}
+
 build_and_deploy_main() {
   echo "=== Building container image for $FUNCTION_MAIN ==="
 
@@ -339,6 +416,8 @@ build_and_deploy_main() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_MAIN deployed (container image)."
+
+  _apply_router_env "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
