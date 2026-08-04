@@ -335,8 +335,8 @@ class TestRouterCredentialIsResolvableByKrepis:
         the edge identifies a consumer BY its credential value. A resolver that
         only answers for the shared ``LITELLM_MASTER_KEY`` would authenticate
         this box as the director and make revocation all-or-nothing."""
-        from krepis.router import resolve_router_credential
-
         import inspect
+
+        from krepis.router import resolve_router_credential
 
         assert "name" in inspect.signature(resolve_router_credential).parameters
