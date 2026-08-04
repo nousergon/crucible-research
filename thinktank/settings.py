@@ -189,9 +189,15 @@ def load_settings() -> ThinktankSettings:
         raw = yaml.safe_load(f)
     tt = raw["thinktank"]
 
+    # `providers` is OPTIONAL. A config whose tiers are all group-addressed
+    # has no provider endpoints to declare, and requiring an empty block would
+    # make the absence of direct provider linkage look like a malformed file
+    # (alpha-engine-config-I6367 — no agent directly linked to OpenRouter).
+    # Still hard-fails on a MALFORMED entry: a provider missing base_url or
+    # key_secret is a mistake, and only its total absence is meaningful.
     providers = {
         name: ProviderSpec(name=name, base_url=p["base_url"], key_secret=p["key_secret"])
-        for name, p in tt["llm"]["providers"].items()
+        for name, p in (tt["llm"].get("providers") or {}).items()
     }
     tiers = {
         name: _parse_tier(name, t)

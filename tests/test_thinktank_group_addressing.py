@@ -204,3 +204,70 @@ class TestGroupAddressedCost:
             served_model="ignored", provider_cost_usd=None,
         )
         assert cost == pytest.approx(3.0)
+
+
+# ── the config file after the flip ───────────────────────────────────────
+
+
+class TestFullyGroupAddressedConfig:
+    """A thinktank.yaml with NO `providers` block at all — the shape the file
+    takes once every tier is group-addressed (alpha-engine-config-I6373 step
+    6). Requiring an empty block would make the absence of direct provider
+    linkage look like a malformed file."""
+
+    def _write(self, tmp_path, body):
+        p = tmp_path / "thinktank.yaml"
+        p.write_text(body)
+        return p
+
+    _NO_PROVIDERS = """
+thinktank:
+  bucket: alpha-engine-research
+  coverage:
+    daily_new_names: 5
+    rank_ceiling: 150
+    sweep_chunk_size: 25
+    stale_after_days: 30
+  budget:
+    monthly_usd_default: 25.0
+    ssm_param: /thinktank/monthly_budget_usd
+  llm:
+    tiers:
+      sweep:
+        group: low
+        max_tokens: 4000
+        structured_outputs: true
+      thesis:
+        group: med
+        max_tokens: 8000
+        structured_outputs: false
+"""
+
+    def test_loads_with_no_providers_block(self, tmp_path, monkeypatch):
+        from thinktank.settings import load_settings
+
+        monkeypatch.setenv(
+            "THINKTANK_CONFIG_PATH", str(self._write(tmp_path, self._NO_PROVIDERS))
+        )
+        s = load_settings()
+        assert s.providers == {}
+        assert {n: t.group for n, t in s.tiers.items()} == {
+            "sweep": "low", "thesis": "med",
+        }
+        assert all(t.is_group_addressed for t in s.tiers.values())
+
+    def test_a_malformed_provider_still_hard_fails(self, tmp_path, monkeypatch):
+        """Only the TOTAL absence of the block is meaningful. A provider
+        missing base_url is a mistake and must not be tolerated by the same
+        leniency."""
+        import pytest as _pytest
+
+        from thinktank.settings import load_settings
+
+        body = self._NO_PROVIDERS.replace(
+            "  llm:\n    tiers:",
+            "  llm:\n    providers:\n      broken:\n        key_secret: X\n    tiers:",
+        )
+        monkeypatch.setenv("THINKTANK_CONFIG_PATH", str(self._write(tmp_path, body)))
+        with _pytest.raises(KeyError):
+            load_settings()
