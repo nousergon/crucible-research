@@ -400,17 +400,30 @@ def _load_producer_specs(
     s3: Any,
     bucket: str,
     dates: list[str],
+    *,
+    as_of: str | None = None,
 ) -> tuple[SpecHistory | None, list[SpecHistory]]:
     """Champion (live ``signals/{date}/signals.json``) + every challenger
-    (``signals_shadow/{producer}/{date}/signals.json``) as SpecHistories, each
+    (``signals_shadow/{producer}/{date}/signals.json``) + every in-window
+    retired arm (same shadow path — config-I6427) as SpecHistories, each
     reduced to its ENTER picks ranked by score.
 
     The champion's NAME comes from the live pointer (see
     ``_resolve_champion_name``), not from the research registry — the promotion
     loop owns that fact. Champion is ``None`` only when neither the pointer nor
     the registry names one; callers must treat that as an honest "no champion
-    to score", not an error."""
-    from producers.registry import challenger_producers
+    to score", not an error.
+
+    ``as_of`` is the cohort/run date (the leaderboard's ``date_str``), passed
+    straight through to ``registry.retired_producers()`` to resolve the
+    trailing window (champion-challenger-policy.md §3). Retired rows are
+    returned in the SAME list as challengers — ``score_leaderboard`` treats
+    that parameter as "every non-champion spec to score" and passes each
+    ``SpecHistory.kind`` through to the artifact unchanged, so a retired arm
+    is tagged ``"kind": "retired"`` there by construction, distinct from a
+    live ``"kind": "challenger"`` row (§3: retired arms are scored but never
+    promotion-eligible; promotion consumers filter on ``kind=="challenger"``)."""
+    from producers.registry import challenger_producers, retired_producers
 
     champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
@@ -433,6 +446,17 @@ def _load_producer_specs(
                 if day.ranked:
                     hist.by_date[d] = day
         challengers.append(hist)
+
+    for spec in retired_producers(as_of=as_of):
+        hist = SpecHistory(name=spec.name, kind="retired")
+        for d in dates:
+            doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
+            if doc:
+                day = _enter_ranked_and_scores(doc)
+                if day.ranked:
+                    hist.by_date[d] = day
+        challengers.append(hist)
+
     return champion, challengers
 
 
@@ -762,8 +786,13 @@ def build_producer_leaderboard(
     OBSERVE-ONLY + FAIL-SOFT: never raises into the caller (the research Lambda)."""
     try:
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
-        champion, challengers = _load_producer_specs(s3, bucket, dates)
-        vacuous = _vacuous_membership_collisions(champion, challengers)
+        champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
+        # Vacuity guard compares champion against LIVE challengers only — a
+        # retired-but-in-window arm (config-I6427) is historical evidence,
+        # never a promotion-eligible competitor, so its membership colliding
+        # with the champion's is not the condition policy §4 warns about.
+        live_challengers = [c for c in challengers if c.kind == "challenger"]
+        vacuous = _vacuous_membership_collisions(champion, live_challengers)
         _alert_vacuous_collisions("producer", champion.name if champion else None, vacuous)
         if champion is None:
             # No kind=="champion" producer registered (config-I2993:
