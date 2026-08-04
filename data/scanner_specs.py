@@ -60,10 +60,7 @@ def _rank_momentum_sleeve(
         fl = factor_loadings.get(ticker)
         if not fl:
             continue
-        vals = [
-            v for v in (fl.get("momentum_20d_zscore"), fl.get("return_60d_zscore"))
-            if v is not None
-        ]
+        vals = [v for v in (fl.get("momentum_20d_zscore"), fl.get("return_60d_zscore")) if v is not None]
         if not vals:
             continue
         scored.append((ticker, sum(vals) / len(vals)))
@@ -121,9 +118,7 @@ def _shadow_artifact(
     population is spec-independent (carried from live); agent_input_set follows
     the live ``population ∪ spec_picks[:50]`` convention."""
     population_tickers = list(live_artifact.get("population_tickers", []))
-    agent_input_set = list(
-        dict.fromkeys(population_tickers + scanner_tickers[:50])
-    )
+    agent_input_set = list(dict.fromkeys(population_tickers + scanner_tickers[:50]))
     return {
         "run_date": live_artifact["run_date"],
         "scanner_version": f"{spec.name}-{spec.version}",
@@ -153,7 +148,7 @@ def build_shadow_artifacts(
     eval_log: list[dict],
     factor_loadings: dict[str, dict[str, float]] | None,
     params: dict,
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], dict[str, str]]:
     """Build shadow candidate artifacts for every CHALLENGER spec.
 
     Fail-soft PER SPEC (§61 alarmed carve-out, config#1684): the shadow build
@@ -162,32 +157,98 @@ def build_shadow_artifacts(
     shadows, so it is omitted PER SPEC — but the failure now lands on an ALARMED
     surface with a consumer (observe_alerts → SNS + flow-doctor forum), not a
     bare WARN that let the empty-``candidates_shadow/`` class hide for weeks
-    (config#1403). Returns ``{spec_name: artifact}``.
+    (config#1403).
+
+    Returns ``(artifacts, errors)``:
+
+    - ``artifacts`` is ``{spec_name: artifact}`` for every spec that ranked
+      successfully this cycle (unchanged contract).
+    - ``errors`` is ``{spec_name: reason}`` for every spec whose ``rank()``
+      raised this cycle — mirrors ``producers/runner.py::run_challengers``'s
+      own ``(written, errors)`` return shape.
+
+    ``errors`` is the input the orchestration layer
+    (``data/scanner_orchestrator.py`` / ``lambda/scanner_handler.py``) uses to
+    write an explicit ``scanner_shadow_status.v1`` MISS record via
+    :func:`build_shadow_status_record`, mirroring
+    ``producers/experiment_record.py``'s ``experiment_record.v1`` pattern
+    (config#6428, champion-challenger-policy.md §3): "A cycle where an arm
+    produces no output is recorded as a miss, not omitted. Silent absence and
+    a genuine zero must never render identically." This WARN + alarm path is
+    unchanged and remains the primary paging surface; the status record is
+    ADDITIVE — a durable record alongside it, never a replacement.
     """
     n_eligible = sum(1 for r in eval_log if r.get("liquidity_pass") == 1)
     out: dict[str, dict] = {}
+    errors: dict[str, str] = {}
     for spec in challenger_specs():
         try:
             tickers = spec.rank(eval_log, factor_loadings, params)
-            out[spec.name] = _shadow_artifact(
-                spec, tickers, live_artifact, n_eligible, len(tickers)
-            )
+            out[spec.name] = _shadow_artifact(spec, tickers, live_artifact, n_eligible, len(tickers))
         except Exception as exc:  # noqa: BLE001 — shadow is best-effort observability
             logger.warning(
-                "[scanner_specs] shadow spec %s failed (non-fatal, live "
-                "unaffected): %s", spec.name, exc,
+                "[scanner_specs] shadow spec %s failed (non-fatal, live unaffected): %s",
+                spec.name,
+                exc,
             )
+            errors[spec.name] = str(exc)
             try:
                 from observe_alerts import publish_observe_alert
+
                 publish_observe_alert(
-                    f"scanner shadow spec {spec.name} FAILED to emit "
-                    f"(non-fatal, live candidates unaffected): {exc}",
+                    f"scanner shadow spec {spec.name} FAILED to emit (non-fatal, live candidates unaffected): {exc}",
                     source=f"scanner:shadow_spec:{spec.name}",
                     dedup_key=f"scanner_shadow_spec_fail:{spec.name}",
                 )
             except Exception:  # noqa: BLE001 — alerting is secondary; WARN above is the backstop
                 logger.warning(
-                    "[scanner_specs] observe_alert publish unavailable for %s "
-                    "(WARN log is the backstop)", spec.name,
+                    "[scanner_specs] observe_alert publish unavailable for %s (WARN log is the backstop)",
+                    spec.name,
                 )
-    return out
+    return out, errors
+
+
+def build_shadow_status_record(
+    spec: ScannerSpec,
+    run_date: str,
+    *,
+    shadow_candidates_key: str | None = None,
+    error: str | None = None,
+) -> dict:
+    """Explicit per-spec, per-cycle status record for the scanner shadow slot
+    — ``scanner_shadow_status.v1`` — mirroring
+    ``producers/experiment_record.py::build_challenger_experiment_record``'s
+    vocabulary (config#6428, champion-challenger-policy.md §3).
+
+    Called by the orchestration layer (``lambda/scanner_handler.py``) AFTER
+    the real ``candidates_shadow/`` write has been attempted for this spec —
+    exactly when the producer slot's own ``run_challengers`` calls
+    ``build_challenger_experiment_record`` — so ``status`` reflects the TRUE
+    final outcome (ranked AND persisted, or not) rather than asserting an
+    action that never happened. ``shadow_candidates_key`` is the S3 key
+    ``write_shadow_candidates_artifact`` returned for a successful write
+    (``None`` when ``rank()`` raised OR the subsequent S3 write failed —
+    ``error`` then carries why, becoming the artifact's honest ``absent``
+    reason)."""
+    if shadow_candidates_key is not None:
+        artifact = {
+            "name": "shadow_candidates",
+            "status": "emitted",
+            "key": shadow_candidates_key,
+        }
+        status = "complete"
+    else:
+        artifact = {
+            "name": "shadow_candidates",
+            "status": "absent",
+            "reason": error or "challenger spec did not emit a candidate set this cycle",
+        }
+        status = "failed"
+    return {
+        "schema_version": 1,
+        "spec": spec.name,
+        "kind": spec.kind,
+        "run_date": run_date,
+        "status": status,
+        "artifacts": [artifact],
+    }
