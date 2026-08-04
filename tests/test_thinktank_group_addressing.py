@@ -271,3 +271,72 @@ thinktank:
         monkeypatch.setenv("THINKTANK_CONFIG_PATH", str(self._write(tmp_path, body)))
         with _pytest.raises(KeyError):
             load_settings()
+
+
+# ── The credential half of the same contract (config-I6373) ──────────────
+
+
+class TestRouterCredentialIsResolvableByKrepis:
+    """`_build_client` passes ``api_key=None`` and lets krepis resolve the
+    credential from ``spec.api_key_env``. That is a CONTRACT with the library,
+    and it is the half that took the Think Tank down.
+
+    The box's credential is a per-consumer SecureString at
+    ``/alpha-engine/ROUTER_CONSUMER_THINKTANK``, and it lives only there on
+    purpose — the dispatcher hands the box the credential's NAME, never its
+    value, so the secret never enters an SSM command string, the CloudWatch
+    log that command streams to, or the bootstrap log shipped to S3.
+
+    Through krepis 0.33.0 ``LLMClient._resolve_api_key`` read ``os.environ``
+    alone. Route admission resolved the same credential on the full chain, so
+    the run was ADMITTED to the edge and then aborted at the first call:
+
+        LLMConfigError: no API key for provider 'litellm_proxy': pass api_key=
+        or set the ROUTER_CONSUMER_THINKTANK environment variable
+
+    Live on 2026-08-04 (``thinktank/runs/2026-08-04/manifest_1d6e7a653137``):
+    aborted after 5s, 0 theses, ``total_cost_usd`` 0, ``challenger_selection``
+    unwritten. krepis>=0.34.0 is the floor that closes it.
+
+    This asserts the library CAPABILITY rather than the version string: a
+    floor is satisfiable by a resolver that no longer behaves this way, and the
+    failure it guards is a daily run at 14:30 UTC, not a CI red.
+    """
+
+    def test_edge_credential_resolves_from_a_non_environment_source(
+        self, monkeypatch
+    ):
+        from krepis.llm import LLMClient
+        from krepis.llm_config import ModelSpec
+        from krepis.router import ROUTER_EDGE_PROVIDER
+
+        monkeypatch.delenv("ROUTER_CONSUMER_THINKTANK", raising=False)
+        monkeypatch.setattr(
+            "krepis.router._litellm_master_key_from_ssm",
+            lambda name="LITELLM_MASTER_KEY": (
+                "sk-live" if name == "ROUTER_CONSUMER_THINKTANK" else None
+            ),
+        )
+        spec = ModelSpec(
+            provider=ROUTER_EDGE_PROVIDER,
+            model="med",
+            base_url="https://router.example.invalid:8443",
+            api_key_env="ROUTER_CONSUMER_THINKTANK",
+        )
+        client = LLMClient(spec=spec, callsite_id="thinktank-contract")
+        assert client._resolve_api_key() == "sk-live", (
+            "the installed krepis resolves the router-edge credential from the "
+            "environment only — the Think Tank's credential is never in the "
+            "environment by design, so every tier call will abort the run"
+        )
+
+    def test_the_resolver_is_addressable_by_credential_name(self):
+        """`resolve_group_spec` stamps a PER-CONSUMER name onto the spec, and
+        the edge identifies a consumer BY its credential value. A resolver that
+        only answers for the shared ``LITELLM_MASTER_KEY`` would authenticate
+        this box as the director and make revocation all-or-nothing."""
+        from krepis.router import resolve_router_credential
+
+        import inspect
+
+        assert "name" in inspect.signature(resolve_router_credential).parameters

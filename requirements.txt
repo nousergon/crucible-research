@@ -180,7 +180,31 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # Bumping the pin also changes this file's hash, which is what forces the
 # Docker layer to rebuild -- an unchanged requirements.txt reuses the cached
 # pip layer and keeps shipping 0.31.1 however many times the deploy runs.
-krepis>=0.31.2
+#
+# >=0.34.0 (alpha-engine-config-I6373, 2026-08-04) is what makes the Think Tank
+# box and the research Lambda able to CALL the router they are already admitted
+# to. Both address model groups through the edge on a per-consumer credential
+# whose value lives in SSM at /alpha-engine/ROUTER_CONSUMER_{THINKTANK,RESEARCH}
+# -- deliberately, so the secret never enters a Lambda config, an environment,
+# a CloudWatch log, or the dispatcher's SSM command string. Through 0.33.0
+# `LLMClient._resolve_api_key` read `os.environ` alone, so both consumers were
+# ADMITTED to the route (route admission resolves the same credential on the
+# full chain) and then died at the call:
+#
+#   LLMConfigError: no API key for provider 'litellm_proxy': pass api_key= or
+#   set the ROUTER_CONSUMER_THINKTANK environment variable
+#
+# Measured on the daily run of 2026-08-04 (thinktank/runs/2026-08-04/
+# manifest_1d6e7a653137.json): aborted after 5s, 0 theses, total_cost_usd 0,
+# challenger_selection unwritten -- with all six KREPIS_ vars set on the box
+# and the SSM parameter present and readable. The floor is what restores the
+# Think Tank, not hygiene.
+#
+# NOT >=0.33.0, which is the obvious read of krepis-PR113 (config-I6414) but is
+# wrong: PR113 fixed the ADMISSION half of this seam and left `llm.py`
+# byte-identical between 0.32.0 and 0.33.0. On 0.33.0 the box fails exactly as
+# it did on 0.32.0.
+krepis>=0.34.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
