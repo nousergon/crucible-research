@@ -324,6 +324,42 @@ def test_materiality_positive_sweep_increments_thesis_version(tt_config):
         assert t1_event["thesis_version_written"] == 2
 
 
+def test_events_artifact_records_every_covered_ticker_not_only_escalations(tt_config):
+    """thinktank-policy.md TT-2.3-non-update-decisions-are-recorded: every
+    sweep decision is recorded with its reason, non-updates included — not
+    only escalations. A sweep that logs only its ``update_thesis`` verdicts
+    makes the gate's precision unmeasurable and a silently-stopped sweep
+    indistinguishable from a quiet week. alpha-engine-config-I6480.
+
+    Mixed-outcome sweep (T1 escalates, T0/T2 do not): the written events
+    artifact must carry one row per covered ticker, action="none" included.
+    """
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # RUN 1 — seed coverage: T0, T1, T2 (no sweep yet)
+        _run(tt_config, backend, s3)
+
+        # RUN 2 — sweep covers T0-T2; only T1 escalates
+        backend.sweep_updates = {"T1": "guidance cut"}
+        manifest2, store = _run(tt_config, backend, s3)
+        assert manifest2.sweep_tickers == 3
+        assert manifest2.events_flagged == 1
+
+        events_text = store.get_text(f"thinktank/events/{manifest2.trading_day}.jsonl")
+        assert events_text is not None
+        rows = [json.loads(line) for line in events_text.strip().splitlines() if line]
+
+        # The written artifact's row count equals the FULL covered-set size —
+        # every ticker's assessment recorded, not only the escalating one.
+        assert len(rows) == manifest2.sweep_tickers == 3
+        assert {r["ticker"] for r in rows} == {"T0", "T1", "T2"}
+        actions_by_ticker = {r["ticker"]: r["action"] for r in rows}
+        assert actions_by_ticker == {"T0": "none", "T1": "update_thesis", "T2": "none"}
+
+
 def test_dry_run_writes_nothing(tt_config):
     backend = _FakeBackend()
     with mock_aws():
