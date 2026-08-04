@@ -669,9 +669,15 @@ def write_universe_board_for_scanner_run(
         focus_lookup,
         run_date,
     )
+    # scanner_tickers rides the SAME candidates.json artifact as scanner_eval_log
+    # (both written by build_candidates_artifact) — pass it through so the
+    # builder's producer contract check (alpha-engine-config#4820) can catch a
+    # degraded/empty scanner_eval_log for THIS run rather than silently writing
+    # a board with a false gate verdict.
     return compute_and_write_universe_board(
         run_date,
         scanner_evals,
+        scanner_tickers=artifact.get("scanner_tickers") or [],
         bucket=bucket,
         s3_client=s3,
     )
