@@ -240,6 +240,18 @@ def test_incumbent_arm_is_count_matched_to_the_champion() -> None:
     assert m["cuts"]["scanner_top_20"]["size"] == m["cuts"]["attractiveness_top_20"]["size"] == 20
 
 
+def test_incumbent_arm_fails_loud_when_not_count_matched() -> None:
+    """Runtime guard (alpha-engine-config-I4983 closes-when): a short
+    tech_score table must not silently emit ``scanner_top_20`` at n<20 while
+    the champion stays at 20 — that reintroduces the breadth confound the
+    ruling exists to kill. Fixture-only equality asserts cannot catch a live
+    partial eval log; the producer must RAISE."""
+    # Only 10 scored cut members → top-by-tech would be size 10, not 20.
+    partial = {t: float(i) for i, t in enumerate(_scanner_cut()[:10])}
+    with pytest.raises(UniverseMembershipError, match="count-match"):
+        _membership(tech_scores=partial)
+
+
 def test_incumbent_arm_disagrees_with_the_champion() -> None:
     """Guard against a fixture (or a future refactor) where both arms silently
     resolve to the same names — that would make the comparison vacuous while
