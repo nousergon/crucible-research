@@ -167,7 +167,20 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # ModelSpec treats the edge as the custom OpenAI-compatible endpoint it is —
 # the chain is walked by the proxy, server-side. An earlier krepis reopens
 # the I6183 failure mode (scanned-route logging while egressing unscanned).
-krepis>=0.31.1
+# 0.31.2 raises the AppConfig registry-resolution failure from DEBUG to
+# WARNING. Load-bearing here, not cosmetic: krepis.logging pins the root
+# logger at INFO with no override, so on 0.31.1 that failure is unobservable
+# and surfaces only as a much later "LLM_MODEL_REGISTRY.yaml not found"
+# naming neither AppConfig nor the cause -- and suggesting a remedy
+# (LLM_MODEL_REGISTRY_PATH) that is wrong for a public-repo Lambda.
+# Measured 2026-08-04 on alpha-engine-research-runner: all six KREPIS_ vars
+# set, IAM simulating allowed, the same call succeeding from a laptop, and
+# AppConfig resolution still failing on every invocation
+# (alpha-engine-config-I6373).
+# Bumping the pin also changes this file's hash, which is what forces the
+# Docker layer to rebuild -- an unchanged requirements.txt reuses the cached
+# pip layer and keeps shipping 0.31.1 however many times the deploy runs.
+krepis>=0.31.2
 
 # Scheduling / calendar
 exchange-calendars~=4.13
