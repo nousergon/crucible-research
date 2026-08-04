@@ -75,3 +75,25 @@ def test_exec_context_is_lambda():
     this call site fail CLOSED instead of reaching a provider endpoint whose
     traffic is unscanned (alpha-engine-config-I6183)."""
     assert '"KREPIS_EXEC_CONTEXT": "lambda"' in _text()
+
+
+def test_it_waits_for_the_code_update_before_writing_configuration():
+    """Lambda serializes updates per function. `update-function-code` leaves
+    LastUpdateStatus=InProgress for a few seconds, and a configuration update
+    inside that window raises ResourceConflictException — which under
+    `set -euo pipefail` aborts the whole deploy.
+
+    Observed live: deploy runs 30866612804 and 30867141385 (2026-08-04) both
+    died here. The merge computed correctly ("merged 6 router variables into
+    26 total"); only the write raced. Every other update in this script
+    already waits first."""
+    text = _text()
+    body = text[text.index("_apply_router_env() {"):]
+    body = body[:body.index("\nbuild_and_deploy_main")]
+    wait_at = body.find("wait function-updated")
+    write_at = body.find("update-function-configuration")
+    assert wait_at != -1, "_apply_router_env never waits for the in-flight update"
+    assert wait_at < write_at, (
+        "_apply_router_env writes configuration before waiting for the code "
+        "update to settle — ResourceConflictException aborts the deploy"
+    )
