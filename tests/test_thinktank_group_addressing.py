@@ -261,6 +261,7 @@ thinktank:
         missing base_url is a mistake and must not be tolerated by the same
         leniency."""
         import pytest as _pytest
+
         from thinktank.settings import load_settings
 
         body = self._NO_PROVIDERS.replace(
