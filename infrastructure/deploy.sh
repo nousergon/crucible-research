@@ -160,6 +160,20 @@ _apply_router_env() {
   local fn="$1"
   echo "  Applying router addressing to $fn (merge, not replace)..."
 
+  # Lambda serializes updates per function. `update-function-code` leaves the
+  # function in LastUpdateStatus=InProgress for a few seconds, and a
+  # configuration update issued inside that window fails with
+  #
+  #   ResourceConflictException: The operation cannot be performed at this
+  #   time. An update is in progress for resource: ...
+  #
+  # which under `set -euo pipefail` aborts the whole deploy. Observed live on
+  # the first two runs of this function (crucible-research deploy runs
+  # 30866612804 and 30867141385, 2026-08-04) -- the merge itself computed
+  # correctly and only the write raced. Every other update in this script
+  # already waits first; this one has to as well.
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+
   local tmp_cur tmp_new
   tmp_cur="$(mktemp)"; tmp_new="$(mktemp)"
   # shellcheck disable=SC2064
