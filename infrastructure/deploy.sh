@@ -27,7 +27,6 @@ FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
-FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 FUNCTION_OPENROUTER_SHADOW="alpha-engine-research-openrouter-shadow"
 FUNCTION_PERTURBATION_BATTERY="alpha-engine-research-perturbation-battery"
@@ -931,21 +930,18 @@ deploy_scanner() {
   _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
 }
 
-# Daily think-tank Lambda — config#1579 P1. Shared image with the main
-# runner; CMD override sets the entry to thinktank_handler.handler.
-# Timeout 900s (Lambda max) matches the EPIC's runner decision
-# ("EventBridge->Lambda first; move to the EC2-spot pattern if a run
-# breaches ~12 min") — a steady-state run is a few minutes (5 thesis
-# builds + chunked sweep + churn-gated themes), but a theme re-seed day
-# stacks ~12 extra tier calls. Memory 1024MB matches the main runner
-# (pandas substrate reader + boto3 working set). Secrets (OpenRouter key,
-# RAG DB URL, Voyage key) resolve at runtime from SSM via the get_secret
-# chokepoint — no function-level env var config needed. The EventBridge
-# schedule + Errors alarm live in infrastructure/setup-thinktank-schedule.sh
-# (idempotent, run once after first deploy creates the function).
-deploy_thinktank() {
-  _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
-}
+# Daily think-tank Lambda deploy target — RETIRED (alpha-engine-config-I5777,
+# 2026-08-04). The §47 spot cutover (config-I5208 daily / config-I5758 weekly)
+# repointed both invokers of `alpha-engine-research-thinktank` onto
+# `alpha-engine-thinktank-spot-dispatcher`; measured 2026-08-04, the function
+# has had zero invocations since 2026-07-29, carries no resource-based policy
+# (no principal can invoke it), and no deployed state machine names it. This
+# target published Docker images to a Lambda nothing calls, on every push, for
+# no benefit. `lambda/thinktank_handler.py` is NOT dead — it is still imported
+# and run in-process by `infrastructure/thinktank_box_runner.py` on the spot
+# box, so its tests and source stay. Only the Lambda-specific publish path is
+# gone. The AWS Lambda resource itself is not deleted by this change — see
+# alpha-engine-config-I5777 for the operator-run deletion command.
 
 # Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B. Shared
 # image with the main runner; CMD override sets the entry to
@@ -1005,13 +1001,12 @@ case "$TARGET" in
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
-  thinktank)             deploy_thinktank ;;
   signals_envelope)      deploy_signals_envelope ;;
   openrouter_shadow)     deploy_openrouter_shadow ;;
   perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
 esac
 
 echo ""

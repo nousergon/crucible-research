@@ -190,3 +190,31 @@ def champion_producer() -> ProducerSpec | None:
     spec is tracked separately). Callers MUST treat ``None`` as a legitimate,
     non-error state, not an invariant violation."""
     return next((p for p in RESEARCH_PRODUCERS.values() if p.kind == "champion"), None)
+
+
+# ── Producer/champion compatibility matrix (config#5713) ───────────────────
+# The declared registry row behind the executor's read-path coherence
+# assertion (alpha-engine executor/champion.py::
+# assert_producer_champion_coherence). Champion-challenger-policy §2 has an
+# arm name its slot; this matrix names which producers RELY on which arms:
+#
+# * ``EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS`` — producers whose
+#   signals.json ``buy_candidates`` is ALWAYS ``[]`` by contract (they never
+#   propose entries themselves; see scoring/signals_envelope.py's docstring
+#   caveat). An empty list from such a producer is not a market condition —
+#   it is the producer's honest "no opinion" — so it is only safe under a
+#   champion arm that synthesizes candidates.
+# * ``FILLING_CHAMPION_ARMS`` — arms that synthesize ``buy_candidates`` in
+#   the executor (apply_champion_selection) and are therefore the only
+#   legitimate partners for empty-by-contract producers.
+# * ``NOOP_CHAMPION_ARMS`` — arms that pass ``buy_candidates`` through
+#   untouched; pairing an empty-by-contract producer with one of these
+#   guarantees no new entry is ever proposed, silently (the defect
+#   config#5713 exists to detect).
+#
+# The executor reads the runtime values from its private risk.yaml
+# (union-extended over its own fail-closed baselines); this row is the
+# policy-level declaration and the drift-test anchor for the producer side.
+EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS = ("signals_envelope",)
+FILLING_CHAMPION_ARMS = ("scanner_predictor_direct", "thinktank_coverage")
+NOOP_CHAMPION_ARMS = ("agentic",)

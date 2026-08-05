@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -104,6 +106,91 @@ def test_skip_stale_refill_zero_gap_returns_nothing():
     )
     assert new_rows == []
     assert refresh == []
+
+
+def test_stale_entries_are_refreshed_regardless_of_new_names_slot_fill():
+    """TT-2.1-staleness-sla-is-actionable / alpha-engine-config-I6478: the
+    ``stale_after_days`` horizon must be an actionable SLA, not merely
+    informational. Before this fix, the stale-refill fallback in
+    ``select_intake`` only fired when the new-names intake slot was
+    otherwise UNFILLED (``slots_left > 0``) — on a day with enough fresh
+    uncovered names to fill ``daily_new_names`` on their own (coverage
+    "already full" for the day), a covered name past its staleness horizon
+    produced no refresh and no signal at all.
+
+    This asserts the invariant directly rather than a hand-picked literal:
+    independently compute every covered ticker whose thesis age (relative
+    to ``trading_day``) is >= ``stale_after_days`` — the ledger's own
+    breach set, mirroring test_thinktank_tier_contract.py's shape of
+    deriving the expected set from the data/code itself — and require
+    every one of them to appear in ``select_intake``'s ``refresh``, even
+    though the board has ample uncovered names to fill every
+    ``daily_new_names`` slot with brand-new coverage (the exact scenario
+    the pre-fix fallback could never reach)."""
+    trading_day = "2026-08-04"
+    stale_after_days = 30
+    ledger = CoverageLedger()
+    record_thesis_write(ledger, ticker="T0", trading_day="2026-06-01", thesis_version=1)  # 64d old — breach
+    record_thesis_write(ledger, ticker="T1", trading_day="2026-06-20", thesis_version=1)  # 45d old — breach
+    record_thesis_write(ledger, ticker="T2", trading_day="2026-08-01", thesis_version=1)  # 3d old — fresh
+
+    # T0-T2 are covered; the board's uncovered pool (T3..) is large enough
+    # that ordinary new-name intake fills every daily_new_names slot on its
+    # own — the "coverage already full" condition under which the
+    # discretionary graceful-refresh path never fires (slots_left <= 0).
+    board = _board(n=20)
+    new_rows, refresh = select_intake(
+        ledger,
+        board,
+        daily_new_names=5,
+        rank_ceiling=150,
+        stale_after_days=stale_after_days,
+        trading_day=trading_day,
+    )
+
+    assert len(new_rows) == 5
+    assert all(r["ticker"] not in {"T0", "T1", "T2"} for r in new_rows)
+
+    breached = {
+        e.ticker
+        for e in ledger.entries.values()
+        if (date.fromisoformat(trading_day) - date.fromisoformat(e.thesis_updated_on)).days
+        >= stale_after_days
+    }
+    assert breached == {"T0", "T1"}
+    assert breached <= set(refresh), (
+        f"stale_after_days={stale_after_days} breach set {breached} not fully "
+        f"covered by refresh={refresh} — the staleness horizon produced no "
+        "action on a day coverage was already full "
+        "(TT-2.1-staleness-sla-is-actionable)"
+    )
+    assert "T2" not in refresh  # fresh entry must not be force-refreshed
+
+
+def test_stale_breach_is_mandatory_even_under_skip_stale_refill():
+    """The SLA floor (breach-forced refresh) is independent of
+    ``skip_stale_refill`` — that flag suppresses only the DISCRETIONARY
+    graceful-refill path (gap_fill's "staleness is daily's job, not mine"),
+    never the mandatory breach floor. Only exercised here at the function
+    level: the gap_fill caller (``gap_fill_fanout.plan_gap_fill``)
+    intentionally never passes ``stale_after_days``/``trading_day``, so in
+    production this floor activates only on the daily cadence — see
+    ``thinktank/run.py``."""
+    trading_day = "2026-08-04"
+    ledger = CoverageLedger()
+    record_thesis_write(ledger, ticker="T0", trading_day="2026-06-01", thesis_version=1)  # 64d old — breach
+
+    new_rows, refresh = select_intake(
+        ledger,
+        _board(),
+        daily_new_names=5,
+        rank_ceiling=150,
+        skip_stale_refill=True,
+        stale_after_days=30,
+        trading_day=trading_day,
+    )
+    assert [r["ticker"] for r in new_rows] == ["T1", "T2", "T3", "T4", "T5"]
+    assert refresh == ["T0"]
 
 
 def test_record_thesis_write_updates_existing_entry():

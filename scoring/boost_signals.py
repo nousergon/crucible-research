@@ -207,8 +207,14 @@ def read_institutional_map(
          producer pattern as short_interest — used automatically if a
          nousergon-data collector later emits it, keeping the expensive 13F
          fetch off the research critical path);
-      2. live ``fetch_institutional_accumulation`` over the (small,
-         already-screened) universe, only when ``EDGAR_IDENTITY`` is set;
+      2. live ``fetch_institutional_accumulation`` over the board-width
+         (~903-name) universe, only when ``EDGAR_IDENTITY`` is set — that
+         secret is unset in production today, so this path currently
+         soft-fails to empty; repointing it to
+         ``nousergon_lib.decision_set`` is tracked follow-up
+         (alpha-engine-config#6450) that must land before
+         ``EDGAR_IDENTITY`` is ever populated in production, not done by
+         this change;
       3. empty map → ``institutional_boost=0.0`` for all.
     """
     bucket = bucket or os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
@@ -227,7 +233,7 @@ def read_institutional_map(
                 return recs
     except Exception as e:  # noqa: BLE001
         logger.warning("[boost_signals] institutional artifact read failed: %s", e)
-    # 2. live 13F fetch for the screened universe
+    # 2. live 13F fetch for the board-width universe (EDGAR_IDENTITY-gated)
     if fetcher is None:
         if not get_secret("EDGAR_IDENTITY", required=False):
             logger.info(
