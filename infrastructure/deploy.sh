@@ -27,7 +27,6 @@ FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
-FUNCTION_THINKTANK="alpha-engine-research-thinktank"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 FUNCTION_OPENROUTER_SHADOW="alpha-engine-research-openrouter-shadow"
 FUNCTION_PERTURBATION_BATTERY="alpha-engine-research-perturbation-battery"
@@ -138,6 +137,97 @@ _verify_live_alias() {
 # NOTE: boto3 path — no ``--cli-binary-format``/base64 dance.
 
 # ── Main function: container image deployment ────────────────────────────────
+
+# -- Router addressing for the research Lambda (config-I6367 / I6373) -------
+#
+# Brian's ruling 2026-08-03: no agent may be directly linked to OpenRouter.
+# `producers/single_agent.py` addresses the `high` model GROUP through the
+# authenticated router edge, and needs six facts it cannot derive for itself.
+#
+# MERGE, never replace. `update-function-configuration --environment` REPLACES
+# the whole variable map, and this function's other ~20 variables (provider
+# keys, RAG_DATABASE_URL, LangSmith config) are NOT codified anywhere in this
+# repo -- they exist only on the live function. Writing a fresh map here would
+# delete every one of them. That gap is tracked as its own issue; until it is
+# closed, the only safe shape is read-modify-write.
+#
+# Nothing is echoed. The current map carries live credentials, so it is read
+# into a file and merged by python, never printed, never passed on a command
+# line. Do NOT trace this script (see AGENTS.md: a shell trace expands the
+# variable JSON).
+_apply_router_env() {
+  local fn="$1"
+  echo "  Applying router addressing to $fn (merge, not replace)..."
+
+  # Lambda serializes updates per function. `update-function-code` leaves the
+  # function in LastUpdateStatus=InProgress for a few seconds, and a
+  # configuration update issued inside that window fails with
+  #
+  #   ResourceConflictException: The operation cannot be performed at this
+  #   time. An update is in progress for resource: ...
+  #
+  # which under `set -euo pipefail` aborts the whole deploy. Observed live on
+  # the first two runs of this function (crucible-research deploy runs
+  # 30866612804 and 30867141385, 2026-08-04) -- the merge itself computed
+  # correctly and only the write raced. Every other update in this script
+  # already waits first; this one has to as well.
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+
+  local tmp_cur tmp_new
+  tmp_cur="$(mktemp)"; tmp_new="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp_cur' '$tmp_new'" RETURN
+
+  aws lambda get-function-configuration \
+    --function-name "$fn" --region "$REGION" \
+    --query "Environment.Variables" --output json > "$tmp_cur" 2>/dev/null \
+    || echo '{}' > "$tmp_cur"
+
+  ROUTER_URL="${ROUTER_URL:-https://router.nousergon.ai:8443}" \
+  ROUTER_CREDENTIAL_SECRET="${ROUTER_CREDENTIAL_SECRET:-ROUTER_CONSUMER_RESEARCH}" \
+  python3 - "$tmp_cur" "$tmp_new" <<'PYEOF'
+import json, os, sys
+
+cur_path, new_path = sys.argv[1], sys.argv[2]
+with open(cur_path) as fh:
+    variables = json.load(fh) or {}
+
+# exec_context names WHERE CODE RUNS (model-router-policy R28), never how it
+# is attached and never which routes are wanted. The registry declares
+# `lambda` on NO model entry, deliberately -- a Lambda has no local egress
+# proxy and no private-network peer, so the router is its only path and this
+# call site FAILS CLOSED rather than reaching a provider endpoint unscanned.
+variables.update({
+    "KREPIS_EXEC_CONTEXT": "lambda",
+    "KREPIS_LITELLM_PROXY_URL": os.environ["ROUTER_URL"],
+    # Its OWN secret, not LITELLM_MASTER_KEY: the edge identifies a consumer
+    # BY its credential VALUE and krepis.secrets resolves SSM BEFORE
+    # os.environ, so a shared name collapses this Lambda into the director's
+    # identity at the edge however the environment is set.
+    "KREPIS_ROUTER_CREDENTIAL_SECRET": os.environ["ROUTER_CREDENTIAL_SECRET"],
+    # crucible-research is PUBLIC, so private-docs/LLM_MODEL_REGISTRY.yaml is
+    # correctly absent from the image. All three are required: krepis'
+    # AppConfig path is opt-in on the application id and SWALLOWS its own
+    # errors, falling through to a filesystem walk that finds nothing here --
+    # so a missing one surfaces later as "LLM_MODEL_REGISTRY.yaml not found",
+    # naming neither AppConfig nor the cause.
+    "KREPIS_APPCONFIG_APPLICATION": "alpha-engine",
+    "KREPIS_APPCONFIG_CONFIG_PROFILE": "llm-model-registry",
+    "KREPIS_APPCONFIG_ENVIRONMENT": "production",
+})
+
+with open(new_path, "w") as fh:
+    json.dump({"Variables": variables}, fh)
+print(f"    merged 6 router variables into {len(variables)} total (values not shown)")
+PYEOF
+
+  aws lambda update-function-configuration \
+    --function-name "$fn" \
+    --environment "file://$tmp_new" \
+    --region "$REGION" > /dev/null
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  echo "    router addressing applied."
+}
 
 build_and_deploy_main() {
   echo "=== Building container image for $FUNCTION_MAIN ==="
@@ -339,6 +429,8 @@ build_and_deploy_main() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_MAIN deployed (container image)."
+
+  _apply_router_env "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
@@ -838,21 +930,18 @@ deploy_scanner() {
   _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
 }
 
-# Daily think-tank Lambda — config#1579 P1. Shared image with the main
-# runner; CMD override sets the entry to thinktank_handler.handler.
-# Timeout 900s (Lambda max) matches the EPIC's runner decision
-# ("EventBridge->Lambda first; move to the EC2-spot pattern if a run
-# breaches ~12 min") — a steady-state run is a few minutes (5 thesis
-# builds + chunked sweep + churn-gated themes), but a theme re-seed day
-# stacks ~12 extra tier calls. Memory 1024MB matches the main runner
-# (pandas substrate reader + boto3 working set). Secrets (OpenRouter key,
-# RAG DB URL, Voyage key) resolve at runtime from SSM via the get_secret
-# chokepoint — no function-level env var config needed. The EventBridge
-# schedule + Errors alarm live in infrastructure/setup-thinktank-schedule.sh
-# (idempotent, run once after first deploy creates the function).
-deploy_thinktank() {
-  _deploy_image_shared_lambda "$FUNCTION_THINKTANK" "thinktank_handler" 900 1024
-}
+# Daily think-tank Lambda deploy target — RETIRED (alpha-engine-config-I5777,
+# 2026-08-04). The §47 spot cutover (config-I5208 daily / config-I5758 weekly)
+# repointed both invokers of `alpha-engine-research-thinktank` onto
+# `alpha-engine-thinktank-spot-dispatcher`; measured 2026-08-04, the function
+# has had zero invocations since 2026-07-29, carries no resource-based policy
+# (no principal can invoke it), and no deployed state machine names it. This
+# target published Docker images to a Lambda nothing calls, on every push, for
+# no benefit. `lambda/thinktank_handler.py` is NOT dead — it is still imported
+# and run in-process by `infrastructure/thinktank_box_runner.py` on the spot
+# box, so its tests and source stay. Only the Lambda-specific publish path is
+# gone. The AWS Lambda resource itself is not deleted by this change — see
+# alpha-engine-config-I5777 for the operator-run deletion command.
 
 # Signals-envelope Lambda — alpha-engine-config epic #2515 Phase B. Shared
 # image with the main runner; CMD override sets the entry to
@@ -912,13 +1001,12 @@ case "$TARGET" in
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
   scanner)               deploy_scanner ;;
-  thinktank)             deploy_thinktank ;;
   signals_envelope)      deploy_signals_envelope ;;
   openrouter_shadow)     deploy_openrouter_shadow ;;
   perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_thinktank; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|thinktank|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
 esac
 
 echo ""

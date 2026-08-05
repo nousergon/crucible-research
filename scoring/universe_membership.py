@@ -239,9 +239,10 @@ def build_universe_membership(
     tech_scores : ``{ticker: tech_score}`` from
         ``candidates.json::scanner_eval_log``. When supplied, emits the
         ``scanner_top_20`` incumbent-challenger cut plus the ``scanner_ranks``
-        table. Optional so historical backfills, whose inputs may predate the
-        eval-log field, still build — they simply omit the incumbent arm rather
-        than failing or fabricating a ranking.
+        table, and FAILS LOUD if that arm cannot be count-matched to the
+        champion (partial eval logs that would emit n≠20). Optional so
+        historical backfills, whose inputs may predate the eval-log field,
+        still build — they omit the incumbent arm rather than fabricating one.
     backfilled_from : provenance string when this artifact is RECONSTRUCTED from
         historical inputs rather than emitted by the live run. Consumers must be
         able to tell a reconstruction from a first-class write — a backfill can
@@ -298,6 +299,25 @@ def build_universe_membership(
             "tickers": incumbent,
             "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score",
         }
+
+    # Count-match is the whole point of N=20 (alpha-engine-config-I4983): an
+    # arm's win must not be confounded between selection rule and breadth. When
+    # the incumbent arm is emitted, its size MUST equal the champion cut's —
+    # a partial eval log that yields n=10 against a n=20 champion is a red run,
+    # never a silently-skewed comparison. (Absence of the incumbent arm when
+    # no tech_scores were supplied is an honest degrade for historical
+    # backfills; that path does not enter this check.)
+    champion = cuts.get(PREDICTOR_UNIVERSE_CUT)
+    incumbent_cut = cuts.get(f"scanner_top_{_INCUMBENT_CUT_N}")
+    if champion is not None and incumbent_cut is not None:
+        if champion["size"] != incumbent_cut["size"]:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: count-match broken — "
+                f"{PREDICTOR_UNIVERSE_CUT}.size={champion['size']} vs "
+                f"scanner_top_{_INCUMBENT_CUT_N}.size={incumbent_cut['size']} "
+                f"(both must equal {_INCUMBENT_CUT_N}; a short tech_score table "
+                f"must not silently narrow the incumbent arm)"
+            )
 
     membership = {
         "schema_version": SCHEMA_VERSION,
@@ -429,9 +449,9 @@ def compute_and_write_universe_membership(
 
     ``scanner_eval_log`` is the run's ``candidates.json::scanner_eval_log``; when
     passed, the incumbent ``scanner_top_20`` arm and ``scanner_ranks`` are
-    emitted. Optional so an omitted log degrades to "no incumbent arm recorded"
-    rather than failing the Scanner run — the champion cut, which is what the
-    predictor actually resolves, does not depend on it.
+    emitted and count-matched to the champion. An omitted log degrades to "no
+    incumbent arm recorded"; a present-but-too-thin log fails the Scanner run
+    rather than writing a breadth-confounded comparison.
 
     Raises ``UniverseMembershipError`` on any empty input. The caller must NOT
     wrap this in a fail-soft except: a missing membership artifact leaves the

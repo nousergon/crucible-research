@@ -5,7 +5,12 @@ Order of operations (one ``--daily`` invocation):
 2. load read-side context (board, signals, macro report, news, RAG probe)
 3. themes: seed if absent / reconcile if a new weekly landed
 4. intake: top-N uncovered by attractiveness (rank-bounded) + stalest refresh
-   — UNLESS gap_fill_only (below), which skips the stalest-refresh half
+   — UNLESS gap_fill_only (below), which skips the stalest-refresh half.
+   The daily branch also enforces the staleness SLA (TT-2.1-staleness-sla-
+   is-actionable, alpha-engine-config-I6478): any covered name past
+   ``stale_after_days`` is force-refreshed regardless of whether the
+   new-names slots were otherwise full — see ``thinktank.ledger
+   .select_intake``.
 5. thesis builds for the intake set
 6. events sweep over all covered names → thesis updates where flagged
 7. churn-gated daily macro-theme update from sweep-surfaced developments
@@ -228,11 +233,18 @@ def run_daily(
             skip_stale_refill=True,
         )
     else:
+        # stale_after_days/trading_day wired here (only): TT-2.1-staleness-
+        # sla-is-actionable / alpha-engine-config-I6478 — the daily cadence
+        # is the sole enforcer of the staleness SLA (see select_intake's
+        # docstring); refresh_tickers and gap_fill_only intentionally omit
+        # them.
         new_rows, refresh = select_intake(
             ledger,
             ctx.board,
             daily_new_names=settings.daily_new_names,
             rank_ceiling=settings.rank_ceiling,
+            stale_after_days=settings.stale_after_days,
+            trading_day=trading_day,
         )
     manifest.names_added = [r["ticker"] for r in new_rows]
     manifest.names_refreshed = refresh

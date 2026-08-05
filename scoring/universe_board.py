@@ -96,7 +96,13 @@ exception for secondary observability, the archive_writer call site fail-SOFTs
 with a WARN log (the board is dashboard visibility, not a trading-path
 contract) — a board-write failure must NOT fail the research run. The builder
 itself raises on genuinely broken inputs so the caller's WARN records a real
-fault rather than silently emitting an empty board.
+fault rather than silently emitting an empty board. This now also covers a
+POPULATED-but-WRONG board: when the caller passes ``scanner_tickers`` (the
+authoritative ``candidates.json::scanner_tickers`` list), the builder verifies
+the board's own ``gate_stage == "passed"`` set agrees exactly and raises on
+mismatch (alpha-engine-config#4820 — a run whose gate input degraded silently
+emitted a board reporting zero, or an undercount, of gate-passers with no
+error anywhere).
 """
 
 from __future__ import annotations
@@ -127,6 +133,30 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_BOARD_SCHEMA_VERSION = 3
 
+# Known-bad gate block (alpha-engine-config#4820). These two dated boards were
+# written BEFORE this module enforced the gate-passed-count producer contract
+# (``_assert_gate_passed_matches_scanner_tickers``) and are frozen with an
+# unreliable ``gate`` / ``gate_stage`` block:
+#
+#   2026-07-02: scanner_eval_log was missing/empty upstream — EVERY record's
+#     gate_stage is wrong (0 stocks read gate_stage=="passed" vs the normal 60
+#     in candidates.json::scanner_tickers that week).
+#   2026-06-26: scanner_eval_log was present but incomplete — an undercount
+#     (46 of the 60 candidates.json::scanner_tickers read gate_stage=="passed").
+#
+# NOT backfilled: the original 2026-07-02/2026-06-26 pipeline state (feature-
+# store snapshot, scanner gate thresholds in effect that cycle) cannot be
+# faithfully re-run, and reconstructing per-ticker gate verdicts from today's
+# thresholds would silently swap one wrong-looking-right board for another —
+# worse than a documented gap (see ``scripts/backfill_universe_membership.py``,
+# which already routes around this same gap by reading scanner_tickers +
+# the attractiveness history instead of the gate block, for precedent). Every
+# OTHER field on these two boards (attractiveness, pillars, tradeability,
+# metrics) is unaffected — only ``gate`` / ``gate_stage`` / ``gate_trace`` are
+# untrustworthy. A consumer must skip/flag ``gate_stage`` for these dates
+# rather than trust it at face value.
+KNOWN_BAD_GATE_RUN_DATES: frozenset[str] = frozenset({"2026-07-02", "2026-06-26"})
+
 # Reference single-name trade size (USD) for the per-name tradeability estimate —
 # a representative position on the paper book. ``expected_cost_bps`` is the
 # ROUND-TRIP cost to enter+exit this notional; ``tradeability_score`` is its
@@ -155,29 +185,29 @@ _ZSCORE_CLIP = 3.0
 # normalization in the data repo, ``test_universe_board.py`` and the data repo's
 # schema-contract test are the paired guards.
 _FUNDAMENTAL_METRICS: tuple[tuple[str, str, float], ...] = (
-    ("pe_ratio", "pe", 30.0),                 # PE = pe_ratio × 30
-    ("pb_ratio", "pb", 5.0),                  # PB = pb_ratio × 5
+    ("pe_ratio", "pe", 30.0),  # PE = pe_ratio × 30
+    ("pb_ratio", "pb", 5.0),  # PB = pb_ratio × 5
     ("debt_to_equity", "debt_to_equity", 2.0),  # D/E = col × 2
     ("current_ratio", "current_ratio", 3.0),  # CR = col × 3
-    ("fcf_yield", "fcf_yield", 1.0),          # decimal pct — clean
+    ("fcf_yield", "fcf_yield", 1.0),  # decimal pct — clean
     ("dividend_yield", "dividend_yield", 1.0),
     ("payout_ratio", "payout_ratio", 1.0),
-    ("roe", "roe", 1.0),                      # decimal pct — clean
-    ("gross_margin", "gross_margin", 1.0),    # 0–1 fraction — clean
+    ("roe", "roe", 1.0),  # decimal pct — clean
+    ("gross_margin", "gross_margin", 1.0),  # 0–1 fraction — clean
     ("revenue_growth_3y", "revenue_growth_3y", 1.0),  # CAGR — clean
     ("eps_growth_3y", "eps_growth_3y", 1.0),
-    ("market_cap_raw", "market_cap", 1.0),    # raw dollars — clean
+    ("market_cap_raw", "market_cap", 1.0),  # raw dollars — clean
 )
 _TECHNICAL_METRICS: tuple[tuple[str, str, float], ...] = (
-    ("rsi_14", "rsi_14", 1.0),                # 0–100 — clean
-    ("momentum_20d", "momentum_20d", 1.0),    # decimal return — clean
+    ("rsi_14", "rsi_14", 1.0),  # 0–100 — clean
+    ("momentum_20d", "momentum_20d", 1.0),  # decimal return — clean
     ("return_60d", "return_60d", 1.0),
     ("return_120d", "return_120d", 1.0),
     ("realized_vol_20d", "realized_vol_20d", 1.0),  # annualized decimal — clean
-    ("atr_14_pct", "atr_pct", 1.0),           # decimal pct — clean
+    ("atr_14_pct", "atr_pct", 1.0),  # decimal pct — clean
     ("dist_from_52w_high", "dist_from_52w_high", 1.0),
     ("price_vs_ma200", "price_vs_ma200", 1.0),
-    ("beta_60d", "beta", 1.0),                # dimensionless — clean
+    ("beta_60d", "beta", 1.0),  # dimensionless — clean
     ("avg_volume_20d_raw", "avg_volume", 1.0),  # raw shares — clean
 )
 
@@ -193,11 +223,7 @@ def _equal_weights() -> dict[str, float]:
 
 
 def _reference_notional(tradeability_config: dict | None) -> float:
-    return float(
-        (tradeability_config or {}).get(
-            "reference_notional_usd", _DEFAULT_REFERENCE_NOTIONAL_USD
-        )
-    )
+    return float((tradeability_config or {}).get("reference_notional_usd", _DEFAULT_REFERENCE_NOTIONAL_USD))
 
 
 def compute_tradeability(
@@ -229,9 +255,7 @@ def compute_tradeability(
     """
     import statistics
 
-    model = TransactionCostModel.from_config(
-        {"transaction_cost": tradeability_config} if tradeability_config else None
-    )
+    model = TransactionCostModel.from_config({"transaction_cost": tradeability_config} if tradeability_config else None)
     ref_notional = _reference_notional(tradeability_config)
 
     adv_usd: dict[str, float] = {}
@@ -253,9 +277,7 @@ def compute_tradeability(
             cost_bps[ticker] = None
             continue
         cost_bps[ticker] = round(
-            model.round_trip_bps(
-                ref_notional, adv, sigma=sigma.get(ticker), ref_sigma=ref_sigma
-            ),
+            model.round_trip_bps(ref_notional, adv, sigma=sigma.get(ticker), ref_sigma=ref_sigma),
             4,
         )
 
@@ -373,19 +395,46 @@ def _gate_trace(row: dict, gate_config: dict | None) -> tuple[list[dict], str]:
     max_atr = gc.get("max_atr_pct")
     tsm = gc.get("tech_score_min")
     trace = [
-        {"stage": "liquidity", "metric": "avg_volume_20d", "value": avg_vol,
-         "threshold": min_vol, "op": ">=", "pass": _cmp(avg_vol, min_vol, ">=")},
-        {"stage": "volatility", "metric": "atr_pct", "value": atr_pct,
-         "threshold": max_atr, "op": "<=", "pass": _cmp(atr_pct, max_atr, "<=")},
-        {"stage": "tech_score", "metric": "tech_score", "value": tech_score,
-         "threshold": tsm, "op": ">=", "pass": _cmp(tech_score, tsm, ">=")},
+        {
+            "stage": "liquidity",
+            "metric": "avg_volume_20d",
+            "value": avg_vol,
+            "threshold": min_vol,
+            "op": ">=",
+            "pass": _cmp(avg_vol, min_vol, ">="),
+        },
+        {
+            "stage": "volatility",
+            "metric": "atr_pct",
+            "value": atr_pct,
+            "threshold": max_atr,
+            "op": "<=",
+            "pass": _cmp(atr_pct, max_atr, "<="),
+        },
+        {
+            "stage": "tech_score",
+            "metric": "tech_score",
+            "value": tech_score,
+            "threshold": tsm,
+            "op": ">=",
+            "pass": _cmp(tech_score, tsm, ">="),
+        },
     ]
     # min_price floor rides with liquidity — surface as a secondary check only
     # when a floor is configured (the common config has min_price == 0).
     min_price = gc.get("min_price")
     if min_price is not None and min_price > 0:
-        trace.insert(1, {"stage": "price_floor", "metric": "current_price", "value": price,
-                         "threshold": min_price, "op": ">=", "pass": _cmp(price, min_price, ">=")})
+        trace.insert(
+            1,
+            {
+                "stage": "price_floor",
+                "metric": "current_price",
+                "value": price,
+                "threshold": min_price,
+                "op": ">=",
+                "pass": _cmp(price, min_price, ">="),
+            },
+        )
 
     # Terminal stage: the recorded verdict is authoritative.
     if passed:
@@ -416,6 +465,42 @@ def _gate_trace(row: dict, gate_config: dict | None) -> tuple[list[dict], str]:
     return trace, stage
 
 
+def _assert_gate_passed_matches_scanner_tickers(stocks: list[dict], scanner_tickers: list[str], run_date: str) -> None:
+    """Producer contract invariant (alpha-engine-config#4820): the board's own
+    derived ``gate_stage == "passed"`` membership must equal the AUTHORITATIVE
+    ``candidates.json::scanner_tickers`` set for the same run_date exactly.
+
+    Both sides trace back to the SAME upstream fact — the scanner's quant-filter
+    survivors — via independent paths (``run_quant_filter``'s recorded per-ticker
+    verdict vs its own ``scanner_tickers`` list). They must agree. A mismatch is
+    definitive evidence the gate input (``scanner_eval_log``) was missing, empty,
+    or otherwise degraded for this run — exactly the historical failure mode
+    where the board silently reported zero (2026-07-02) or an undercount
+    (2026-06-26) of gate-passers while ``candidates.json`` carried the normal
+    60. Raising here (rather than the prior WARN-and-emit-anyway posture) is
+    the no-silent-fails fix: a producer must not publish an artifact whose gate
+    block reads a false verdict.
+    """
+    passed = {s["ticker"] for s in stocks if s["gate_stage"] == "passed"}
+    expected = set(scanner_tickers)
+    if passed == expected:
+        return
+    missing = expected - passed  # scanner picked it; board didn't mark it passed
+    extra = passed - expected  # board marked it passed; scanner didn't pick it
+    raise ValueError(
+        f"universe_board: gate-passed mismatch for {run_date} — "
+        f"board gate_stage=='passed' count={len(passed)} vs "
+        f"candidates.json::scanner_tickers count={len(expected)}. "
+        f"Missing from board (n={len(missing)}): {sorted(missing)[:10]}"
+        f"{'...' if len(missing) > 10 else ''}. "
+        f"Unexpected on board (n={len(extra)}): {sorted(extra)[:10]}"
+        f"{'...' if len(extra) > 10 else ''}. "
+        "This means the gate input (scanner_eval_log) was missing/empty/"
+        "malformed this run — refusing to publish a board with a false gate "
+        "verdict (no-silent-fails, alpha-engine-config#4820)."
+    )
+
+
 def build_universe_board(
     run_date: str,
     scanner_evals: list[dict],
@@ -427,6 +512,7 @@ def build_universe_board(
     pillar_weights: dict | None = None,
     gate_config: dict | None = None,
     tradeability_config: dict | None = None,
+    scanner_tickers: list[str] | None = None,
     bucket: str | None = None,
     s3_client: Any = None,
 ) -> dict:
@@ -450,13 +536,29 @@ def build_universe_board(
         gate_config: resolved scanner thresholds. Resolved from config when None;
             an explicit ``{}`` / None just degrades the gate trace to null
             thresholds (still emits the per-stock funnel order).
+        scanner_tickers: the AUTHORITATIVE ``candidates.json::scanner_tickers``
+            list for this run_date — the scanner's own record of which names
+            survived the quant filter, independent of ``scanner_evals``.
+            When provided (production callers MUST provide it), the builder
+            enforces the producer contract invariant: the set of tickers whose
+            derived ``gate_stage == "passed"`` must equal this set exactly.
+            A mismatch means the gate input (``scanner_eval_log``) was
+            missing, empty, or otherwise malformed for this run — the
+            historical failure mode (alpha-engine-config#4820) where a run
+            silently emitted a board reporting zero (or an undercount of)
+            gate-passers while ``candidates.json`` carried the normal count.
+            ``None`` skips the check (unit tests exercising other aspects of
+            the board without a full candidates.json fixture).
         bucket / s3_client: S3 wiring (defaults: env bucket + a fresh boto3
             client) — injectable for tests.
 
     Returns the board dict (also the unit under the producer contract test).
 
     Raises when ``scanner_evals`` is empty (a research run that produced no
-    universe is a real fault — the caller's WARN records it).
+    universe is a real fault — the caller's WARN records it), or when
+    ``scanner_tickers`` is provided and disagrees with the board's own
+    ``gate_stage == "passed"`` set (no-silent-fails: a producer must not
+    emit an artifact whose gate block silently reads a false verdict).
     """
     if not scanner_evals:
         raise ValueError(
@@ -482,10 +584,7 @@ def build_universe_board(
     # pillars, so only the ratios matter for the math; this fixes the displayed
     # top-level pillar_weights.
     _wt_total = sum(max(0.0, (_num(w) or 0.0)) for w in pillar_weights.values()) or 1.0
-    pillar_weights = {
-        p: round(max(0.0, (_num(pillar_weights.get(p)) or 0.0)) / _wt_total, 6)
-        for p in _PILLAR_ORDER
-    }
+    pillar_weights = {p: round(max(0.0, (_num(pillar_weights.get(p)) or 0.0)) / _wt_total, 6) for p in _PILLAR_ORDER}
 
     from scoring.composite import _PILLAR_TO_FACTOR_KEY
 
@@ -493,7 +592,7 @@ def build_universe_board(
     fund_by_ticker = _index_parquet(fundamental_df)
 
     # ── Pass 1: per-stock base records + collect per-pillar scores ───────────
-    records: list[tuple[dict, dict]] = []   # (stock, pillar_scores)
+    records: list[tuple[dict, dict]] = []  # (stock, pillar_scores)
     pillar_scores_by_ticker: dict[str, dict] = {}
     for row in scanner_evals:
         ticker = row.get("ticker")
@@ -504,10 +603,7 @@ def build_universe_board(
         tech = tech_by_ticker.get(ticker, {})
         fund = fund_by_ticker.get(ticker, {})
 
-        pillar_scores = {
-            pillar: _num(profile.get(_PILLAR_TO_FACTOR_KEY[pillar]))
-            for pillar in _PILLAR_ORDER
-        }
+        pillar_scores = {pillar: _num(profile.get(_PILLAR_TO_FACTOR_KEY[pillar])) for pillar in _PILLAR_ORDER}
         pillar_scores_by_ticker[ticker] = pillar_scores
         pillar_coverage = {
             pillar: int(profile[f"{_PILLAR_TO_FACTOR_KEY[pillar][:-6]}_n"])
@@ -530,27 +626,32 @@ def build_universe_board(
 
         trace, gate_stage = _gate_trace(row, gate_config)
 
-        records.append(({
-            "ticker": ticker,
-            "sector": profile.get("sector") or row.get("sector") or cls.get("sector"),
-            "country": cls.get("country"),
-            "industry": cls.get("industry"),
-            "attractiveness_score": None,   # filled in pass 2 (cross-sectional percentile)
-            "attractiveness_raw": None,
-            "pillars": pillar_scores,
-            "pillar_contributions": {},
-            "pillar_coverage": pillar_coverage,
-            "focus_score": _num(row.get("focus_score")),
-            "focus_stance": row.get("focus_stance"),
-            "tech_score": _num(row.get("tech_score")),
-            "gate": {
-                "quant_filter_pass": int(row.get("quant_filter_pass", 0) or 0),
-                "filter_fail_reason": row.get("filter_fail_reason"),
-            },
-            "gate_stage": gate_stage,
-            "gate_trace": trace,
-            "metrics": metrics,
-        }, pillar_scores))
+        records.append(
+            (
+                {
+                    "ticker": ticker,
+                    "sector": profile.get("sector") or row.get("sector") or cls.get("sector"),
+                    "country": cls.get("country"),
+                    "industry": cls.get("industry"),
+                    "attractiveness_score": None,  # filled in pass 2 (cross-sectional percentile)
+                    "attractiveness_raw": None,
+                    "pillars": pillar_scores,
+                    "pillar_contributions": {},
+                    "pillar_coverage": pillar_coverage,
+                    "focus_score": _num(row.get("focus_score")),
+                    "focus_stance": row.get("focus_stance"),
+                    "tech_score": _num(row.get("tech_score")),
+                    "gate": {
+                        "quant_filter_pass": int(row.get("quant_filter_pass", 0) or 0),
+                        "filter_fail_reason": row.get("filter_fail_reason"),
+                    },
+                    "gate_stage": gate_stage,
+                    "gate_trace": trace,
+                    "metrics": metrics,
+                },
+                pillar_scores,
+            )
+        )
 
     # ── Attractiveness (SOTA z-blend → percentile) via the shared chokepoint ──
     attractiveness = compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
@@ -563,16 +664,15 @@ def build_universe_board(
     # ── Tradeability (INDEPENDENT √-impact cost score — computed separately and
     #    NEVER folded into the attractiveness blend above, ARCHITECTURE §43) ────
     metrics_by_ticker = {stock["ticker"]: stock["metrics"] for stock, _ in records}
-    tradeability = compute_tradeability(
-        metrics_by_ticker, tradeability_config=tradeability_config
-    )
+    tradeability = compute_tradeability(metrics_by_ticker, tradeability_config=tradeability_config)
     for stock, _ in records:
         stock["tradeability"] = tradeability.get(stock["ticker"])
 
     stocks = [s for s, _ in records]
-    stocks.sort(
-        key=lambda s: (s["attractiveness_score"] is None, -(s["attractiveness_score"] or 0))
-    )
+    stocks.sort(key=lambda s: (s["attractiveness_score"] is None, -(s["attractiveness_score"] or 0)))
+
+    if scanner_tickers is not None:
+        _assert_gate_passed_matches_scanner_tickers(stocks, scanner_tickers, run_date)
 
     return {
         "schema_version": UNIVERSE_BOARD_SCHEMA_VERSION,
@@ -607,16 +707,19 @@ def attractiveness_from_factor_profiles(
     if pillar_weights is None:
         pillar_weights = _load_pillar_weights(bucket, s3_client)
     return _attractiveness_from_factor_profiles(
-        factor_profiles, pillar_weights=pillar_weights,
+        factor_profiles,
+        pillar_weights=pillar_weights,
     )
 
 
 # ── S3 I/O ──────────────────────────────────────────────────────────────────
 
+
 def _client(s3_client: Any):
     if s3_client is not None:
         return s3_client
     import boto3
+
     return boto3.client("s3")
 
 
@@ -689,7 +792,9 @@ def write_universe_board_to_s3(board: dict, run_date: str, *, bucket: str | None
         s3.put_object(Bucket=b, Key=key, Body=body, ContentType="application/json")
     logger.info(
         "[universe_board] wrote %d stocks → s3://%s/%s (+latest)",
-        board.get("universe_count", 0), b, dated_key,
+        board.get("universe_count", 0),
+        b,
+        dated_key,
     )
     return dated_key
 
@@ -698,17 +803,27 @@ def compute_and_write_universe_board(
     run_date: str,
     scanner_evals: list[dict],
     *,
+    scanner_tickers: list[str] | None = None,
     bucket: str | None = None,
     s3_client: Any = None,
 ) -> str:
     """archive_writer entry point — build from S3-resident inputs + the in-memory
     scanner_evals and write the artifact. Also appends today's attractiveness
     slice to the per-stock history time-series (fail-soft — a history failure
-    must not mask the board write). Returns the dated S3 key."""
-    board = build_universe_board(run_date, scanner_evals, bucket=bucket, s3_client=s3_client)
+    must not mask the board write). Returns the dated S3 key.
+
+    ``scanner_tickers``: forwarded to :func:`build_universe_board`'s producer
+    contract check (alpha-engine-config#4820) — pass the authoritative
+    ``candidates.json::scanner_tickers`` list so a degraded gate input raises
+    instead of silently writing a board with a false gate verdict.
+    """
+    board = build_universe_board(
+        run_date, scanner_evals, scanner_tickers=scanner_tickers, bucket=bucket, s3_client=s3_client
+    )
     key = write_universe_board_to_s3(board, run_date, bucket=bucket, s3_client=s3_client)
     try:
         from scoring.attractiveness_history import append_history, extract_history_rows_from_board
+
         append_history(extract_history_rows_from_board(board), bucket=bucket, s3_client=s3_client)
     except Exception as e:  # secondary observability — never fail the board write
         logger.warning("[universe_board] attractiveness history append failed (non-fatal): %s", e)
