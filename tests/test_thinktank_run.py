@@ -259,6 +259,71 @@ def test_daily_lifecycle_end_to_end(tt_config):
         assert macro["weekly_anchor_date"] == "2026-07-05"
 
 
+def test_materiality_positive_sweep_increments_thesis_version(tt_config):
+    """alpha-engine-config-I6479: a run-level, single-purpose pin that a
+    materiality-positive sweep assessment does not just flag the ticker and
+    call ``update_thesis`` — it actually PERSISTS a new, higher thesis
+    version. ``test_daily_lifecycle_end_to_end`` exercises the same path as
+    one step of a broader multi-run lifecycle; this test isolates it so the
+    version-increment invariant survives independently of that test's other
+    assertions.
+
+    Checks the full versioning contract (thinktank-policy.md TT-2.3):
+    latest.json's version number, the dated ``v{N}.json`` immutable
+    snapshot, the coverage ledger's ``thesis_version``, and the sweep
+    EventRecord's ``thesis_version_written`` all agree on the new version.
+    """
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+
+        # RUN 1 — seeds T0-T2 at thesis version 1 (initial coverage).
+        manifest1, store = _run(tt_config, backend, s3)
+        assert manifest1.names_added == ["T0", "T1", "T2"]
+        t1_before = store.get_json("thinktank/theses/T1/latest.json")
+        assert t1_before["version"] == 1
+
+        # RUN 2 — sweep flags T1 as materiality-positive (action=update_thesis).
+        backend.sweep_updates = {"T1": "guidance cut"}
+        manifest2, store = _run(tt_config, backend, s3)
+        assert manifest2.events_flagged == 1
+        assert manifest2.event_updates_written == 1
+
+        # The persisted VERSION NUMBER actually incremented, not merely that
+        # update_thesis was invoked or the sweep ran.
+        t1_latest = store.get_json("thinktank/theses/T1/latest.json")
+        assert t1_latest["version"] == 2
+        assert t1_latest["update_reason"] == "event"
+        assert t1_latest["event_context"] == "guidance cut"
+
+        # The dated, immutable v{N}.json snapshot exists at the SAME version
+        # (thinktank/__init__.py::THESIS_KEY_TMPL) — the versioning contract
+        # persists an append-only history, not just an overwritten pointer.
+        t1_v2 = store.get_json("thinktank/theses/T1/v2.json")
+        assert t1_v2 is not None
+        assert t1_v2["version"] == 2
+        assert t1_v2 == t1_latest
+
+        # The prior version's snapshot is untouched (append-only).
+        t1_v1 = store.get_json("thinktank/theses/T1/v1.json")
+        assert t1_v1 is not None
+        assert t1_v1["version"] == 1
+        assert t1_v1["update_reason"] == "initial"
+
+        # The coverage ledger's thesis_version tracks the new version too.
+        ledger = CoverageLedger.model_validate(store.get_json(LEDGER_KEY))
+        assert ledger.entries["T1"].thesis_version == 2
+
+        # The sweep's own EventRecord names the version it wrote — the
+        # escalation ladder's own bookkeeping agrees with the store.
+        events_raw = store.get_text(f"thinktank/events/{manifest2.trading_day}.jsonl")
+        event_rows = [json.loads(line) for line in events_raw.splitlines() if line.strip()]
+        t1_event = next(r for r in event_rows if r["ticker"] == "T1")
+        assert t1_event["action"] == "update_thesis"
+        assert t1_event["thesis_version_written"] == 2
+
+
 def test_events_artifact_records_every_covered_ticker_not_only_escalations(tt_config):
     """thinktank-policy.md TT-2.3-non-update-decisions-are-recorded: every
     sweep decision is recorded with its reason, non-updates included — not
