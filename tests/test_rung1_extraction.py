@@ -119,33 +119,27 @@ class TestExtractionOutputSchema:
 class TestExtractSingleTicker:
     """Single-ticker extraction with a mock krepis client."""
 
-    def _mock_client_factory(self, return_value: ExtractionOutput):
-        """Create a mock LLMClient factory that returns the given output."""
-        mock_client = MagicMock()
-        mock_client.structured.return_value = return_value
-        return lambda spec, api_key: mock_client
-
     def test_successful_extraction(self):
-        factory = self._mock_client_factory(
-            ExtractionOutput(guidance_direction="raised", risk_factor_count_delta_raw=2, management_tone_zscore=0.8)
-        )
-        result = extract_single_ticker(
-            "AAPL", ["recent_earnings"], "Earnings transcript context.",
-            model_arm="floor", api_key="test-key", client_factory=factory,
-        )
+        expected = ExtractionOutput(guidance_direction="raised", risk_factor_count_delta_raw=2, management_tone_zscore=0.8)
+        with patch("krepis.llm.LLMClient") as mock_llm_cls:
+            mock_llm_cls.return_value.structured.return_value = expected
+            result = extract_single_ticker(
+                "AAPL", ["recent_earnings"], "Earnings transcript context.",
+                model_arm="floor", api_key="test-key",
+            )
         assert result.guidance_direction == "raised"
         assert result.risk_factor_count_delta_raw == 2
         assert result.management_tone_zscore == 0.8
 
     def test_unknown_model_arm_raises(self):
-        with pytest.raises(ValueError, match="unknown"):
+        with pytest.raises(ValueError, match="Unknown model_arm"):
             extract_single_ticker(
                 "AAPL", [], "Context.", model_arm="nonexistent",
                 api_key="test-key",
             )
 
     def test_missing_api_key_raises(self):
-        with patch("agents.sector_teams.rung1_extraction.OPENROUTER_API_KEY", None):
+        with patch("config.OPENROUTER_API_KEY", None):
             with pytest.raises(RuntimeError, match="OpenRouter API key"):
                 extract_single_ticker("AAPL", [], "Context.")
 
@@ -159,7 +153,6 @@ class TestExtractTriggeredTickers:
 
     def test_single_ticker(self):
         tickers = [("AAPL", ["news_volume_spike"])]
-        from agents.sector_teams.rung1_extraction import retrieve_filings_context
         # Patch both the LLM call and the RAG retrieval
         with patch(
             "agents.sector_teams.rung1_extraction.extract_single_ticker",

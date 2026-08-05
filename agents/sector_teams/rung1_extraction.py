@@ -16,10 +16,9 @@ This is the substrate for the agentic-evolution ladder (alpha-engine-config#3079
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -75,7 +74,7 @@ class ExtractionOutput(BaseModel):
     column has a SCHEMA.md §3 row + FeatureEntry in registry.py::CATALOG.
     """
 
-    guidance_direction: str = Field(
+    guidance_direction: Literal["raised", "lowered", "maintained", "none"] = Field(
         ...,
         description=(
             "Earnings guidance direction extracted from the most recent "
@@ -187,7 +186,6 @@ def extract_single_ticker(
     from krepis.llm import LLMClient
     from krepis.llm_config import ModelSpec
 
-    from agents.prompt_loader import load_prompt
     from config import MAX_TOKENS_PER_STOCK, OPENROUTER_API_KEY
 
     key = api_key or OPENROUTER_API_KEY
