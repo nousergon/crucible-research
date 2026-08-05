@@ -88,7 +88,8 @@ def _read_prior_signals_universe_tickers(
     """Read the prior week's ``signals/latest.json`` pointer + the
     ``signals.json`` it points at, and return
     ``(prior_population, prior_scanner_picks, prior_run_date)`` where
-    ``prior_scanner_picks`` is ``universe - population``.
+    ``prior_scanner_picks`` is ``universe - population`` — i.e. board-width
+    names (~903) not currently held, not a narrow promoted set.
 
     Returns ``([], [], None)`` on any S3 miss (no prior signals.json
     yet — cold-start case is flagged in the artifact stats). Does NOT
@@ -143,8 +144,10 @@ def _read_prior_signals_universe_tickers(
     else:
         prior_universe_tickers = list(universe_raw)
 
-    # Scanner picks = universe - population (population is holdings; the
-    # rest of universe is what the prior scanner promoted).
+    # Scanner picks = universe - population. ``universe`` here is the
+    # board-width (~903-name) list, not a narrow promoted set, so this is
+    # "board names not currently held" (population), not "what the prior
+    # scanner promoted."
     pop_set = set(prior_population)
     prior_scanner_picks = [t for t in prior_universe_tickers if t not in pop_set]
 
