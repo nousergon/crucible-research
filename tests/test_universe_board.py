@@ -26,6 +26,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.universe_board import (  # noqa: E402
+    KNOWN_BAD_GATE_RUN_DATES,
     UNIVERSE_BOARD_SCHEMA_VERSION,
     build_universe_board,
 )
@@ -49,68 +50,147 @@ _GATE_CONFIG = {
 def _scanner_evals():
     return [
         # AAPL — passes the gate; row carries the gate-input values.
-        {"ticker": "AAPL", "sector": "Information Technology", "tech_score": 72.0,
-         "current_price": 195.0, "avg_volume_20d": 55_000_000.0, "atr_pct": 1.5,
-         "price_vs_ma200": 0.10, "focus_score": 80.0, "focus_stance": "momentum",
-         "quant_filter_pass": 1, "filter_fail_reason": None},
+        {
+            "ticker": "AAPL",
+            "sector": "Information Technology",
+            "tech_score": 72.0,
+            "current_price": 195.0,
+            "avg_volume_20d": 55_000_000.0,
+            "atr_pct": 1.5,
+            "price_vs_ma200": 0.10,
+            "focus_score": 80.0,
+            "focus_stance": "momentum",
+            "quant_filter_pass": 1,
+            "filter_fail_reason": None,
+        },
         # LIN — rejected by the liquidity gate (avg_vol below the floor).
-        {"ticker": "LIN", "sector": "Materials", "tech_score": 40.0,
-         "current_price": 460.0, "avg_volume_20d": 120_000.0, "atr_pct": 1.2,
-         "price_vs_ma200": 0.03, "focus_score": 55.0, "focus_stance": "quality",
-         "quant_filter_pass": 0, "filter_fail_reason": "liquidity"},
+        {
+            "ticker": "LIN",
+            "sector": "Materials",
+            "tech_score": 40.0,
+            "current_price": 460.0,
+            "avg_volume_20d": 120_000.0,
+            "atr_pct": 1.2,
+            "price_vs_ma200": 0.03,
+            "focus_score": 55.0,
+            "focus_stance": "quality",
+            "quant_filter_pass": 0,
+            "filter_fail_reason": "liquidity",
+        },
         # XYZ — no factor profile at all → all pillars null → attractiveness null.
-        {"ticker": "XYZ", "sector": "Industrials", "tech_score": None,
-         "current_price": 12.0, "focus_score": None, "focus_stance": None,
-         "quant_filter_pass": 0, "filter_fail_reason": "no_data"},
+        {
+            "ticker": "XYZ",
+            "sector": "Industrials",
+            "tech_score": None,
+            "current_price": 12.0,
+            "focus_score": None,
+            "focus_stance": None,
+            "quant_filter_pass": 0,
+            "filter_fail_reason": "no_data",
+        },
     ]
 
 
 def _factor_profiles():
     return {
-        "AAPL": {"sector": "Information Technology", "quality_score": 90.0,
-                 "value_score": 30.0, "momentum_score": 85.0, "low_vol_score": 60.0,
-                 "growth_score": 80.0, "stewardship_score": 70.0,
-                 "quality_n": 4, "momentum_n": 5},
+        "AAPL": {
+            "sector": "Information Technology",
+            "quality_score": 90.0,
+            "value_score": 30.0,
+            "momentum_score": 85.0,
+            "low_vol_score": 60.0,
+            "growth_score": 80.0,
+            "stewardship_score": 70.0,
+            "quality_n": 4,
+            "momentum_n": 5,
+        },
         # LIN — only 4 of 6 pillars present (no growth/stewardship) → reallocation.
-        "LIN": {"sector": "Materials", "quality_score": 50.0, "value_score": 40.0,
-                "momentum_score": 30.0, "low_vol_score": 60.0},
+        "LIN": {
+            "sector": "Materials",
+            "quality_score": 50.0,
+            "value_score": 40.0,
+            "momentum_score": 30.0,
+            "low_vol_score": 60.0,
+        },
     }
 
 
 def _classification():
     return {
-        "AAPL": {"sector": "Information Technology", "country": "United States",
-                 "industry": "Consumer Electronics"},
-        "LIN": {"sector": "Materials", "country": "Ireland",
-                "industry": "Specialty Chemicals"},
+        "AAPL": {"sector": "Information Technology", "country": "United States", "industry": "Consumer Electronics"},
+        "LIN": {"sector": "Materials", "country": "Ireland", "industry": "Specialty Chemicals"},
     }
 
 
 def _fundamental_df():
-    return pd.DataFrame([
-        # pe_ratio is PE/30; pb_ratio is PB/5; debt_to_equity is D/E÷2; current_ratio is CR÷3.
-        {"ticker": "AAPL", "pe_ratio": 1.0, "pb_ratio": 8.0, "debt_to_equity": 0.75,
-         "current_ratio": 0.4, "fcf_yield": 0.04, "roe": 1.5, "gross_margin": 0.44,
-         "revenue_growth_3y": 0.08, "eps_growth_3y": 0.10, "market_cap_raw": 3.0e12,
-         "dividend_yield": 0.005, "payout_ratio": 0.15},
-        {"ticker": "LIN", "pe_ratio": 1.2, "pb_ratio": 1.0, "debt_to_equity": 0.5,
-         "current_ratio": 0.3, "fcf_yield": 0.05, "roe": 0.16, "gross_margin": 0.45,
-         "revenue_growth_3y": 0.06, "eps_growth_3y": 0.09, "market_cap_raw": 2.2e11,
-         "dividend_yield": 0.013, "payout_ratio": 0.45},
-    ])
+    return pd.DataFrame(
+        [
+            # pe_ratio is PE/30; pb_ratio is PB/5; debt_to_equity is D/E÷2; current_ratio is CR÷3.
+            {
+                "ticker": "AAPL",
+                "pe_ratio": 1.0,
+                "pb_ratio": 8.0,
+                "debt_to_equity": 0.75,
+                "current_ratio": 0.4,
+                "fcf_yield": 0.04,
+                "roe": 1.5,
+                "gross_margin": 0.44,
+                "revenue_growth_3y": 0.08,
+                "eps_growth_3y": 0.10,
+                "market_cap_raw": 3.0e12,
+                "dividend_yield": 0.005,
+                "payout_ratio": 0.15,
+            },
+            {
+                "ticker": "LIN",
+                "pe_ratio": 1.2,
+                "pb_ratio": 1.0,
+                "debt_to_equity": 0.5,
+                "current_ratio": 0.3,
+                "fcf_yield": 0.05,
+                "roe": 0.16,
+                "gross_margin": 0.45,
+                "revenue_growth_3y": 0.06,
+                "eps_growth_3y": 0.09,
+                "market_cap_raw": 2.2e11,
+                "dividend_yield": 0.013,
+                "payout_ratio": 0.45,
+            },
+        ]
+    )
 
 
 def _technical_df():
-    return pd.DataFrame([
-        {"ticker": "AAPL", "rsi_14": 58.0, "momentum_20d": 0.03, "return_60d": 0.08,
-         "return_120d": 0.12, "realized_vol_20d": 0.22, "atr_14_pct": 0.015,
-         "dist_from_52w_high": -0.04, "price_vs_ma200": 0.10, "beta_60d": 1.2,
-         "avg_volume_20d_raw": 55_000_000.0},
-        {"ticker": "LIN", "rsi_14": 47.0, "momentum_20d": -0.01, "return_60d": 0.02,
-         "return_120d": 0.05, "realized_vol_20d": 0.18, "atr_14_pct": 0.012,
-         "dist_from_52w_high": -0.09, "price_vs_ma200": 0.03, "beta_60d": 0.9,
-         "avg_volume_20d_raw": 3_000_000.0},
-    ])
+    return pd.DataFrame(
+        [
+            {
+                "ticker": "AAPL",
+                "rsi_14": 58.0,
+                "momentum_20d": 0.03,
+                "return_60d": 0.08,
+                "return_120d": 0.12,
+                "realized_vol_20d": 0.22,
+                "atr_14_pct": 0.015,
+                "dist_from_52w_high": -0.04,
+                "price_vs_ma200": 0.10,
+                "beta_60d": 1.2,
+                "avg_volume_20d_raw": 55_000_000.0,
+            },
+            {
+                "ticker": "LIN",
+                "rsi_14": 47.0,
+                "momentum_20d": -0.01,
+                "return_60d": 0.02,
+                "return_120d": 0.05,
+                "realized_vol_20d": 0.18,
+                "atr_14_pct": 0.012,
+                "dist_from_52w_high": -0.09,
+                "price_vs_ma200": 0.03,
+                "beta_60d": 0.9,
+                "avg_volume_20d_raw": 3_000_000.0,
+            },
+        ]
+    )
 
 
 def _build(**overrides):
@@ -131,6 +211,7 @@ def _by_ticker(board):
 
 # ── 1. Shape / membership ────────────────────────────────────────────────────
 
+
 def test_artifact_shape_and_membership():
     board = _build()
     assert board["schema_version"] == UNIVERSE_BOARD_SCHEMA_VERSION == 3
@@ -142,6 +223,7 @@ def test_artifact_shape_and_membership():
 
 
 # ── Tradeability (INDEPENDENT √-impact cost score — ARCHITECTURE §43) ─────────
+
 
 def test_tradeability_independent_score_and_coverage():
     board = _build()
@@ -191,6 +273,7 @@ def test_tradeability_never_blended_into_attractiveness():
 
 # ── 2. SOTA attractiveness ───────────────────────────────────────────────────
 
+
 def test_attractiveness_is_cross_sectional_percentile():
     b = _by_ticker(_build())
     # AAPL z-blend (0.1667) > LIN z-blend (-0.25) → percentiles 100 / 50.
@@ -230,8 +313,7 @@ def test_pillar_weights_default_equal():
 def test_tuned_weights_override_normalizes_and_shifts_blend():
     # Raw (unnormalized) tuned weights — heavy on value/quality. The producer
     # must normalize to sum 1.0 and the blend must change vs equal-weight.
-    raw = {"quality": 3.0, "value": 3.0, "momentum": 1.0,
-           "growth": 1.0, "stewardship": 1.0, "defensiveness": 1.0}
+    raw = {"quality": 3.0, "value": 3.0, "momentum": 1.0, "growth": 1.0, "stewardship": 1.0, "defensiveness": 1.0}
     board = _build(pillar_weights=raw)
     w = board["pillar_weights"]
     assert round(sum(w.values()), 6) == 1.0
@@ -247,17 +329,39 @@ def test_dispersion_restored_uses_full_range():
     # terminal percentile must span ~0..100 (the old mean-of-percentiles
     # compressed toward 50; this is the institutional fix).
     n = 11
-    evals = [{"ticker": f"T{i}", "sector": "X", "tech_score": float(i),
-              "current_price": 10.0, "quant_filter_pass": 1,
-              "filter_fail_reason": None} for i in range(n)]
+    evals = [
+        {
+            "ticker": f"T{i}",
+            "sector": "X",
+            "tech_score": float(i),
+            "current_price": 10.0,
+            "quant_filter_pass": 1,
+            "filter_fail_reason": None,
+        }
+        for i in range(n)
+    ]
     # Monotone pillar values per name so blends strictly increase with i.
-    profiles = {f"T{i}": {"sector": "X", "quality_score": float(i * 10),
-                          "value_score": float(i * 10), "momentum_score": float(i * 10),
-                          "low_vol_score": float(i * 10), "growth_score": float(i * 10),
-                          "stewardship_score": float(i * 10)} for i in range(n)}
-    board = build_universe_board("2026-06-28", evals, factor_profiles=profiles,
-                                 classification={}, technical_df=None,
-                                 fundamental_df=None, gate_config=_GATE_CONFIG)
+    profiles = {
+        f"T{i}": {
+            "sector": "X",
+            "quality_score": float(i * 10),
+            "value_score": float(i * 10),
+            "momentum_score": float(i * 10),
+            "low_vol_score": float(i * 10),
+            "growth_score": float(i * 10),
+            "stewardship_score": float(i * 10),
+        }
+        for i in range(n)
+    }
+    board = build_universe_board(
+        "2026-06-28",
+        evals,
+        factor_profiles=profiles,
+        classification={},
+        technical_df=None,
+        fundamental_df=None,
+        gate_config=_GATE_CONFIG,
+    )
     scores = [s["attractiveness_score"] for s in board["stocks"]]
     assert max(scores) == 100.0
     assert min(scores) < 15.0  # bottom name lands near 0, not stuck near 50
@@ -267,12 +371,13 @@ def test_dispersion_restored_uses_full_range():
 
 # ── 3. Denormalization contract ──────────────────────────────────────────────
 
+
 def test_valuation_denormalization_contract():
     aapl = _by_ticker(_build())["AAPL"]["metrics"]
-    assert aapl["pe"] == 30.0          # 1.0 × 30
-    assert aapl["pb"] == 40.0          # 8.0 × 5
-    assert aapl["debt_to_equity"] == 1.5   # 0.75 × 2
-    assert aapl["current_ratio"] == 1.2    # 0.4 × 3
+    assert aapl["pe"] == 30.0  # 1.0 × 30
+    assert aapl["pb"] == 40.0  # 8.0 × 5
+    assert aapl["debt_to_equity"] == 1.5  # 0.75 × 2
+    assert aapl["current_ratio"] == 1.2  # 0.4 × 3
     assert aapl["fcf_yield"] == 0.04
     assert aapl["roe"] == 1.5
     assert aapl["market_cap"] == 3.0e12
@@ -281,6 +386,7 @@ def test_valuation_denormalization_contract():
 
 
 # ── 4. Classification join ───────────────────────────────────────────────────
+
 
 def test_country_industry_join():
     b = _by_ticker(_build())
@@ -295,6 +401,7 @@ def test_missing_classification_degrades_to_null():
 
 
 # ── 5. Gate transparency ─────────────────────────────────────────────────────
+
 
 def test_gate_flags_and_config_passthrough():
     board = _build()
@@ -331,6 +438,7 @@ def test_gate_trace_thresholds_null_when_config_absent():
 
 # ── 6. Sort order + guards ───────────────────────────────────────────────────
 
+
 def test_sort_most_attractive_first_nulls_last():
     tickers = [s["ticker"] for s in _build()["stocks"]]
     assert tickers == ["AAPL", "LIN", "XYZ"]  # 100, 50, null
@@ -338,5 +446,97 @@ def test_sort_most_attractive_first_nulls_last():
 
 def test_empty_scanner_evals_raises():
     import pytest
+
     with pytest.raises(ValueError, match="empty"):
         build_universe_board("2026-06-28", [], factor_profiles={}, classification={})
+
+
+# ── 7. Producer contract: gate-passed count vs scanner_tickers (config#4820) ──
+#
+# Root cause pinned here: 2026-07-02's candidates.json lacked scanner_eval_log
+# entirely, so every scanner_evals row degraded to quant_filter_pass=0 +
+# filter_fail_reason=None (the "never evaluated" shape) even though the
+# tickers WERE the normal scanner picks. gate_stage's funnel sub-stages were
+# still fully populated (the value-vs-threshold trace doesn't need
+# quant_filter_pass) — only the terminal "passed" verdict was wrong, so the
+# board silently reported ZERO gate-passers while candidates.json::
+# scanner_tickers carried the normal 60. No error raised anywhere.
+
+
+def test_gate_passed_matches_scanner_tickers_on_healthy_board():
+    """The common case: gate verdicts are correctly recorded, so the board's
+    own passed set agrees with the authoritative scanner_tickers list — no
+    raise. Only AAPL passes in the fixture."""
+    board = _build(scanner_tickers=["AAPL"])
+    passed = {s["ticker"] for s in board["stocks"] if s["gate_stage"] == "passed"}
+    assert passed == {"AAPL"}
+
+
+def test_gate_passed_mismatch_raises():
+    """scanner_tickers claims LIN also passed, but the recorded gate verdict
+    (quant_filter_pass=0, filter_fail_reason='liquidity') says otherwise —
+    the producer must refuse to publish, not silently disagree with itself."""
+    import pytest
+
+    with pytest.raises(ValueError, match="gate-passed mismatch"):
+        _build(scanner_tickers=["AAPL", "LIN"])
+
+
+def test_degraded_gate_input_raises_instead_of_zero_passed_board():
+    """Reproduces the EXACT 2026-07-02 shape: scanner_eval_log was missing/
+    empty upstream, so every row that SHOULD have quant_filter_pass=1 instead
+    carries quant_filter_pass=0 + filter_fail_reason=None (indistinguishable
+    from 'never evaluated' at the row level) even though its raw metrics
+    still clear every gate threshold — the funnel sub-stages compute fine,
+    only the terminal verdict is wrong. Without this fix, build_universe_board
+    would happily emit a board with ZERO gate_stage=='passed' entries. With
+    the fix, passing the authoritative scanner_tickers (as every production
+    caller now does) makes that emit a loud ValueError instead."""
+    import pytest
+
+    degraded_evals = [
+        # Same as AAPL in _scanner_evals(), but WITHOUT a recorded gate
+        # verdict — the exact shape a missing scanner_eval_log produces.
+        {
+            "ticker": "AAPL",
+            "sector": "Information Technology",
+            "tech_score": 72.0,
+            "current_price": 195.0,
+            "avg_volume_20d": 55_000_000.0,
+            "atr_pct": 1.5,
+            "price_vs_ma200": 0.10,
+            "focus_score": 80.0,
+            "focus_stance": "momentum",
+        },
+        # quant_filter_pass / filter_fail_reason intentionally OMITTED —
+        # defaults to 0 / None, matching a run whose gate input degraded.
+    ]
+    with pytest.raises(ValueError, match="gate-passed mismatch"):
+        build_universe_board(
+            "2026-07-02",
+            degraded_evals,
+            factor_profiles=_factor_profiles(),
+            classification=_classification(),
+            technical_df=_technical_df(),
+            fundamental_df=_fundamental_df(),
+            gate_config=_GATE_CONFIG,
+            # candidates.json still carried the normal pick this week.
+            scanner_tickers=["AAPL"],
+        )
+
+
+def test_known_bad_gate_run_dates_marker():
+    """Documented known-bad marker (alpha-engine-config#4820) for the two
+    historical dated boards written before this producer contract existed —
+    consumers reading the dashboard's dated board history must skip/flag
+    gate_stage for these dates rather than trust it at face value. Pinned so
+    the marker can't silently drift or be dropped."""
+    assert KNOWN_BAD_GATE_RUN_DATES == frozenset({"2026-07-02", "2026-06-26"})
+
+
+def test_scanner_tickers_none_skips_the_check():
+    """Callers that don't have (or don't care about) the authoritative
+    scanner_tickers list — e.g. unit tests exercising other board aspects —
+    are unaffected; the check is opt-in via passing the list."""
+    board = _build(scanner_tickers=None)  # explicit default; must not raise
+    assert board["universe_count"] == 3

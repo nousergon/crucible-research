@@ -289,11 +289,19 @@ class TestHandler:
                 "data.scanner_orchestrator.write_candidates_artifact",
                 return_value="candidates/2026-05-29/candidates.json",
             ),
-            patch("data.scanner_orchestrator.build_shadow_candidate_artifacts", return_value=shadow_art),
+            patch(
+                "data.scanner_orchestrator.build_shadow_candidate_artifacts",
+                return_value=(shadow_art, {}),
+            ),
             patch(
                 "data.scanner_orchestrator.write_shadow_candidates_artifact",
                 return_value="candidates_shadow/momentum_sleeve/2026-05-29/candidates.json",
             ),
+            # config#6428: the per-spec status-record write is a SEPARATE
+            # best-effort S3 write from the candidates artifact above — stub
+            # it too so this test only asserts the (unchanged) `shadows`
+            # summary contract.
+            patch("data.scanner_orchestrator.write_shadow_status_record", return_value={}),
             patch("boto3.client", return_value=MagicMock()),
         ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
@@ -317,12 +325,51 @@ class TestHandler:
                 "data.scanner_orchestrator.build_shadow_candidate_artifacts",
                 side_effect=RuntimeError("loadings exploded"),
             ),
+            patch("data.scanner_orchestrator.write_shadow_status_record", return_value={}),
             patch("boto3.client", return_value=MagicMock()),
         ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["shadows"] == {}
         assert "loadings exploded" in result["summary"]["shadow_error"]
+
+    def test_shadow_status_record_written_for_every_challenger_spec(self, handler_mod):
+        # config#6428, champion-challenger-policy.md §3: a failed shadow spec
+        # gets an explicit MISS status record — not just the in-memory
+        # `shadow_error` summary field (which never survives past the
+        # response), and not just the WARN + observe-alert already inside
+        # build_shadow_artifacts. This is the durable record.
+        from data.scanner_specs import challenger_specs
+
+        written_records = {}
+
+        def fake_write_status(record, spec_name, run_date, **kwargs):
+            written_records[spec_name] = record
+            return {"dated_key": f"candidates_shadow_status/{spec_name}/{run_date}.json"}
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.build_shadow_candidate_artifacts",
+                return_value=({}, {"momentum_sleeve": "synthetic forced failure"}),
+            ),
+            patch("data.scanner_orchestrator.write_shadow_status_record", side_effect=fake_write_status),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+
+        assert result["status"] == "OK"
+        expected_specs = {spec.name for spec in challenger_specs()}
+        assert set(written_records) == expected_specs
+        record = written_records["momentum_sleeve"]
+        assert record["status"] == "failed"
+        assert record["artifacts"][0]["status"] == "absent"
+        assert "synthetic forced failure" in record["artifacts"][0]["reason"]
 
     def test_universe_board_written_and_summarized(self, handler_mod):
         # alpha-engine-config-I2515: the standalone Scanner path becomes a
