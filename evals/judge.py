@@ -77,6 +77,13 @@ from nousergon_lib.eval_artifacts import (
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
+from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
+from graph.state_schemas import (
+    RubricEvalArtifact,
+    RubricEvalLLMOutput,
+)
+
+logger = logging.getLogger(__name__)
 
 # Process-scoped cost sink for every OpenRouter judge call. Constructed
 # lazily so importing this module costs nothing; shared across all
@@ -100,13 +107,6 @@ def _judge_cost_sink():
             register_atexit=True,
         )
     return _JUDGE_COST_SINK
-from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
-from graph.state_schemas import (
-    RubricEvalArtifact,
-    RubricEvalLLMOutput,
-)
-
-logger = logging.getLogger(__name__)
 
 
 def _new_judge_run_id() -> str:

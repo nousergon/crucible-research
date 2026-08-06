@@ -69,6 +69,11 @@ _CANDIDATES_PREFIX = "candidates"
 # builds are emitted here, parallel to the live candidates/ path, never consumed
 # by live trading until manually promoted.
 _SHADOW_PREFIX = "candidates_shadow"
+# Explicit per-spec, per-cycle MISS-recording surface (config#6428,
+# champion-challenger-policy.md §3) — parallel to _SHADOW_PREFIX. Written for
+# EVERY registered challenger spec every cycle, success or failure, so a
+# failed cycle is a durable record, never indistinguishable from "never ran".
+_SHADOW_STATUS_PREFIX = "candidates_shadow_status"
 _SIGNALS_LATEST_KEY = "signals/latest.json"
 
 
@@ -83,7 +88,8 @@ def _read_prior_signals_universe_tickers(
     """Read the prior week's ``signals/latest.json`` pointer + the
     ``signals.json`` it points at, and return
     ``(prior_population, prior_scanner_picks, prior_run_date)`` where
-    ``prior_scanner_picks`` is ``universe - population``.
+    ``prior_scanner_picks`` is ``universe - population`` — i.e. board-width
+    names (~903) not currently held, not a narrow promoted set.
 
     Returns ``([], [], None)`` on any S3 miss (no prior signals.json
     yet — cold-start case is flagged in the artifact stats). Does NOT
@@ -138,8 +144,10 @@ def _read_prior_signals_universe_tickers(
     else:
         prior_universe_tickers = list(universe_raw)
 
-    # Scanner picks = universe - population (population is holdings; the
-    # rest of universe is what the prior scanner promoted).
+    # Scanner picks = universe - population. ``universe`` here is the
+    # board-width (~903-name) list, not a narrow promoted set, so this is
+    # "board names not currently held" (population), not "what the prior
+    # scanner promoted."
     pop_set = set(prior_population)
     prior_scanner_picks = [t for t in prior_universe_tickers if t not in pop_set]
 
@@ -365,7 +373,9 @@ def build_candidates_artifact(
         if _factor_loadings and eval_log:
             _params = _resolved_scanner_params()
             _ms_tickers = _rank_momentum_sleeve(
-                eval_log, _factor_loadings, _params,
+                eval_log,
+                _factor_loadings,
+                _params,
             )
             if _ms_tickers:
                 scanner_tickers = _ms_tickers
@@ -373,9 +383,7 @@ def build_candidates_artifact(
                 # (was set by run_quant_filter's tech_score ranking).
                 _ms_set = set(_ms_tickers)
                 for rec in eval_log:
-                    rec["quant_filter_pass"] = (
-                        1 if rec["ticker"] in _ms_set else 0
-                    )
+                    rec["quant_filter_pass"] = 1 if rec["ticker"] in _ms_set else 0
                     if rec["ticker"] not in _ms_set and not rec.get("filter_fail_reason"):
                         rec["filter_fail_reason"] = "rank_cutoff"
                 logger.info(
@@ -385,8 +393,8 @@ def build_candidates_artifact(
                 )
     except Exception as _exc:
         logger.warning(
-            "[scanner_orchestrator] momentum sleeve re-ranking unavailable "
-            "(falling back to tech_score ranking): %s", _exc,
+            "[scanner_orchestrator] momentum sleeve re-ranking unavailable (falling back to tech_score ranking): %s",
+            _exc,
         )
 
     # ── 5. Build artifact ─────────────────────────────────────────────────
@@ -473,7 +481,9 @@ def write_candidates_artifact(
     return key
 
 
-def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
+def build_shadow_candidate_artifacts(
+    live_artifact: dict,
+) -> tuple[dict[str, dict], dict[str, str]]:
     """Build the champion/challenger SHADOW candidate artifacts (config#1221).
 
     Must be called immediately after :func:`build_candidates_artifact` for the
@@ -481,20 +491,32 @@ def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
     ``run_quant_filter`` stashed on ``_last_eval_log`` (so the hard gates are
     held constant across specs with zero gate duplication) and the
     cross-sectional ``*_zscore`` factor loadings. Fully fail-soft: any missing
-    input (no eval log, no loadings) yields ``{}`` rather than raising — the
-    shadow substrate must NEVER jeopardize the live candidates.json.
+    input (no eval log, no loadings) yields ``({}, errors)`` rather than
+    raising — the shadow substrate must NEVER jeopardize the live
+    candidates.json.
+
+    Returns ``(artifacts, errors)`` — see
+    ``data.scanner_specs.build_shadow_artifacts`` for the per-spec-failure
+    case. When the WHOLE substrate is skipped here (no eval log / no factor
+    loadings), ``errors`` covers EVERY registered challenger spec, not just
+    one — a whole-cycle skip is a miss for every spec too (config#6428,
+    champion-challenger-policy.md §3).
     """
     from data.fetchers.feature_store_reader import read_latest_factor_loadings
     from data.scanner import run_quant_filter
-    from data.scanner_specs import build_shadow_artifacts
+    from data.scanner_specs import build_shadow_artifacts, challenger_specs
+
+    def _all_specs_missing(reason: str) -> dict[str, str]:
+        return {spec.name: reason for spec in challenger_specs()}
 
     eval_log = getattr(run_quant_filter, "_last_eval_log", None)
     if not eval_log:
+        reason = "no scanner eval log available this cycle"
         logger.warning(
-            "[scanner_orchestrator] no scanner eval log available — skipping "
-            "shadow candidate-gen specs (live artifact unaffected)",
+            "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
+            reason,
         )
-        return {}
+        return {}, _all_specs_missing(reason)
     # Tickers come from the eval log so this read uses the ArcticDB (daily)
     # source like the live path, rather than silently dropping to the weekly
     # snapshot and comparing a fresh champion against stale shadow specs.
@@ -506,18 +528,19 @@ def build_shadow_candidate_artifacts(live_artifact: dict) -> dict[str, dict]:
     try:
         factor_loadings = read_latest_factor_loadings(tickers=shadow_tickers)
     except Exception as exc:
+        reason = f"factor-loading read failed: {exc}"
         logger.warning(
-            "[scanner_orchestrator] factor-loading read failed (%s) — "
-            "skipping shadow candidate-gen specs (live artifact unaffected)",
-            exc,
+            "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
+            reason,
         )
-        return {}
+        return {}, _all_specs_missing(reason)
     if not factor_loadings:
+        reason = "factor loadings unavailable this cycle"
         logger.warning(
-            "[scanner_orchestrator] factor loadings unavailable — skipping "
-            "shadow candidate-gen specs (live artifact unaffected)",
+            "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
+            reason,
         )
-        return {}
+        return {}, _all_specs_missing(reason)
     params = _resolved_scanner_params()
     return build_shadow_artifacts(live_artifact, eval_log, factor_loadings, params)
 
@@ -649,9 +672,15 @@ def write_universe_board_for_scanner_run(
         focus_lookup,
         run_date,
     )
+    # scanner_tickers rides the SAME candidates.json artifact as scanner_eval_log
+    # (both written by build_candidates_artifact) — pass it through so the
+    # builder's producer contract check (alpha-engine-config#4820) can catch a
+    # degraded/empty scanner_eval_log for THIS run rather than silently writing
+    # a board with a false gate verdict.
     return compute_and_write_universe_board(
         run_date,
         scanner_evals,
+        scanner_tickers=artifact.get("scanner_tickers") or [],
         bucket=bucket,
         s3_client=s3,
     )
@@ -686,3 +715,41 @@ def write_shadow_candidates_artifact(
         len(artifact["scanner_tickers"]),
     )
     return key
+
+
+def write_shadow_status_record(
+    record: dict,
+    spec_name: str,
+    run_date: str,
+    *,
+    s3_client: Any | None = None,
+    bucket: str = _DEFAULT_BUCKET,
+) -> dict:
+    """Persist a scanner shadow spec's per-cycle status record (config#6428,
+    champion-challenger-policy.md §3) — mirroring
+    ``producers/experiment_record.py::write_challenger_experiment_record``'s
+    dated-key + latest-pointer convention — to
+    ``s3://{bucket}/candidates_shadow_status/{spec_name}/{run_date}.json`` and
+    ``.../latest.json``. Called every cycle for every registered challenger
+    spec, success or failure — see
+    ``data.scanner_specs.build_shadow_status_record``. Returns
+    ``{"dated_key": str, "latest_key": str}``."""
+    s3 = s3_client if s3_client is not None else boto3.client("s3")
+    body = json.dumps(record, indent=2, sort_keys=True).encode("utf-8")
+    dated_key = f"{_SHADOW_STATUS_PREFIX}/{spec_name}/{run_date}.json"
+    latest_key = f"{_SHADOW_STATUS_PREFIX}/{spec_name}/latest.json"
+    for key in (dated_key, latest_key):
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=io.BytesIO(body).getvalue(),
+            ContentType="application/json",
+        )
+    logger.info(
+        "[scanner_orchestrator] wrote shadow status record: s3://%s/%s (spec=%s status=%s)",
+        bucket,
+        dated_key,
+        spec_name,
+        record.get("status"),
+    )
+    return {"dated_key": dated_key, "latest_key": latest_key}

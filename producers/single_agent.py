@@ -11,29 +11,41 @@ floor isolates). It is also the natural Phase-3 distillation target (config#1135
 Assembly reuses the live ``_build_signals_payload`` (no reimplementation) —
 contract-identical to the champion; only the belief differs.
 
-**alpha-engine-config-I2997 (2026-07-19): migrated ``assess_candidates`` off
-direct Anthropic (``ChatAnthropic``/Sonnet-4-6) to the fleet-SOTA
-``krepis.llm.LLMClient`` OpenRouter transport (DeepSeek V4 Pro — this
-challenger's per-candidate qualitative reasoning is the "heavier reasoning"
-tier per Brian's ruling, vs the lighter DeepSeek V4 Flash used for
-mechanical/high-volume sites). This is dispatched WEEKLY by the Saturday SF's
-ChallengerShadow state (``_run_challengers_only``), and is a SHADOW/
-best-effort challenger — never blocks the champion.**
+**alpha-engine-config-I6367 (2026-08-03): migrated ``assess_candidates`` off
+a pinned ``ModelSpec(provider="openrouter", model="deepseek/deepseek-v4-pro")``
+onto the ``high`` model group via ``krepis.router.resolve_group_spec()``.**
+Brian's ruling that day is categorical: no agent may be directly linked to
+OpenRouter. This call site is why it was made concrete — on 2026-08-02 the
+OpenRouter account balance went negative and the pin had nowhere to go, so
+every run raised ``ChallengerShadowGapError`` out of the daily Lambda and the
+challenger shadow write was lost outright (measured 2026-08-03 22:50 UTC).
+``high`` expresses the same capability tier the pin did: this challenger's
+per-candidate qualitative reasoning is the "heavier reasoning" tier per
+Brian's earlier ruling, vs the lighter tier used for mechanical/high-volume
+sites. Dispatched WEEKLY by the Saturday SF's ChallengerShadow state
+(``_run_challengers_only``); a SHADOW/best-effort challenger that never
+blocks the champion.
 
-``ModelSpec.structured_outputs=False`` is REQUIRED, not a style choice: live-
-verified 2026-07-19 that OpenRouter's strict ``response_format=json_schema``
-mode is unreliable for DeepSeek-family models — across repeated live calls
-against this exact ``RankingProducerOutput`` schema, the model intermittently
-renamed the required ``ticker`` field (e.g. to ``symbol``/``candidate``),
-which the strict/json_schema path took as ground truth and failed schema
-validation on every attempt. ``structured_outputs=False`` (JSON-instruction +
-tolerant extraction — the krepis/Think-Tank fallback path) round-tripped this
-exact schema correctly on every live attempt tried. ``reasoning={"exclude":
-True}`` mirrors the fleet's two other live DeepSeek V4 OpenRouter consumers
-(morning-signal's ``fallback_llm``, crucible-research's own
-``evals/judge_models.py::OPENROUTER_SHADOW``) — without it a reasoning-
-capable OpenRouter model can burn its whole output budget on chain-of-thought
-and return empty content (config#1659 / config#2575).
+(Prior hop, alpha-engine-config-I2997 / 2026-07-19: off direct Anthropic
+``ChatAnthropic``/Sonnet-4-6 onto ``krepis.llm.LLMClient``.)
+
+``structured_outputs=False`` is REQUIRED, not a style choice, and is passed
+EXPLICITLY so a registry default cannot re-enable it: live-verified
+2026-07-19 that strict ``response_format=json_schema`` is unreliable for
+DeepSeek-family models — across repeated live calls against this exact
+``RankingProducerOutput`` schema, the model intermittently renamed the
+required ``ticker`` field (e.g. to ``symbol``/``candidate``), which the
+strict path took as ground truth and failed validation on every attempt. The
+JSON-instruction + tolerant-extraction path round-tripped this exact schema
+correctly on every live attempt tried.
+
+The former ``reasoning={"exclude": True}`` is no longer set here. It guarded
+against a reasoning-capable model burning its whole output budget on
+chain-of-thought and returning empty content (config#1659 / config#2575) —
+but reasoning is a per-model param and the serving model is now a registry
+decision, so the registry's ``params.reasoning`` for the entry that actually
+serves is authoritative. Setting it from here would override a per-model fact
+with a guess made for a different model.
 """
 
 from __future__ import annotations
@@ -183,16 +195,33 @@ def _format_candidate_block(scanner_tickers: list[str], technical_scores: dict, 
     return "\n".join(lines)
 
 
-CHALLENGER_MODEL = "deepseek/deepseek-v4-pro"
-"""OpenRouter/DeepSeek V4 Pro (alpha-engine-config-I2997, 2026-07-19). ID
-verified two ways: (1) live against the OpenRouter models API
-(`GET https://openrouter.ai/api/v1/models` lists `deepseek/deepseek-v4-pro`
-— "DeepSeek: DeepSeek V4 Pro"); (2) the sibling `deepseek/deepseek-v4-flash`
-ID cross-checked against two independent live fleet configs already running
-it (morning-signal's SSM `fallback_llm`, this repo's own
-`evals/judge_models.py::OPENROUTER_SHADOW`) confirms the `deepseek/deepseek-
-v4-*` naming family is correct. Never hand-write an OpenRouter model ID — a
-typo silently killed morning-signal on 2026-07-15."""
+CHALLENGER_GROUP = "high"
+"""Capability tier this challenger asks for — NOT a model, and not a provider.
+
+Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent may be
+directly linked to OpenRouter. This call site previously pinned
+``ModelSpec(provider="openrouter", model="deepseek/deepseek-v4-pro")`` and
+died with it: on 2026-08-02 the OpenRouter account balance went negative and
+every run raised ``ChallengerShadowGapError`` out of the daily Lambda, losing
+the challenger shadow write entirely (measured 2026-08-03 22:50 UTC).
+
+``high`` is the same capability tier the pin expressed — heavier per-candidate
+qualitative reasoning, per Brian's earlier ruling that distinguishes this from
+the lighter tier used for mechanical/high-volume sites. Its members and their
+order are a registry decision (``LLM_MODEL_REGISTRY.yaml``), resolved above
+this module. It asks for a tier and says where it runs; nothing else."""
+
+CHALLENGER_EXEC_CONTEXT = "lambda"
+"""Where this code runs — a fact, never a routing preference (R28/R29).
+
+The registry declares ``lambda`` on NO model entry, deliberately: a Lambda has
+no local egress proxy and no private-network peer, so the router is its only
+path. That is what makes this call site **fail closed** rather than falling
+through to a direct provider endpoint whose traffic is DLP-unscanned. Do not
+"fix" a router outage here by widening what this context admits — the
+Director's ``exclude_route="litellm_proxy"`` did exactly that and served
+``glm-5.2`` at openrouter.ai unscanned while logging a healthy route
+(alpha-engine-config-I6183)."""
 
 CALLSITE_ID = "single-agent-quant"
 """Cost-attribution join key for this call site (krepis >= 0.23 requires it).
@@ -239,23 +268,15 @@ def assess_candidates(
     never silently skips cost emission (alpha-engine-config-I5206)."""
     from krepis.cost_sink import S3JsonlCostSink
     from krepis.llm import LLMClient
-    from krepis.llm_config import ModelSpec
+    from krepis.router import resolve_group_spec
 
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
+    from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = (
         loaded.text + "\n\n## Candidates\n" + _format_candidate_block(scanner_tickers, technical_scores, sector_map)
     )
-    key = api_key or OPENROUTER_API_KEY
-    if not key:
-        raise RuntimeError(
-            "single_agent challenger requires an OpenRouter API key: pass "
-            "api_key= explicitly, or ensure config.OPENROUTER_API_KEY "
-            "resolves (SSM parameter /alpha-engine/OPENROUTER_API_KEY, or "
-            "the OPENROUTER_API_KEY environment variable as a fallback)."
-        )
     # Default sink so a production call without an injected sink still
     # emits. The sink never raises on a failed PUT, so constructing one
     # in tests is harmless (they either inject their own or ignore S3).
@@ -265,20 +286,32 @@ def assess_candidates(
             prefix="decision_artifacts/_cost_raw",
             register_atexit=True,
         )
-    spec = ModelSpec(
-        provider="openrouter",
-        model=CHALLENGER_MODEL,
+    # The registry decides model, endpoint and credential; this module decides
+    # only which capability tier it wants and where it is running. krepis
+    # resolves the credential by NAME at call time, so no key is read here —
+    # which is why `api_key` is now only a test seam.
+    #
+    # `structured_outputs=False` is REQUIRED, not a style choice, and is
+    # passed explicitly so a registry default cannot re-enable it: live-
+    # verified 2026-07-19 that strict `response_format=json_schema` is
+    # unreliable for DeepSeek-family models against this exact
+    # `RankingProducerOutput` schema — the model intermittently renamed the
+    # required `ticker` field and the strict path took that as ground truth,
+    # failing validation on every attempt. The JSON-instruction + tolerant-
+    # extraction path round-tripped it correctly every time.
+    spec, route = resolve_group_spec(
+        CHALLENGER_GROUP,
+        exec_context=CHALLENGER_EXEC_CONTEXT,
+        # This call site builds an LLMClient on the openai transport. Asking
+        # for the anthropic wire would let a fallback hand it a URL its
+        # transport cannot speak.
+        wire="openai",
         max_tokens=MAX_TOKENS_STRATEGIC,
-        # REQUIRED — see module docstring (live-verified 2026-07-19: strict
-        # response_format=json_schema is unreliable for DeepSeek-family
-        # models on OpenRouter; the JSON-instruction + tolerant-extraction
-        # fallback round-tripped this schema correctly every attempt).
         structured_outputs=False,
-        reasoning={"exclude": True},
     )
     client = LLMClient(
         spec,
-        api_key=key,
+        api_key=api_key,
         client_factory=client_factory,
         max_retries=CHALLENGER_LLM_MAX_RETRIES,
         # REQUIRED since krepis 0.23 (krepis/llm.py::LLMClient.__init__ —
@@ -301,9 +334,12 @@ def assess_candidates(
         attempts=2,
     )
     logger.info(
-        "[single_agent] challenger llm_call model=%s resolved_model=%s "
-        "input_tokens=%d output_tokens=%d provider_cost_usd=%s",
-        CHALLENGER_MODEL,
+        "[single_agent] challenger llm_call group=%s route=%s requested=%s "
+        "resolved_model=%s input_tokens=%d output_tokens=%d "
+        "provider_cost_usd=%s",
+        CHALLENGER_GROUP,
+        route.get("route"),
+        spec.model,
         result.model,
         result.usage.input_tokens,
         result.usage.output_tokens,

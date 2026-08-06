@@ -760,6 +760,10 @@ class TestWriteUniverseBoardForScannerRun:
             artifact = {
                 "run_date": self._RUN_DATE,
                 "scanner_eval_log": self._eval_log(),
+                # Only NVDA has quant_filter_pass == 1 in _eval_log() — must
+                # agree with the board's gate_stage == "passed" set per the
+                # producer contract check (alpha-engine-config#4820).
+                "scanner_tickers": ["NVDA"],
             }
 
             with (

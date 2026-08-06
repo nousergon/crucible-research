@@ -297,3 +297,23 @@ def test_board_with_empty_stocks_raises():
     empty_board = {"schema_version": 3, "stocks": []}
     with pytest.raises(ValueError):
         build_signals_envelope("2026-07-14", empty_board, None)
+
+
+def test_producer_declared_empty_by_contract_in_compatibility_matrix():
+    """config#5713: the producer's empty-by-contract contract must be
+    DECLARED in the producer/champion compatibility matrix (the registry
+    row the executor's coherence assertion is anchored to) — the caveat in
+    the module docstring must never be the only enforcement surface."""
+    from producers.registry import (
+        EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS,
+        FILLING_CHAMPION_ARMS,
+        NOOP_CHAMPION_ARMS,
+    )
+
+    assert _built_envelope()["producer"] in EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS
+    # The arms sets must be non-empty and disjoint — a matrix that names a
+    # producer as empty-by-contract while every arm is (also) a no-op arm
+    # would make the guard vacuously unable to fire.
+    assert FILLING_CHAMPION_ARMS
+    assert NOOP_CHAMPION_ARMS
+    assert not (set(FILLING_CHAMPION_ARMS) & set(NOOP_CHAMPION_ARMS))

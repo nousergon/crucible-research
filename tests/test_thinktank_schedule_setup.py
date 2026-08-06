@@ -22,9 +22,16 @@ What is pinned now:
   1. The script REFUSES — non-zero exit, before any AWS call.
   2. It names where the schedule actually lives, so the refusal is a
      redirect rather than a dead end.
-  3. ``deploy.sh`` still builds the Lambda: the function is not retired,
-     only the daily EventBridge path to it is. ``mode=gap_fill`` and the
-     Step Functions fan-out modes still invoke it.
+  3. ``deploy.sh`` no longer builds the Lambda (alpha-engine-config-I5777,
+     2026-08-04): the weekly SF's ``ThinkTankCoverage`` state was ALSO
+     repointed at the spot dispatcher (config-I5758), so nothing invokes
+     ``alpha-engine-research-thinktank`` any more — measured 2026-08-04,
+     zero CloudWatch invocations since 2026-07-29, no resource-based
+     policy, no deployed state machine names it. The function is retired,
+     not merely its daily EventBridge path. ``lambda/thinktank_handler.py``
+     is NOT retired — ``infrastructure/thinktank_box_runner.py`` still
+     imports and runs it in-process on the spot box, so the orchestration
+     code and its own tests (``test_thinktank_handler.py``) stay live.
 
 The 14:30 cadence and the dispatch alarm now belong to the dispatcher's
 own ``deploy.sh`` and are pinned in nousergon-data.
@@ -32,7 +39,6 @@ own ``deploy.sh`` and are pinned in nousergon-data.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
 
@@ -102,15 +108,20 @@ def test_the_deleted_alarms_are_not_resurrected_elsewhere():
             assert name not in path.read_text(encoding="utf-8"), f"{path.name} references the deleted alarm {name}"
 
 
-def test_deploy_sh_ships_the_thinktank_target():
-    """The schedule is only as fresh as the function behind it: deploy.sh
-    must define the thinktank target (image-share, 900s timeout for the
-    theme re-seed worst case) and stage the private thinktank.yaml into
-    the image alongside scoring.yaml/universe.yaml."""
+def test_deploy_sh_no_longer_ships_the_thinktank_lambda_target():
+    """Inverted 2026-08-04 (alpha-engine-config-I5777): this used to assert
+    deploy.sh SHIPS the thinktank Lambda target, back when only the daily
+    schedule was superseded and the function still had a live invoker via
+    the weekly SF's mode=gap_fill. That invoker is gone too (config-I5758
+    repointed ThinkTankCoverage at the spot dispatcher) — the function
+    itself is retired, so deploy.sh must NOT publish code to it any more.
+    The private thinktank.yaml config stays staged into the shared image
+    (thinktank/ core logic is still read on the spot box), so that
+    assertion is unchanged."""
     text = _DEPLOY_SH.read_text(encoding="utf-8")
-    assert 'FUNCTION_THINKTANK="alpha-engine-research-thinktank"' in text
-    assert re.search(
-        r'_deploy_image_shared_lambda "\$FUNCTION_THINKTANK" "thinktank_handler" 900 1024',
-        text,
+    assert "FUNCTION_THINKTANK" not in text, (
+        "deploy.sh still declares FUNCTION_THINKTANK — the thinktank Lambda "
+        "deploy target should have been removed by alpha-engine-config-I5777"
     )
+    assert "deploy_thinktank" not in text
     assert "for yaml in scoring.yaml universe.yaml thinktank.yaml; do" in text
