@@ -146,7 +146,24 @@ PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
 # three champion/challenger arms are directly comparable at equal size (an arm's
 # win must not be confounded between selection rule and breadth — the
 # count-matched framing is what made the churn finding legible at all).
-_RANK_CUTS = (20, 25, 60)
+ATTRACTIVENESS_FEED_TOP_N = 60
+"""Width of the decision set fed forward to evidence ingestion and the
+challenger arms — ``rag-corpus-policy.md`` §2.1 names this constant.
+
+The fleet SSoT is ``nousergon_lib.decision_set.ATTRACTIVENESS_FEED_TOP_N``.
+This module keeps a local definition rather than importing it because this
+repo's ``nousergon-lib`` pin is v0.124.3 and adopting the lib constant means a
+34-version jump that has nothing to do with this invariant; unification is
+tracked and lands with the next pin bump. The value is asserted against the
+consumer's in the cross-repo contract test rather than trusted to stay equal
+by inspection.
+"""
+
+_RANK_CUTS = (20, 25, ATTRACTIVENESS_FEED_TOP_N)
+
+FEED_CUT_NAME = f"attractiveness_top_{ATTRACTIVENESS_FEED_TOP_N}"
+"""The cut downstream evidence ingestion scopes to. The champion cut must be
+its head — see the funnel invariant in :func:`build_universe_membership`."""
 
 # Width of the incumbent (``tech_score``) challenger arm — held equal to the
 # champion width so champion-vs-incumbent is a selection-rule comparison with
@@ -317,6 +334,38 @@ def build_universe_membership(
                 f"scanner_top_{_INCUMBENT_CUT_N}.size={incumbent_cut['size']} "
                 f"(both must equal {_INCUMBENT_CUT_N}; a short tech_score table "
                 f"must not silently narrow the incumbent arm)"
+            )
+
+    # The funnel invariant (alpha-engine-config-I6630). The champion cut is the
+    # HEAD of the feed cut, and every downstream consumer is entitled to assume
+    # it: the RAG corpus scopes to the feed cut so the scored names get
+    # evidence, and Think Tank's gap-fill window is the same 60.
+    #
+    # This holds by construction while both are cuts of one ranking — which is
+    # exactly why it went unchecked, and exactly how it broke. The corpus was
+    # scoped to ``scanner_candidates`` (a tech_score momentum GATE, also 60
+    # wide) against a champion drawn from the attractiveness RANK; measured
+    # 2026-08-07 they overlapped on 2 of 20. Nothing failed, because nothing
+    # asserted the two were related.
+    #
+    # Asserted at the producer so a champion moved outside the feed cut is a
+    # RED SCANNER RUN, not a consumer's problem to discover weeks later. If a
+    # future champion legitimately sits outside the attractiveness rank family
+    # (a Think Tank promotion, say), the feed cut must move in the same change
+    # — that is the coupling this enforces, not an obstacle to it.
+    champion_cut = cuts.get(PREDICTOR_UNIVERSE_CUT)
+    feed_cut = cuts.get(FEED_CUT_NAME)
+    if champion_cut is not None and feed_cut is not None:
+        escaped = sorted(set(champion_cut["tickers"]) - set(feed_cut["tickers"]))
+        if escaped:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: funnel invariant broken — "
+                f"{len(escaped)} of {champion_cut['size']} ticker(s) in the "
+                f"champion cut {PREDICTOR_UNIVERSE_CUT!r} are absent from the "
+                f"feed cut {FEED_CUT_NAME!r} ({escaped}). The champion must be "
+                f"the head of the feed set: the corpus fills evidence for the "
+                f"feed cut, so a champion outside it is scored on cold context "
+                f"(alpha-engine-config-I6630)."
             )
 
     membership = {
