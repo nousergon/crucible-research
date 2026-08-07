@@ -215,7 +215,7 @@ pytz~=2026.3
 
 # Dev / testing
 pytest~=9.1
-pytest-asyncio~=0.23
+pytest-asyncio~=1.4
 # Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
