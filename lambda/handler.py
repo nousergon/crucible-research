@@ -458,10 +458,11 @@ def handler(event, context):
     # thinktank / aggregate_costs / rationale_clustering / eval_judge dry
     # paths (return before any S3 / secrets).
     if dry_run_llm:
+        from nousergon_lib.dates import resolve_trading_day
+
         from archive.manager import ArchiveManager
         from dry_run import install_dry_run_stubs
         from graph.research_graph import build_graph, create_initial_state
-        from nousergon_lib.dates import resolve_trading_day
         _dry_run_date = resolve_trading_day(datetime.date.today().isoformat())
         logger.info(
             "dry_run_llm=True: boot/import/wiring validation only "
