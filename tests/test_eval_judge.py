@@ -32,7 +32,7 @@ from nousergon_lib.decision_capture import (
     ModelMetadata,
 )
 
-from evals.judge_models import OPENROUTER_SHADOW
+from evals.judge_models import DEEPSEEK_V4_PRO, OPENROUTER_SHADOW
 from graph.state_schemas import (
     RubricDimensionScore,
     RubricEvalArtifact,
@@ -500,11 +500,15 @@ class TestEvaluateArtifact:
             "usage": {"include": True},
         }
 
-    def test_sonnet_tier_also_routes_to_the_same_openrouter_default(self):
-        """Brian's ruling collapses BOTH tiers' physical call onto the SAME
-        OpenRouter default — the Sonnet ``judge_model`` logical key is
-        preserved (persisted identity) but the request model is identical
-        to the Haiku tier's, not a separate Sonnet-equivalent pin."""
+    def test_sonnet_tier_sync_routes_to_deepseek_v4_pro(self):
+        """config#4775 (2026-08-03): the sync path routes the Sonnet
+        ``judge_model`` logical key to DeepSeek V4 Pro — a genuine nuance
+        tier above the Haiku tier's V4 Flash — restoring a two-tier
+        physical split post-I2997. The ``judge_model`` logical key is
+        preserved (persisted identity / S3 path / CloudWatch dimension);
+        only the physical request model differs from the Haiku tier's.
+        Supersedes the pre-#4775 collapsed single-model routing, where
+        BOTH tiers physically called the same OpenRouter default."""
         from evals import judge as judge_mod
 
         fake_client = MagicMock()
@@ -521,7 +525,9 @@ class TestEvaluateArtifact:
             )
 
         assert result.judge_model == "claude-sonnet-4-6"
-        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+        assert result.judge_request_model == DEEPSEEK_V4_PRO.request_model
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["model"] == DEEPSEEK_V4_PRO.request_model
 
     def test_records_resolved_model_from_response(self):
         """L4578(a): the API-resolved model is captured per-artifact for
