@@ -151,13 +151,17 @@ def handler(event, context):
     # read candidates/2026-05-29/. Normalize at the producer to the canonical
     # trading-day axis (lib chokepoint), preserving on-or-before semantics so an
     # explicit operator backfill date is normalized too.
-    import datetime as _dt
+    #
+    # resolve_trading_day is the shared chokepoint (nousergon_lib.dates) — the
+    # same normalizer the backtester, evaluator and signals_envelope_handler
+    # resolve through (config-I6667). It is defensive where the inline block it
+    # replaces raised out of date.fromisoformat on a malformed value; the
+    # `len(run_date) < 10` guard above still precedes this call, so a malformed
+    # run_date is rejected with an ERROR return before normalization is reached
+    # and the softened contract changes nothing reachable here.
+    from nousergon_lib.dates import resolve_trading_day
 
-    from nousergon_lib import trading_calendar as _tc
-
-    _cal = _dt.date.fromisoformat(run_date[:10])
-    _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
-    _trading_day = _td.isoformat()
+    _trading_day = resolve_trading_day(run_date[:10])
     if _trading_day != run_date[:10]:
         logger.info(
             "[scanner_handler] normalized run_date %s (calendar) → %s (trading "

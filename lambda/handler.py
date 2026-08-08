@@ -275,35 +275,27 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     return _tc.is_trading_day(d)
 
 
-def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
-    """Return the most recent NYSE trading day on or before the given date.
-
-    If the given date is itself a trading day, returns it unchanged.
-    Otherwise rewinds one day at a time until a trading day is found.
-
-    Used to stamp signals, scanner_evaluations, team_candidates, and
-    cio_evaluations with the data-close date research actually saw —
-    the prior trading day's close is the anchor for 5d-forward-return
-    evaluation and aligns with the standard quant convention (measure
-    signals against the close that fed them).
-
-    Replaces the earlier `next_trading_day` stamping (2026-04-13,
-    commit 9a94e34), which stamped with the Monday the signals would
-    be traded on. That fixed the executor's staleness check at the
-    cost of shifting the evaluator's 5d forward window by one trading
-    day, producing Mon->Mon returns instead of the cleaner Fri->Fri
-    window. Executor's staleness check uses a 7 calendar-day threshold,
-    so Friday-stamped signals read Monday morning (age=3d) stay well
-    inside tolerance.
-
-    Delegates to the alpha_engine_lib.trading_calendar chokepoint
-    (L4466/config#886) — formerly a repo-local exchange_calendars
-    resolver, a second calendar source of truth that could silently
-    drift from the lib the scanner resolves through.
-    """
-    from nousergon_lib import trading_calendar as _tc
-    d = date or datetime.date.today()
-    return d if _tc.is_trading_day(d) else _tc.previous_trading_day(d)
+# NOTE (config-I6667): the repo-local `most_recent_trading_day` that used to
+# live here was removed in favour of `nousergon_lib.dates.resolve_trading_day`,
+# the fleet chokepoint the backtester, evaluator, Scanner and
+# signals_envelope_handler all resolve through. Its rationale is preserved at
+# the two call sites below, because it is the stamping doctrine and not an
+# implementation note:
+#
+#   Research stamps signals, scanner_evaluations, team_candidates and
+#   cio_evaluations with the data-close date it actually saw — the prior
+#   trading day's close is the anchor for 5d-forward-return evaluation and
+#   matches the quant convention of measuring signals against the close that
+#   fed them. This supersedes the `next_trading_day` stamping (2026-04-13,
+#   commit 9a94e34), which stamped with the Monday the signals would be traded
+#   on: that fixed the executor's staleness check at the cost of shifting the
+#   evaluator's 5d forward window by one trading day (Mon→Mon instead of the
+#   cleaner Fri→Fri). The executor's staleness check uses a 7 calendar-day
+#   threshold (signal_reader._warn_if_stale), so Friday-stamped signals read
+#   Monday morning show age=3d, well inside tolerance.
+#
+# `resolve_trading_day` takes and returns an ISO `yyyy-mm-dd` STRING, so each
+# call site converts explicitly rather than re-introducing a local wrapper.
 
 
 def is_early_close(date: datetime.date | None = None) -> bool:
@@ -469,7 +461,8 @@ def handler(event, context):
         from archive.manager import ArchiveManager
         from dry_run import install_dry_run_stubs
         from graph.research_graph import build_graph, create_initial_state
-        _dry_run_date = str(most_recent_trading_day(datetime.date.today()))
+        from nousergon_lib.dates import resolve_trading_day
+        _dry_run_date = resolve_trading_day(datetime.date.today().isoformat())
         logger.info(
             "dry_run_llm=True: boot/import/wiring validation only "
             "(preflight-equivalent; time gate + data-dependent graph not executed)"
@@ -538,8 +531,14 @@ def handler(event, context):
     # calendar-day threshold (signal_reader._warn_if_stale), so
     # Friday-stamped signals read Monday morning show age=3 days, well
     # inside tolerance.
-    trading_date = most_recent_trading_day(today)
-    run_date = str(trading_date)
+    from nousergon_lib.dates import resolve_trading_day
+
+    run_date = resolve_trading_day(today.isoformat())
+    # `trading_date` stays a `datetime.date`: _maybe_emit_scorecard,
+    # _maybe_emit_team_accuracy and the aggregate_day / compute_corpus_stats
+    # `target_date=` arguments are all date-typed. Convert here rather than
+    # wrapping the lib helper (config-I6667).
+    trading_date = datetime.date.fromisoformat(run_date)
 
     # Idempotency gate: skip if signals already written for this date
     if not force:
