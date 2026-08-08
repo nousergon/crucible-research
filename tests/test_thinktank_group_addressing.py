@@ -340,3 +340,79 @@ class TestRouterCredentialIsResolvableByKrepis:
         from krepis.router import resolve_router_credential
 
         assert "name" in inspect.signature(resolve_router_credential).parameters
+
+
+# ── The served-model half of the same contract (config-I6543 / -I6652) ───────
+
+
+class TestGroupAliasIsNeverReportedAsTheServedModel:
+    """Under group addressing the serving model is unknown until the response
+    returns, so ``spec.model`` is a synthetic alias ("low"/"med"/"high"/
+    "ultra") that is never itself billable and never carries a price card.
+
+    Through krepis 0.35.0 both litellm-transport paths — ``complete()``'s
+    ``TRANSPORT_LITELLM`` branch and ``_structured_litellm()``, the latter
+    being the Think Tank's live path for `themes`/`thesis`/`pillar` — fell
+    back to ``model=served_model or self.spec.model`` when the response's
+    ``model`` field came back empty. The alias then flowed into
+    ``thinktank/client.py::_cost_for``, which correctly refused to price a
+    fictional model and RAISED::
+
+        ThinktankLLMError: tier=themes group=low served-model='low': the
+        provider returned no cost and no price card could be resolved
+
+    Live on 2026-08-04 (``thinktank/runs/2026-08-04/manifest_df20e6c66665``):
+    run aborted, 0 theses written. The fail-loud design downstream worked
+    exactly as intended; what fed it did not. krepis 0.36.0
+    (``_resolve_group_served_model``, krepis-PR115) raises at the source with
+    ``_hidden_params`` attached instead of returning the alias.
+
+    Asserted as a library CAPABILITY, not a version string, mirroring
+    ``TestRouterCredentialIsResolvableByKrepis`` above: a floor is satisfiable
+    by a build that no longer behaves this way, and the failure it guards is a
+    daily 14:30 UTC run, not a CI red.
+
+    Deliberately NOT asserted: that a price card exists for "low". Adding one
+    would paper over a resolution failure by pretending the alias is billable
+    — flagged as the wrong fix in config-I6543 and in the alert-drain issue
+    (-I6577) that proposed it, which was closed for that reason.
+    """
+
+    def test_a_group_alias_is_never_reported_as_the_served_model(self):
+        import pytest as _pytest
+        from krepis.llm import _resolve_group_served_model
+        from krepis.llm_config import LLMConfigError, ModelSpec
+        from krepis.router import ROUTER_EDGE_PROVIDER
+
+        spec = ModelSpec(
+            provider=ROUTER_EDGE_PROVIDER,
+            model="low",
+            base_url="https://router.example.invalid:8443",
+            api_key_env="ROUTER_CONSUMER_THINKTANK",
+        )
+
+        class _Resp:
+            def __init__(self, model):
+                self.model = model
+                self._hidden_params = {"model_id": "deployment-abc"}
+
+        # A real served model passes straight through.
+        assert _resolve_group_served_model(_Resp("deepseek-v4-flash"), spec=spec) == (
+            "deepseek-v4-flash"
+        )
+
+        # An empty field and the alias echoed back are the two shapes seen
+        # live; both must RAISE rather than resolve to the alias.
+        for unusable in ("", None, "low"):
+            with _pytest.raises(LLMConfigError) as exc:
+                _resolve_group_served_model(_Resp(unusable), spec=spec)
+            message = str(exc.value)
+            assert "low" in message, (
+                "the raise must name the group so the operator knows which "
+                "tier produced it"
+            )
+            assert "_hidden_params" in message, (
+                "the raise must carry _hidden_params — it is the only "
+                "diagnostic that can root-cause WHY the model field was "
+                "unusable, and capturing it is deliverable 3 of config-I6543"
+            )
