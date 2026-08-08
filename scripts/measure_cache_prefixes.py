@@ -6,9 +6,10 @@ whether the prefix clears the model-specific cache minimum before any
 won't engage caching — no error, just ``cache_creation_input_tokens: 0``
 forever — so this audit must run before merging any caching changes.
 
-Model cache minimums (per Anthropic prompt-caching docs):
-  - Haiku-4-5 / Opus tier:  4096 tokens
-  - Sonnet-4-6:             2048 tokens
+Model cache minimums (imported from ``krepis.cache_minimums`` — the
+canonical source per ``alpha-engine-config`` registry policy; was
+previously duplicated inline with wrong values for two of four
+entries, both too high, causing three caching deferrals).
 
 Call sites measured:
 
@@ -52,18 +53,16 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import anthropic  # noqa: E402
-from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 # ── Model-specific cache minimums (tokens) ────────────────────────────────
-# Per Anthropic prompt-caching docs: any prefix below this silently won't
-# cache. Kept inline so the script doesn't depend on a config repo for
-# what is a fixed, documented API constraint.
-_CACHE_MIN_BY_MODEL: dict[str, int] = {
-    "claude-haiku-4-5": 4096,
-    "claude-opus-4-7": 4096,
-    "claude-opus-4-6": 4096,
-    "claude-sonnet-4-6": 2048,
-}
+# Imported from ``krepis.cache_minimums`` (the canonical source per
+# alpha-engine-config LLM_MODEL_REGISTRY.yaml). The previous inline copy
+# had two of four entries wrong (both too high for Sonnet and Opus),
+# which silently declined caching for prefixes that would have cached
+# and caused three fixes to be deferred against inflated thresholds.
+# See alpha-engine-config-I4930 for the full worklist.
+from krepis.cache_minimums import cache_minimum  # noqa: E402
+from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 
 @dataclass
@@ -168,12 +167,12 @@ def measure_sector_quant(client: anthropic.Anthropic) -> PrefixMeasurement:
     return PrefixMeasurement(
         call_site="sector_quant_analyst",
         model=model,
-        minimum_for_cache=_CACHE_MIN_BY_MODEL[model],
+        minimum_for_cache=cache_minimum(model),
         input_tokens=tokens,
         n_tools=len(tools),
         system_chars=len(system_text),
         user_chars=0,
-        clears_cache_minimum=tokens >= _CACHE_MIN_BY_MODEL[model],
+        clears_cache_minimum=tokens >= cache_minimum(model),
         notes="Caching SHIPPED in this PR via SystemMessage cache_control.",
     )
 
@@ -221,12 +220,12 @@ def measure_sector_qual(client: anthropic.Anthropic) -> PrefixMeasurement:
     return PrefixMeasurement(
         call_site=f"sector_qual_analyst ({prompt_name})",
         model=model,
-        minimum_for_cache=_CACHE_MIN_BY_MODEL[model],
+        minimum_for_cache=cache_minimum(model),
         input_tokens=tokens,
         n_tools=len(tools),
         system_chars=len(system_text),
         user_chars=0,
-        clears_cache_minimum=tokens >= _CACHE_MIN_BY_MODEL[model],
+        clears_cache_minimum=tokens >= cache_minimum(model),
         notes="Caching SHIPPED in this PR via SystemMessage cache_control.",
     )
 
@@ -261,12 +260,12 @@ def measure_peer_review_selection(
     return PrefixMeasurement(
         call_site="peer_review_joint_selection (Phase 4)",
         model=model,
-        minimum_for_cache=_CACHE_MIN_BY_MODEL[model],
+        minimum_for_cache=cache_minimum(model),
         input_tokens=tokens,
         n_tools=0,
         system_chars=0,
         user_chars=len(rendered),
-        clears_cache_minimum=tokens >= _CACHE_MIN_BY_MODEL[model],
+        clears_cache_minimum=tokens >= cache_minimum(model),
         notes=(
             "Upper bound: whole rendered prompt. Phase 4 cacheable prefix "
             "is smaller after splitting stable rubric from volatile candidates."
@@ -301,12 +300,12 @@ def measure_macro_analyst(client: anthropic.Anthropic) -> PrefixMeasurement:
     return PrefixMeasurement(
         call_site="macro_agent_analyst (Phase 4)",
         model=model,
-        minimum_for_cache=_CACHE_MIN_BY_MODEL[model],
+        minimum_for_cache=cache_minimum(model),
         input_tokens=tokens,
         n_tools=0,
         system_chars=0,
         user_chars=len(rendered),
-        clears_cache_minimum=tokens >= _CACHE_MIN_BY_MODEL[model],
+        clears_cache_minimum=tokens >= cache_minimum(model),
         notes=(
             "Upper bound: whole rendered prompt. Phase 4 cacheable prefix "
             "is smaller after splitting stable rubric from volatile macro data."
@@ -332,12 +331,12 @@ def measure_eval_judge(
     return PrefixMeasurement(
         call_site=f"eval_judge / {rubric_name} (Phase 4)",
         model=model,
-        minimum_for_cache=_CACHE_MIN_BY_MODEL[model],
+        minimum_for_cache=cache_minimum(model),
         input_tokens=tokens,
         n_tools=0,
         system_chars=0,
         user_chars=len(rendered),
-        clears_cache_minimum=tokens >= _CACHE_MIN_BY_MODEL[model],
+        clears_cache_minimum=tokens >= cache_minimum(model),
         notes=(
             "Upper bound: whole rendered rubric. Phase 4 cacheable prefix "
             "is smaller after splitting stable rubric from volatile artifact data."
