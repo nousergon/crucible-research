@@ -341,3 +341,199 @@ def test_tech_scores_from_eval_log_projection() -> None:
     ]
     assert tech_scores_from_eval_log(rows) == {"AAPL": 65.89, "MSFT": 60.61}
     assert tech_scores_from_eval_log(None) == {}
+
+
+# ── 8. Cut refresh cadence (alpha-engine-config-I6666) ───────────────────────
+#
+# Brian's ruling 2026-08-08: the cut stays on its current daily refresh, but
+# moving it to weekly must be a one-switch change. What the switch changes is
+# how often the CUT is re-derived — never whether the artifact is written. A
+# carry-forward run still writes both keys, so `universe_membership_latest`
+# stays honest at cadence `weekday_sf` (config-I6651) and a MISSED Scanner run
+# stays distinguishable from a deliberately held cut.
+
+from scoring.universe_membership import (  # noqa: E402
+    CADENCE_DAILY,
+    CADENCE_WEEKLY,
+    DEFAULT_CUT_REFRESH_CADENCE,
+    carry_forward_cuts,
+    compute_and_write_universe_membership,
+    cut_refresh_cadence,
+    read_latest_membership,
+    should_recut,
+)
+
+
+class _ReadableFakeS3(_FakeS3):
+    """`_FakeS3` that can also serve what was put — the carry-forward path
+    reads `latest.json` back."""
+
+    def __init__(self, seed: dict | None = None):
+        super().__init__()
+        if seed is not None:
+            self.puts["universe_membership/latest.json"] = json.dumps(seed).encode()
+
+    def get_object(self, *, Bucket, Key):  # noqa: N803
+        if Key not in self.puts:
+            raise NoSuchKey("nope")
+
+        class _Body:
+            def __init__(self, b):
+                self._b = b
+
+            def read(self):
+                return self._b
+
+        return {"Body": _Body(self.puts[Key])}
+
+
+class NoSuchKey(Exception):
+    """Named to match botocore's generated ``S3.Client.exceptions.NoSuchKey``,
+    which is what the production path narrows on. A differently-named stand-in
+    would make this test pass against code that cannot recognise the real
+    error."""
+
+
+def _prior(effective_date: str) -> dict:
+    m = _membership()
+    m["cut_effective_date"] = effective_date
+    return m
+
+
+def test_default_cadence_is_daily(monkeypatch):
+    """Live behaviour must be unchanged on merge."""
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    assert DEFAULT_CUT_REFRESH_CADENCE == CADENCE_DAILY
+    assert cut_refresh_cadence() == CADENCE_DAILY
+
+
+def test_env_var_flips_the_cadence_without_a_code_change(monkeypatch):
+    """The whole point of the issue: one switch, no deploy."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "  WEEKLY  ")
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+
+
+def test_unrecognised_cadence_raises_rather_than_defaulting(monkeypatch):
+    """A typo silently selecting daily would be indistinguishable from the
+    setting working."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weeky")
+    with pytest.raises(UniverseMembershipError):
+        cut_refresh_cadence()
+
+
+def test_daily_cadence_always_recuts():
+    assert should_recut("2026-08-04", _prior("2026-08-03"), CADENCE_DAILY) is True
+    assert should_recut("2026-08-04", _prior("2026-08-04"), CADENCE_DAILY) is True
+
+
+def test_weekly_cadence_carries_forward_within_an_iso_week():
+    # 2026-08-03 Mon … 2026-08-07 Fri are one ISO week.
+    assert should_recut("2026-08-04", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+    assert should_recut("2026-08-07", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+
+
+def test_weekly_cadence_recuts_on_the_first_run_of_a_new_iso_week():
+    # 2026-08-08 Sat is still the same ISO week as 08-03; 08-10 Mon is the next.
+    assert should_recut("2026-08-08", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+    assert should_recut("2026-08-10", _prior("2026-08-03"), CADENCE_WEEKLY) is True
+
+
+def test_weekly_cadence_recuts_when_there_is_no_prior_cut():
+    assert should_recut("2026-08-04", None, CADENCE_WEEKLY) is True
+    assert should_recut("2026-08-04", {}, CADENCE_WEEKLY) is True
+    # An artifact predating the field is not a usable prior either.
+    assert should_recut("2026-08-04", {"cuts": {"x": {}}}, CADENCE_WEEKLY) is True
+
+
+def test_carry_forward_holds_cuts_but_keeps_todays_ranks():
+    """The gap between fresh ranks and a held cut is what makes staleness
+    visible; carrying the ranks too would hide it."""
+    prior = _prior("2026-08-03")
+    fresh = _membership()
+    fresh["ranks"] = {"NEWNAME": {"attractiveness_rank": 1, "attractiveness_score": 9.9}}
+    held = carry_forward_cuts(fresh, prior)
+    assert held["cuts"] == prior["cuts"]
+    assert held["cut_effective_date"] == "2026-08-03"
+    assert held["ranks"] == fresh["ranks"]
+
+
+def test_carry_forward_preserves_the_prior_predictor_cut_name():
+    """Changing PREDICTOR_UNIVERSE_CUT must not take effect mid-week without a
+    re-cut — the artifact names the cut, so the held artifact must keep naming
+    the one its tickers actually came from."""
+    prior = _prior("2026-08-03")
+    prior["predictor_universe_cut"] = "some_prior_champion"
+    held = carry_forward_cuts(_membership(), prior)
+    assert held["predictor_universe_cut"] == "some_prior_champion"
+
+
+def test_carried_forward_artifact_still_trips_the_count_match_guard():
+    """The held cut is what the predictor consumes all week — guarding only the
+    freshly-derived path would leave the long-lived artifact unchecked."""
+    prior = _prior("2026-08-03")
+    prior["cuts"] = dict(prior["cuts"])
+    prior["cuts"][PREDICTOR_UNIVERSE_CUT] = {
+        "basis": "attractiveness_rank", "size": 20,
+        "tickers": [f"T{i:03d}" for i in range(20)], "source": "x",
+    }
+    prior["cuts"]["scanner_top_20"] = {
+        "basis": "tech_score_rank", "size": 10,
+        "tickers": [f"T{i:03d}" for i in range(10)], "source": "x",
+    }
+    from scoring.universe_membership import assert_cut_invariants
+
+    with pytest.raises(UniverseMembershipError, match="count-match broken"):
+        assert_cut_invariants(carry_forward_cuts(_membership(), prior), _RUN_DATE)
+
+
+def test_read_latest_membership_returns_none_when_absent():
+    assert read_latest_membership(bucket="b", s3_client=_ReadableFakeS3()) is None
+
+
+def test_read_latest_membership_propagates_a_real_failure():
+    """A swallowed read would look like 'no prior cut', re-cut mid-week, and
+    quietly restore the daily churn the weekly setting exists to stop."""
+
+    class _Denied:
+        def get_object(self, *, Bucket, Key):  # noqa: N803
+            raise RuntimeError("AccessDenied")
+
+    with pytest.raises(RuntimeError):
+        read_latest_membership(bucket="b", s3_client=_Denied())
+
+
+def test_weekly_end_to_end_holds_the_cut_and_still_writes_both_keys(monkeypatch):
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
+    prior = _prior("2026-07-20")          # ISO week 30
+    s3 = _ReadableFakeS3(seed=prior)
+    monkeypatch.setattr(
+        "scoring.universe_membership.attractiveness_for_run",
+        lambda run_date, **kw: _attractiveness(),
+    )
+    # 2026-07-24 is inside ISO week 30 -> carry forward.
+    compute_and_write_universe_membership(
+        _RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3
+    )
+    written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert written["cut_refresh_cadence"] == CADENCE_WEEKLY
+    assert written["cut_effective_date"] == "2026-07-20"
+    assert written["cuts"] == prior["cuts"]
+    assert written["run_date"] == _RUN_DATE           # written every run
+    assert "universe_membership/latest.json" in s3.puts
+
+
+def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    s3 = _ReadableFakeS3(seed=_prior("2026-07-20"))
+    monkeypatch.setattr(
+        "scoring.universe_membership.attractiveness_for_run",
+        lambda run_date, **kw: _attractiveness(),
+    )
+    compute_and_write_universe_membership(
+        _RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3
+    )
+    written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert written["cut_refresh_cadence"] == CADENCE_DAILY
+    assert written["cut_effective_date"] == _RUN_DATE
