@@ -41,7 +41,7 @@ agentevals~=0.0
 
 # Data
 yfinance~=1.5.2
-requests-ratelimiter~=0.7
+requests-ratelimiter~=0.10
 pandas~=2.2
 numpy~=1.26
 requests~=2.34
