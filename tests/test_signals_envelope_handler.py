@@ -397,3 +397,76 @@ class TestSecondaryArtifacts:
         assert result["status"] == "OK"
         assert result["dated_key"] == "signals/2026-07-14/signals.json"
         alert.assert_called_once()
+
+
+class TestTradingDayNormalization:
+    """config-I6653 — every key this handler writes must share the Scanner's
+    trading-day axis.
+
+    The weekly SF's ``InitializeInput`` derives ``run_date`` from
+    ``date($$.Execution.StartTime)``, a CALENDAR date. Before this fix the
+    handler used it verbatim while the Scanner in the SAME execution
+    normalized, so the 2026-08-08 Saturday cycle wrote
+    ``candidates/2026-08-07/`` and ``universe_membership/2026-08-07/`` at
+    03:11-03:13 UTC and ``signals/2026-08-08/`` +
+    ``scanner/universe/trajectory/2026-08-08/`` at 03:13-03:15. The
+    ``research_signals`` freshness row is severity:critical with a
+    ``{trading_day}`` key template, so its probe read the stale Friday file
+    and PASSED.
+    """
+
+    @staticmethod
+    def _run(handler_mod, run_date, payload=None):
+        built = payload if payload is not None else _envelope()
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=built), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")) as write_envelope, \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief") as write_brief, \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory") as write_traj:
+            handler_mod.handler({"run_date": run_date, "target": "production"}, None)
+        return write_envelope, write_brief, write_traj
+
+    def test_saturday_calendar_run_date_writes_the_friday_trading_day(self, handler_mod):
+        """The regression itself. 2026-08-08 was a Saturday; the trading day
+        was Friday 2026-08-07 — the date the Scanner used in the same run."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-08")
+        assert write_envelope.call_args.args[1] == "2026-08-07"
+        assert write_brief.call_args.args[0] == "2026-08-07"
+        assert write_traj.call_args.args[0] == "2026-08-07"
+
+    def test_every_artifact_the_handler_writes_shares_one_date(self, handler_mod):
+        """The invariant, stated directly: one cycle, one date, across all
+        three writers. A future writer added without normalization fails
+        here."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-08")
+        dates = {
+            write_envelope.call_args.args[1],
+            write_brief.call_args.args[0],
+            write_traj.call_args.args[0],
+        }
+        assert dates == {"2026-08-07"}
+
+    def test_weekday_run_date_is_unchanged(self, handler_mod):
+        """Normalization is idempotent — the weekday preopen path already had
+        calendar == trading day, and must stay byte-identical."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-07")
+        assert write_envelope.call_args.args[1] == "2026-08-07"
+        assert write_brief.call_args.args[0] == "2026-08-07"
+        assert write_traj.call_args.args[0] == "2026-08-07"
+
+    def test_calendar_date_is_recorded_when_it_differs(self, handler_mod):
+        """Dual-track: normalizing must not discard WHICH cycle wrote the file,
+        or two runs a day apart become indistinguishable inside the artifact."""
+        payload = _envelope()
+        self._run(handler_mod, "2026-08-08", payload=payload)
+        assert payload.get("calendar_date") == "2026-08-08"
+
+    def test_calendar_date_is_absent_on_a_weekday_run(self, handler_mod):
+        """Weekday artifacts stay byte-identical to before this change."""
+        payload = _envelope()
+        self._run(handler_mod, "2026-08-07", payload=payload)
+        assert "calendar_date" not in payload

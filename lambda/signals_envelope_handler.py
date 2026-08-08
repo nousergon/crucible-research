@@ -146,6 +146,38 @@ def handler(event, context):
             "expected ISO YYYY-MM-DD."
         )
 
+    # ── Trading-day normalization (DATE_CONVENTIONS, config-I6653) ───────────
+    # Every artifact this handler writes keys by the TRADING DAY, not the
+    # calendar date. The weekly SF's InitializeInput derives run_date from
+    # date($$.Execution.StartTime) — a CALENDAR date — so on a Saturday cycle
+    # it threads e.g. 2026-08-08 while the trading day is Friday 2026-08-07.
+    #
+    # Until this normalization the handler used that value verbatim, and the
+    # Scanner in the SAME execution normalized: on 2026-08-08 one run wrote
+    # candidates/2026-08-07/ and universe_membership/2026-08-07/ at 03:11-03:13
+    # while this handler wrote signals/2026-08-08/ and
+    # scanner/universe/trajectory/2026-08-08/ at 03:13-03:15. research_signals
+    # is a severity:critical freshness row whose key template is
+    # {trading_day}, so the probe read the stale Friday file and PASSED.
+    #
+    # resolve_trading_day is the shared chokepoint (nousergon_lib.dates) — the
+    # same normalizer the backtester and evaluator adopted, and whose docstring
+    # names this exact class. Adopted here rather than copying the Scanner's
+    # inline block, per shared-code-policy: this is the fourth call site.
+    # Idempotent, so a weekday run (calendar == trading day) is a no-op.
+    from nousergon_lib.dates import resolve_trading_day
+
+    calendar_date = run_date[:10]
+    run_date = resolve_trading_day(calendar_date)
+    if run_date != calendar_date:
+        logger.info(
+            "[signals_envelope_handler] normalized run_date %s (calendar) → %s "
+            "(trading day) per DATE_CONVENTIONS — every key this handler writes "
+            "must share the Scanner's trading-day axis (config-I6653)",
+            calendar_date,
+            run_date,
+        )
+
     target = event.get("target", _DEFAULT_TARGET)
     if target not in _VALID_TARGETS:
         raise ValueError(
@@ -203,6 +235,15 @@ def handler(event, context):
     # violates the shared signals v1 JSON Schema (nousergon_lib.contracts)
     # — both propagate uncaught, per the RAISE contract above.
     envelope = build_signals_envelope(run_date, board, substrate)
+
+    # Dual-track per DATE_CONVENTIONS: the artifact keys by trading day, and
+    # ALSO records the calendar date of the cycle that produced it. Without
+    # this, normalization silently discards which run wrote the file — two
+    # cycles a day apart become indistinguishable inside the artifact
+    # (config-I6653). Only stamped when the two differ, so weekday artifacts
+    # are byte-identical to before this change.
+    if calendar_date != run_date:
+        envelope["calendar_date"] = calendar_date
 
     # target is forwarded verbatim — production intent is always explicit,
     # this handler never infers or defaults it silently past the event's
