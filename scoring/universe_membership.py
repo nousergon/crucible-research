@@ -101,7 +101,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -172,7 +172,6 @@ _INCUMBENT_CUT_N = 20
 
 _DEFAULT_BUCKET = "alpha-engine-research"
 
-
 class UniverseMembershipError(RuntimeError):
     """Raised when the membership artifact cannot be built from real inputs.
 
@@ -180,6 +179,138 @@ class UniverseMembershipError(RuntimeError):
     load-bearing for the predictor's daily universe, so an empty or partial
     membership is a red run, never a degraded write.
     """
+
+
+# ── Cut refresh cadence (alpha-engine-config-I6666) ──────────────────────────
+# How often the CUT is re-derived, as opposed to how often this artifact is
+# WRITTEN. The two were the same thing until now: every invocation re-cut
+# everything, so when config-I6494-A put the Scanner on the weekday preopen SF
+# the predictor's universe silently began turning over daily — 32 distinct
+# names held a top-20 slot across the six sessions 2026-07-29 → 2026-08-07, and
+# only 12 of the original 20 survived, against a 21-day prediction horizon.
+#
+# Brian's ruling 2026-08-08: stay daily for now, but make the switch to weekly
+# a one-line flip rather than a producer migration. Hence a declared setting
+# with an env override, so the Scanner Lambda can move without a deploy.
+#
+# The artifact is written EVERY run under both settings (see
+# ``resolve_cut_refresh``) — a carry-forward still writes. That is deliberate:
+# it keeps ``universe_membership_latest`` honest at cadence ``weekday_sf``
+# (alpha-engine-config-I6651), so a missed Scanner run stays visible as a
+# missing artifact instead of being indistinguishable from a held cut.
+CADENCE_DAILY = "daily"
+CADENCE_WEEKLY = "weekly"
+CUT_REFRESH_CADENCES = frozenset({CADENCE_DAILY, CADENCE_WEEKLY})
+DEFAULT_CUT_REFRESH_CADENCE = CADENCE_DAILY
+
+
+def cut_refresh_cadence() -> str:
+    """The configured cut-refresh cadence.
+
+    ``SCANNER_CUT_REFRESH_CADENCE`` overrides the default so the Scanner Lambda
+    flips without a deploy. An unrecognised value RAISES rather than falling
+    back: a typo silently selecting daily would be indistinguishable from the
+    setting working, and the whole point of this knob is that its position is
+    knowable.
+    """
+    value = (os.environ.get("SCANNER_CUT_REFRESH_CADENCE") or "").strip().lower()
+    if not value:
+        return DEFAULT_CUT_REFRESH_CADENCE
+    if value not in CUT_REFRESH_CADENCES:
+        raise UniverseMembershipError(
+            f"SCANNER_CUT_REFRESH_CADENCE={value!r} is not a recognised cadence — "
+            f"expected one of {sorted(CUT_REFRESH_CADENCES)} "
+            f"(alpha-engine-config-I6666)"
+        )
+    return value
+
+
+def _iso_week(date_str: str) -> tuple[int, int]:
+    """``(iso_year, iso_week)`` for a ``YYYY-MM-DD`` string."""
+    try:
+        y, w, _ = date.fromisoformat(str(date_str)).isocalendar()
+    except (TypeError, ValueError) as exc:
+        raise UniverseMembershipError(
+            f"cannot resolve the ISO week of {date_str!r}: {exc}"
+        ) from exc
+    return (y, w)
+
+
+def should_recut(run_date: str, prior: dict | None, cadence: str | None = None) -> bool:
+    """Whether this run re-derives the cuts, or carries the prior ones forward.
+
+    ``daily`` always re-cuts. ``weekly`` re-cuts on the first run of each ISO
+    week, and whenever there is no usable prior cut to carry.
+
+    ISO week rather than a named weekday deliberately: a holiday-shortened week
+    still gets exactly one re-cut, with no trading-calendar special-casing here
+    and no way for a skipped Saturday to strand the cut for a fortnight.
+    """
+    cadence = cadence or cut_refresh_cadence()
+    if cadence == CADENCE_DAILY:
+        return True
+    effective = (prior or {}).get("cut_effective_date")
+    if not effective or not (prior or {}).get("cuts"):
+        # No prior cut to carry — a first run, or an artifact predating this
+        # field. Re-cut rather than invent one.
+        return True
+    return _iso_week(run_date) > _iso_week(effective)
+
+
+def read_latest_membership(
+    *, bucket: str | None = None, s3_client: Any = None
+) -> dict | None:
+    """The current ``universe_membership/latest.json``, or ``None`` if absent.
+
+    Absence is a legitimate first-run state and returns ``None``; any other
+    error propagates. A read failure must not be silently read as "no prior
+    cut", which under ``weekly`` would re-cut mid-week and quietly restore the
+    daily churn this exists to stop.
+    """
+    s3 = _client(s3_client)
+    b = _bucket(bucket)
+    try:
+        body = s3.get_object(Bucket=b, Key="universe_membership/latest.json")["Body"].read()
+    except Exception as exc:
+        if _is_missing_key(exc):
+            return None
+        raise
+    return json.loads(body)
+
+
+def _is_missing_key(exc: Exception) -> bool:
+    """True only for a genuine "object does not exist" S3 error.
+
+    Narrow on purpose. Every other failure — credentials, throttling, a denied
+    bucket — must propagate, because under ``weekly`` a swallowed read would
+    look like "no prior cut", re-cut mid-week, and quietly restore the daily
+    churn this module exists to bound.
+    """
+    if type(exc).__name__ == "NoSuchKey":
+        return True
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+    return code in {"NoSuchKey", "404"}
+
+
+def carry_forward_cuts(fresh: dict, prior: dict) -> dict:
+    """``fresh`` with the prior run's cuts held, and today's ranks kept.
+
+    Ranks are deliberately NOT carried: they are today's ~900-name view, and
+    the gap between fresh ranks and a held cut is precisely what an operator
+    needs in order to see how stale the cut has become. ``cut_effective_date``
+    is what says which is which.
+
+    ``predictor_universe_cut`` is carried from the prior artifact rather than
+    re-read from :data:`PREDICTOR_UNIVERSE_CUT`, so changing that constant
+    cannot take effect mid-week without a re-cut.
+    """
+    held = dict(fresh)
+    held["cuts"] = prior["cuts"]
+    held["predictor_universe_cut"] = prior.get(
+        "predictor_universe_cut", fresh.get("predictor_universe_cut")
+    )
+    held["cut_effective_date"] = prior["cut_effective_date"]
+    return held
 
 
 def _bucket(bucket: str | None) -> str:
@@ -229,6 +360,70 @@ def _tech_score_rank_table(scanner_tickers: list[str], tech_scores: dict[str, fl
     scored = {t: tech_scores[t] for t in dict.fromkeys(scanner_tickers) if isinstance(tech_scores.get(t), (int, float))}
     ordered = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))
     return {ticker: {"tech_score_rank": i + 1, "tech_score": score} for i, (ticker, score) in enumerate(ordered)}
+
+
+def assert_cut_invariants(membership: dict, run_date: str) -> None:
+    """Raise ``UniverseMembershipError`` if the artifact's cuts violate an invariant.
+
+    Extracted from :func:`build_universe_membership` so it can also run against
+    a CARRIED-FORWARD artifact (alpha-engine-config-I6666). Under the weekly
+    cadence the held cut is what the predictor consumes for the rest of the
+    week, so a count-match or funnel violation in it is exactly as load-bearing
+    as one in a freshly derived cut — guarding only the fresh path would leave
+    the long-lived artifact unchecked.
+    """
+    _cuts = membership.get("cuts") or {}
+
+    # Count-match is the whole point of N=20 (alpha-engine-config-I4983): an
+    # arm's win must not be confounded between selection rule and breadth. When
+    # the incumbent arm is emitted, its size MUST equal the champion cut's —
+    # a partial eval log that yields n=10 against a n=20 champion is a red run,
+    # never a silently-skewed comparison. (Absence of the incumbent arm when
+    # no tech_scores were supplied is an honest degrade for historical
+    # backfills; that path does not enter this check.)
+    champion = _cuts.get(PREDICTOR_UNIVERSE_CUT)
+    incumbent_cut = _cuts.get(f"scanner_top_{_INCUMBENT_CUT_N}")
+    if champion is not None and incumbent_cut is not None:
+        if champion["size"] != incumbent_cut["size"]:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: count-match broken — "
+                f"{PREDICTOR_UNIVERSE_CUT}.size={champion['size']} vs "
+                f"scanner_top_{_INCUMBENT_CUT_N}.size={incumbent_cut['size']} "
+                f"(both must equal {_INCUMBENT_CUT_N}; a short tech_score table "
+                f"must not silently narrow the incumbent arm)"
+            )
+
+    # The funnel invariant (alpha-engine-config-I6630). The champion cut is the
+    # HEAD of the feed cut, and every downstream consumer is entitled to assume
+    # it: the RAG corpus scopes to the feed cut so the scored names get
+    # evidence, and Think Tank's gap-fill window is the same 60.
+    #
+    # This holds by construction while both are cuts of one ranking — which is
+    # exactly why it went unchecked, and exactly how it broke. The corpus was
+    # scoped to ``scanner_candidates`` (a tech_score momentum GATE, also 60
+    # wide) against a champion drawn from the attractiveness RANK; measured
+    # 2026-08-07 they overlapped on 2 of 20. Nothing failed, because nothing
+    # asserted the two were related.
+    #
+    # Asserted at the producer so a champion moved outside the feed cut is a
+    # RED SCANNER RUN, not a consumer's problem to discover weeks later. If a
+    # future champion legitimately sits outside the attractiveness rank family
+    # (a Think Tank promotion, say), the feed cut must move in the same change
+    # — that is the coupling this enforces, not an obstacle to it.
+    champion_cut = _cuts.get(PREDICTOR_UNIVERSE_CUT)
+    feed_cut = _cuts.get(FEED_CUT_NAME)
+    if champion_cut is not None and feed_cut is not None:
+        escaped = sorted(set(champion_cut["tickers"]) - set(feed_cut["tickers"]))
+        if escaped:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: funnel invariant broken — "
+                f"{len(escaped)} of {champion_cut['size']} ticker(s) in the "
+                f"champion cut {PREDICTOR_UNIVERSE_CUT!r} are absent from the "
+                f"feed cut {FEED_CUT_NAME!r} ({escaped}). The champion must be "
+                f"the head of the feed set: the corpus fills evidence for the "
+                f"feed cut, so a champion outside it is scored on cold context "
+                f"(alpha-engine-config-I6630)."
+            )
 
 
 def build_universe_membership(
@@ -317,56 +512,7 @@ def build_universe_membership(
             "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score",
         }
 
-    # Count-match is the whole point of N=20 (alpha-engine-config-I4983): an
-    # arm's win must not be confounded between selection rule and breadth. When
-    # the incumbent arm is emitted, its size MUST equal the champion cut's —
-    # a partial eval log that yields n=10 against a n=20 champion is a red run,
-    # never a silently-skewed comparison. (Absence of the incumbent arm when
-    # no tech_scores were supplied is an honest degrade for historical
-    # backfills; that path does not enter this check.)
-    champion = cuts.get(PREDICTOR_UNIVERSE_CUT)
-    incumbent_cut = cuts.get(f"scanner_top_{_INCUMBENT_CUT_N}")
-    if champion is not None and incumbent_cut is not None:
-        if champion["size"] != incumbent_cut["size"]:
-            raise UniverseMembershipError(
-                f"universe membership {run_date}: count-match broken — "
-                f"{PREDICTOR_UNIVERSE_CUT}.size={champion['size']} vs "
-                f"scanner_top_{_INCUMBENT_CUT_N}.size={incumbent_cut['size']} "
-                f"(both must equal {_INCUMBENT_CUT_N}; a short tech_score table "
-                f"must not silently narrow the incumbent arm)"
-            )
-
-    # The funnel invariant (alpha-engine-config-I6630). The champion cut is the
-    # HEAD of the feed cut, and every downstream consumer is entitled to assume
-    # it: the RAG corpus scopes to the feed cut so the scored names get
-    # evidence, and Think Tank's gap-fill window is the same 60.
-    #
-    # This holds by construction while both are cuts of one ranking — which is
-    # exactly why it went unchecked, and exactly how it broke. The corpus was
-    # scoped to ``scanner_candidates`` (a tech_score momentum GATE, also 60
-    # wide) against a champion drawn from the attractiveness RANK; measured
-    # 2026-08-07 they overlapped on 2 of 20. Nothing failed, because nothing
-    # asserted the two were related.
-    #
-    # Asserted at the producer so a champion moved outside the feed cut is a
-    # RED SCANNER RUN, not a consumer's problem to discover weeks later. If a
-    # future champion legitimately sits outside the attractiveness rank family
-    # (a Think Tank promotion, say), the feed cut must move in the same change
-    # — that is the coupling this enforces, not an obstacle to it.
-    champion_cut = cuts.get(PREDICTOR_UNIVERSE_CUT)
-    feed_cut = cuts.get(FEED_CUT_NAME)
-    if champion_cut is not None and feed_cut is not None:
-        escaped = sorted(set(champion_cut["tickers"]) - set(feed_cut["tickers"]))
-        if escaped:
-            raise UniverseMembershipError(
-                f"universe membership {run_date}: funnel invariant broken — "
-                f"{len(escaped)} of {champion_cut['size']} ticker(s) in the "
-                f"champion cut {PREDICTOR_UNIVERSE_CUT!r} are absent from the "
-                f"feed cut {FEED_CUT_NAME!r} ({escaped}). The champion must be "
-                f"the head of the feed set: the corpus fills evidence for the "
-                f"feed cut, so a champion outside it is scored on cold context "
-                f"(alpha-engine-config-I6630)."
-            )
+    assert_cut_invariants({"cuts": cuts}, run_date)
 
     membership = {
         "schema_version": SCHEMA_VERSION,
@@ -375,6 +521,11 @@ def build_universe_membership(
         "generated_at": generated_at or datetime.now(UTC).isoformat(timespec="seconds"),
         "universe_count": len(ranks),
         "predictor_universe_cut": PREDICTOR_UNIVERSE_CUT,
+        # alpha-engine-config-I6666 — a freshly built artifact is by definition
+        # re-cut today; ``carry_forward_cuts`` overwrites this when the run
+        # holds the prior cut instead. ``cut_effective_date == run_date`` is
+        # therefore the test for "this cut is today's".
+        "cut_effective_date": run_date,
         "cuts": cuts,
         "ranks": ranks,
     }
@@ -507,10 +658,36 @@ def compute_and_write_universe_membership(
     predictor resolving a stale universe, which is the defect this artifact
     exists to prevent.
     """
+    cadence = cut_refresh_cadence()
+    prior = (
+        None
+        if cadence == CADENCE_DAILY
+        else read_latest_membership(bucket=bucket, s3_client=s3_client)
+    )
+
     membership = build_universe_membership(
         run_date,
         scanner_tickers,
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
     )
+    membership["cut_refresh_cadence"] = cadence
+
+    if not should_recut(run_date, prior, cadence):
+        membership = carry_forward_cuts(membership, prior)
+        # The guards are re-run against the HELD cuts, not only against freshly
+        # derived ones: a carried-forward artifact is what the predictor
+        # consumes for the rest of the week, so a count-match or funnel
+        # violation in it is exactly as load-bearing.
+        assert_cut_invariants(membership, run_date)
+        logger.info(
+            "[universe_membership] %s cadence — carrying the cut from %s "
+            "(ranks refreshed for %s)",
+            cadence, membership["cut_effective_date"], run_date,
+        )
+    else:
+        logger.info(
+            "[universe_membership] %s cadence — re-cut for %s", cadence, run_date
+        )
+
     return write_universe_membership_to_s3(membership, run_date, bucket=bucket, s3_client=s3_client)
