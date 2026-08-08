@@ -28,6 +28,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.universe_membership import (  # noqa: E402
+    _RANK_CUTS,
+    ATTRACTIVENESS_FEED_TOP_N,
+    FEED_CUT_NAME,
     PREDICTOR_UNIVERSE_CUT,
     SCHEMA_VERSION,
     UniverseMembershipError,
@@ -250,6 +253,44 @@ def test_incumbent_arm_fails_loud_when_not_count_matched() -> None:
     partial = {t: float(i) for i, t in enumerate(_scanner_cut()[:10])}
     with pytest.raises(UniverseMembershipError, match="count-match"):
         _membership(tech_scores=partial)
+
+
+def test_champion_cut_is_nested_inside_the_feed_cut() -> None:
+    """The funnel invariant (alpha-engine-config-I6630). Downstream evidence
+    ingestion scopes to the feed cut, so the champion must be its head or the
+    scored names are scored on cold context."""
+    m = _membership(tech_scores=_tech_scores())
+    champion = set(m["cuts"][PREDICTOR_UNIVERSE_CUT]["tickers"])
+    feed = set(m["cuts"][FEED_CUT_NAME]["tickers"])
+    assert champion <= feed
+    # Not vacuous: the feed cut is genuinely wider than the champion.
+    assert len(feed) > len(champion)
+
+
+def test_feed_cut_name_is_derived_from_the_declared_width() -> None:
+    """Guards the pair the consumer resolves against. A hand-edited cut name
+    that no longer matches ``ATTRACTIVENESS_FEED_TOP_N`` would leave
+    nousergon-data's ``_rag_scope.SCOPE_CUT`` resolving a cut this producer
+    never writes — and the resolver raises rather than degrading, so the whole
+    corpus fill stops."""
+    assert FEED_CUT_NAME == f"attractiveness_top_{ATTRACTIVENESS_FEED_TOP_N}"
+    assert ATTRACTIVENESS_FEED_TOP_N in _RANK_CUTS
+
+
+def test_funnel_invariant_fails_loud_when_the_champion_escapes_the_feed_cut(
+    monkeypatch,
+) -> None:
+    """Runtime guard, not a fixture equality. The live 2026-08-07 defect was a
+    champion drawn from one ranking and a downstream scope cut drawn from
+    another; nothing failed because nothing asserted the two were related.
+
+    Simulated here by pointing the champion at the tech_score cut — the exact
+    pre-I4983 shape — while the feed cut stays an attractiveness rank cut."""
+    import scoring.universe_membership as mod
+
+    monkeypatch.setattr(mod, "PREDICTOR_UNIVERSE_CUT", "scanner_top_20")
+    with pytest.raises(UniverseMembershipError, match="funnel invariant"):
+        _membership(tech_scores=_tech_scores())
 
 
 def test_incumbent_arm_disagrees_with_the_champion() -> None:
