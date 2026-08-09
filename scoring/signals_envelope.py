@@ -613,7 +613,14 @@ def main(argv: list[str] | None = None) -> int:
             "stray manual run)."
         )
 
-    run_date = args.date or str(date.today())
+    # DATE_CONVENTIONS (config-I6653): normalize to the trading day, and never
+    # default a trade-artifact key to date.today(). Idempotent, so an explicit
+    # --date that is already a trading day passes through unchanged; a manual
+    # weekend run now writes the Friday key the consumers actually read instead
+    # of a Saturday key nothing resolves.
+    from nousergon_lib.dates import resolve_trading_day
+
+    run_date = resolve_trading_day(args.date)
     s3 = boto3.client("s3")
 
     board = read_universe_board(args.bucket, run_date=run_date, s3_client=s3)
