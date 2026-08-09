@@ -34,7 +34,7 @@ langsmith~=0.8.18
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=2.51.0
+openai>=2.53.0
 
 # Evals
 agentevals~=0.0
@@ -204,7 +204,26 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # wrong: PR113 fixed the ADMISSION half of this seam and left `llm.py`
 # byte-identical between 0.32.0 and 0.33.0. On 0.33.0 the box fails exactly as
 # it did on 0.32.0.
-krepis>=0.34.0
+#
+# 0.36.0 (config-I6652, krepis-PR115): `_resolve_group_served_model` — a
+# capability-GROUP alias must never be reported as the model that served. On
+# 0.34.0 and 0.35.0, `complete()`'s litellm_proxy branch and
+# `_structured_litellm()` fell back to `self.spec.model` when the response's
+# `model` field came back empty, so the literal string "low" reached
+# `thinktank/client.py::_cost_for`, found no price card, and RAISED -- correct
+# fail-loud behaviour on a value that should never have been produced.
+# Measured live on 2026-08-04 (thinktank/runs/2026-08-04/manifest_df20e6c66665
+# .json): 0 theses written.
+#
+# The floor is a CONTRACT, not a hope. A fresh spot box resolves to the newest
+# release and would pick up 0.36.0 anyway -- that is resolution order, not a
+# requirement, and a cached layer, a lockfile, or the versioned base AMI planned
+# in config-I6165 can each serve 0.35.0 and silently reintroduce the defect.
+# `tests/test_thinktank_group_addressing.py::
+# TestGroupAliasIsNeverReportedAsTheServedModel` is the half that verifies the
+# CAPABILITY rather than the version string, mirroring the credential contract
+# added for the 0.34.0 floor directly above it in that file.
+krepis>=0.36.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
@@ -215,7 +234,7 @@ pytz~=2026.3
 
 # Dev / testing
 pytest~=9.1
-pytest-asyncio~=0.23
+pytest-asyncio~=1.4
 # Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
@@ -225,7 +244,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.43
+edgartools~=5.46
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
