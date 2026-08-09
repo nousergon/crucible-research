@@ -4,16 +4,23 @@ Order of operations (one ``--daily`` invocation):
 1. budget guard (hard refusal at the monthly cap)
 2. load read-side context (board, signals, macro report, news, RAG probe)
 3. themes: seed if absent / reconcile if a new weekly landed
-4. intake: top-N uncovered by attractiveness (rank-bounded) + stalest refresh
-   — UNLESS gap_fill_only (below), which skips the stalest-refresh half.
-   The daily branch also enforces the staleness SLA (TT-2.1-staleness-sla-
-   is-actionable, alpha-engine-config-I6478): any covered name past
-   ``stale_after_days`` is force-refreshed regardless of whether the
-   new-names slots were otherwise full — see ``thinktank.ledger
+4. intake SELECTION: top-N uncovered by attractiveness (rank-bounded) +
+   stalest refresh — UNLESS gap_fill_only (below), which skips the
+   stalest-refresh half. The daily branch also enforces the staleness SLA
+   (TT-2.1-staleness-sla-is-actionable, alpha-engine-config-I6478): any
+   covered name past ``stale_after_days`` is force-refreshed regardless of
+   whether the new-names slots were otherwise full — see ``thinktank.ledger
    .select_intake``.
-5. thesis builds for the intake set
-6. events sweep over all covered names → thesis updates where flagged
-7. churn-gated daily macro-theme update from sweep-surfaced developments
+5. events sweep over all covered names → thesis updates where flagged, then
+   the churn-gated daily macro-theme update from the developments it surfaced
+6. thesis builds for the intake set (new names, then refreshes)
+
+   Steps 5 and 6 were the other way round until alpha-engine-config-I6650.
+   DETECTION RUNS FIRST: it is the cheap tier that decides what the expensive
+   tier is for, an abort in the thesis loop used to cost the whole day's
+   detection (eight consecutive days of it, 2026-08-03..08), and under a
+   deadline the truncation now lands on per-ticker refresh rather than on a
+   single un-resumable fan-out.
 8. persist ledger, ratings board, challenger selection, events, manifest,
    month cost ledger; flush SFT rows
 
@@ -265,9 +272,15 @@ def run_daily(
     # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
     from krepis.cost_sink import S3JsonlCostSink
 
+    # prefix MUST be `_cost_raw` (not `_cost`). AggregateCosts reads
+    # `_cost_raw/**/*.jsonl` and writes the dashboard's
+    # `_cost/{date}/cost.parquet`. Writing JSONL into `_cost/` made
+    # every Think Tank run's cost rows invisible to the aggregator —
+    # the stream looked dead on the dashboard even though emission
+    # was live (alpha-engine-config-I5206, verified 2026-08-01).
     cost_sink = S3JsonlCostSink(
         bucket=settings.bucket,
-        prefix="decision_artifacts/_cost",
+        prefix="decision_artifacts/_cost_raw",
         run_id=run_id,
         register_atexit=True,
     )
@@ -383,73 +396,30 @@ def _build_and_sweep(
     if refresh_tickers is None:
         themes.ensure_current()
 
-    board_by_ticker = {r["ticker"]: r for r in new_rows}
-    for idx, ticker in enumerate(manifest.names_added):
-        if _out_of_time(seconds_remaining):
-            skipped = manifest.names_added[idx:]
-            manifest.deadline_truncated = True
-            manifest.deadline_skipped_new = skipped
-            logger.warning(
-                "[thinktank] DEADLINE: stopping new-thesis intake with %d of %d "
-                "remaining (%s) — proceeding to terminal writes so this run's "
-                "completed work persists (alpha-engine-config-I5208)",
-                len(skipped),
-                len(manifest.names_added),
-                ", ".join(skipped[:10]),
-            )
-            break
-        thesis = build_thesis(
-            store,
-            client,
-            ctx,
-            themes,
-            ticker=ticker,
-            board_row=board_by_ticker[ticker],
-            trading_day=trading_day,
-            calendar_date=calendar_date,
-            update_reason="initial",
-        )
-        _checkpoint_thesis_write(
-            store,
-            ledger,
-            ticker=ticker,
-            trading_day=trading_day,
-            thesis_version=thesis.version,
-            sector=thesis.sector,
-            attractiveness_rank=thesis.attractiveness_rank,
-        )
-        theses_written.append(thesis)
-        manifest.theses_written += 1
-
+    # ── DETECTION FIRST (alpha-engine-config-I6650) ─────────────────────────
+    # The events sweep used to run LAST, after intake and refresh. Three
+    # consequences, all of them live:
+    #
+    # 1. Any abort in the thesis loop cost the whole day's DETECTION. Every
+    #    run from 2026-08-03 aborted on a provider 402 partway through the
+    #    `med`-group thesis writes, so `thinktank/events/` produced nothing
+    #    for eight days while `sweep_tickers` sat at 0 and
+    #    `deadline_skipped_sweep` stayed false — the sweep was never
+    #    reached, not skipped.
+    # 2. It inverted the escalation ladder products/thinktank.md §2.4
+    #    describes. Detection is supposed to GATE the expensive tier;
+    #    running the expensive tier first means a bad day at the write tier
+    #    silently costs the cheap pass that decides what is worth writing.
+    # 3. Under a deadline the truncation landed on the sweep — a single
+    #    un-resumable fan-out — rather than on routine refresh, which is
+    #    per-ticker and the most droppable work in the run.
+    #
+    # Running it first also makes two things strictly more correct rather
+    # than merely earlier: `covered_before` genuinely means "covered before
+    # today's additions" now that no addition has happened yet, and themes
+    # absorb the day's macro developments BEFORE any thesis is written
+    # against them.
     ranked_rows = {s.get("ticker"): s for s in (ctx.board or {}).get("stocks", [])}
-    refresh_reason = "operator_refresh" if refresh_tickers is not None else "staleness_refresh"
-    for idx, ticker in enumerate(refresh):
-        if _out_of_time(seconds_remaining):
-            skipped = list(refresh[idx:])
-            manifest.deadline_truncated = True
-            manifest.deadline_skipped_refresh = skipped
-            logger.warning(
-                "[thinktank] DEADLINE: stopping refresh with %d of %d remaining "
-                "— proceeding to terminal writes (alpha-engine-config-I5208)",
-                len(skipped),
-                len(refresh),
-            )
-            break
-        thesis = build_thesis(
-            store,
-            client,
-            ctx,
-            themes,
-            ticker=ticker,
-            board_row=ranked_rows.get(ticker),
-            trading_day=trading_day,
-            calendar_date=calendar_date,
-            update_reason=refresh_reason,
-        )
-        _checkpoint_thesis_write(store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version)
-        theses_written.append(thesis)
-        manifest.theses_written += 1
-
     # ── events sweep over everything covered before today's additions ────────
     if covered_before and _out_of_time(seconds_remaining):
         # The sweep is a single LLM fan-out over every covered name — it cannot
@@ -506,6 +476,71 @@ def _build_and_sweep(
         if macro_notes:
             themes.ensure_current(daily_developments=macro_notes)
 
+    board_by_ticker = {r["ticker"]: r for r in new_rows}
+    for idx, ticker in enumerate(manifest.names_added):
+        if _out_of_time(seconds_remaining):
+            skipped = manifest.names_added[idx:]
+            manifest.deadline_truncated = True
+            manifest.deadline_skipped_new = skipped
+            logger.warning(
+                "[thinktank] DEADLINE: stopping new-thesis intake with %d of %d "
+                "remaining (%s) — proceeding to terminal writes so this run's "
+                "completed work persists (alpha-engine-config-I5208)",
+                len(skipped),
+                len(manifest.names_added),
+                ", ".join(skipped[:10]),
+            )
+            break
+        thesis = build_thesis(
+            store,
+            client,
+            ctx,
+            themes,
+            ticker=ticker,
+            board_row=board_by_ticker[ticker],
+            trading_day=trading_day,
+            calendar_date=calendar_date,
+            update_reason="initial",
+        )
+        _checkpoint_thesis_write(
+            store,
+            ledger,
+            ticker=ticker,
+            trading_day=trading_day,
+            thesis_version=thesis.version,
+            sector=thesis.sector,
+            attractiveness_rank=thesis.attractiveness_rank,
+        )
+        theses_written.append(thesis)
+        manifest.theses_written += 1
+
+    refresh_reason = "operator_refresh" if refresh_tickers is not None else "staleness_refresh"
+    for idx, ticker in enumerate(refresh):
+        if _out_of_time(seconds_remaining):
+            skipped = list(refresh[idx:])
+            manifest.deadline_truncated = True
+            manifest.deadline_skipped_refresh = skipped
+            logger.warning(
+                "[thinktank] DEADLINE: stopping refresh with %d of %d remaining "
+                "— proceeding to terminal writes (alpha-engine-config-I5208)",
+                len(skipped),
+                len(refresh),
+            )
+            break
+        thesis = build_thesis(
+            store,
+            client,
+            ctx,
+            themes,
+            ticker=ticker,
+            board_row=ranked_rows.get(ticker),
+            trading_day=trading_day,
+            calendar_date=calendar_date,
+            update_reason=refresh_reason,
+        )
+        _checkpoint_thesis_write(store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version)
+        theses_written.append(thesis)
+        manifest.theses_written += 1
 
 def _terminal_writes(
     store: ThinktankStore,
