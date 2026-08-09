@@ -249,6 +249,7 @@ def assess_candidates(
     *,
     api_key: str | None = None,
     client_factory=None,
+    cost_sink=None,
 ) -> list[dict]:
     """The single LLM call: one DeepSeek V4 Pro (OpenRouter) invocation
     assesses every candidate.
@@ -260,17 +261,31 @@ def assess_candidates(
     silently degrades would pollute the leaderboard).
 
     ``client_factory`` is the krepis.llm.LLMClient test seam: a callable
-    ``(spec, api_key) -> transport_client``. Production leaves it unset."""
+    ``(spec, api_key) -> transport_client``. Production leaves it unset.
+    ``cost_sink`` is the shared ``S3JsonlCostSink`` (or any callable) —
+    when omitted, a process-local sink writing to
+    ``decision_artifacts/_cost_raw`` is constructed so this challenger
+    never silently skips cost emission (alpha-engine-config-I5206)."""
+    from krepis.cost_sink import S3JsonlCostSink
     from krepis.llm import LLMClient
     from krepis.router import resolve_group_spec
 
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC
+    from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = (
         loaded.text + "\n\n## Candidates\n" + _format_candidate_block(scanner_tickers, technical_scores, sector_map)
     )
+    # Default sink so a production call without an injected sink still
+    # emits. The sink never raises on a failed PUT, so constructing one
+    # in tests is harmless (they either inject their own or ignore S3).
+    if cost_sink is None:
+        cost_sink = S3JsonlCostSink(
+            bucket=S3_BUCKET,
+            prefix="decision_artifacts/_cost_raw",
+            register_atexit=True,
+        )
     # The registry decides model, endpoint and credential; this module decides
     # only which capability tier it wants and where it is running. krepis
     # resolves the credential by NAME at call time, so no key is read here —
@@ -305,6 +320,7 @@ def assess_candidates(
         # LLM_CALLSITE_REGISTRY.yaml entry, so the literal MUST stay in sync
         # with that row's `id` (alpha-engine-config, id: single-agent-quant).
         callsite_id=CALLSITE_ID,
+        cost_sink=cost_sink,
     )
     result = client.structured(
         # Behavior parity with the pre-migration call (a single
