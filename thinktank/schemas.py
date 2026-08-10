@@ -282,6 +282,25 @@ class TickerEventAssessment(BaseModel):
     rationale: str = Field(description="One-two sentences; why this action.")
 
 
+class TriageDecisionLLM(BaseModel):
+    """LLM output for one triage call (`products/thinktank.md` §2.4, T1).
+
+    The sweep is wide and cheap, so its precision is low by design; this is the
+    gate that decides whether a flagged event actually CHANGES the standing
+    belief, before the expensive write tier is allowed to run. `escalate=False`
+    is the expected common answer and is not a failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    escalate: bool = Field(
+        description="True only if the event changes the standing thesis's claim."
+    )
+    reason: str = Field(
+        description="One-two sentences; why the belief does or does not move."
+    )
+
+
 class SweepBatchLLM(BaseModel):
     """LLM output for one sweep chunk."""
 
@@ -303,6 +322,14 @@ class EventRecord(_Artifact):
     severity: int
     rationale: str
     thesis_version_written: int | None = None
+    # ── Triage gate (alpha-engine-config-I6649, products/thinktank.md §2.4) ──
+    # §2.3 is explicit that the NO decisions are the denominator: without them
+    # the gate's precision is unmeasurable and a gate that has silently stopped
+    # firing looks identical to a quiet week. So both verdicts are written, and
+    # `triage_escalated` is None only for rows the gate never saw — i.e.
+    # `action="none"`, which the sweep already rejected.
+    triage_escalated: bool | None = None
+    triage_reason: str | None = None
 
 
 # ── Coverage ledger ──────────────────────────────────────────────────────────
@@ -356,6 +383,14 @@ class RunManifest(_Artifact):
     theses_written: int = 0
     sweep_tickers: int = 0
     events_flagged: int = 0
+    # ── Triage gate counters (alpha-engine-config-I6649) ─────────────────────
+    # events_flagged is the sweep's output; triage_yes + triage_no partition it
+    # (modulo triage_errors). Their RATIO is the number the gate exists to move,
+    # and it is unreadable from a single counter — which is why both are here
+    # rather than only the escalations.
+    triage_yes: int = 0
+    triage_no: int = 0
+    triage_errors: int = 0
     event_updates_written: int = 0
     themes_reconciled: bool = False
     theme_updates_written: int = 0
