@@ -250,6 +250,7 @@ def run_daily(
             ctx.board,
             daily_new_names=settings.daily_new_names,
             rank_ceiling=settings.rank_ceiling,
+            exit_rank=settings.exit_rank,
             stale_after_days=settings.stale_after_days,
             trading_day=trading_day,
         )
@@ -711,14 +712,17 @@ def _compute_coverage_gap(
         return {"error": "universe_board_missing"}
     stocks = board.get("stocks", [])
     if not stocks:
-        return {"top_n": top_n, "covered_pct": 0, "total_covered": len(ledger.entries), "uncovered_count": top_n}
+        return {"top_n": top_n, "covered_pct": 0, "total_covered": len(ledger.covered()), "uncovered_count": top_n}
     sorted_stocks = sorted(
         stocks,
         key=lambda s: s.get("attractiveness_score", 0) or 0,
         reverse=True,
     )
     top_tickers = {s["ticker"] for s in sorted_stocks[:top_n] if s.get("ticker")}
-    covered = set(ledger.entries.keys())
+    # covered(), not entries: a de-covered name keeps its entry and its whole
+    # thesis history, so len(entries) stopped being a coverage count
+    # (config-I6648).
+    covered = ledger.covered()
     covered_in_top = covered & top_tickers
     pct = round(len(covered_in_top) / max(len(top_tickers), 1) * 100, 1)
     return {
@@ -727,7 +731,7 @@ def _compute_coverage_gap(
         "covered_in_top": len(covered_in_top),
         "covered_pct": pct,
         "uncovered_count": len(top_tickers) - len(covered_in_top),
-        "total_covered": len(ledger.entries),
+        "total_covered": len(ledger.covered()),
     }
 
 
