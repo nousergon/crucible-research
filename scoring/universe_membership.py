@@ -60,8 +60,29 @@ drift this artifact exists to end. The predictor unions its own holdings from
 resolution time.
 
 Output (versioned — consumers pin on ``schema_version``):
-  ``s3://{bucket}/universe_membership/{run_date}/membership.json``
-  ``s3://{bucket}/universe_membership/latest.json`` (sidecar)
+  ``s3://{bucket}/universe_membership/{run_date}/membership.json``  (pointer)
+  ``s3://{bucket}/universe_membership/latest.json``                 (pointer)
+  ``s3://{bucket}/universe_membership/{run_date}/runs/{stamp}.json`` (immutable)
+
+The ``runs/`` copy exists because the first two are POINTERS and the Scanner
+runs more than once per trading day (alpha-engine-config-I6785). The weekday
+preopen SF invokes it in the morning; the postclose-chained weekly *exercise*
+run (``pipeline_role=exercise``, config#6658) invokes it again after the close
+and normalizes to the same ``trading_day``, so it rewrites the same key.
+
+Measured 2026-08-07: ``predictor/predictions/2026-08-07.json`` was written at
+17:16Z; ``universe_membership/2026-08-07/membership.json`` carries
+``generated_at`` 2026-08-08T10:13Z. The surviving object POSTDATES the
+predictions it supposedly fed by 17 hours, and four names stamped
+``attractiveness_top_20`` in those predictions (FFIV, PFGC, SN, TREX) are absent
+from it. Bucket versioning is off, so the morning cut was unrecoverable.
+
+That is not only an audit gap. ``crucible-dashboard/loaders/universe_churn.py``
+builds its whole churn/tenure/survivor series from the dated keys, so every
+double-written cycle contributed the EVENING cut to a series presented as the
+cut being traded. ``runs/`` is keyed on the artifact's own ``generated_at`` and
+never overwritten: two writers on one trading day produce two objects, and the
+question "what did the predictor actually read this morning" stays answerable.
 
 Schema::
 
@@ -88,6 +109,14 @@ Schema::
     "scanner_ranks": {                  # SCANNER CUT only, rank 1 = highest
       "AAPL": {"tech_score_rank": int, "tech_score": float},   # tech_score.
       ...                               # Absent when no eval log was supplied.
+    },
+    "turnover": {                       # null when no prior artifact was readable
+      "prior_run_date": "YYYY-MM-DD",
+      "prior_generated_at": "ISO-8601 UTC",
+      "per_cut": {
+        "<cut_name>": {"size": int, "retained": int, "added": int,
+                       "dropped": int, "retention_pct": float}
+      }
     }
   }
 
@@ -172,6 +201,7 @@ _INCUMBENT_CUT_N = 20
 
 _DEFAULT_BUCKET = "alpha-engine-research"
 
+
 class UniverseMembershipError(RuntimeError):
     """Raised when the membership artifact cannot be built from real inputs.
 
@@ -230,9 +260,7 @@ def _iso_week(date_str: str) -> tuple[int, int]:
     try:
         y, w, _ = date.fromisoformat(str(date_str)).isocalendar()
     except (TypeError, ValueError) as exc:
-        raise UniverseMembershipError(
-            f"cannot resolve the ISO week of {date_str!r}: {exc}"
-        ) from exc
+        raise UniverseMembershipError(f"cannot resolve the ISO week of {date_str!r}: {exc}") from exc
     return (y, w)
 
 
@@ -257,9 +285,7 @@ def should_recut(run_date: str, prior: dict | None, cadence: str | None = None) 
     return _iso_week(run_date) > _iso_week(effective)
 
 
-def read_latest_membership(
-    *, bucket: str | None = None, s3_client: Any = None
-) -> dict | None:
+def read_latest_membership(*, bucket: str | None = None, s3_client: Any = None) -> dict | None:
     """The current ``universe_membership/latest.json``, or ``None`` if absent.
 
     Absence is a legitimate first-run state and returns ``None``; any other
@@ -306,9 +332,7 @@ def carry_forward_cuts(fresh: dict, prior: dict) -> dict:
     """
     held = dict(fresh)
     held["cuts"] = prior["cuts"]
-    held["predictor_universe_cut"] = prior.get(
-        "predictor_universe_cut", fresh.get("predictor_universe_cut")
-    )
+    held["predictor_universe_cut"] = prior.get("predictor_universe_cut", fresh.get("predictor_universe_cut"))
     held["cut_effective_date"] = prior["cut_effective_date"]
     return held
 
@@ -426,6 +450,67 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
             )
 
 
+def compute_turnover(current: dict, prior: dict | None) -> dict | None:
+    """Per-cut membership delta of ``current`` against the PRIOR write, or None.
+
+    Producer-side rather than consumer-side (alpha-engine-config-I6785) for two
+    reasons. First, the number has to be durable and readable without loading N
+    artifacts — a monitor asking "did the cut move?" should not have to
+    reconstruct a series. Second, the consumer-side derivation is exactly what
+    the clobber defect proved cannot be trusted: the dashboard computes churn
+    from dated keys that a later same-day writer had already replaced.
+
+    "Prior" means the immediately-preceding WRITE, not the preceding calendar
+    day. On a day with both a preopen and an exercise run, the exercise run's
+    turnover is measured against that morning's cut, which is the honest
+    comparison — and ``prior_run_date`` + ``prior_generated_at`` say so
+    explicitly rather than leaving the reader to assume a day boundary.
+
+    Returns None (never a block of zeros) when there is no usable prior. Zeros
+    would read as "nothing changed"; the truth is "nothing to compare against",
+    and a surface that cannot tell those apart invents a 100%-retention point
+    at the start of every series.
+
+    Only cuts present in BOTH artifacts are compared. A cut that appears or
+    disappears between writes is a schema change, and reporting it as 100%
+    churn would misattribute a producer edit to the market.
+    """
+    if not prior:
+        return None
+    prior_generated = prior.get("generated_at")
+    if prior_generated and prior_generated == current.get("generated_at"):
+        # The prior pointer still holds THIS artifact — a re-write of the same
+        # run. Comparing it to itself would publish a fabricated 100% retention.
+        return None
+
+    cur_cuts = current.get("cuts") or {}
+    prior_cuts = prior.get("cuts") or {}
+    per_cut: dict[str, dict] = {}
+    for name, block in cur_cuts.items():
+        prior_block = prior_cuts.get(name)
+        if not prior_block:
+            continue
+        now = {str(t).upper() for t in (block.get("tickers") or [])}
+        was = {str(t).upper() for t in (prior_block.get("tickers") or [])}
+        if not was:
+            continue
+        retained = len(now & was)
+        per_cut[name] = {
+            "size": len(now),
+            "retained": retained,
+            "added": len(now - was),
+            "dropped": len(was - now),
+            "retention_pct": round(100.0 * retained / len(was), 2),
+        }
+    if not per_cut:
+        return None
+    return {
+        "prior_run_date": prior.get("run_date"),
+        "prior_generated_at": prior_generated,
+        "per_cut": per_cut,
+    }
+
+
 def build_universe_membership(
     run_date: str,
     scanner_tickers: list[str],
@@ -434,6 +519,7 @@ def build_universe_membership(
     tech_scores: dict[str, float] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
+    prior: dict | None = None,
 ) -> dict:
     """Assemble the membership artifact from already-resolved inputs.
 
@@ -455,6 +541,11 @@ def build_universe_membership(
         champion (partial eval logs that would emit n≠20). Optional so
         historical backfills, whose inputs may predate the eval-log field,
         still build — they omit the incumbent arm rather than fabricating one.
+    prior : the previous membership artifact, when one was readable. Used only
+        to compute the ``turnover`` block; passing None yields ``turnover:
+        null`` rather than a fabricated zero-churn record. Kept a parameter
+        rather than an S3 read inside this function so the schema contract
+        stays pure and unit-testable without fixtures or network.
     backfilled_from : provenance string when this artifact is RECONSTRUCTED from
         historical inputs rather than emitted by the live run. Consumers must be
         able to tell a reconstruction from a first-class write — a backfill can
@@ -533,7 +624,29 @@ def build_universe_membership(
         membership["scanner_ranks"] = scanner_ranks
     if backfilled_from:
         membership["backfilled_from"] = backfilled_from
+    membership["turnover"] = compute_turnover(membership, prior)
     return membership
+
+
+def run_stamp(generated_at: str) -> str:
+    """``2026-08-10T12:49:30+00:00`` → ``20260810T124930Z``.
+
+    Derived from the artifact's own ``generated_at`` rather than from the wall
+    clock at write time, so the immutable key and the payload can never
+    disagree about when the cut was computed. Normalised to UTC first: two runs
+    stamped in different offsets must not sort into the wrong order in an
+    ``s3 ls``, which is how an operator reads this prefix.
+
+    Falls back to the raw string with unsafe characters stripped if the value
+    is unparseable — an odd key is recoverable, a dropped write is not.
+    """
+    try:
+        parsed = datetime.fromisoformat(generated_at)
+    except (TypeError, ValueError):
+        return "".join(c for c in str(generated_at) if c.isalnum())
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def write_universe_membership_to_s3(
@@ -543,19 +656,32 @@ def write_universe_membership_to_s3(
     bucket: str | None = None,
     s3_client: Any = None,
 ) -> str:
-    """Write to the dated key + the ``latest.json`` sidecar. Returns the dated key."""
+    """Write the immutable ``runs/`` copy plus the two pointer keys. Returns the
+    dated pointer key (unchanged return contract).
+
+    Write ORDER is load-bearing: the immutable copy lands FIRST. If the process
+    dies between writes, the surviving state is "the run is recorded but the
+    pointers still name the previous one" — recoverable. The reverse order
+    yields pointers naming a cut with no durable copy, which is the very state
+    I6785 was filed about.
+    """
     s3 = _client(s3_client)
     b = _bucket(bucket)
     body = json.dumps(membership, separators=(",", ":"), default=str).encode("utf-8")
+    stamp = run_stamp(membership.get("generated_at") or "")
+    run_key = f"universe_membership/{run_date}/runs/{stamp}.json"
     dated_key = f"universe_membership/{run_date}/membership.json"
-    for key in (dated_key, "universe_membership/latest.json"):
+    for key in (run_key, dated_key, "universe_membership/latest.json"):
         s3.put_object(Bucket=b, Key=key, Body=body, ContentType="application/json")
+    turnover = membership.get("turnover") or {}
     logger.info(
-        "[universe_membership] wrote %d cuts over %d ranked names → s3://%s/%s (+latest)",
+        "[universe_membership] wrote %d cuts over %d ranked names → s3://%s/%s (+dated, +latest); turnover vs %s: %s",
         len(membership.get("cuts", {})),
         membership.get("universe_count", 0),
         b,
-        dated_key,
+        run_key,
+        turnover.get("prior_run_date") or "n/a",
+        {k: v["retention_pct"] for k, v in (turnover.get("per_cut") or {}).items()} or "none",
     )
     return dated_key
 
@@ -659,17 +785,20 @@ def compute_and_write_universe_membership(
     exists to prevent.
     """
     cadence = cut_refresh_cadence()
-    prior = (
-        None
-        if cadence == CADENCE_DAILY
-        else read_latest_membership(bucket=bucket, s3_client=s3_client)
-    )
+    # Read unconditionally (alpha-engine-config-I6785). It was previously read
+    # only under ``weekly``, because carry-forward was the only consumer; the
+    # ``turnover`` block needs it on every cadence, and under ``daily`` it is
+    # the ONLY thing that records that the cut moved. ``read_latest_membership``
+    # returns None on genuine absence and raises on anything else, so this does
+    # not weaken the weekly path's read guarantee.
+    prior = read_latest_membership(bucket=bucket, s3_client=s3_client)
 
     membership = build_universe_membership(
         run_date,
         scanner_tickers,
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
+        prior=prior,
     )
     membership["cut_refresh_cadence"] = cadence
 
@@ -681,13 +810,20 @@ def compute_and_write_universe_membership(
         # violation in it is exactly as load-bearing.
         assert_cut_invariants(membership, run_date)
         logger.info(
-            "[universe_membership] %s cadence — carrying the cut from %s "
-            "(ranks refreshed for %s)",
-            cadence, membership["cut_effective_date"], run_date,
+            "[universe_membership] %s cadence — carrying the cut from %s (ranks refreshed for %s)",
+            cadence,
+            membership["cut_effective_date"],
+            run_date,
         )
     else:
-        logger.info(
-            "[universe_membership] %s cadence — re-cut for %s", cadence, run_date
-        )
+        logger.info("[universe_membership] %s cadence — re-cut for %s", cadence, run_date)
+
+    # Recomputed against the cuts as WRITTEN, after any carry-forward. Under
+    # ``weekly`` the held branch replaces the freshly-derived cuts wholesale, so
+    # a turnover block computed before that branch would describe a cut this
+    # artifact does not contain. On a carried cut the honest answer is 100%
+    # retention with zero added — "the cut was held" is a real reading, and one
+    # a monitor should be able to see without inferring it from the cadence.
+    membership["turnover"] = compute_turnover(membership, prior)
 
     return write_universe_membership_to_s3(membership, run_date, bucket=bucket, s3_client=s3_client)
