@@ -40,6 +40,24 @@ thinktank:
         price_in_per_m: 0.15
         price_out_per_m: 0.60
         structured_outputs: true
+      triage:     # the gate between detection and the expensive write tier
+        # products/thinktank.md §2.4 (alpha-engine-config-I6649). Sits between
+        # `sweep` and `thesis`: the sweep is wide and low-precision by design,
+        # so without this every false positive it produces is paid for at the
+        # `thesis` tier. Cheap by construction — it reads only the standing
+        # thesis's claim and the sweep's rationale, never the full evidence
+        # bundle, because assembling that bundle is most of what makes the
+        # write tier expensive.
+        #
+        # structured_outputs MUST stay true: TriageDecisionLLM is a two-field
+        # schema whose `escalate` boolean gates spend, and a JSON-instruction
+        # fallback that returns prose here would fail open on every call.
+        provider: openrouter
+        model: openai/gpt-oss-120b
+        max_tokens: 1000
+        price_in_per_m: 0.15
+        price_out_per_m: 0.60
+        structured_outputs: true
       themes:     # macro + sector theme maintenance
         provider: openrouter
         model: qwen/qwen3-235b-a22b-instruct
