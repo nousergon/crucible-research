@@ -166,6 +166,13 @@ _FROZEN_FIELDS = {
         "last_sweep_on",
         "attractiveness_rank_at_entry",
         "sector",
+        # alpha-engine-config-I6648 — the hysteresis exit. A de-covered name
+        # keeps its entry and its whole thesis lineage and is MARKED, per
+        # Brian's 2026-08-10 ruling (option a). len(entries) therefore stopped
+        # being a coverage count; consumers must call covered().
+        "covered",
+        "dropped_on",
+        "attractiveness_rank_at_drop",
     },
     CoverageLedger: {"schema_version", "updated_at", "entries"},
     RunManifest: {

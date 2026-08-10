@@ -8,9 +8,17 @@ thinktank:
 
   coverage:
     daily_new_names: 5        # new theses initiated per daily run
-    rank_ceiling: 150         # never initiate coverage below this attractiveness rank
+    rank_ceiling: 150         # ENTER threshold: never initiate coverage below this attractiveness rank
+    exit_rank: 200            # EXIT threshold, strictly wider (products/thinktank.md §2.1,
+                              # alpha-engine-config-I6648). A covered name is de-covered only
+                              # once its rank passes THIS, so a name oscillating between 150
+                              # and 200 enters once and is never dropped. Absent => no exit
+                              # path at all, which is the pre-I6648 ratchet.
     sweep_chunk_size: 25      # covered tickers per events-sweep LLM call
-    stale_after_days: 30      # informational staleness horizon
+    stale_after_days: 30      # MANDATORY refresh horizon, enforced in ledger.py::select_intake
+                              # (alpha-engine-config-I6478 / crucible-research-PR584). It was
+                              # informational until 2026-08-04 and this comment said so until
+                              # 2026-08-10 — a stale comment that read as decoration.
 
   budget:
     monthly_usd_default: 25.0             # hard cap fallback (guard fails CLOSED onto this)
