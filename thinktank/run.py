@@ -62,7 +62,7 @@ from datetime import UTC, datetime
 from nousergon_lib.dates import now_dual
 
 from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
-from thinktank.analyst import build_thesis, sweep
+from thinktank.analyst import build_thesis, sweep, triage
 from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, load_context
@@ -438,8 +438,51 @@ def _build_and_sweep(
         record_sweep(ledger, covered_before, trading_day)
         for a in assessments:
             written_version: int | None = None
+            escalated: bool | None = None
+            triage_reason: str | None = None
             if a.action == "update_thesis":
                 manifest.events_flagged += 1
+                # ── TRIAGE GATE (alpha-engine-config-I6649) ──────────────────
+                # products/thinktank.md §2.4: the expensive write tier fires
+                # only behind an escalation decision that is itself recorded.
+                # The sweep is wide and low-precision by design, so without
+                # this gate every false positive it produces is paid for at
+                # the `med`-group thesis tier — the most expensive stage.
+                #
+                # FAIL-OPEN, deliberately, and it is the one place in this
+                # module that does. A triage error must not silently suppress
+                # a belief update: the gate exists to save cost, and the cost
+                # of wrongly skipping a real re-underwrite is a stale belief
+                # that no later run will revisit (the sweep only flags NEW
+                # events). The error is counted in `triage_errors`, recorded
+                # on the event row, and the escalation proceeds — so the
+                # failure is visible on the manifest rather than absorbed.
+                try:
+                    decision = triage(
+                        store, client, ctx, assessment=a, trading_day=trading_day
+                    )
+                    escalated = decision.escalate
+                    triage_reason = decision.reason
+                except Exception as exc:  # noqa: BLE001 — see fail-open note above
+                    manifest.triage_errors += 1
+                    escalated = True
+                    triage_reason = f"triage failed, escalating: {exc}"
+                    logger.warning(
+                        "[thinktank] triage failed for %s — escalating rather "
+                        "than silently skipping a belief update: %s",
+                        a.ticker,
+                        exc,
+                    )
+                if escalated:
+                    manifest.triage_yes += 1
+                else:
+                    manifest.triage_no += 1
+                    logger.info(
+                        "[thinktank] triage held %s at the gate: %s",
+                        a.ticker,
+                        triage_reason,
+                    )
+            if a.action == "update_thesis" and escalated:
                 thesis = build_thesis(
                     store,
                     client,
@@ -471,6 +514,8 @@ def _build_and_sweep(
                     severity=a.severity,
                     rationale=a.rationale,
                     thesis_version_written=written_version,
+                    triage_escalated=escalated,
+                    triage_reason=triage_reason,
                 ).model_dump()
             )
         if macro_notes:

@@ -28,6 +28,7 @@ from thinktank.schemas import (
     CompanyThesisRatedLLM,
     SweepBatchLLM,
     TickerEventAssessment,
+    TriageDecisionLLM,
 )
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 THESIS_TIER = "thesis"
 SWEEP_TIER = "sweep"
+TRIAGE_TIER = "triage"
 PILLAR_TIER = "pillar"
 
 _ANALYST_SYSTEM = (
@@ -59,6 +61,16 @@ _SWEEP_SYSTEM = (
     "routine drift is action=none; action=update_thesis is for genuinely "
     "thesis-relevant developments (guidance, M&A, regulatory, major product, "
     "severe sentiment/event spikes)."
+)
+_TRIAGE_SYSTEM = (
+    "You are the coverage-desk analyst deciding whether a flagged development "
+    "actually changes the standing investment thesis. You are a GATE, not an "
+    "author: the sweep that flagged this is wide and deliberately low-precision, "
+    "and re-underwriting is expensive. Escalate ONLY if the standing claim below "
+    "would read differently to an investor who knew this development. A real "
+    "event that the thesis already anticipates, or that moves no part of its "
+    "claim, is escalate=false — and that is the expected common answer, not a "
+    "failure to find something."
 )
 
 
@@ -316,3 +328,71 @@ def sweep(
         if batch.macro_relevant.strip():
             macro_notes.append(batch.macro_relevant.strip())
     return assessments, "\n".join(macro_notes)
+
+
+def triage(
+    store: ThinktankStore,
+    client: ThinktankClient,
+    ctx: ContextBundle,
+    *,
+    assessment: TickerEventAssessment,
+    trading_day: str,
+) -> TriageDecisionLLM:
+    """Decide whether a swept event actually moves the standing belief.
+
+    The middle rung of `products/thinktank.md` §2.4's ladder. The sweep (T0) is
+    wide and cheap over news aggregates alone; the thesis writer (T2) is the
+    most expensive stage in the run. Without this gate every sweep false
+    positive lands directly on T2, which is precisely the cost shape §2.4
+    forbids: "the cost of a wide sweep lands on the most expensive stage".
+
+    Unlike `build_thesis`, this reads ONLY the standing thesis's own claim and
+    the sweep's rationale — no RAG fetch, no insider or ownership bundle. That
+    asymmetry is the point: assembling the evidence bundle is a large part of
+    what makes T2 expensive, so a gate that assembled it would save nothing.
+
+    Raises nothing on a no-thesis ticker; it escalates. A flagged name with no
+    standing belief to contradict is exactly the case where writing one is the
+    correct call, and inventing a negative here would silently suppress first
+    coverage.
+    """
+    prior = load_latest_thesis(store, assessment.ticker)
+    if prior is None:
+        return TriageDecisionLLM(
+            escalate=True,
+            reason=(
+                "No standing thesis for this ticker, so there is no claim the "
+                "event could leave unchanged — escalated without an LLM call."
+            ),
+        )
+
+    prompt = load_prompt("thinktank_triage")
+    rendered = prompt.format(
+        ticker=assessment.ticker,
+        trading_day=trading_day,
+        severity=assessment.severity,
+        sweep_rationale=assessment.rationale,
+        standing_thesis=json.dumps(
+            {
+                "version": prior.version,
+                "rating": getattr(prior, "rating", None),
+                "sections": [
+                    {"title": sec.title, "body": sec.body}
+                    for sec in getattr(prior, "sections", [])
+                ],
+            },
+            default=str,
+        ),
+        market_regime=ctx.market_regime(),
+    )
+    result = client.complete(
+        TRIAGE_TIER,
+        agent_id="analyst_triage",
+        system=_TRIAGE_SYSTEM,
+        user=rendered,
+        response_model=TriageDecisionLLM,
+        prompt_id=prompt.name,
+        prompt_version=prompt.version,
+        sft_meta={"ticker": assessment.ticker, "severity": assessment.severity},
+    )
+    return result.parsed  # type: ignore[return-value]
