@@ -62,7 +62,7 @@ from datetime import UTC, datetime
 from nousergon_lib.dates import now_dual
 
 from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
-from thinktank.analyst import build_thesis, sweep
+from thinktank.analyst import build_thesis, sweep, triage
 from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, load_context
@@ -436,10 +436,85 @@ def _build_and_sweep(
         assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
         manifest.sweep_tickers = len(covered_before)
         record_sweep(ledger, covered_before, trading_day)
+        # ── RECORD BEFORE ESCALATE (alpha-engine-config-I6817 D3) ───────────
+        # Every assessment gets its row NOW, before any expensive write can
+        # abort the loop. Measured on run b150c317eeef (2026-08-10), the first
+        # run after the I6650 ordering fix: the sweep completed over 178
+        # tickers across 8 paid calls, then the write tier aborted on the
+        # first flagged name — and `thinktank/events/2026-08-10.jsonl` landed
+        # with SIX rows. Detection ran and was billed; its record did not
+        # survive, because rows were appended interleaved with the writes.
+        #
+        # That is I6650's own failure mode displaced by one stage rather than
+        # closed: running the sweep first stopped an abort from costing the
+        # detection, but not from costing the record of it — and §2.3 grades
+        # the gate on the record. The triage tier makes it strictly worse if
+        # left alone, since it adds a second thing that can raise inside the
+        # same loop.
+        rows_by_ticker: dict[str, dict] = {}
         for a in assessments:
-            written_version: int | None = None
+            row = EventRecord(
+                ticker=a.ticker,
+                trading_day=trading_day,
+                action=a.action,
+                severity=a.severity,
+                rationale=a.rationale,
+            ).model_dump()
+            rows_by_ticker[a.ticker] = row
+            event_rows.append(row)
+
+        for a in assessments:
+            row = rows_by_ticker[a.ticker]
+            escalated: bool | None = None
+            triage_reason: str | None = None
             if a.action == "update_thesis":
                 manifest.events_flagged += 1
+                # ── TRIAGE GATE (alpha-engine-config-I6649) ──────────────────
+                # products/thinktank.md §2.4: the expensive write tier fires
+                # only behind an escalation decision that is itself recorded.
+                # The sweep is wide and low-precision by design, so without
+                # this gate every false positive it produces is paid for at
+                # the `med`-group thesis tier — the most expensive stage.
+                #
+                # FAIL-OPEN, deliberately, and it is the one place in this
+                # module that does. A triage error must not silently suppress
+                # a belief update: the gate exists to save cost, and the cost
+                # of wrongly skipping a real re-underwrite is a stale belief
+                # that no later run will revisit (the sweep only flags NEW
+                # events). The error is counted in `triage_errors`, recorded
+                # on the event row, and the escalation proceeds — so the
+                # failure is visible on the manifest rather than absorbed.
+                try:
+                    decision = triage(
+                        store, client, ctx, assessment=a, trading_day=trading_day
+                    )
+                    escalated = decision.escalate
+                    triage_reason = decision.reason
+                except Exception as exc:  # noqa: BLE001 — see fail-open note above
+                    manifest.triage_errors += 1
+                    escalated = True
+                    triage_reason = f"triage failed, escalating: {exc}"
+                    logger.warning(
+                        "[thinktank] triage failed for %s — escalating rather "
+                        "than silently skipping a belief update: %s",
+                        a.ticker,
+                        exc,
+                    )
+                if escalated:
+                    manifest.triage_yes += 1
+                else:
+                    manifest.triage_no += 1
+                    logger.info(
+                        "[thinktank] triage held %s at the gate: %s",
+                        a.ticker,
+                        triage_reason,
+                    )
+                # Stamped BEFORE the write, so a write that aborts still leaves
+                # the gate's verdict on the record — the decision is the thing
+                # §2.4 requires be recorded, and it is already made.
+                row["triage_escalated"] = escalated
+                row["triage_reason"] = triage_reason
+            if a.action == "update_thesis" and escalated:
                 thesis = build_thesis(
                     store,
                     client,
@@ -462,17 +537,8 @@ def _build_and_sweep(
                 manifest.event_updates_written += 1
                 manifest.theses_written += 1
                 theses_written.append(thesis)
-                written_version = thesis.version
-            event_rows.append(
-                EventRecord(
-                    ticker=a.ticker,
-                    trading_day=trading_day,
-                    action=a.action,
-                    severity=a.severity,
-                    rationale=a.rationale,
-                    thesis_version_written=written_version,
-                ).model_dump()
-            )
+                row["thesis_version_written"] = thesis.version
+
         if macro_notes:
             themes.ensure_current(daily_developments=macro_notes)
 
