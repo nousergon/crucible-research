@@ -345,6 +345,26 @@ class LedgerEntry(BaseModel):
     last_sweep_on: str | None = None
     attractiveness_rank_at_entry: int | None = None
     sector: str | None = None
+    # ── Hysteresis exit (alpha-engine-config-I6648, products/thinktank.md
+    # §2.1). Coverage was a MONOTONIC RATCHET until 2026-08-10: nothing in
+    # ledger.py removed an entry, so `rank_ceiling` gated ENTRY only and the
+    # covered set could only grow — measured at 178 covered names against a
+    # ceiling of 150. §2.1 wants a declared set with an enter threshold and a
+    # WIDER exit threshold; this is the exit half.
+    #
+    # Brian's ruling 2026-08-10, option (a): the entry STAYS in `entries` and
+    # is marked, rather than moving to a separate `dropped` map. `covered()`
+    # already filters, so one more predicate is a smaller surface than a
+    # second structure to keep consistent — and the drop record IS the audit
+    # trail §2.1 wants for a de-covered name.
+    #
+    # The thesis history under `thinktank/theses/{ticker}/` is NEVER touched
+    # by a drop. §2.2 makes every version immutable and forbids destroying the
+    # record of what was believed when a decision was made; that binds a
+    # de-covered name exactly as much as a covered one.
+    covered: bool = True
+    dropped_on: str | None = None
+    attractiveness_rank_at_drop: int | None = None
 
 
 class CoverageLedger(_Artifact):
@@ -354,7 +374,18 @@ class CoverageLedger(_Artifact):
     entries: dict[str, LedgerEntry] = Field(default_factory=dict)
 
     def covered(self) -> set[str]:
-        return set(self.entries)
+        """Currently-covered tickers only.
+
+        NOT ``set(self.entries)`` since alpha-engine-config-I6648: a
+        de-covered name keeps its entry (and its whole thesis history) and is
+        marked ``covered=False``. ``len(ledger.entries)`` therefore stopped
+        being a coverage count — every consumer that wants one must call this.
+        """
+        return {t for t, e in self.entries.items() if e.covered}
+
+    def dropped(self) -> set[str]:
+        """Names covered at some point and de-covered since (I6648)."""
+        return {t for t, e in self.entries.items() if not e.covered}
 
 
 # ── Run manifest / cost ledger ───────────────────────────────────────────────
