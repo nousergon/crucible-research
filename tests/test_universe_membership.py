@@ -14,7 +14,11 @@ predictor resolves its daily scoring universe from (alpha-engine-predictor
      not rank churn.
   4. FAIL-LOUD on empty inputs — the defect this artifact exists to prevent is
      a silently-empty/stale membership, so an empty cut must raise, never write.
-  5. Both S3 keys written (dated + latest sidecar) with identical bodies.
+  5. All THREE S3 keys written with identical bodies — the immutable
+     ``runs/{stamp}.json`` copy plus the two pointers — and two writes on one
+     run_date keeping both run copies (alpha-engine-config-I6785).
+  6. ``turnover``: per-cut retained/added/dropped against the prior WRITE, null
+     rather than zeros when there is nothing to compare against.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ from scoring.universe_membership import (  # noqa: E402
     UniverseMembershipError,
     attractiveness_from_board,
     build_universe_membership,
+    compute_turnover,
+    run_stamp,
     write_universe_membership_to_s3,
 )
 
@@ -187,13 +193,117 @@ class _FakeS3:
         self.puts[Key] = Body
 
 
-def test_writes_dated_key_and_latest_sidecar_identically():
+def test_writes_immutable_run_copy_plus_both_pointers_identically():
     s3 = _FakeS3()
-    key = write_universe_membership_to_s3(_membership(), _RUN_DATE, bucket="test-bucket", s3_client=s3)
+    m = _membership()
+    key = write_universe_membership_to_s3(m, _RUN_DATE, bucket="test-bucket", s3_client=s3)
     assert key == f"universe_membership/{_RUN_DATE}/membership.json"
-    assert set(s3.puts) == {key, "universe_membership/latest.json"}
-    assert s3.puts[key] == s3.puts["universe_membership/latest.json"]
+    run_key = f"universe_membership/{_RUN_DATE}/runs/{run_stamp(m['generated_at'])}.json"
+    assert set(s3.puts) == {key, run_key, "universe_membership/latest.json"}
+    assert s3.puts[key] == s3.puts["universe_membership/latest.json"] == s3.puts[run_key]
     assert json.loads(s3.puts[key])["run_date"] == _RUN_DATE
+
+
+def test_two_writes_on_one_run_date_keep_both_run_copies():
+    """The defect I6785 records: the weekday preopen Scanner and the
+    postclose-chained exercise Scanner both normalise to the same trading day,
+    so the pointer keys hold only the LAST cut of the day. Measured 2026-08-07:
+    the surviving membership.json postdated the predictions it fed by 17h and
+    was missing four names those predictions were stamped with. The immutable
+    copies must survive that."""
+    s3 = _FakeS3()
+    morning = _membership()
+    morning["generated_at"] = "2026-07-24T12:49:30+00:00"
+    evening = _membership()
+    evening["generated_at"] = "2026-07-25T03:13:01+00:00"
+    evening["cuts"]["attractiveness_top_20"]["tickers"] = ["ZZZZ"]
+
+    write_universe_membership_to_s3(morning, _RUN_DATE, bucket="b", s3_client=s3)
+    write_universe_membership_to_s3(evening, _RUN_DATE, bucket="b", s3_client=s3)
+
+    run_keys = sorted(k for k in s3.puts if "/runs/" in k)
+    assert run_keys == [
+        f"universe_membership/{_RUN_DATE}/runs/20260724T124930Z.json",
+        f"universe_membership/{_RUN_DATE}/runs/20260725T031301Z.json",
+    ]
+    # The pointer holds the evening cut; the morning cut is still recoverable.
+    pointer = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert pointer["cuts"]["attractiveness_top_20"]["tickers"] == ["ZZZZ"]
+    recovered = json.loads(s3.puts[run_keys[0]])
+    assert recovered["cuts"]["attractiveness_top_20"]["tickers"] != ["ZZZZ"]
+
+
+def test_run_stamp_normalises_to_utc_so_the_prefix_sorts_chronologically():
+    # An operator reads this prefix with `aws s3 ls`. Two runs stamped in
+    # different offsets must not sort into the wrong order.
+    assert run_stamp("2026-08-10T12:49:30+00:00") == "20260810T124930Z"
+    assert run_stamp("2026-08-10T05:49:30-07:00") == "20260810T124930Z"
+    assert run_stamp("2026-08-10T12:49:30") == "20260810T124930Z"
+
+
+def test_run_stamp_falls_back_rather_than_dropping_the_write():
+    # An odd key is recoverable; a skipped immutable write is not.
+    assert run_stamp("not-a-timestamp") == "notatimestamp"
+    assert run_stamp(None) == "None"
+
+
+# ── 5b. Turnover (alpha-engine-config-I6785) ─────────────────────────────────
+
+
+def _prior_membership(
+    tickers_top20: list[str], *, run_date="2026-07-17", generated_at="2026-07-17T12:00:00+00:00"
+) -> dict:
+    m = _membership()
+    m["run_date"] = run_date
+    m["generated_at"] = generated_at
+    m["cuts"]["attractiveness_top_20"]["tickers"] = sorted(tickers_top20)
+    return m
+
+
+def test_turnover_counts_retained_added_dropped_against_the_prior_write():
+    current = _membership()
+    now = current["cuts"]["attractiveness_top_20"]["tickers"]
+    prior = _prior_membership(now[:15] + ["OLD1", "OLD2", "OLD3", "OLD4", "OLD5"])
+
+    block = compute_turnover(current, prior)
+    cut = block["per_cut"]["attractiveness_top_20"]
+    assert block["prior_run_date"] == "2026-07-17"
+    assert block["prior_generated_at"] == "2026-07-17T12:00:00+00:00"
+    assert cut["size"] == len(now)
+    assert cut["retained"] == 15
+    assert cut["added"] == len(now) - 15
+    assert cut["dropped"] == 5
+    assert cut["retention_pct"] == 75.0
+
+
+def test_turnover_is_null_not_zeros_when_there_is_no_prior():
+    # Zeros would render as "nothing changed" and invent a 100%-retention point
+    # at the head of every series. Absence of a comparison is its own state.
+    assert compute_turnover(_membership(), None) is None
+
+
+def test_turnover_is_null_when_the_prior_pointer_is_this_same_artifact():
+    # A re-write of the same run must not publish a fabricated 100% retention.
+    m = _membership()
+    assert compute_turnover(m, dict(m)) is None
+
+
+def test_turnover_skips_cuts_absent_from_either_side():
+    # A cut appearing or disappearing between writes is a producer schema
+    # change; reporting it as 100% churn would misattribute it to the market.
+    current = _membership()
+    prior = _prior_membership(current["cuts"]["attractiveness_top_20"]["tickers"])
+    del prior["cuts"]["attractiveness_top_60"]
+    block = compute_turnover(current, prior)
+    assert "attractiveness_top_60" not in block["per_cut"]
+    assert "attractiveness_top_20" in block["per_cut"]
+
+
+def test_build_attaches_turnover_and_defaults_it_to_null():
+    assert build_universe_membership(_RUN_DATE, _scanner_cut(), _attractiveness())["turnover"] is None
+    prior = _prior_membership(["AAAA"])
+    built = build_universe_membership(_RUN_DATE, _scanner_cut(), _attractiveness(), prior=prior)
+    assert built["turnover"]["prior_run_date"] == "2026-07-17"
 
 
 # ── 6. Incumbent challenger arm (alpha-engine-config-I4983) ──────────────────
@@ -475,12 +585,16 @@ def test_carried_forward_artifact_still_trips_the_count_match_guard():
     prior = _prior("2026-08-03")
     prior["cuts"] = dict(prior["cuts"])
     prior["cuts"][PREDICTOR_UNIVERSE_CUT] = {
-        "basis": "attractiveness_rank", "size": 20,
-        "tickers": [f"T{i:03d}" for i in range(20)], "source": "x",
+        "basis": "attractiveness_rank",
+        "size": 20,
+        "tickers": [f"T{i:03d}" for i in range(20)],
+        "source": "x",
     }
     prior["cuts"]["scanner_top_20"] = {
-        "basis": "tech_score_rank", "size": 10,
-        "tickers": [f"T{i:03d}" for i in range(10)], "source": "x",
+        "basis": "tech_score_rank",
+        "size": 10,
+        "tickers": [f"T{i:03d}" for i in range(10)],
+        "source": "x",
     }
     from scoring.universe_membership import assert_cut_invariants
 
@@ -506,21 +620,19 @@ def test_read_latest_membership_propagates_a_real_failure():
 
 def test_weekly_end_to_end_holds_the_cut_and_still_writes_both_keys(monkeypatch):
     monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
-    prior = _prior("2026-07-20")          # ISO week 30
+    prior = _prior("2026-07-20")  # ISO week 30
     s3 = _ReadableFakeS3(seed=prior)
     monkeypatch.setattr(
         "scoring.universe_membership.attractiveness_for_run",
         lambda run_date, **kw: _attractiveness(),
     )
     # 2026-07-24 is inside ISO week 30 -> carry forward.
-    compute_and_write_universe_membership(
-        _RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3
-    )
+    compute_and_write_universe_membership(_RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3)
     written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
     assert written["cut_refresh_cadence"] == CADENCE_WEEKLY
     assert written["cut_effective_date"] == "2026-07-20"
     assert written["cuts"] == prior["cuts"]
-    assert written["run_date"] == _RUN_DATE           # written every run
+    assert written["run_date"] == _RUN_DATE  # written every run
     assert "universe_membership/latest.json" in s3.puts
 
 
@@ -531,9 +643,7 @@ def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
         "scoring.universe_membership.attractiveness_for_run",
         lambda run_date, **kw: _attractiveness(),
     )
-    compute_and_write_universe_membership(
-        _RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3
-    )
+    compute_and_write_universe_membership(_RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3)
     written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
     assert written["cut_refresh_cadence"] == CADENCE_DAILY
     assert written["cut_effective_date"] == _RUN_DATE
