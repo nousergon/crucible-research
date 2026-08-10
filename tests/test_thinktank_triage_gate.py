@@ -110,8 +110,8 @@ def test_the_event_row_carries_the_triage_verdict_and_its_reason():
     assert held.thesis_version_written is None, (
         "a held event must not carry a written thesis version"
     )
-    assert re.search(r"triage_escalated=escalated", _SRC)
-    assert re.search(r"triage_reason=triage_reason", _SRC)
+    assert re.search(r'row\["triage_escalated"\] = escalated', _SRC)
+    assert re.search(r'row\["triage_reason"\] = triage_reason', _SRC)
 
 
 def test_a_row_the_gate_never_saw_is_distinguishable_from_a_hold():
@@ -124,6 +124,35 @@ def test_a_row_the_gate_never_saw_is_distinguishable_from_a_hold():
     )
     assert unseen.triage_escalated is None
     assert unseen.triage_escalated is not False
+
+
+def test_every_assessment_is_recorded_before_any_expensive_write_can_abort():
+    """alpha-engine-config-I6817 D3, measured on run b150c317eeef (2026-08-10).
+
+    The first run after the I6650 ordering fix: the sweep completed over 178
+    tickers across 8 paid calls, the write tier then aborted on the first
+    flagged name, and thinktank/events/2026-08-10.jsonl landed with SIX rows.
+    Detection ran and was billed; its RECORD did not survive, because rows were
+    appended interleaved with the writes. §2.3 grades the gate on the record.
+
+    The triage tier makes this strictly worse if left alone — it adds a second
+    thing that can raise inside the same loop.
+    """
+    record_at = _pos(r"rows_by_ticker\[a\.ticker\] = row")
+    triage_at = _pos(r"decision = triage\(")
+    write_at = _pos(r"thesis = build_thesis\(")
+    assert record_at < triage_at < write_at, (
+        "event rows are not all recorded before the first call that can raise "
+        "— an abort mid-loop loses the record of detection that was paid for"
+    )
+
+
+def test_the_gate_verdict_is_stamped_before_the_write_it_gates():
+    """A write that aborts must still leave the DECISION on the record: it was
+    already made, and §2.4 requires the decision be recorded, not the write."""
+    stamp_at = _pos(r'row\["triage_escalated"\] = escalated')
+    write_at = _pos(r"thesis = build_thesis\(")
+    assert stamp_at < write_at
 
 
 # ── 3. A triage failure escalates rather than suppressing ────────────────────

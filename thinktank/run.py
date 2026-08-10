@@ -436,8 +436,35 @@ def _build_and_sweep(
         assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
         manifest.sweep_tickers = len(covered_before)
         record_sweep(ledger, covered_before, trading_day)
+        # ── RECORD BEFORE ESCALATE (alpha-engine-config-I6817 D3) ───────────
+        # Every assessment gets its row NOW, before any expensive write can
+        # abort the loop. Measured on run b150c317eeef (2026-08-10), the first
+        # run after the I6650 ordering fix: the sweep completed over 178
+        # tickers across 8 paid calls, then the write tier aborted on the
+        # first flagged name — and `thinktank/events/2026-08-10.jsonl` landed
+        # with SIX rows. Detection ran and was billed; its record did not
+        # survive, because rows were appended interleaved with the writes.
+        #
+        # That is I6650's own failure mode displaced by one stage rather than
+        # closed: running the sweep first stopped an abort from costing the
+        # detection, but not from costing the record of it — and §2.3 grades
+        # the gate on the record. The triage tier makes it strictly worse if
+        # left alone, since it adds a second thing that can raise inside the
+        # same loop.
+        rows_by_ticker: dict[str, dict] = {}
         for a in assessments:
-            written_version: int | None = None
+            row = EventRecord(
+                ticker=a.ticker,
+                trading_day=trading_day,
+                action=a.action,
+                severity=a.severity,
+                rationale=a.rationale,
+            ).model_dump()
+            rows_by_ticker[a.ticker] = row
+            event_rows.append(row)
+
+        for a in assessments:
+            row = rows_by_ticker[a.ticker]
             escalated: bool | None = None
             triage_reason: str | None = None
             if a.action == "update_thesis":
@@ -482,6 +509,11 @@ def _build_and_sweep(
                         a.ticker,
                         triage_reason,
                     )
+                # Stamped BEFORE the write, so a write that aborts still leaves
+                # the gate's verdict on the record — the decision is the thing
+                # §2.4 requires be recorded, and it is already made.
+                row["triage_escalated"] = escalated
+                row["triage_reason"] = triage_reason
             if a.action == "update_thesis" and escalated:
                 thesis = build_thesis(
                     store,
@@ -505,19 +537,8 @@ def _build_and_sweep(
                 manifest.event_updates_written += 1
                 manifest.theses_written += 1
                 theses_written.append(thesis)
-                written_version = thesis.version
-            event_rows.append(
-                EventRecord(
-                    ticker=a.ticker,
-                    trading_day=trading_day,
-                    action=a.action,
-                    severity=a.severity,
-                    rationale=a.rationale,
-                    thesis_version_written=written_version,
-                    triage_escalated=escalated,
-                    triage_reason=triage_reason,
-                ).model_dump()
-            )
+                row["thesis_version_written"] = thesis.version
+
         if macro_notes:
             themes.ensure_current(daily_developments=macro_notes)
 
