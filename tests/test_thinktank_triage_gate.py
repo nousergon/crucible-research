@@ -34,6 +34,7 @@ import re
 import sys
 
 import pytest
+from pydantic import ValidationError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -221,5 +222,5 @@ def test_the_decision_schema_forces_a_stated_reason(field):
     """An escalation with no reason cannot be graded, and §2.4 requires the
     decision be recorded WITH its reason."""
     assert field in TriageDecisionLLM.model_fields
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         TriageDecisionLLM(**{field: None})
