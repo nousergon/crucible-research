@@ -87,7 +87,11 @@ _FLOW_DOCTOR_YAML = os.path.join(
     ),
     "flow-doctor.yaml",
 )
-setup_logging("signals_envelope", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+setup_logging(
+    "signals_envelope",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    flow_name="research-signals-envelope",
+)
 
 logger = logging.getLogger(__name__)
 

@@ -56,6 +56,7 @@ setup_logging(
     "eval_judge_poll",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=[],
+    flow_name="research-eval-judge-poll",
 )
 
 logger = logging.getLogger(__name__)
