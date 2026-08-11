@@ -82,6 +82,12 @@ class ThinktankSettings:
     budget_ssm_param: str
     providers: dict[str, ProviderSpec] = field(default_factory=dict)
     tiers: dict[str, TierSpec] = field(default_factory=dict)
+    # alpha-engine-config-I6648 / products/thinktank.md §2.1. `rank_ceiling`
+    # is the ENTER threshold; this is the strictly-wider EXIT threshold that
+    # makes the covered set a declared set rather than a monotonic ratchet.
+    # Optional so an un-migrated config keeps today's behaviour (no exit path)
+    # rather than silently de-covering on first load.
+    exit_rank: int | None = None
 
     def tier(self, name: str) -> TierSpec:
         try:
@@ -125,6 +131,36 @@ def _config_path() -> Path:
             "THINKTANK_CONFIG_PATH explicitly."
         ),
     )
+
+
+def _parse_exit_rank(coverage: dict) -> int | None:
+    """`coverage.exit_rank`, validated STRICTLY wider than the enter rank.
+
+    Fails LOUD at config load rather than at the first drop
+    (alpha-engine-config-I6648). An exit rank at or inside the enter rank is
+    not a narrow band, it is a de-covering loop: a name enters at rank N and
+    is dropped on the same ranking, every run, forever — and the symptom would
+    be churn in the coverage ledger a long way from the config that caused it.
+
+    Absent ⇒ ``None`` ⇒ no exit path, which is the pre-I6648 behaviour. An
+    un-migrated config must keep working; it must not start de-covering names
+    because a default appeared.
+    """
+    raw = os.environ.get("THINKTANK_EXIT_RANK", coverage.get("exit_rank"))
+    if raw is None or raw == "":
+        return None
+    exit_rank = int(raw)
+    enter_rank = int(
+        os.environ.get("THINKTANK_RANK_CEILING", coverage["rank_ceiling"])
+    )
+    if exit_rank <= enter_rank:
+        raise ValueError(
+            f"thinktank coverage.exit_rank={exit_rank} must be STRICTLY "
+            f"greater than rank_ceiling={enter_rank} — an exit rank at or "
+            "inside the enter rank de-covers every name it just admitted, "
+            "every run (products/thinktank.md §2.1, config-I6648)"
+        )
+    return exit_rank
 
 
 def _parse_tier(name: str, t: dict) -> TierSpec:
@@ -210,6 +246,7 @@ def load_settings() -> ThinktankSettings:
         bucket=os.environ.get("RESEARCH_BUCKET", os.environ.get("S3_BUCKET", tt.get("bucket", DEFAULT_BUCKET))),
         daily_new_names=int(os.environ.get("THINKTANK_DAILY_NEW_NAMES", coverage["daily_new_names"])),
         rank_ceiling=int(os.environ.get("THINKTANK_RANK_CEILING", coverage["rank_ceiling"])),
+        exit_rank=_parse_exit_rank(coverage),
         sweep_chunk_size=int(coverage.get("sweep_chunk_size", 25)),
         stale_after_days=int(coverage.get("stale_after_days", 30)),
         monthly_budget_usd_default=float(budget["monthly_usd_default"]),
