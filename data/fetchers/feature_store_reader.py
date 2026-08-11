@@ -92,6 +92,45 @@ _TECHNICAL_COLS: tuple[str, ...] = (
     "dist_from_52w_low",
 )
 
+# The 8 technical columns the FACTOR pillar consumes
+# (``scoring/factor_scoring.py::_technical_frame_from_arctic``). Declared
+# here rather than there because this module owns which columns the
+# ``universe`` library is read for, and because the union below has to be
+# derivable without importing a scoring module into a fetcher.
+_FACTOR_TECHNICAL_COLS: tuple[str, ...] = (
+    "atr_14_pct",
+    "dist_from_52w_high",
+    "momentum_20d",
+    "momentum_5d",
+    "realized_vol_20d",
+    "return_120d",
+    "return_60d",
+    "vol_ratio_10_60",
+)
+
+# Both column sets in one projection, order-preserving and de-duplicated.
+#
+# A single Scanner run reads technical features TWICE over the same ~900
+# constituents — once from ``scanner_orchestrator`` for ``tech_score``, once
+# from ``factor_scoring`` for the factor pillar — with overlapping but
+# unequal column sets. Reading each set separately was two full ``read_batch``
+# round-trips over the whole universe. Measured on the live Lambda: 59.3s +
+# 39.9s on 2026-08-10, and 106s for the first alone on 2026-08-11, when the
+# second never ran because the function hit its 300s ceiling
+# (alpha-engine-config-I6855).
+#
+# The union is 16 columns against 12 and 8, so it costs four extra columns on
+# one read and saves an entire round-trip over ~900 symbols. That trade is
+# the one ``_read_arctic_latest`` already documents: at this symbol count the
+# round-trip count, not the payload, dominates. Callers still receive only
+# the columns they asked for — the widening is invisible above this module.
+_ARCTIC_UNION_COLS: tuple[str, ...] = tuple(dict.fromkeys(_TECHNICAL_COLS + _FACTOR_TECHNICAL_COLS))
+
+# Single-entry memo for the union read, keyed on ``(tickers, ref_date)``.
+# See :func:`_read_arctic_union_cached` for why it holds exactly one entry
+# and why the date is part of the key.
+_ARCTIC_UNION_CACHE: dict = {}
+
 # Trailing window to read so the latest row is found even after a long
 # weekend or holiday stretch. Wide enough to be robust, narrow enough that
 # the projected read stays small.
@@ -222,6 +261,62 @@ def _read_arctic_latest(
     return out
 
 
+def _read_arctic_union_cached(tickers: list[str], ref_date, *, what: str) -> dict[str, dict]:
+    """``_read_arctic_latest`` over :data:`_ARCTIC_UNION_COLS`, once per run.
+
+    Single-entry, keyed on ``(tickers, ref_date)``. Single rather than
+    unbounded because the only reuse that exists is within one Scanner
+    invocation over one universe on one date; an LRU would hold ~900 rows of
+    a universe nothing will ask for again, in a 1024MB Lambda, for the life
+    of a warm container.
+
+    The key carries ``ref_date`` deliberately. An operator replay for an
+    earlier date shares the container with the run before it, and serving it
+    that run's rows would silently answer for the wrong day — the exact
+    class :class:`FeatureStoreStalenessError` exists to make loud.
+
+    On a hit the staleness and error-rate assertions in
+    :func:`_read_arctic_latest` do not re-run. They already passed for these
+    exact rows on the miss, and re-asserting identical data cannot fail
+    differently; the cache never spans dates, so it cannot carry a verdict
+    forward onto data it was not computed for.
+    """
+    import pandas as pd
+
+    key = (tuple(tickers), pd.Timestamp(ref_date).normalize())
+    cached = _ARCTIC_UNION_CACHE.get(key)
+    if cached is not None:
+        logger.info(
+            "[data_source=arcticdb] %s: served from this run's union read (%d tickers, ref %s) — no second read_batch",
+            what,
+            len(cached),
+            ref_date,
+        )
+        return cached
+
+    rows = _read_arctic_latest(tickers, _ARCTIC_UNION_COLS, ref_date, what=what)
+    _ARCTIC_UNION_CACHE.clear()
+    _ARCTIC_UNION_CACHE[key] = rows
+    return rows
+
+
+def _project(rows: dict[str, dict], columns: tuple[str, ...]) -> dict[str, dict]:
+    """``rows`` narrowed to ``columns``, dropping tickers left with nothing.
+
+    The drop preserves :func:`_read_arctic_latest`'s contract, which omits a
+    ticker whose projected values are all absent or non-finite. Without it
+    the union read would admit a ticker carrying only the OTHER caller's
+    columns, and hand this caller an empty feature dict where it previously
+    got no key at all.
+    """
+    out: dict[str, dict] = {}
+    for ticker, values in rows.items():
+        narrowed = {c: values[c] for c in columns if c in values}
+        if narrowed:
+            out[ticker] = narrowed
+    return out
+
+
 def _use_arctic(tickers: list[str] | None, *, what: str) -> bool:
     """Whether this call reads ArcticDB (daily) or the S3 snapshot (weekly).
 
@@ -281,24 +376,23 @@ def read_latest_features(
     lookup.
 
     ``columns`` defaults to the scanner's 12-column ``tech_score`` set.
-    ``scoring/factor_scoring.py`` passes its own narrower set — the two
-    consumers need overlapping but different technical columns, and reading
-    the union over ~900 symbols would waste the difference on every run.
+    ``scoring/factor_scoring.py`` passes its own 8-column set. Both are
+    served from ONE ``read_batch`` over :data:`_ARCTIC_UNION_COLS` and then
+    projected, so the second caller in a run costs nothing — see
+    :data:`_ARCTIC_UNION_COLS` for the measurement that motivated it.
+    Callers still see exactly the columns they asked for.
 
     Staleness raises ``FeatureStoreStalenessError``. An unreadable source
     still returns ``None`` on the S3 path, preserving the existing contract
     for the caller's explicit empty-store raise.
     """
     if _use_arctic(tickers, what="technical features"):
-        return (
-            _read_arctic_latest(
-                tickers,
-                columns or _TECHNICAL_COLS,
-                ref_date or _today(),
-                what="technical features",
-            )
-            or None
+        rows = _read_arctic_union_cached(
+            tickers,
+            ref_date or _today(),
+            what="technical features",
         )
+        return _project(rows, columns or _TECHNICAL_COLS) or None
     return _read_latest_features_s3()
 
 
