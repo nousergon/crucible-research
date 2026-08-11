@@ -52,6 +52,7 @@ setup_logging(
     "eval_rolling_mean",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+    flow_name="research-eval-rolling-mean",
 )
 
 logger = logging.getLogger(__name__)
