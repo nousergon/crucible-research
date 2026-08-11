@@ -916,18 +916,45 @@ deploy_aggregate_costs() {
 }
 
 # Standalone scanner Lambda — ROADMAP L1995 Phase 1. Shared image with
-# the main runner; CMD override sets the entry point. Timeout 300s
-# (5min) covers feature-store read + ~903-ticker quant filter pass +
-# S3 write — pure compute, no LLM calls. Memory 1024MB matches the
-# main runner's headroom for ArcticDB / pandas working sets.
+# the main runner; CMD override sets the entry point. Covers feature-store
+# read + ~903-ticker quant filter pass + universe board + membership +
+# leaderboard + S3 writes — pure compute, no LLM calls. Memory 1024MB
+# matches the main runner's headroom for ArcticDB / pandas working sets
+# (observed Max Memory Used 520MB, so memory is not the binding budget).
+#
+# TIMEOUT 450s, sized to observed p95 × 1.5 per sf-pipeline-policy.md §4,
+# NOT to a round number. Raised from 300s on 2026-08-11
+# (alpha-engine-config-I6855) after both preopen attempts died at exactly
+# 300.00s and the pipeline terminated DEGRADED, losing that day's universe
+# board, membership, leaderboard and trajectory. Duration history over
+# 7/28-8/11 put p95 at ~290s — 7/31 came within 3% of the ceiling and 8/6
+# hit it once, two weeks of creep with nothing paging.
+#
+# Raising the ceiling is HALF the fix and is not a licence to absorb growth
+# silently (§1.2). The other half is the union projection in
+# data/fetchers/feature_store_reader.py, which removed one of the two
+# whole-universe read_batch round-trips, and the duration alarm below,
+# which pages at 70% of this value so the next creep is seen before it
+# fails. If this number needs raising again, find out what grew first.
+#
+# The SF task budget must stay ABOVE this: a lambda:invoke whose
+# timeoutSeconds is below the function's own timeout can never bind, and
+# the SF sees Sandbox.Timedout instead of States.Timeout. Asserted by
+# nousergon-data/tests/test_sf_lambda_timeout_ordering.py.
 #
 # The CloudWatch metric filter + degradation alarm on the scanner's
-# candidate count (config#785) is codified in
-# infrastructure/setup_scanner_alarm.sh (idempotent; run once after the
-# first scanner deploy creates the log group), mirroring the eval alarms
-# in setup_eval_alarms.sh.
+# candidate count (config#785) and the duration alarm (config-I6855) are
+# codified in infrastructure/setup_scanner_alarm.sh (idempotent; run once
+# after the first scanner deploy creates the log group), mirroring the eval
+# alarms in setup_eval_alarms.sh.
 deploy_scanner() {
-  _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
+  _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 450 1024
+  # AFTER the update, never before: the duration alarm derives its threshold
+  # from the LIVE timeout, so running it first would codify the old ceiling.
+  # Not guarded — a timeout raised with no alarm behind it is the state that
+  # produced I6855, and a deploy that silently half-applies is worse than a
+  # red one.
+  bash "$(dirname "${BASH_SOURCE[0]}")/setup_scanner_alarm.sh" duration
 }
 
 # Daily think-tank Lambda deploy target — RETIRED (alpha-engine-config-I5777,
