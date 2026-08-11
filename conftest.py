@@ -47,3 +47,24 @@ def _isolate_secrets_from_ssm(monkeypatch):
     clear_cache()
     yield
     clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _clear_arctic_union_cache():
+    """Empty the reader's in-run union memo around every test.
+
+    ``feature_store_reader._ARCTIC_UNION_CACHE`` is process state keyed on
+    ``(tickers, ref_date)`` (alpha-engine-config-I6855). Tests share both —
+    ``["AAPL"]`` on one pinned date is the house fixture — so without this a
+    test asserting ``read_batch`` was called would silently be served the
+    PREVIOUS test's rows and pass while exercising nothing. Cleared on both
+    sides so neither an inherited entry nor a leaked one can do it.
+    """
+    try:
+        from data.fetchers.feature_store_reader import _ARCTIC_UNION_CACHE
+    except ImportError:
+        yield
+        return
+    _ARCTIC_UNION_CACHE.clear()
+    yield
+    _ARCTIC_UNION_CACHE.clear()

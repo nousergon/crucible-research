@@ -131,9 +131,16 @@ def test_read_failure_rate_above_the_ceiling_raises():
         )
 
 
-def test_only_the_columns_the_scanner_consumes_are_projected():
+def test_only_the_columns_some_consumer_needs_are_projected():
     """A full-row read over ~900 symbols is the difference between a
     comfortable and a timed-out scanner Lambda.
+
+    The projection is the UNION of the two consumers' column sets, not one
+    caller's (alpha-engine-config-I6855) — the union costs four extra columns
+    on one read and saves a whole round-trip over the universe. It is still a
+    bounded projection, which is what this test exists to hold: the guard is
+    against reading the full row, never against reading a second consumer's
+    columns.
     """
     mod = _reload_with_source(None)
     lib = MagicMock()
@@ -143,7 +150,8 @@ def test_only_the_columns_the_scanner_consumes_are_projected():
         mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
 
     requested = lib.read_batch.call_args[0][0][0]
-    assert set(requested.columns) == set(mod._TECHNICAL_COLS)
+    assert set(requested.columns) == set(mod._ARCTIC_UNION_COLS)
+    assert set(requested.columns) == set(mod._TECHNICAL_COLS) | set(mod._FACTOR_TECHNICAL_COLS)
     assert "avg_volume_20d_raw" in requested.columns, (
         "the scanner's MIN_AVG_VOLUME gate needs raw shares, not the normalized avg_volume_20d ratio"
     )
@@ -162,3 +170,143 @@ def test_factor_loadings_honour_the_same_source_selection():
         )
 
     assert out == {"AAPL": {"momentum_20d_zscore": 1.2}}
+
+
+# ── One union read per run (alpha-engine-config-I6855) ────────────────────
+#
+# A Scanner run reads technical features TWICE over the same ~900
+# constituents with different column sets — scanner_orchestrator for
+# tech_score, factor_scoring for the factor pillar. Each was a full
+# read_batch round-trip: 59.3s + 39.9s measured on 2026-08-10, and 106s for
+# the first alone on 2026-08-11 when the second never ran because the Lambda
+# hit its 300s ceiling and the preopen pipeline terminated DEGRADED.
+
+
+def _union_frame(last_date: str) -> pd.DataFrame:
+    """A row carrying columns from BOTH callers' sets, so projection is real."""
+    idx = pd.DatetimeIndex([pd.Timestamp(last_date)])
+    return pd.DataFrame(
+        {
+            "rsi_14": [55.0],           # scanner only
+            "momentum_20d": [0.03],     # both
+            "return_60d": [0.11],       # factor only
+        },
+        index=idx,
+    )
+
+
+def test_second_reader_call_in_a_run_issues_no_second_read_batch():
+    """The factor pillar's read is served from the scanner's union read."""
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.return_value = [_batch_result(_union_frame("2026-07-29"))]
+    ref = pd.Timestamp("2026-07-29").date()
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=ref)
+        mod.read_latest_features(["AAPL"], columns=("return_60d",), ref_date=ref)
+
+    assert lib.read_batch.call_count == 1
+
+
+def test_the_single_read_projects_the_union_not_one_callers_columns():
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.return_value = [_batch_result(_union_frame("2026-07-29"))]
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
+
+    requested = list(lib.read_batch.call_args[0][0])[0].columns
+    assert set(mod._TECHNICAL_COLS) <= set(requested)
+    assert set(mod._FACTOR_TECHNICAL_COLS) <= set(requested)
+
+
+def test_each_caller_still_receives_only_the_columns_it_asked_for():
+    """The widening is invisible above this module — no caller sees the union."""
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.return_value = [_batch_result(_union_frame("2026-07-29"))]
+    ref = pd.Timestamp("2026-07-29").date()
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        scanner_rows = mod.read_latest_features(["AAPL"], ref_date=ref)
+        factor_rows = mod.read_latest_features(["AAPL"], columns=("return_60d",), ref_date=ref)
+
+    assert set(scanner_rows["AAPL"]) == {"rsi_14", "momentum_20d"}
+    assert set(factor_rows["AAPL"]) == {"return_60d"}
+
+
+def test_a_ticker_left_with_no_requested_column_is_dropped_not_emptied():
+    """Preserves _read_arctic_latest's contract under the wider read.
+
+    Before the union, a ticker carrying only the OTHER caller's columns
+    never appeared in this caller's result. It must still not appear — an
+    empty feature dict is a different value than a missing key, and
+    scanner_orchestrator branches on presence.
+    """
+    mod = _reload_with_source(None)
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-07-29")])
+    factor_only = pd.DataFrame({"return_60d": [0.11]}, index=idx)
+    lib = MagicMock()
+    lib.read_batch.return_value = [_batch_result(factor_only)]
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        rows = mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
+
+    assert rows is None  # no ticker survived the projection → empty → None
+
+
+def test_a_different_ref_date_is_a_miss_not_a_stale_hit():
+    """An operator replay sharing a warm container must not read the wrong day."""
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.side_effect = [
+        [_batch_result(_union_frame("2026-07-29"))],
+        [_batch_result(_union_frame("2026-07-28"))],
+    ]
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-28").date())
+
+    assert lib.read_batch.call_count == 2
+
+
+def test_a_different_universe_is_a_miss():
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.side_effect = [
+        [_batch_result(_union_frame("2026-07-29"))],
+        [_batch_result(_union_frame("2026-07-29"))],
+    ]
+    ref = pd.Timestamp("2026-07-29").date()
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=ref)
+        mod.read_latest_features(["MSFT"], ref_date=ref)
+
+    assert lib.read_batch.call_count == 2
+
+
+def test_the_memo_holds_one_entry_so_a_warm_container_cannot_accumulate():
+    mod = _reload_with_source(None)
+    lib = MagicMock()
+    lib.read_batch.side_effect = [
+        [_batch_result(_union_frame("2026-07-29"))],
+        [_batch_result(_union_frame("2026-07-28"))],
+    ]
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-28").date())
+
+    assert len(mod._ARCTIC_UNION_CACHE) == 1
+
+
+def test_factor_scoring_reads_its_column_list_from_the_reader():
+    """One declaration. A second copy would drift the union silently."""
+    import scoring.factor_scoring as fs
+    from data.fetchers import feature_store_reader as mod
+
+    assert fs._FACTOR_TECHNICAL_COLS is mod._FACTOR_TECHNICAL_COLS
