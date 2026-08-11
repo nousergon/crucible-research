@@ -70,6 +70,7 @@ def select_intake(
     *,
     daily_new_names: int,
     rank_ceiling: int,
+    exit_rank: int | None = None,
     skip_stale_refill: bool = False,
     stale_after_days: int | None = None,
     trading_day: str | None = None,
@@ -104,6 +105,47 @@ def select_intake(
     ranked = ranked_universe(board)
     covered = ledger.covered()
 
+    # ── HYSTERESIS EXIT (alpha-engine-config-I6648) ─────────────────────────
+    # Until 2026-08-10 nothing in this module ever de-covered a name: the
+    # `rank > rank_ceiling` break below gates ENTRY, and the next line skips
+    # anything already covered, so an existing entry was never re-evaluated.
+    # Coverage was a monotonic RATCHET — measured at 178 covered names against
+    # rank_ceiling=150 on run b150c317eeef.
+    #
+    # `exit_rank` MUST be strictly wider than `rank_ceiling` (enforced at
+    # config load, not here). That gap is the whole point: a name oscillating
+    # between the two thresholds enters once and is never dropped, which is
+    # what stops boundary churn from destroying the belief history it churns
+    # through.
+    #
+    # A name ABSENT from today's ranking is NOT dropped. Absence means the
+    # scanner did not rank it today — a universe change, a data gap, a halted
+    # ticker — and inferring "it fell below the exit rank" from silence is the
+    # failure this codebase has already shipped once. Only an explicit rank
+    # worse than `exit_rank` de-covers.
+    dropped: list[str] = []
+    if exit_rank is not None and covered:
+        rank_by_ticker = {
+            row.get("ticker"): rank
+            for rank, row in enumerate(ranked, start=1)
+            if row.get("ticker")
+        }
+        for ticker in sorted(covered):
+            rank = rank_by_ticker.get(ticker)
+            if rank is not None and rank > exit_rank:
+                entry = ledger.entries[ticker]
+                entry.covered = False
+                entry.dropped_on = trading_day or ""
+                entry.attractiveness_rank_at_drop = rank
+                dropped.append(ticker)
+        if dropped:
+            covered = ledger.covered()
+            logger.info(
+                "[thinktank] de-covered %d name(s) past exit_rank=%d: %s "
+                "(thesis history retained — config-I6648)",
+                len(dropped), exit_rank, ", ".join(dropped),
+            )
+
     new_rows: list[dict] = []
     for rank, row in enumerate(ranked, start=1):
         if rank > rank_ceiling:
@@ -123,8 +165,12 @@ def select_intake(
     if not skip_stale_refill:
         slots_left = daily_new_names - len(new_rows)
         if slots_left > 0 and ledger.entries:
+            # `.covered` filter: a de-covered name must not consume a
+            # refresh slot, or the ratchet returns through the back door
+            # (config-I6648).
             stalest = sorted(
-                ledger.entries.values(), key=lambda e: e.thesis_updated_on
+                (e for e in ledger.entries.values() if e.covered),
+                key=lambda e: e.thesis_updated_on,
             )
             graceful_refresh = [e.ticker for e in stalest[:slots_left]]
 
@@ -133,7 +179,8 @@ def select_intake(
         breached_entries = [
             e
             for e in ledger.entries.values()
-            if _age_days(trading_day, e.thesis_updated_on) >= stale_after_days
+            if e.covered
+            and _age_days(trading_day, e.thesis_updated_on) >= stale_after_days
         ]
         breached_entries.sort(key=lambda e: e.thesis_updated_on)  # stalest first
         breached = [e.ticker for e in breached_entries]

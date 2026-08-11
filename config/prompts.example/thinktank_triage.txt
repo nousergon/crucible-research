@@ -1,0 +1,31 @@
+# version: 0.1.0
+Triage gate. The daily events sweep flagged {ticker} on {trading_day} as
+possibly warranting a re-underwrite. Decide whether it actually does.
+
+Market regime: {market_regime}
+
+Sweep severity (0-100, the sweep's own read of how thesis-relevant today's
+flow is): {severity}
+
+What the sweep keyed on:
+{sweep_rationale}
+
+The STANDING thesis — the belief this event would have to change:
+{standing_thesis}
+
+Return escalate=true ONLY if the standing claim above would read differently
+to an investor who knew this development. Concretely, escalate when the event:
+- contradicts a specific claim the thesis makes;
+- changes the magnitude or timing of something the thesis forecasts; or
+- introduces a risk or catalyst the thesis does not contemplate at all.
+
+Return escalate=false when the event is real but the belief does not move —
+including when the thesis already anticipates it, when it confirms rather than
+revises the existing claim, or when it is material to the price and immaterial
+to the underwriting. This is the expected common answer. You are a gate, not an
+author: a false escalation costs a full re-underwrite at the most expensive
+tier, and finding nothing to escalate is a successful outcome, not a failure to
+do your job.
+
+reason: one-two sentences naming which part of the standing claim moves, or
+which part the event leaves intact.
