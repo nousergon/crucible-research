@@ -307,7 +307,6 @@ def test_the_memo_holds_one_entry_so_a_warm_container_cannot_accumulate():
 def test_factor_scoring_reads_its_column_list_from_the_reader():
     """One declaration. A second copy would drift the union silently."""
     import scoring.factor_scoring as fs
-
     from data.fetchers import feature_store_reader as mod
 
     assert fs._FACTOR_TECHNICAL_COLS is mod._FACTOR_TECHNICAL_COLS
