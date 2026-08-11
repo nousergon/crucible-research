@@ -65,6 +65,7 @@ setup_logging(
     "research",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+    flow_name="research-graph",
 )
 
 logger = logging.getLogger(__name__)

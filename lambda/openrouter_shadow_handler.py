@@ -74,7 +74,11 @@ _FLOW_DOCTOR_YAML = os.path.join(
     ),
     "flow-doctor.yaml",
 )
-setup_logging("openrouter_shadow", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+setup_logging(
+    "openrouter_shadow",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    flow_name="research-openrouter-shadow",
+)
 
 logger = logging.getLogger(__name__)
 
