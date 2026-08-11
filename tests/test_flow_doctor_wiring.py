@@ -306,3 +306,51 @@ class TestNoDeadFlowDoctorPlumbing:
             assert "state['flow_doctor']" not in content, (
                 f"new state['flow_doctor'] consumer in {py.relative_to(REPO_ROOT)}"
             )
+
+
+class TestThinkTankNamesItsOwnComponent:
+    """An alert names the COMPONENT, not the repo (alpha-engine-config-I6910).
+
+    `flow-doctor.yaml` declares `flow_name: research-lambda` for the whole
+    repo. The Think Tank stopped being a Lambda on 2026-07-29 when it moved to
+    a self-terminating EC2 spot box (ARCHITECTURE §47) — the old
+    `alpha-engine-research-thinktank` function last logged on 2026-07-30. For
+    the twelve days after, every Think Tank abort paged under the name of a
+    component with no logs to go and read, and the operator went looking at
+    Lambdas for a failure that had none.
+    """
+
+    def _handler_source(self) -> str:
+        return (REPO_ROOT / "lambda" / "thinktank_handler.py").read_text()
+
+    def test_setup_logging_is_called_with_the_component_name(self):
+        assert 'flow_name="thinktank-spot"' in self._handler_source(), (
+            "thinktank_handler must file its alerts under `thinktank-spot`; "
+            "without the override it inherits flow-doctor.yaml's repo-wide "
+            "`research-lambda`, which names a compute substrate it does not "
+            "run on"
+        )
+
+    def test_the_yaml_still_declares_the_repo_wide_default(self):
+        """Pins WHY the override is needed. If the yaml is ever changed to a
+        per-component name, this test failing is the prompt to re-examine
+        whether the override is still the right mechanism — not a reason to
+        delete the assertion above."""
+        yaml_text = (REPO_ROOT / "flow-doctor.yaml").read_text()
+        assert "flow_name: research-lambda" in yaml_text
+
+    def test_krepis_accepts_the_kwarg(self):
+        """The CAPABILITY, not the version string — mirroring the krepis-floor
+        contract tests requirements.txt points at. An older krepis raises
+        TypeError on this kwarg rather than degrading, so a stale cached layer
+        would break the handler at import, not merely lose the label."""
+        import inspect
+
+        from nousergon_lib.logging import setup_logging
+
+        assert "flow_name" in inspect.signature(setup_logging).parameters
+
+    def test_the_log_prefix_is_unchanged(self):
+        """`name` and `flow_name` are separate knobs. Nothing about correcting
+        the alert label should rewrite twelve days of log-grep habits."""
+        assert '"thinktank",' in self._handler_source()
