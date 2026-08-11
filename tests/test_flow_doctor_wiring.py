@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -354,3 +355,64 @@ class TestThinkTankNamesItsOwnComponent:
         """`name` and `flow_name` are separate knobs. Nothing about correcting
         the alert label should rewrite twelve days of log-grep habits."""
         assert '"thinktank",' in self._handler_source()
+
+
+class TestEveryEntryPointNamesItsOwnComponent:
+    """`flow-doctor.yaml` declares ONE `flow_name` for the whole repo; this repo
+    ships fourteen entry points (alpha-engine-config-I6910 D3).
+
+    Two things follow from sharing it, and both bit:
+
+    - **The label misdirects.** `research-lambda` sent an operator to Lambda
+      logs for a Think Tank failure that had none, twelve days after that
+      component moved to an EC2 spot box.
+    - **The budget is shared.** As of flow-doctor 0.10.0 the daily alert budget
+      is scoped per `flow_name` (alpha-engine-config-I6921); components sharing
+      one name share one budget, so a noisy neighbour spends everyone's.
+
+    This test is the reason a fourteenth handler cannot quietly inherit the
+    default: adding one without a `flow_name` fails here.
+    """
+
+    def _handlers(self):
+        return sorted((REPO_ROOT / "lambda").glob("*_handler.py")) + [
+            REPO_ROOT / "lambda" / "handler.py"
+        ]
+
+    def _flow_name(self, path):
+        m = re.search(r'flow_name="([^"]+)"', path.read_text())
+        return m.group(1) if m else None
+
+    def test_every_handler_declares_a_flow_name(self):
+        missing = [
+            p.name for p in self._handlers()
+            if "setup_logging(" in p.read_text() and self._flow_name(p) is None
+        ]
+        assert not missing, (
+            f"{missing} call setup_logging without flow_name, so they file "
+            f"alerts under flow-doctor.yaml's repo-wide `research-lambda` — a "
+            f"name that identifies neither the component nor, since the Think "
+            f"Tank migration, its compute substrate"
+        )
+
+    def test_no_two_handlers_share_a_flow_name(self):
+        """A shared name is a shared alert budget and an ambiguous page."""
+        seen = {}
+        for p in self._handlers():
+            flow = self._flow_name(p)
+            if flow is None:
+                continue
+            seen.setdefault(flow, []).append(p.name)
+        dupes = {f: n for f, n in seen.items() if len(n) > 1}
+        assert not dupes, f"flow_name collisions: {dupes}"
+
+    def test_no_handler_reintroduces_the_repo_wide_default(self):
+        offenders = [
+            p.name for p in self._handlers()
+            if self._flow_name(p) == "research-lambda"
+        ]
+        assert not offenders, (
+            f"{offenders} pin the repo-wide default explicitly. If a handler "
+            f"genuinely wants it, delete the kwarg — restating it defeats the "
+            f"two tests above without saying so."
+        )
