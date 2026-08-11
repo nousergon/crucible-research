@@ -112,7 +112,21 @@ _FLOW_DOCTOR_YAML = os.path.join(
     ),
     "flow-doctor.yaml",
 )
-setup_logging("thinktank", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+# flow_name overrides flow-doctor.yaml's repo-wide `research-lambda`
+# (alpha-engine-config-I6910). The yaml is owned per REPO; an alert is about a
+# COMPONENT, and this one has not been a Lambda since 2026-07-29, when the
+# Think Tank moved to a self-terminating EC2 spot box (ARCHITECTURE §47). The
+# old `alpha-engine-research-thinktank` function last logged on 2026-07-30 —
+# so for twelve days every abort here paged under the name of a component with
+# no logs to go and read, and the operator went looking at Lambdas.
+#
+# `name` stays "thinktank": it is the stdout prefix, a separate knob from the
+# label an alert is filed under. Requires krepis>=0.43.0 (see requirements.txt).
+setup_logging(
+    "thinktank",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    flow_name="thinktank-spot",
+)
 
 logger = logging.getLogger(__name__)
 
