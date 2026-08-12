@@ -164,14 +164,153 @@ _T = TypeVar("_T")
 # an OpenAI-compatible endpoint keeps the loops, the tool calling and
 # with_structured_output byte-identical, and gains the platform.
 #
-# WHY THE ENDPOINT IS CONFIG. On a host running the LiteLLM router this points
-# at the router and inherits fallback chains and DLP scanning. In Lambda —
-# which cannot reach 127.0.0.1 — it points at OpenRouter, exactly as thinktank
-# already resolves ProviderSpec.base_url. The class is a selection fact and
-# belongs to the registry; the endpoint is a deployment fact and belongs to
-# config. Note that the Lambda path therefore does NOT gain egress-proxy DLP:
-# that gap is pre-existing and fleet-wide for Lambda, not specific to these
-# call sites, and it is not closed here.
+# WHERE THE ENDPOINT COMES FROM — and why it is no longer config.
+#
+# Until alpha-engine-config-I7005 this factory had TWO branches. When
+# ``config.ROUTER_BASE_URL`` was empty — the DEFAULT, so this was the live path
+# on every deployment — it constructed ``ChatAnthropic`` from
+# ``config.DIRECT_MODEL_FOR_CLASS``, a consumer-held capability-class ->
+# concrete-model-slug table built from two model-id literals in the research
+# config. That is precisely what `model-router-policy` §2 layer 5 forbids a
+# consumer to hold ("a routing table, a model slug, or an endpoint of their
+# own"), and its fall-through was to an unscanned direct provider rather than
+# the fail-closed §5 step 3 requires. The other branch pointed ``ChatOpenAI``
+# at a config-supplied ``base_url`` — not a hardcoded public endpoint, but a
+# SECOND parallel mapping of the same routing fact, which §2's test names as a
+# defect on its own ("if a fact appears at two layers, delete the copy at the
+# lower layer").
+#
+# Both are gone. There is ONE path: ``krepis.router.resolve_group_spec()``
+# returns the model, the endpoint and the credential NAME for a capability
+# tier, filtered by where this process declares it is running. This module now
+# says exactly two things about routing — which tier it wants, and which wire
+# format it speaks — and nothing at all about models, endpoints or providers.
+#
+# Mirrors ``alpha-engine-evaluator/director/agent.py`` (the fleet's reference
+# implementation of this pattern) and ``producers/single_agent.py`` in this
+# repo, rather than inventing a third variant.
+
+
+def _exec_context() -> str | None:
+    """Where this process declares it is running, or None to take krepis' default.
+
+    R29: the context is a DECLARED input, never inferred. This deliberately
+    does NOT sniff the hostname, the EC2 metadata service, or the presence of
+    ``AWS_LAMBDA_FUNCTION_NAME`` — a wrong guess produces a mis-resolution that
+    looks like a health failure, which is the exact confusion R29 exists to
+    prevent. Read at call time (not import) so a test or a wrapper script that
+    sets the variable late still takes effect.
+
+    Returning None hands the decision to krepis' own documented resolution
+    order (``KREPIS_EXEC_CONTEXT`` -> ``DEFAULT_EXEC_CONTEXT``), so this module
+    holds no default of its own.
+
+    Deployments that set it:
+      * ``alpha-engine-research-runner`` Lambda — ``infrastructure/deploy.sh``
+        ``_apply_router_env`` sets ``lambda`` alongside the router URL, the
+        per-consumer credential name and the AppConfig registry coordinates.
+      * the weekly Research spot — set by the launcher in ``nous-ergon-ops``.
+    """
+    raw = os.environ.get("KREPIS_EXEC_CONTEXT")
+    return raw.strip() if raw and raw.strip() else None
+
+
+def _assert_routed_through_the_proxy(route: dict, ctx: str | None) -> None:
+    """Refuse a resolution that reached a direct provider endpoint from a
+    context where no such endpoint legitimately exists.
+
+    This is a guard against a **corrupted input**, not a routing decision, and
+    the distinction is what keeps it on the right side of `model-router-policy`
+    §2's layer-5 rule: this factory does not choose a route, it refuses one
+    that cannot be conformant. Which entries are reachable from a context
+    remains entirely the registry's statement about itself (R28/R29).
+
+    It matters here specifically because of a vocabulary over-claim that this
+    repo cannot fix from inside itself. The registry's local egress-proxy
+    entries declare ``reachable_from: [laptop, ec2]``, where ``ec2`` means the
+    dashboard box — the one EC2 instance that runs an egress proxy on
+    loopback. The weekly Research run executes on an **ephemeral spot** that
+    has no such proxy, and the group chains also contain ``route: openrouter``
+    entries which carry the same ``ec2`` claim and are NOT health-probed at
+    resolve time. So a spot declaring ``ec2`` whose router edge is momentarily
+    unhealthy would fall straight through to openrouter.ai — DLP-unscanned,
+    and the exact linkage Brian's 2026-08-03 ruling forbids categorically
+    (alpha-engine-config-I6367). The same shape already shipped once, in the
+    Director, and served ``glm-5.2`` at openrouter.ai while logging a healthy
+    route (alpha-engine-config-I6183).
+
+    Raising loses the run. That is the intended trade (R20 / §5 step 3): an
+    unscanned paid egress that reports success is worse than a job that does
+    not run, and §5 is explicit that where no reachable direct route exists,
+    router unavailability is an **outage** to be reported rather than absorbed.
+
+    On ``laptop`` a direct egress-proxy route IS legitimate — the proxy is on
+    loopback there and R27d permits it — so the guard steps aside, exactly as
+    the Director's does.
+    """
+    if ctx == "laptop":
+        return
+    actual = route.get("route")
+    if actual == "litellm_proxy":
+        return
+    raise RuntimeError(
+        f"research agent resolved route={actual!r} from exec_context={ctx!r}. "
+        f"The only conformant route from a research Lambda or the weekly "
+        f"Research spot is 'litellm_proxy' (model-router-policy R26): neither "
+        f"runs a local egress proxy, so a direct provider endpoint resolved "
+        f"from here means the router edge is unhealthy, the registry copy is "
+        f"stale, or the declared context over-claims reachability. Refusing to "
+        f"make a paid, DLP-unscanned call — an unreachable router is an OUTAGE "
+        f"(model-router-policy §5), not a licence to reach a public endpoint. "
+        f"Resolved: model={route.get('deployment_id')!r} "
+        f"provider={route.get('provider')!r} "
+        f"api_base_url={route.get('api_base_url')!r}; "
+        f"skipped={route.get('skipped_entries')!r}"
+    )
+
+
+def _log_route(route: dict, *, model_class: str) -> None:
+    """Emit the route's degradation state on EVERY call — 0 on the healthy path.
+
+    R12 makes serving from a fallback an alert rather than a log line, and
+    ``principles.md`` §2.7 is that a signal which only appears when something is
+    wrong is indistinguishable from a dead emitter. So the healthy value is
+    emitted too, and the WARN line is shaped for flow-doctor pickup like every
+    other retry/repair warning in this module.
+
+    Degradation on the proxy route can only mean ``skipped_entries`` — which
+    entry the proxy walks to is server-side and arrives at call time, so
+    ``krepis.router.route_is_degraded`` correctly answers False there rather
+    than firing on every healthy call (the category error that pinned the
+    Director's fallback metric at 1 on its first healthy run).
+
+    Never raises: a telemetry failure must not take down a research run.
+    """
+    try:
+        from krepis.router import route_is_degraded
+
+        skipped = route.get("skipped_entries") or []
+        degraded = bool(skipped) or route_is_degraded(route)
+        if degraded:
+            log.warning(
+                "[agent_route:%s] route DEGRADED: served=%s route=%s primary=%s context=%s — skipped: %s",
+                model_class,
+                route.get("registry_id"),
+                route.get("route"),
+                route.get("primary_registry_id") or route.get("primary_model"),
+                route.get("exec_context"),
+                "; ".join(f"{s.get('registry_id')}: {s.get('reason')}" for s in skipped) or "(none recorded)",
+            )
+        else:
+            log.info(
+                "[agent_route:%s] route healthy: served=%s route=%s context=%s degraded=0",
+                model_class,
+                route.get("registry_id"),
+                route.get("route"),
+                route.get("exec_context"),
+            )
+    except Exception:  # noqa: BLE001 — telemetry only; the call itself must proceed
+        log.exception("[agent_route:%s] route telemetry failed — degradation is blind for this call", model_class)
 
 
 def make_agent_llm(
@@ -184,75 +323,71 @@ def make_agent_llm(
 ):
     """Return a chat model for *model_class* ("low"/"med"/"high"/"ultra").
 
+    The class is resolved to a model, an endpoint and a credential by
+    ``krepis.router.resolve_group_spec`` — the registry decides all three; this
+    factory decides only which capability tier it wants, where it is running,
+    and that it speaks the OpenAI wire format. There is no direct-provider
+    branch and no configured endpoint: both were layer-5 routing facts
+    (`model-router-policy` §2), and the resolver **fails closed** with its own
+    ``ValueError``/``FileNotFoundError`` when the tier cannot be served from
+    here, which is what §5 step 3 requires of a consumer that cannot reach the
+    router.
+
     Preserves the retry and timeout budgets every agent previously set by
     hand — dropping those silently would change failure behaviour under load
     while looking like a pure refactor.
     """
     # Local imports: keeps this module importable without the LLM deps, which
     # matters because it is also imported by tooling that never makes a call.
+    from krepis.router import resolve_group_spec
+    from langchain_openai import ChatOpenAI
     from nousergon_lib.secrets import get_secret
 
-    from config import (
-        DIRECT_MODEL_FOR_CLASS,
-        ROUTER_BASE_URL,
-        ROUTER_KEY_SECRET,
-    )
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     cbs = callbacks if callbacks is not None else [get_cost_telemetry_callback()]
+    ctx = _exec_context()
 
-    # DIRECT MODE — no router configured for this deployment. Resolve the class
-    # to a concrete model locally and talk to Anthropic exactly as these call
-    # sites did before the migration.
-    #
-    # This branch is why the migration is safe to land: Lambda and the EC2
-    # canary box have no reachable router, and defaulting them onto one turned
-    # every agent call into a connection error. Opting in is a config edit per
-    # deployment, not a flag day.
-    if not ROUTER_BASE_URL:
-        from langchain_anthropic import ChatAnthropic
+    # `max_tokens` is handed to the resolver rather than applied afterwards so
+    # the spec, the log line and the request all carry ONE number. The Director
+    # learned this the hard way: it restated the budget locally and logged
+    # `spec.max_tokens`, so the value printed was not the value sent.
+    spec, route = resolve_group_spec(
+        model_class,
+        exec_context=ctx,
+        wire="openai",
+        max_tokens=max_tokens,
+    )
+    _assert_routed_through_the_proxy(route, ctx)
+    _log_route(route, model_class=model_class)
 
-        model = DIRECT_MODEL_FOR_CLASS.get(model_class)
-        if model is None:
-            # Fail loud: a class with no direct-mode model would otherwise be
-            # sent to Anthropic as a literal model name and 404 at call time.
-            raise ValueError(
-                f"model_class {model_class!r} has no direct-mode model. Either set "
-                f"llm.router_base_url to resolve classes via the registry, or add a "
-                f"concrete model for this class in config.DIRECT_MODEL_FOR_CLASS "
-                f"(known: {sorted(DIRECT_MODEL_FOR_CLASS)})."
-            )
-        return ChatAnthropic(
-            model=model,
-            anthropic_api_key=api_key or get_secret("ANTHROPIC_API_KEY", required=False, default=""),
-            max_tokens=max_tokens,
-            max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-            default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-            callbacks=cbs,
-            **extra,
-        )
-        # Custodial compliance (policy §2a): the key is fetched from Secrets
-        # Manager at call time, NOT from a process-wide env var. Deployments
-        # with a reachable router use the sentinel ROUTER_KEY_SECRET instead
-        # and hold no upstream provider credential at all.
-        # The eval_judge Lambda handlers are registered as declared exceptions
-        # in the fleet's LLM_CALLSITE_REGISTRY.yaml until I4927 puts them
-        # behind the in-VPC gateway.
+    # The credential is resolved BY NAME, from the name the resolver returned.
+    # `api_key_env is None` means `auth_token_type: placeholder` — the egress
+    # proxy holds the real key and there is nothing to resolve here, which is
+    # not the same as a missing credential. `api_key` stays a test seam.
+    if api_key:
+        key = api_key
+    elif spec.api_key_env:
+        key = get_secret(spec.api_key_env, required=False, default="") or "unused"
+    else:
+        key = "unused"
 
-    # ROUTER MODE — the class name goes on the wire and the registry resolves it.
-    from langchain_openai import ChatOpenAI
-
-    key = api_key or get_secret(ROUTER_KEY_SECRET, required=False, default="") or "unused"
+    kwargs = dict(extra)
+    if spec.reasoning is not None:
+        # A per-model registry param (e.g. {"exclude": True}), forwarded
+        # verbatim. Setting it from here would override a per-model fact with a
+        # guess made for a different model — the registry owns it.
+        kwargs.setdefault("extra_body", {})["reasoning"] = spec.reasoning
 
     return ChatOpenAI(
-        model=model_class,
-        base_url=ROUTER_BASE_URL,
+        model=spec.model,
+        base_url=spec.base_url,
         api_key=key,
-        max_tokens=max_tokens,
+        max_tokens=spec.max_tokens,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=cbs,
-        **extra,
+        **kwargs,
     )
 
 

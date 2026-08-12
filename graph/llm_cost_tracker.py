@@ -37,15 +37,24 @@ Why both per-node and per-call streams:
   the JSONL sink so the daily aggregator can recompute costs against
   any pricing table version without replaying agents.
 
-Usage pattern (one ChatAnthropic instance, one agent decision)::
+Usage pattern (one chat-model instance, one agent decision)::
 
     from graph.llm_cost_tracker import (
         get_cost_telemetry_callback, track_llm_cost,
     )
+    from agents.langchain_utils import make_agent_llm
     from agents.prompt_loader import load_prompt
+    from config import MAX_TOKENS_PER_STOCK, PER_STOCK_CLASS
 
     cb = get_cost_telemetry_callback()
-    llm = ChatAnthropic(model=PER_STOCK_MODEL, callbacks=[cb], ...)
+    # The CLASS is what the caller names; the registry decides the model
+    # (alpha-engine-config-I7005). Constructing a provider client here with a
+    # model id would fail tests/test_llm_request_timeout.py's repo-wide guard.
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
+        max_tokens=MAX_TOKENS_PER_STOCK,
+        callbacks=[cb],
+    )
 
     user_prompt = load_prompt("cio_decision")
     rendered = user_prompt.format(**kwargs)

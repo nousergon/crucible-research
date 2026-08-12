@@ -471,36 +471,28 @@ def _resolve_class(key: str) -> str:
 PER_STOCK_CLASS: str = _resolve_class("per_stock_class")
 STRATEGIC_CLASS: str = _resolve_class("strategic_class")
 
-# Endpoint that resolves a class name. A deployment fact, not a selection one.
+# THE CLASS IS THE ONLY ROUTING FACT THIS CONFIG HOLDS, DELIBERATELY.
 #
-# UNSET IS THE DEFAULT, AND IT MEANS DIRECT MODE. An empty value routes
-# make_agent_llm() back to a direct Anthropic client using the concrete
-# *_MODEL ids below — byte-identical to pre-migration behaviour. This makes
-# the migration opt-in per deployment rather than flag-day.
+# `router_base_url`, `router_key_secret`, `per_stock_model`, `strategic_model`
+# and the derived `DIRECT_MODEL_FOR_CLASS` table were removed in
+# alpha-engine-config-I7005. Every one of them was a routing fact held at
+# `model-router-policy` §2 layer 5, which the policy names as a defect on
+# sight: a consumer "must not hold a routing table, a model slug, or an
+# endpoint of their own", and "if a fact appears at two layers, delete the copy
+# at the lower layer".
 #
-# It is deliberately NOT defaulted to 127.0.0.1:8980. Only the laptop and the
-# dashboard box run a local router; Lambda and the EC2 canary box cannot reach
-# localhost at all, so a localhost default is wrong for most of the fleet and
-# fails as a connection error at call time rather than at config load.
-ROUTER_BASE_URL: str = str(LLM_CFG.get("router_base_url", "") or "")
-ROUTER_KEY_SECRET: str = str(LLM_CFG.get("router_key_secret", "LITELLM_MASTER_KEY"))
-
-# Concrete model ids for DIRECT mode and for the call sites still talking to
-# Anthropic by hand (ic_cio, canary_replay — held back per policy section 8).
+# They are not replaced by other config keys. `agents.langchain_utils
+# .make_agent_llm` resolves the class through `krepis.router
+# .resolve_group_spec()`, which returns the model, the endpoint and the
+# credential NAME from the registry, filtered by the execution context the
+# process DECLARES via `KREPIS_EXEC_CONTEXT` (R29 — declared, never inferred).
+# The router edge URL and the per-consumer credential name are likewise krepis'
+# own environment contract (`KREPIS_LITELLM_PROXY_URL`,
+# `KREPIS_ROUTER_CREDENTIAL_SECRET`), set by each deployment's launcher, so
+# there is exactly one copy of each and this file is not it.
 #
-# These MUST stay real model ids. An earlier revision of this change aliased
-# them onto the class names; every un-migrated ChatAnthropic(model=...) site
-# then sent the literal string "low" to Anthropic and got a 404. Caught by the
-# canary replay probe, which is exactly the failure it exists to catch.
-PER_STOCK_MODEL: str = str(LLM_CFG.get("per_stock_model", "claude-haiku-4-5-20251001"))
-STRATEGIC_MODEL: str = str(LLM_CFG.get("strategic_model", "claude-sonnet-4-6"))
-
-# Class -> concrete model, for direct mode only. In router mode the registry
-# owns this mapping and this table is unused.
-DIRECT_MODEL_FOR_CLASS: dict[str, str] = {
-    PER_STOCK_CLASS: PER_STOCK_MODEL,
-    STRATEGIC_CLASS: STRATEGIC_MODEL,
-}
+# Leaving the keys in a `research/universe.yaml` is harmless — nothing reads
+# them — but they are dead and should be dropped on the next edit of that file.
 MAX_TOKENS_PER_STOCK: int = LLM_CFG["max_tokens_per_stock"]
 MAX_TOKENS_STRATEGIC: int = LLM_CFG["max_tokens_strategic"]
 CONCURRENT_AGENTS: int = LLM_CFG["concurrent_agents"]
