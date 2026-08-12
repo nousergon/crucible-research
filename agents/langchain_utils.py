@@ -215,7 +215,7 @@ def _exec_context() -> str | None:
     return raw.strip() if raw and raw.strip() else None
 
 
-def _assert_routed_through_the_proxy(route: dict, ctx: str | None) -> None:
+def _assert_routed_through_the_proxy(route: dict) -> None:
     """Refuse a resolution that reached a direct provider endpoint from a
     context where no such endpoint legitimately exists.
 
@@ -247,7 +247,18 @@ def _assert_routed_through_the_proxy(route: dict, ctx: str | None) -> None:
     On ``laptop`` a direct egress-proxy route IS legitimate — the proxy is on
     loopback there and R27d permits it — so the guard steps aside, exactly as
     the Director's does.
+
+    The context read here is ``route["exec_context"]`` — the value the resolver
+    ACTUALLY used — not the value this module declared. They differ whenever the
+    declaration is ``None``: krepis then applies its own default, and a guard
+    comparing against the un-resolved ``None`` would fire on a route that was
+    legitimately resolved for the laptop. That is not hypothetical; it broke six
+    tests on the first CI run of this change, where `KREPIS_EXEC_CONTEXT` is
+    unset and krepis resolved `laptop`. The route is the honest record of what
+    the resolution was made against, and it is what a guard on the resolution
+    must read.
     """
+    ctx = route.get("exec_context")
     if ctx == "laptop":
         return
     actual = route.get("route")
@@ -358,7 +369,7 @@ def make_agent_llm(
         wire="openai",
         max_tokens=max_tokens,
     )
-    _assert_routed_through_the_proxy(route, ctx)
+    _assert_routed_through_the_proxy(route)
     _log_route(route, model_class=model_class)
 
     # The credential is resolved BY NAME, from the name the resolver returned.

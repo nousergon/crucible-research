@@ -234,7 +234,7 @@ def test_exec_context_is_not_sniffed(monkeypatch, _no_cost_callback):
 # ── 4. a non-proxy route off the laptop is refused ───────────────────────────
 
 
-@pytest.mark.parametrize("ctx", ["lambda", "ec2", None])
+@pytest.mark.parametrize("ctx", ["lambda", "ec2"])
 def test_direct_provider_route_is_refused_off_the_laptop(monkeypatch, _no_cost_callback, ctx):
     """The alpha-engine-config-I6183 shape: a resolution that reached
     openrouter.ai from a context with no local egress proxy. Raising loses the
@@ -251,13 +251,10 @@ def test_direct_provider_route_is_refused_off_the_laptop(monkeypatch, _no_cost_c
         registry_id="glm-5.2",
         deployment_id="glm-5.2",
         api_base_url="https://openrouter.invalid/api/v1",
-        exec_context=ctx or "laptop",
+        exec_context=ctx,
     )
     _install_resolver(monkeypatch, spec=spec, route=route)
-    if ctx is None:
-        monkeypatch.delenv("KREPIS_EXEC_CONTEXT", raising=False)
-    else:
-        monkeypatch.setenv("KREPIS_EXEC_CONTEXT", ctx)
+    monkeypatch.setenv("KREPIS_EXEC_CONTEXT", ctx)
 
     with pytest.raises(RuntimeError, match="litellm_proxy"):
         langchain_utils.make_agent_llm(model_class="high", max_tokens=8, callbacks=[])
@@ -345,3 +342,33 @@ def test_route_telemetry_warns_when_entries_were_skipped(monkeypatch, _no_cost_c
         langchain_utils.make_agent_llm(model_class="low", max_tokens=8, callbacks=[])
 
     assert any("DEGRADED" in r.getMessage() for r in caplog.records)
+
+
+def test_guard_reads_the_RESOLVED_context_not_the_declared_one(monkeypatch, _no_cost_callback):
+    """The declared value and the resolved value differ whenever the declaration
+    is None — krepis then applies its own default. A guard comparing against the
+    un-resolved None fires on a route that was legitimately resolved for the
+    laptop, which is exactly what broke six tests on this change's first CI run.
+    """
+    from agents import langchain_utils
+
+    spec = _FakeSpec(
+        model="deepseek-v4-flash",
+        base_url="http://127.0.0.1:8990",
+        api_key_env=None,
+        max_tokens=8,
+    )
+    route = _proxy_route(
+        route="egress_proxy",
+        provider="deepseek",
+        registry_id="deepseek-v4-flash",
+        primary_registry_id="deepseek-v4-flash",
+        deployment_id="deepseek-v4-flash",
+        api_base_url="http://127.0.0.1:8990",
+        exec_context="laptop",  # what the RESOLVER used
+    )
+    _install_resolver(monkeypatch, spec=spec, route=route)
+    monkeypatch.delenv("KREPIS_EXEC_CONTEXT", raising=False)  # what the CALLER declared
+
+    llm = langchain_utils.make_agent_llm(model_class="low", max_tokens=8, callbacks=[])
+    assert type(llm).__name__ == "ChatOpenAI"
