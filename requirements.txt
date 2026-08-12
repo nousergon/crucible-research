@@ -223,7 +223,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # TestGroupAliasIsNeverReportedAsTheServedModel` is the half that verifies the
 # CAPABILITY rather than the version string, mirroring the credential contract
 # added for the 0.34.0 floor directly above it in that file.
-krepis>=0.36.0
+# 0.43.0 floor: `setup_logging(flow_name=...)`, which `lambda/thinktank_handler.py`
+# uses to file this component's alerts under `thinktank-spot` rather than the
+# repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
+# An older krepis raises TypeError on the kwarg rather than degrading, so the
+# floor is load-bearing rather than advisory.
+krepis>=0.43.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
