@@ -54,7 +54,7 @@ _SECTOR_ETF = {
 }
 SECTOR_ETFS = sorted(set(_SECTOR_ETF.values()))
 
-CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", "https://console.nousergon.ai")
+CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", "https://dashboard.nousergon.ai")
 
 
 # ── pure numeric helpers ─────────────────────────────────────────────────────
