@@ -21,10 +21,23 @@ Returns:
       "summary": <process_batch_results return dict>
     }
 
-``OK`` = no failures. ``PARTIAL`` = at least one batch result failed
-but the run completed. ``ERROR`` = the run itself blew up. Mirrors
-the legacy single-Lambda contract so the Saturday SF + dashboard
-result inspectors keep working unchanged.
+``OK`` = no failures and full coverage. ``PARTIAL`` = at least one batch
+result failed, OR a phase stopped on the deadline budget and the pass
+covered less of the corpus than it was asked to. ``ERROR`` = the run
+itself blew up. Mirrors the legacy single-Lambda contract so the Saturday
+SF + dashboard result inspectors keep working unchanged.
+
+**alpha-engine-config-I6920 class (deadline discipline).** This function
+was killed at its 900s wall in 9 of 28 observed real invocations,
+every one of them inside ``process_batch_results``'s parse-retry tail.
+Killed at the wall means no manifest, no summary, no cause — the SF sees
+``States.Timeout`` and routes to ``MarkEvalJudgeDegraded`` knowing
+nothing about what was covered. The orchestrator now consumes a stated
+fraction of the invocation's own clock, stops each loop when the next
+item no longer fits, and returns a PARTIAL envelope carrying
+``complete`` / ``budget_stopped`` / ``n_skipped_for_budget`` — hoisted to
+the TOP level of the return so a Step Functions ``Choice`` can read it
+without digging into ``$.summary``.
 """
 
 from __future__ import annotations
@@ -56,6 +69,7 @@ setup_logging(
     "eval_judge_process",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=[],
+    flow_name="research-eval-judge-process",
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +83,25 @@ def _ensure_init() -> None:
         return
     os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
     _init_done = True
+
+
+def _remaining_seconds(context):
+    """Zero-arg callable giving the seconds left in this invocation.
+
+    ``None`` when there is no Lambda context (local runs, tests), which
+    the orchestrator treats as "no deadline" — identical behaviour to
+    before alpha-engine-config-I6920.
+
+    NOT decorated with ``@monitor_handler``: that decorator belongs on the
+    entry point, and putting it on a helper both leaves the real handler
+    unwrapped and misreports the helper's frame as the handler's. (The
+    concordance Lambda in crucible-backtester has exactly that defect
+    today — see the PR body.)
+    """
+    getter = getattr(context, "get_remaining_time_in_millis", None)
+    if not callable(getter):
+        return None
+    return lambda: getter() / 1000.0
 
 
 @monitor_handler
@@ -118,6 +151,7 @@ def handler(event, context):
             plan_s3_key=plan_s3_key,
             bucket=bucket,
             anthropic_client=client,
+            remaining_s=_remaining_seconds(context),
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_process_handler] process failed hard")
@@ -164,19 +198,44 @@ def handler(event, context):
             "batch_id": batch_id,
             "error": _process_error,
             "manifest_capture_dates": manifest_dates,
+            # An ERROR covered an unknown fraction of the corpus. Saying
+            # anything else here would let a crashed pass read as complete
+            # on the same field a truncated one reports honestly.
+            "complete": False,
+            "budget_stopped": False,
         }
 
     summary["manifest_capture_dates"] = manifest_dates
 
-    status = "PARTIAL" if summary["failed"] else "OK"
+    # I6920: a pass that stopped on budget covered less of the corpus than
+    # it was asked to. That is partial signal, and reporting OK would make
+    # a truncated sweep read as a full one.
+    budget_stopped = bool(summary.get("budget_stopped"))
+    if budget_stopped:
+        logger.warning(
+            "[eval_judge_process_handler] stopped on budget in %s: %s "
+            "items not processed",
+            summary.get("budget_stopped_phases"),
+            summary.get("n_skipped_for_budget"),
+        )
+    status = "PARTIAL" if (summary["failed"] or budget_stopped) else "OK"
     logger.info(
         "[eval_judge_process_handler] done status=%s haiku=%d sonnet=%d "
-        "skipped_unmapped=%d skipped_empty_input=%d failed=%d",
+        "skipped_unmapped=%d skipped_empty_input=%d failed=%d complete=%s",
         status,
         summary["haiku_evaluated"],
         summary["sonnet_evaluated"],
         summary["skipped_unmapped"],
         summary["skipped_empty_input"],
         len(summary["failed"]),
+        summary.get("complete", True),
     )
-    return {"status": status, "summary": summary}
+    return {
+        "status": status,
+        # Hoisted out of `summary` so a Step Functions Choice can branch on
+        # it — sf-pipeline-policy.md §2.3a requires the verdict to reach the
+        # machine, not only the operator reading the log.
+        "complete": bool(summary.get("complete", True)),
+        "budget_stopped": budget_stopped,
+        "summary": summary,
+    }

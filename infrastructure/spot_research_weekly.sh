@@ -170,18 +170,25 @@ _spot_failure_reason() {
     local rc="$1"
     if [ "$rc" -eq 64 ]; then echo "launch-capacity-exhausted"; return 0; fi
     [ -z "$INSTANCE_ID" ] && return 1
-    local _decide_out _decide_rc
-    _decide_out="$("$LIB_PYTHON" -m krepis.ec2_spot relaunch-decision \
+    # See alpha-engine-config-I7009 — migrated off the exit-code contract to --json.
+    local _decide_json="" _decide_rc=0
+    _decide_json="$("$LIB_PYTHON" -m krepis.ec2_spot relaunch-decision \
         --instance-id "$INSTANCE_ID" \
         --region "$AWS_REGION" \
         --attempt "$SPOT_ATTEMPT" \
         --max-attempts "$MAX_SPOT_ATTEMPTS" \
         ${SF_EXECUTION_TIMEOUT:+--sf-execution-timeout "$SF_EXECUTION_TIMEOUT" --per-attempt-seconds "$MAX_RUNTIME_SECONDS"} \
-        2>/dev/null)"
-    _decide_rc=$?
-    echo "  spot relaunch-decision (attempt $SPOT_ATTEMPT/$MAX_SPOT_ATTEMPTS): rc=$_decide_rc ${_decide_out:+[$_decide_out]}" >&2
+        --json \
+        2>/dev/null)" || _decide_rc=$?
+    echo "  spot relaunch-decision (attempt $SPOT_ATTEMPT/$MAX_SPOT_ATTEMPTS): rc=$_decide_rc ${_decide_json:+[$_decide_json]}" >&2
+    # A non-zero exit here means the CLI could not answer — not a verdict.
+    # Treat as hold (not a confirmed reclaim): return 1, same as the CLI
+    # answering "hold" via the JSON payload below.
     [ "$_decide_rc" -eq 0 ] || return 1
-    echo "confirmed-reclaim${_decide_out:+ ($_decide_out)}"
+    local _relaunch=""
+    _relaunch="$(printf '%s' "$_decide_json" | "$LIB_PYTHON" -c 'import json,sys; print("1" if json.load(sys.stdin).get("relaunch") else "0")')"
+    [ "$_relaunch" = "1" ] || return 1
+    echo "confirmed-reclaim${_decide_json:+ ($_decide_json)}"
 }
 
 on_exit() {

@@ -64,6 +64,7 @@ setup_logging(
     "aggregate_costs",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+    flow_name="research-aggregate-costs",
 )
 
 logger = logging.getLogger(__name__)

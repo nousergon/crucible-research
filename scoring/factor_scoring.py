@@ -71,6 +71,10 @@ from datetime import date as _date
 
 import pandas as pd
 
+from data.fetchers.feature_store_reader import (
+    _FACTOR_TECHNICAL_COLS as _READER_FACTOR_TECHNICAL_COLS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -539,16 +543,13 @@ _MAX_FUNDAMENTAL_STALENESS_TD = 10
 #
 # Narrower than the scanner's 12-column tech_score set on purpose: the two
 # consumers overlap but differ, and this read spans ~900 symbols.
-_FACTOR_TECHNICAL_COLS: tuple[str, ...] = (
-    "atr_14_pct",
-    "dist_from_52w_high",
-    "momentum_20d",
-    "momentum_5d",
-    "realized_vol_20d",
-    "return_120d",
-    "return_60d",
-    "vol_ratio_10_60",
-)
+# The 8 technical columns this module's factor pillar reads. DECLARED IN THE
+# READER (``data/fetchers/feature_store_reader.py``) and re-exported here
+# under its historical name: the reader builds the union projection serving
+# both this call site and the scanner's from one ``read_batch``
+# (alpha-engine-config-I6855), and a union derived from a second copy of the
+# list would drift silently the first time either side gained a column.
+_FACTOR_TECHNICAL_COLS: tuple[str, ...] = _READER_FACTOR_TECHNICAL_COLS
 
 
 def _technical_frame_from_arctic(tickers: list[str], run_date_str: str) -> pd.DataFrame:

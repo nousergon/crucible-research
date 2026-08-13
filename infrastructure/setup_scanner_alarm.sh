@@ -25,8 +25,28 @@
 #   tests/test_scanner_metric_marker.py locks the marker format against
 #   drift; tests/test_scanner_alarm_setup.py locks this script.
 #
+# Two alarm groups, separately invocable because they need DIFFERENT IAM:
+#
+#   count     the log metric filter + candidate-count floor. Needs
+#             logs:PutMetricFilter on /aws/lambda/*, which
+#             github-actions-lambda-deploy deliberately does NOT hold (its
+#             logs grants are scoped to the Step Functions log groups), so
+#             this group stays an operator command run under an admin
+#             identity.
+#   duration  the runtime-headroom alarm (alpha-engine-config-I6855). Needs
+#             only cloudwatch:PutMetricAlarm on alarm:alpha-engine-* and
+#             lambda:GetFunctionConfiguration, both of which the deploy role
+#             already holds — so deploy.sh's deploy_scanner() calls it on
+#             every merge and the alarm can never drift from the timeout it
+#             is derived from.
+#
+# Splitting on the IAM boundary rather than widening the deploy role keeps
+# the applier from gaining write access to Lambda log groups for one alarm.
+#
 # Usage:
-#   bash infrastructure/setup_scanner_alarm.sh
+#   bash infrastructure/setup_scanner_alarm.sh            # both groups
+#   bash infrastructure/setup_scanner_alarm.sh count
+#   bash infrastructure/setup_scanner_alarm.sh duration
 #   SNS_TOPIC_ARN=arn:aws:sns:...:my-topic bash infrastructure/setup_scanner_alarm.sh
 
 set -euo pipefail
@@ -47,6 +67,7 @@ THRESHOLD=25
 
 echo "[setup_scanner_alarm] SNS=${SNS_TOPIC_ARN} region=${REGION} namespace=${NAMESPACE}"
 
+setup_count_alarm() {
 # ── Metric filter: extract the candidate count from the scanner log ───────
 # Pattern is space-delimited. Token layout of the marker line (text mode):
 #   date time level [scanner] [scanner_handler] METRIC scanner_tickers_count <n>
@@ -89,5 +110,64 @@ aws cloudwatch put-metric-alarm \
   --alarm-actions "${SNS_TOPIC_ARN}" \
   --ok-actions "${SNS_TOPIC_ARN}" \
   --region "${REGION}"
+}
 
-echo "[setup_scanner_alarm] done — scanner degradation alarm converged."
+setup_duration_alarm() {
+# ── Alarm: fire when the run's DURATION approaches the function timeout ───
+# alpha-engine-config-I6855. The count alarm above answers "did the scanner
+# produce enough names?" and says nothing about "is the scanner about to stop
+# producing anything at all". On 2026-08-11 both preopen attempts died at
+# exactly 300.00s and the pipeline terminated DEGRADED — and the two weeks of
+# creep that led there (p95 ~290s, 7/31 within 3% of the ceiling, 8/6 already
+# timing out once) paged nobody, because nothing watched duration.
+#
+# Threshold is 70% of the function timeout, not a fixed number of seconds:
+# the point is headroom remaining, so the two move together and a future
+# timeout raise cannot silently widen the blind spot. Read the LIVE timeout
+# rather than hardcoding deploy.sh's literal — the alarm must describe the
+# function that exists, not the one the repo intends (sf-pipeline-policy.md
+# §2.4: verification reads the deployed artifact).
+#
+# Maximum (not Average) over a 1-day period: one slow invocation is the
+# signal, and averaging it against a fast retry is how a run that nearly
+# died reads as healthy. treat-missing-data=notBreaching for the same
+# no-run-day reason as the count alarm.
+TIMEOUT_S="$(aws lambda get-function-configuration \
+  --function-name "${FUNCTION_SCANNER}" \
+  --query 'Timeout' --output text --region "${REGION}")"
+
+if [[ -z "${TIMEOUT_S}" || "${TIMEOUT_S}" == "None" ]]; then
+  echo "[setup_scanner_alarm] FATAL: could not read ${FUNCTION_SCANNER} Timeout — refusing to guess a duration threshold." >&2
+  exit 1
+fi
+
+DURATION_ALARM_NAME="alpha-engine-scanner-duration-headroom"
+DURATION_THRESHOLD_MS=$(( TIMEOUT_S * 700 ))  # 70% of timeout, in ms
+
+echo "[setup_scanner_alarm] put ${DURATION_ALARM_NAME} (Duration > ${DURATION_THRESHOLD_MS}ms = 70% of ${TIMEOUT_S}s)"
+aws cloudwatch put-metric-alarm \
+  --alarm-name "${DURATION_ALARM_NAME}" \
+  --alarm-description "Scanner runtime headroom (alpha-engine-config-I6855): a scanner invocation used more than 70% of its ${TIMEOUT_S}s timeout. This is the creep warning, not the failure — when it breaches, find what grew before raising the timeout (sf-pipeline-policy.md §4: timeouts are budgets, not accommodations). Both 2026-08-11 preopen attempts died at the ceiling and cost that day's universe board, membership, leaderboard and trajectory." \
+  --namespace "AWS/Lambda" \
+  --metric-name "Duration" \
+  --dimensions Name=FunctionName,Value="${FUNCTION_SCANNER}" \
+  --statistic Maximum \
+  --period 86400 \
+  --evaluation-periods 1 \
+  --datapoints-to-alarm 1 \
+  --threshold "${DURATION_THRESHOLD_MS}" \
+  --comparison-operator GreaterThanThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "${SNS_TOPIC_ARN}" \
+  --ok-actions "${SNS_TOPIC_ARN}" \
+  --region "${REGION}"
+}
+
+case "${1:-all}" in
+  count)    setup_count_alarm ;;
+  duration) setup_duration_alarm ;;
+  all)      setup_count_alarm; setup_duration_alarm ;;
+  *)        echo "Usage: $0 [all|count|duration]" >&2; exit 1 ;;
+esac
+
+echo "[setup_scanner_alarm] done — ${1:-all} converged."

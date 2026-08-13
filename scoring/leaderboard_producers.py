@@ -39,6 +39,17 @@ no longer silent. An unmeasurable leaderboard is written with
 ``status: "unmeasurable"`` and raises an observe alert — "we could not
 measure" and "nothing has matured yet" are different states and must never
 render identically again.
+
+Vacuity guard (champion-challenger-policy.md §4, alpha-engine-config-I6429):
+after specs are loaded, every challenger's resolved picked-ticker set is
+compared against the champion's, per cohort date. An exact-set collision is
+LOUD (``publish_observe_alert``, same mechanism as the ``unmeasurable``
+alert) and recorded on the leaderboard as ``vacuous_membership_collisions``,
+never blocking — a well-formed, green leaderboard comparing an arm to itself
+must be visible, not silent. Previously this existed only as a fixture-based
+unit test (``tests/test_universe_membership.py::
+test_incumbent_arm_disagrees_with_the_champion``) that never ran against a
+live cycle's actual resolved membership.
 """
 
 from __future__ import annotations
@@ -389,17 +400,30 @@ def _load_producer_specs(
     s3: Any,
     bucket: str,
     dates: list[str],
+    *,
+    as_of: str | None = None,
 ) -> tuple[SpecHistory | None, list[SpecHistory]]:
     """Champion (live ``signals/{date}/signals.json``) + every challenger
-    (``signals_shadow/{producer}/{date}/signals.json``) as SpecHistories, each
+    (``signals_shadow/{producer}/{date}/signals.json``) + every in-window
+    retired arm (same shadow path — config-I6427) as SpecHistories, each
     reduced to its ENTER picks ranked by score.
 
     The champion's NAME comes from the live pointer (see
     ``_resolve_champion_name``), not from the research registry — the promotion
     loop owns that fact. Champion is ``None`` only when neither the pointer nor
     the registry names one; callers must treat that as an honest "no champion
-    to score", not an error."""
-    from producers.registry import challenger_producers
+    to score", not an error.
+
+    ``as_of`` is the cohort/run date (the leaderboard's ``date_str``), passed
+    straight through to ``registry.retired_producers()`` to resolve the
+    trailing window (champion-challenger-policy.md §3). Retired rows are
+    returned in the SAME list as challengers — ``score_leaderboard`` treats
+    that parameter as "every non-champion spec to score" and passes each
+    ``SpecHistory.kind`` through to the artifact unchanged, so a retired arm
+    is tagged ``"kind": "retired"`` there by construction, distinct from a
+    live ``"kind": "challenger"`` row (§3: retired arms are scored but never
+    promotion-eligible; promotion consumers filter on ``kind=="challenger"``)."""
+    from producers.registry import challenger_producers, retired_producers
 
     champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
@@ -422,6 +446,17 @@ def _load_producer_specs(
                 if day.ranked:
                     hist.by_date[d] = day
         challengers.append(hist)
+
+    for spec in retired_producers(as_of=as_of):
+        hist = SpecHistory(name=spec.name, kind="retired")
+        for d in dates:
+            doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
+            if doc:
+                day = _enter_ranked_and_scores(doc)
+                if day.ranked:
+                    hist.by_date[d] = day
+        challengers.append(hist)
+
     return champion, challengers
 
 
@@ -518,6 +553,86 @@ def _overdue_zero_cohort_reason(dates: list[str], horizon_days: int, as_of: str)
     )
 
 
+def _vacuous_membership_collisions(
+    champion: SpecHistory | None,
+    challengers: list[SpecHistory],
+) -> list[dict]:
+    """Cohort dates where a challenger resolved to EXACTLY the champion's
+    picked-ticker set — champion-challenger-policy.md §4: "if two arms
+    resolve to the same membership, the comparison is worthless while every
+    other assertion still passes. Assert that competing arms actually
+    differ."
+
+    Before this, a guard existed ONLY as a fixture-based unit test
+    (``tests/test_universe_membership.py::
+    test_incumbent_arm_disagrees_with_the_champion``) — it asserts static
+    test fixtures never collide, and exercises nothing at runtime. Nothing on
+    a live cycle ever compared the champion's ACTUAL resolved picks against a
+    challenger's (alpha-engine-config#6429).
+
+    Exact-set-equality, deliberately not a fuzzy/near-identical threshold: no
+    fuzzy-match convention exists anywhere else in this codebase for a
+    membership comparison of this kind, and policy §4's count-matching
+    already holds every arm in a slot to the same width — a near-miss under
+    count-matching is itself the finding, not noise to smooth over.
+
+    Checked against every cohort date both specs cover, not only the current
+    run date: a collision on any historical date is exactly as vacuous as one
+    today, and shadow artifacts back-fill.
+
+    Returns one entry per ``(challenger, date)`` collision — empty when every
+    arm differs everywhere, which is the expected, healthy state.
+    """
+    if champion is None:
+        return []
+    collisions: list[dict] = []
+    for ch in challengers:
+        for d in sorted(set(champion.by_date) & set(ch.by_date)):
+            champ_set = set(champion.by_date[d].ranked)
+            ch_set = set(ch.by_date[d].ranked)
+            if champ_set and champ_set == ch_set:
+                collisions.append({"challenger": ch.name, "date": d, "n_tickers": len(champ_set)})
+    return collisions
+
+
+def _alert_vacuous_collisions(
+    leaderboard_id: str,
+    champion_name: str | None,
+    collisions: list[dict],
+) -> None:
+    """Alarm on a vacuous champion/challenger comparison (policy §4). Mirrors
+    the CC-7.2 ``unmeasurable`` alert shape (below): LOUD but never
+    blocking — an alarm/status surface, not an exception on the live path.
+    Fires once per build with every colliding arm+date named, rather than
+    once per date, so a persistent collision does not spam one alert per
+    cohort date."""
+    if champion_name is None or not collisions:
+        return
+    by_challenger: dict[str, list[str]] = {}
+    for c in collisions:
+        by_challenger.setdefault(c["challenger"], []).append(c["date"])
+    detail = "; ".join(
+        f"{name} on {len(dates)} date(s) ({', '.join(sorted(dates))})" for name, dates in sorted(by_challenger.items())
+    )
+    logger.error(
+        "[leaderboard] %s VACUOUS comparison: champion %r resolved identical membership to %s",
+        leaderboard_id,
+        champion_name,
+        detail,
+    )
+    publish_observe_alert(
+        message=(
+            f"[leaderboard] {leaderboard_id} leaderboard: champion {champion_name!r} "
+            f"resolved to IDENTICAL membership as {detail} — the comparison is vacuous "
+            "on those cohort date(s) while every other assertion still passes "
+            "(champion-challenger-policy.md §4). Verify the challenger spec actually "
+            "differs from the champion."
+        ),
+        source=f"research:{leaderboard_id}_leaderboard",
+        dedup_key=f"{leaderboard_id}_leaderboard_vacuous:{champion_name}:{'|'.join(sorted(by_challenger))}",
+    )
+
+
 def _unmeasurable_result(
     s3: Any,
     bucket: str,
@@ -582,6 +697,8 @@ def build_scanner_leaderboard(
     try:
         dates = _cohort_dates(s3, bucket, "candidates_shadow/", depth=1)
         champion, challengers = _load_scanner_specs(s3, bucket, dates)
+        vacuous = _vacuous_membership_collisions(champion, challengers)
+        _alert_vacuous_collisions("scanner", champion.name if champion else None, vacuous)
         try:
             realized = _resolve_realized_returns(
                 s3,
@@ -611,6 +728,7 @@ def build_scanner_leaderboard(
         )
         leaderboard["leaderboard_id"] = "scanner"
         leaderboard["date"] = date_str
+        leaderboard["vacuous_membership_collisions"] = vacuous
         # config-I5195: zero scored cohorts is EXPECTED while cohorts are
         # immature and a DEFECT once they should have matured. The two render
         # identically as n_dates=0, which is how the original defect survived
@@ -668,7 +786,14 @@ def build_producer_leaderboard(
     OBSERVE-ONLY + FAIL-SOFT: never raises into the caller (the research Lambda)."""
     try:
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
-        champion, challengers = _load_producer_specs(s3, bucket, dates)
+        champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
+        # Vacuity guard compares champion against LIVE challengers only — a
+        # retired-but-in-window arm (config-I6427) is historical evidence,
+        # never a promotion-eligible competitor, so its membership colliding
+        # with the champion's is not the condition policy §4 warns about.
+        live_challengers = [c for c in challengers if c.kind == "challenger"]
+        vacuous = _vacuous_membership_collisions(champion, live_challengers)
+        _alert_vacuous_collisions("producer", champion.name if champion else None, vacuous)
         if champion is None:
             # No kind=="champion" producer registered (config-I2993:
             # agentic_sector_teams retired 2026-07-12, no successor champion
@@ -717,6 +842,7 @@ def build_producer_leaderboard(
         )
         leaderboard["leaderboard_id"] = "producer"
         leaderboard["date"] = date_str
+        leaderboard["vacuous_membership_collisions"] = vacuous
         # config-I5195: zero scored cohorts is EXPECTED while cohorts are
         # immature and a DEFECT once they should have matured. The two render
         # identically as n_dates=0, which is how the original defect survived

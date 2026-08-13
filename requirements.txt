@@ -5,11 +5,23 @@
 # pin exists solely to satisfy the security-audit gate.
 setuptools>=83.0.0
 anthropic~=0.120
-langgraph~=0.2
-langchain-anthropic~=0.3
+# Raised to the 1.x line (config#2570): langchain-anthropic~=1.5 forces
+# langchain-core 1.x, and the transitive eval graph (agentevals~=0.0 ->
+# openevals -> langchain 1.x) already resolves to langchain-core>=1.4.9 +
+# langgraph>=1.2.5. langgraph <1.2.5 (the 0.x lines) pins langchain-core<1.0
+# — uninstallable alongside 1.x (pip dies with `resolution-too-deep`
+# backtracking every 0.x release). `~=1.2` tracks the line the eval graph
+# already pulls in.
+langgraph~=1.2
+langchain-anthropic~=1.5
 # OpenAI-compatible chat model — how every research agent now reaches the
 # router (or OpenRouter in Lambda). See agents/langchain_utils.make_agent_llm.
-langchain-openai~=0.3
+# Raised to the 1.x line (config#2570): the transitive eval graph
+# (agentevals~=0.0 -> openevals -> langchain 1.x) already resolves
+# langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
+# 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
+# current path.
+langchain-openai~=1.4
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
@@ -22,14 +34,14 @@ langsmith~=0.8.18
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=2.51.0
+openai>=2.53.0
 
 # Evals
 agentevals~=0.0
 
 # Data
-yfinance~=0.2.54
-requests-ratelimiter~=0.7
+yfinance~=1.5.2
+requests-ratelimiter~=0.10
 pandas~=2.2
 numpy~=1.26
 requests~=2.34
@@ -138,7 +150,90 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # `TypeError: 'NoneType' object is not subscriptable` through the migrated
 # client, reintroducing the bug tests/test_null_choices_provider_error.py
 # exists to prevent. The floor is load-bearing, not hygiene.
-krepis>=0.25.0
+# 0.31.0 adds `krepis.router.resolve_group_spec` (group -> ModelSpec, the
+# adapter every consumer was hand-writing) and KREPIS_ROUTER_CREDENTIAL_SECRET
+# (per-consumer router identity — the edge identifies a consumer BY its
+# credential value and krepis.secrets resolves SSM before os.environ, so two
+# consumers sharing a secret NAME collapse into one identity there). Both are
+# load-bearing for alpha-engine-config-I6367: this repo's thinktank tiers and
+# the single_agent_quant challenger now address model groups instead of
+# pinning provider="openrouter".
+# The floor is >=0.31.1 (krepis-PR107), NOT 0.31.0: 0.31.0 emitted the proxy
+# route with `provider: "litellm"`, which ModelSpec maps to TRANSPORT_LITELLM
+# — krepis' IN-PROCESS Router, which calls each provider directly from the
+# consumer and reads OPENROUTER_API_KEY out of the environment. That would
+# send this repo's Lambda straight to openrouter.ai, unscanned. 0.31.1 emits
+# `provider: "litellm_proxy"` (a name unknown to PROVIDER_REGISTRY), so
+# ModelSpec treats the edge as the custom OpenAI-compatible endpoint it is —
+# the chain is walked by the proxy, server-side. An earlier krepis reopens
+# the I6183 failure mode (scanned-route logging while egressing unscanned).
+# 0.31.2 raises the AppConfig registry-resolution failure from DEBUG to
+# WARNING. Load-bearing here, not cosmetic: krepis.logging pins the root
+# logger at INFO with no override, so on 0.31.1 that failure is unobservable
+# and surfaces only as a much later "LLM_MODEL_REGISTRY.yaml not found"
+# naming neither AppConfig nor the cause -- and suggesting a remedy
+# (LLM_MODEL_REGISTRY_PATH) that is wrong for a public-repo Lambda.
+# Measured 2026-08-04 on alpha-engine-research-runner: all six KREPIS_ vars
+# set, IAM simulating allowed, the same call succeeding from a laptop, and
+# AppConfig resolution still failing on every invocation
+# (alpha-engine-config-I6373).
+# Bumping the pin also changes this file's hash, which is what forces the
+# Docker layer to rebuild -- an unchanged requirements.txt reuses the cached
+# pip layer and keeps shipping 0.31.1 however many times the deploy runs.
+#
+# >=0.34.0 (alpha-engine-config-I6373, 2026-08-04) is what makes the Think Tank
+# box and the research Lambda able to CALL the router they are already admitted
+# to. Both address model groups through the edge on a per-consumer credential
+# whose value lives in SSM at /alpha-engine/ROUTER_CONSUMER_{THINKTANK,RESEARCH}
+# -- deliberately, so the secret never enters a Lambda config, an environment,
+# a CloudWatch log, or the dispatcher's SSM command string. Through 0.33.0
+# `LLMClient._resolve_api_key` read `os.environ` alone, so both consumers were
+# ADMITTED to the route (route admission resolves the same credential on the
+# full chain) and then died at the call:
+#
+#   LLMConfigError: no API key for provider 'litellm_proxy': pass api_key= or
+#   set the ROUTER_CONSUMER_THINKTANK environment variable
+#
+# Measured on the daily run of 2026-08-04 (thinktank/runs/2026-08-04/
+# manifest_1d6e7a653137.json): aborted after 5s, 0 theses, total_cost_usd 0,
+# challenger_selection unwritten -- with all six KREPIS_ vars set on the box
+# and the SSM parameter present and readable. The floor is what restores the
+# Think Tank, not hygiene.
+#
+# NOT >=0.33.0, which is the obvious read of krepis-PR113 (config-I6414) but is
+# wrong: PR113 fixed the ADMISSION half of this seam and left `llm.py`
+# byte-identical between 0.32.0 and 0.33.0. On 0.33.0 the box fails exactly as
+# it did on 0.32.0.
+#
+# 0.36.0 (config-I6652, krepis-PR115): `_resolve_group_served_model` — a
+# capability-GROUP alias must never be reported as the model that served. On
+# 0.34.0 and 0.35.0, `complete()`'s litellm_proxy branch and
+# `_structured_litellm()` fell back to `self.spec.model` when the response's
+# `model` field came back empty, so the literal string "low" reached
+# `thinktank/client.py::_cost_for`, found no price card, and RAISED -- correct
+# fail-loud behaviour on a value that should never have been produced.
+# Measured live on 2026-08-04 (thinktank/runs/2026-08-04/manifest_df20e6c66665
+# .json): 0 theses written.
+#
+# The floor is a CONTRACT, not a hope. A fresh spot box resolves to the newest
+# release and would pick up 0.36.0 anyway -- that is resolution order, not a
+# requirement, and a cached layer, a lockfile, or the versioned base AMI planned
+# in config-I6165 can each serve 0.35.0 and silently reintroduce the defect.
+# `tests/test_thinktank_group_addressing.py::
+# TestGroupAliasIsNeverReportedAsTheServedModel` is the half that verifies the
+# CAPABILITY rather than the version string, mirroring the credential contract
+# added for the 0.34.0 floor directly above it in that file.
+# 0.43.0 floor: `setup_logging(flow_name=...)`, which `lambda/thinktank_handler.py`
+# uses to file this component's alerts under `thinktank-spot` rather than the
+# repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
+# An older krepis raises TypeError on the kwarg rather than degrading, so the
+# floor is load-bearing rather than advisory.
+#
+# 0.51.0 floor (krepis-PR133, alpha-engine-config-I7009): `krepis.ec2_spot
+# relaunch-decision` gained `--json`, putting the verdict on a JSON field
+# instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
+# that field; an older krepis has no `--json` flag at all.
+krepis>=0.51.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
@@ -149,7 +244,7 @@ pytz~=2026.3
 
 # Dev / testing
 pytest~=9.1
-pytest-asyncio~=0.23
+pytest-asyncio~=1.4
 # Bumped 1.0.1 -> 1.2.2 (config#2342): CVE-2026-28684, set_key()/unset_key()
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
@@ -159,7 +254,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.43
+edgartools~=5.46
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9

@@ -21,7 +21,6 @@ lock that in: the dry canary must
 
 from __future__ import annotations
 
-import datetime
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -49,8 +48,8 @@ def test_dry_run_llm_boots_without_clock_or_s3():
 
     with patch.object(mod, "_ensure_init"), \
          patch.object(mod, "_is_scheduled_run_time") as sched, \
-         patch.object(mod, "most_recent_trading_day",
-                      return_value=datetime.date(2026, 7, 20)), \
+         patch("nousergon_lib.dates.resolve_trading_day",
+               return_value="2026-07-20"), \
          patch("archive.manager.ArchiveManager", return_value=am), \
          patch("dry_run.install_dry_run_stubs", return_value=restore) as stubs, \
          patch("graph.research_graph.build_graph") as build_graph, \

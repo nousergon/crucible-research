@@ -55,6 +55,7 @@ setup_logging(
     "rationale_clustering",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+    flow_name="research-rationale-clustering",
 )
 
 logger = logging.getLogger(__name__)

@@ -70,6 +70,7 @@ setup_logging(
     "scanner",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
     exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+    flow_name="research-scanner",
 )
 
 logger = logging.getLogger(__name__)
@@ -102,8 +103,10 @@ def handler(event, context):
         build_shadow_candidate_artifacts,
         write_candidates_artifact,
         write_shadow_candidates_artifact,
+        write_shadow_status_record,
         write_universe_board_for_scanner_run,
     )
+    from data.scanner_specs import build_shadow_status_record, challenger_specs
     from evals.lambda_dry import is_dry
 
     # Shell-run dry path — boot + imports above already exercised the
@@ -149,13 +152,17 @@ def handler(event, context):
     # read candidates/2026-05-29/. Normalize at the producer to the canonical
     # trading-day axis (lib chokepoint), preserving on-or-before semantics so an
     # explicit operator backfill date is normalized too.
-    import datetime as _dt
+    #
+    # resolve_trading_day is the shared chokepoint (nousergon_lib.dates) — the
+    # same normalizer the backtester, evaluator and signals_envelope_handler
+    # resolve through (config-I6667). It is defensive where the inline block it
+    # replaces raised out of date.fromisoformat on a malformed value; the
+    # `len(run_date) < 10` guard above still precedes this call, so a malformed
+    # run_date is rejected with an ERROR return before normalization is reached
+    # and the softened contract changes nothing reachable here.
+    from nousergon_lib.dates import resolve_trading_day
 
-    from nousergon_lib import trading_calendar as _tc
-
-    _cal = _dt.date.fromisoformat(run_date[:10])
-    _td = _cal if _tc.is_trading_day(_cal) else _tc.previous_trading_day(_cal)
-    _trading_day = _td.isoformat()
+    _trading_day = resolve_trading_day(run_date[:10])
     if _trading_day != run_date[:10]:
         logger.info(
             "[scanner_handler] normalized run_date %s (calendar) → %s (trading "
@@ -214,8 +221,9 @@ def handler(event, context):
     # is the WARN log + the response field).
     shadows: dict[str, str] = {}
     shadow_error: str | None = None
+    shadow_build_errors: dict[str, str] = {}
     try:
-        shadow_artifacts = build_shadow_candidate_artifacts(artifact)
+        shadow_artifacts, shadow_build_errors = build_shadow_candidate_artifacts(artifact)
         for spec_name, shadow_artifact in shadow_artifacts.items():
             try:
                 shadows[spec_name] = write_shadow_candidates_artifact(
@@ -231,12 +239,51 @@ def handler(event, context):
                     exc,
                 )
                 shadow_error = f"{spec_name}: {exc}"
+                # The BUILD succeeded but the persist failed — the spec still
+                # produced no durable candidates_shadow/ artifact this cycle,
+                # so the status record below must record it as a miss too
+                # (never assert an action that never happened).
+                shadow_build_errors[spec_name] = str(exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[scanner_handler] shadow candidate-gen build failed (non-fatal, live unaffected): %s",
             exc,
         )
         shadow_error = str(exc)
+        shadow_build_errors = {spec.name: str(exc) for spec in challenger_specs()}
+
+    # ── Explicit per-spec, per-cycle MISS record (config#6428) ───────────────
+    # champion-challenger-policy.md §3: "A cycle where an arm produces no
+    # output is recorded as a miss, not omitted. Silent absence and a genuine
+    # zero must never render identically." Every registered challenger spec
+    # gets a scanner_shadow_status.v1 record EVERY cycle — mirroring
+    # producers/experiment_record.py's experiment_record.v1 vocabulary — built
+    # AFTER the write attempt above so `status` reflects the TRUE final
+    # outcome. ADDITIVE to the WARN + observe-alert path already inside
+    # build_shadow_artifacts (never a replacement) and wholly fail-soft: a
+    # status-record write failure here is logged and never downgrades the OK
+    # response.
+    for spec in challenger_specs():
+        record = build_shadow_status_record(
+            spec,
+            run_date,
+            shadow_candidates_key=shadows.get(spec.name),
+            error=shadow_build_errors.get(spec.name),
+        )
+        try:
+            write_shadow_status_record(
+                record,
+                spec.name,
+                run_date,
+                s3_client=s3_client,
+                bucket=bucket,
+            )
+        except Exception as exc:  # noqa: BLE001 — status recording is best-effort
+            logger.warning(
+                "[scanner_handler] shadow status-record write failed for spec %s (non-fatal): %s",
+                spec.name,
+                exc,
+            )
 
     # ── Universe scoreboard (alpha-engine-config-I2515) ──────────────────────
     # Standalone Scanner path becomes a universe-board producer, completing

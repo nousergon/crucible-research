@@ -956,9 +956,12 @@ class ArchiveManager:
                     price_vs_ma200, current_price, avg_volume_20d,
                     focus_score, focus_stance, focus_team_id,
                     focus_rank_in_team, focus_rank_in_sector,
-                    focus_list_passed, agent_override, override_team_id)
+                    focus_list_passed, agent_override, override_team_id,
+                    rsi_sub_score, macd_sub_score, ma50_sub_score,
+                    ma200_sub_score, momentum_sub_score)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?)""",
                 (
                     e["ticker"], e["eval_date"], e.get("sector"),
                     e.get("tech_score"), e.get("scan_path"),
@@ -972,6 +975,9 @@ class ArchiveManager:
                     e.get("focus_rank_in_sector"),
                     e.get("focus_list_passed", 0), e.get("agent_override", 0),
                     e.get("override_team_id"),
+                    e.get("rsi_sub_score"), e.get("macd_sub_score"),
+                    e.get("ma50_sub_score"), e.get("ma200_sub_score"),
+                    e.get("momentum_sub_score"),
                 ),
             )
 

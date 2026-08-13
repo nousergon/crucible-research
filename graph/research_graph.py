@@ -3481,6 +3481,7 @@ def _build_scanner_eval_rows(
     scanner_eval_log: list,
     focus_lookup: dict,
     run_date: str,
+    market_regime: str = "neutral",
 ) -> list:
     """Assemble the ``scanner_evaluations`` rows for the cycle (pure, so the
     join is unit-testable independently of the archive_writer graph node).
@@ -3504,6 +3505,16 @@ def _build_scanner_eval_rows(
     universe; or a cycle where the stash was unavailable) degrade to
     ``quant_filter_pass=0`` + null reason — honest "not scanner-evaluated", with
     metrics still carried from ``technical_scores``.
+
+    Per-sub-signal scores (``rsi_sub_score`` / ``macd_sub_score`` /
+    ``ma50_sub_score`` / ``ma200_sub_score`` / ``momentum_sub_score``) are
+    computed from the feature-store indicator values via
+    ``scoring.technical.compute_technical_sub_scores`` and persisted so the
+    backtester's ``tech_weight_ablation`` optimizer (alpha-engine-config#841)
+    can re-rank the full scanner universe under alternate composite weights
+    without re-running the scanner pipeline. NULL for tickers whose indicator
+    values are unreadable this cycle — the backtester treats those rows as
+    "no sub-score data, ablation skips this row."
     """
     eval_by_ticker = {
         e.get("ticker"): e for e in (scanner_eval_log or []) if e.get("ticker")
@@ -3552,6 +3563,30 @@ def _build_scanner_eval_rows(
         fl_entry = focus_lookup.get(ticker)
         if fl_entry is not None:
             row.update(fl_entry)
+        # ── Per-sub-signal scores for tech-weight ablation ─────────────────
+        # Computed from the feature-store indicator values (the same values
+        # the scanner uses to compute tech_score). Ticker rows with missing
+        # indicators get NULL sub-scores — the backtester's ablation
+        # optimizer treats NULL as "no data, skip this row" (same contract
+        # as team_candidates migration 15).
+        from scoring.technical import compute_technical_sub_scores
+
+        sub_scores = compute_technical_sub_scores(
+            {
+                "rsi_14": ts.get("rsi_14", 50.0),
+                "macd_cross": ts.get("macd_cross", 0.0),
+                "macd_above_zero": bool(ts.get("macd_above_zero", False)),
+                "price_vs_ma50": ts.get("price_vs_ma50"),
+                "price_vs_ma200": ts.get("price_vs_ma200"),
+                "momentum_20d": ts.get("momentum_20d"),
+            },
+            market_regime=market_regime,
+        )
+        row["rsi_sub_score"] = sub_scores["rsi"]
+        row["macd_sub_score"] = sub_scores["macd"]
+        row["ma50_sub_score"] = sub_scores["ma50"]
+        row["ma200_sub_score"] = sub_scores["ma200"]
+        row["momentum_sub_score"] = sub_scores["momentum"]
         rows.append(row)
     return rows
 
@@ -4003,6 +4038,7 @@ def archive_writer(state: ResearchState) -> dict:
         scanner_eval_log=scanner_eval_log,
         focus_lookup=focus_lookup,
         run_date=run_date,
+        market_regime=state.get("market_regime", "neutral"),
     )
 
     am.write_scanner_evaluations(scanner_evals)
@@ -4211,8 +4247,11 @@ def archive_writer(state: ResearchState) -> dict:
 #      ``…/eod-report?date=YYYY-MM-DD`` is.
 #
 # (This repo's own scoring/attractiveness_trajectory.py already hand-rolled a
-# *different*, likely-stale link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"``
-# — into the analogous host_universe_scanner.py host tab, ignoring the
+# *different* link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"`` — whose
+# CONSOLE_BASE_URL default was measured 404ing on console.nousergon.ai and is
+# fixed to dashboard.nousergon.ai in alpha-engine-config-I6140. The host fix
+# doesn't touch the underlying gap: it's hand-rolled into the analogous
+# host_universe_scanner.py host tab, ignoring the
 # host/tab indirection entirely. That's the failure mode this link avoids by
 # using the real filename-derived slug plus the documented ``?tab=``
 # mechanism, but it's the same class of gap: a dashboard follow-up should

@@ -397,3 +397,183 @@ class TestSecondaryArtifacts:
         assert result["status"] == "OK"
         assert result["dated_key"] == "signals/2026-07-14/signals.json"
         alert.assert_called_once()
+
+
+class TestTradingDayNormalization:
+    """config-I6653 — every key this handler writes must share the Scanner's
+    trading-day axis.
+
+    The weekly SF's ``InitializeInput`` derives ``run_date`` from
+    ``date($$.Execution.StartTime)``, a CALENDAR date. Before this fix the
+    handler used it verbatim while the Scanner in the SAME execution
+    normalized, so the 2026-08-08 Saturday cycle wrote
+    ``candidates/2026-08-07/`` and ``universe_membership/2026-08-07/`` at
+    03:11-03:13 UTC and ``signals/2026-08-08/`` +
+    ``scanner/universe/trajectory/2026-08-08/`` at 03:13-03:15. The
+    ``research_signals`` freshness row is severity:critical with a
+    ``{trading_day}`` key template, so its probe read the stale Friday file
+    and PASSED.
+    """
+
+    @staticmethod
+    def _run(handler_mod, run_date, payload=None):
+        built = payload if payload is not None else _envelope()
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=built), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")) as write_envelope, \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief") as write_brief, \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory") as write_traj:
+            handler_mod.handler({"run_date": run_date, "target": "production"}, None)
+        return write_envelope, write_brief, write_traj
+
+    def test_saturday_calendar_run_date_writes_the_friday_trading_day(self, handler_mod):
+        """The regression itself. 2026-08-08 was a Saturday; the trading day
+        was Friday 2026-08-07 — the date the Scanner used in the same run."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-08")
+        assert write_envelope.call_args.args[1] == "2026-08-07"
+        assert write_brief.call_args.args[0] == "2026-08-07"
+        assert write_traj.call_args.args[0] == "2026-08-07"
+
+    def test_every_artifact_the_handler_writes_shares_one_date(self, handler_mod):
+        """The invariant, stated directly: one cycle, one date, across all
+        three writers. A future writer added without normalization fails
+        here."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-08")
+        dates = {
+            write_envelope.call_args.args[1],
+            write_brief.call_args.args[0],
+            write_traj.call_args.args[0],
+        }
+        assert dates == {"2026-08-07"}
+
+    def test_weekday_run_date_is_unchanged(self, handler_mod):
+        """Normalization is idempotent — the weekday preopen path already had
+        calendar == trading day, and must stay byte-identical."""
+        write_envelope, write_brief, write_traj = self._run(handler_mod, "2026-08-07")
+        assert write_envelope.call_args.args[1] == "2026-08-07"
+        assert write_brief.call_args.args[0] == "2026-08-07"
+        assert write_traj.call_args.args[0] == "2026-08-07"
+
+    def test_calendar_date_is_recorded_when_it_differs(self, handler_mod):
+        """Dual-track: normalizing must not discard WHICH cycle wrote the file,
+        or two runs a day apart become indistinguishable inside the artifact."""
+        payload = _envelope()
+        self._run(handler_mod, "2026-08-08", payload=payload)
+        assert payload.get("calendar_date") == "2026-08-08"
+
+    def test_calendar_date_is_absent_on_a_weekday_run(self, handler_mod):
+        """Weekday artifacts stay byte-identical to before this change."""
+        payload = _envelope()
+        self._run(handler_mod, "2026-08-07", payload=payload)
+        assert "calendar_date" not in payload
+
+
+class TestResearchHealthStamp:
+    """config-I6053 / config-I6344 — the repointed ``health/research.json``
+    writer.
+
+    Its only prior writer sat downstream of the multi-agent Research graph
+    that config-I2515 removed from the weekly SF on 2026-07-14, so the stamp
+    froze at 2026-07-21 carrying the last full_run's FAILURE payload
+    (``[Errno 28] No space left on device``). Since config-I6891 routes a
+    degraded weekly run into a ``Fail`` terminal, a dead stamp now fails the
+    entire Saturday pipeline via ``SaturdayHealthCheck``. These tests pin the
+    repoint so the writer cannot silently detach a second time.
+    """
+
+    @staticmethod
+    def _run(handler_mod, event, health_side_effect=None):
+        health = MagicMock(side_effect=health_side_effect)
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+             ), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief"), \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory"), \
+             patch("nousergon_lib.health.write_health", health), \
+             patch("observe_alerts.publish_observe_alert") as alert:
+            result = handler_mod.handler(event, None)
+        return result, health, alert
+
+    def test_production_run_stamps_research_health(self, handler_mod):
+        result, health, _ = self._run(
+            handler_mod, {"run_date": "2026-07-14", "target": "production"},
+        )
+        assert result["status"] == "OK"
+        health.assert_called_once()
+        kwargs = health.call_args.kwargs
+        assert kwargs["module_name"] == "research", (
+            "the stamp must be written under the 'research' module name — it "
+            "is the key health/research.json resolves from, and the four "
+            "health_* ARTIFACT_REGISTRY rows are a lockstep contract"
+        )
+        assert kwargs["run_date"] == "2026-07-14"
+        # The declared required deliverable IS signals — that is why this
+        # handler, not the Scanner, owns the stamp.
+        deliverables = kwargs["deliverables"]
+        assert [d.name for d in deliverables] == ["signals"]
+        assert deliverables[0].required is True
+        assert deliverables[0].produced is True
+
+    def test_shadow_target_does_not_stamp(self, handler_mod):
+        """A shadow cycle is not a real research run and must never make the
+        stamp read fresh."""
+        _, health, _ = self._run(
+            handler_mod, {"run_date": "2026-07-14", "target": "shadow"},
+        )
+        health.assert_not_called()
+
+    def test_friday_preflight_does_not_stamp(self, handler_mod):
+        """The Friday-PM shell run threads preflight=true with
+        target=production. It is a transport smoke, not a research cycle —
+        stamping there would manufacture exactly the false green this
+        detector exists to prevent."""
+        _, health, _ = self._run(
+            handler_mod,
+            {"run_date": "2026-07-14", "target": "production", "preflight": True},
+        )
+        health.assert_not_called()
+
+    def test_health_write_failure_is_fail_soft_and_alerts(self, handler_mod):
+        """signals.json is already persisted; an observability write must not
+        sink it. It must never be silent either."""
+        result, health, alert = self._run(
+            handler_mod,
+            {"run_date": "2026-07-14", "target": "production"},
+            health_side_effect=RuntimeError("boom"),
+        )
+        assert result["status"] == "OK"
+        assert result["dated_key"] == "signals/2026-07-14/signals.json"
+        health.assert_called_once()
+        alert.assert_called_once()
+        assert "health" in alert.call_args.kwargs["source"]
+
+    def test_stamp_uses_trading_day_not_calendar_date(self, handler_mod):
+        """config-I6653's axis applies to the stamp too: a Saturday cycle
+        threads the calendar date, and the stamp must carry the trading day
+        every other artifact of the same run is keyed by."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("nousergon_lib.dates.resolve_trading_day", return_value="2026-08-07"), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief"), \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory"), \
+             patch("nousergon_lib.health.write_health") as health:
+            handler_mod.handler(
+                {"run_date": "2026-08-08", "target": "production"}, None,
+            )
+        assert health.call_args.kwargs["run_date"] == "2026-08-07"

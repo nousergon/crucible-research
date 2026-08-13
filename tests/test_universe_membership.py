@@ -14,7 +14,11 @@ predictor resolves its daily scoring universe from (alpha-engine-predictor
      not rank churn.
   4. FAIL-LOUD on empty inputs — the defect this artifact exists to prevent is
      a silently-empty/stale membership, so an empty cut must raise, never write.
-  5. Both S3 keys written (dated + latest sidecar) with identical bodies.
+  5. All THREE S3 keys written with identical bodies — the immutable
+     ``runs/{stamp}.json`` copy plus the two pointers — and two writes on one
+     run_date keeping both run copies (alpha-engine-config-I6785).
+  6. ``turnover``: per-cut retained/added/dropped against the prior WRITE, null
+     rather than zeros when there is nothing to compare against.
 """
 
 from __future__ import annotations
@@ -28,11 +32,16 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.universe_membership import (  # noqa: E402
+    _RANK_CUTS,
+    ATTRACTIVENESS_FEED_TOP_N,
+    FEED_CUT_NAME,
     PREDICTOR_UNIVERSE_CUT,
     SCHEMA_VERSION,
     UniverseMembershipError,
     attractiveness_from_board,
     build_universe_membership,
+    compute_turnover,
+    run_stamp,
     write_universe_membership_to_s3,
 )
 
@@ -184,13 +193,117 @@ class _FakeS3:
         self.puts[Key] = Body
 
 
-def test_writes_dated_key_and_latest_sidecar_identically():
+def test_writes_immutable_run_copy_plus_both_pointers_identically():
     s3 = _FakeS3()
-    key = write_universe_membership_to_s3(_membership(), _RUN_DATE, bucket="test-bucket", s3_client=s3)
+    m = _membership()
+    key = write_universe_membership_to_s3(m, _RUN_DATE, bucket="test-bucket", s3_client=s3)
     assert key == f"universe_membership/{_RUN_DATE}/membership.json"
-    assert set(s3.puts) == {key, "universe_membership/latest.json"}
-    assert s3.puts[key] == s3.puts["universe_membership/latest.json"]
+    run_key = f"universe_membership/{_RUN_DATE}/runs/{run_stamp(m['generated_at'])}.json"
+    assert set(s3.puts) == {key, run_key, "universe_membership/latest.json"}
+    assert s3.puts[key] == s3.puts["universe_membership/latest.json"] == s3.puts[run_key]
     assert json.loads(s3.puts[key])["run_date"] == _RUN_DATE
+
+
+def test_two_writes_on_one_run_date_keep_both_run_copies():
+    """The defect I6785 records: the weekday preopen Scanner and the
+    postclose-chained exercise Scanner both normalise to the same trading day,
+    so the pointer keys hold only the LAST cut of the day. Measured 2026-08-07:
+    the surviving membership.json postdated the predictions it fed by 17h and
+    was missing four names those predictions were stamped with. The immutable
+    copies must survive that."""
+    s3 = _FakeS3()
+    morning = _membership()
+    morning["generated_at"] = "2026-07-24T12:49:30+00:00"
+    evening = _membership()
+    evening["generated_at"] = "2026-07-25T03:13:01+00:00"
+    evening["cuts"]["attractiveness_top_20"]["tickers"] = ["ZZZZ"]
+
+    write_universe_membership_to_s3(morning, _RUN_DATE, bucket="b", s3_client=s3)
+    write_universe_membership_to_s3(evening, _RUN_DATE, bucket="b", s3_client=s3)
+
+    run_keys = sorted(k for k in s3.puts if "/runs/" in k)
+    assert run_keys == [
+        f"universe_membership/{_RUN_DATE}/runs/20260724T124930Z.json",
+        f"universe_membership/{_RUN_DATE}/runs/20260725T031301Z.json",
+    ]
+    # The pointer holds the evening cut; the morning cut is still recoverable.
+    pointer = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert pointer["cuts"]["attractiveness_top_20"]["tickers"] == ["ZZZZ"]
+    recovered = json.loads(s3.puts[run_keys[0]])
+    assert recovered["cuts"]["attractiveness_top_20"]["tickers"] != ["ZZZZ"]
+
+
+def test_run_stamp_normalises_to_utc_so_the_prefix_sorts_chronologically():
+    # An operator reads this prefix with `aws s3 ls`. Two runs stamped in
+    # different offsets must not sort into the wrong order.
+    assert run_stamp("2026-08-10T12:49:30+00:00") == "20260810T124930Z"
+    assert run_stamp("2026-08-10T05:49:30-07:00") == "20260810T124930Z"
+    assert run_stamp("2026-08-10T12:49:30") == "20260810T124930Z"
+
+
+def test_run_stamp_falls_back_rather_than_dropping_the_write():
+    # An odd key is recoverable; a skipped immutable write is not.
+    assert run_stamp("not-a-timestamp") == "notatimestamp"
+    assert run_stamp(None) == "None"
+
+
+# ── 5b. Turnover (alpha-engine-config-I6785) ─────────────────────────────────
+
+
+def _prior_membership(
+    tickers_top20: list[str], *, run_date="2026-07-17", generated_at="2026-07-17T12:00:00+00:00"
+) -> dict:
+    m = _membership()
+    m["run_date"] = run_date
+    m["generated_at"] = generated_at
+    m["cuts"]["attractiveness_top_20"]["tickers"] = sorted(tickers_top20)
+    return m
+
+
+def test_turnover_counts_retained_added_dropped_against_the_prior_write():
+    current = _membership()
+    now = current["cuts"]["attractiveness_top_20"]["tickers"]
+    prior = _prior_membership(now[:15] + ["OLD1", "OLD2", "OLD3", "OLD4", "OLD5"])
+
+    block = compute_turnover(current, prior)
+    cut = block["per_cut"]["attractiveness_top_20"]
+    assert block["prior_run_date"] == "2026-07-17"
+    assert block["prior_generated_at"] == "2026-07-17T12:00:00+00:00"
+    assert cut["size"] == len(now)
+    assert cut["retained"] == 15
+    assert cut["added"] == len(now) - 15
+    assert cut["dropped"] == 5
+    assert cut["retention_pct"] == 75.0
+
+
+def test_turnover_is_null_not_zeros_when_there_is_no_prior():
+    # Zeros would render as "nothing changed" and invent a 100%-retention point
+    # at the head of every series. Absence of a comparison is its own state.
+    assert compute_turnover(_membership(), None) is None
+
+
+def test_turnover_is_null_when_the_prior_pointer_is_this_same_artifact():
+    # A re-write of the same run must not publish a fabricated 100% retention.
+    m = _membership()
+    assert compute_turnover(m, dict(m)) is None
+
+
+def test_turnover_skips_cuts_absent_from_either_side():
+    # A cut appearing or disappearing between writes is a producer schema
+    # change; reporting it as 100% churn would misattribute it to the market.
+    current = _membership()
+    prior = _prior_membership(current["cuts"]["attractiveness_top_20"]["tickers"])
+    del prior["cuts"]["attractiveness_top_60"]
+    block = compute_turnover(current, prior)
+    assert "attractiveness_top_60" not in block["per_cut"]
+    assert "attractiveness_top_20" in block["per_cut"]
+
+
+def test_build_attaches_turnover_and_defaults_it_to_null():
+    assert build_universe_membership(_RUN_DATE, _scanner_cut(), _attractiveness())["turnover"] is None
+    prior = _prior_membership(["AAAA"])
+    built = build_universe_membership(_RUN_DATE, _scanner_cut(), _attractiveness(), prior=prior)
+    assert built["turnover"]["prior_run_date"] == "2026-07-17"
 
 
 # ── 6. Incumbent challenger arm (alpha-engine-config-I4983) ──────────────────
@@ -238,6 +351,56 @@ def test_incumbent_arm_is_count_matched_to_the_champion() -> None:
     selection rule and breadth."""
     m = _membership(tech_scores=_tech_scores())
     assert m["cuts"]["scanner_top_20"]["size"] == m["cuts"]["attractiveness_top_20"]["size"] == 20
+
+
+def test_incumbent_arm_fails_loud_when_not_count_matched() -> None:
+    """Runtime guard (alpha-engine-config-I4983 closes-when): a short
+    tech_score table must not silently emit ``scanner_top_20`` at n<20 while
+    the champion stays at 20 — that reintroduces the breadth confound the
+    ruling exists to kill. Fixture-only equality asserts cannot catch a live
+    partial eval log; the producer must RAISE."""
+    # Only 10 scored cut members → top-by-tech would be size 10, not 20.
+    partial = {t: float(i) for i, t in enumerate(_scanner_cut()[:10])}
+    with pytest.raises(UniverseMembershipError, match="count-match"):
+        _membership(tech_scores=partial)
+
+
+def test_champion_cut_is_nested_inside_the_feed_cut() -> None:
+    """The funnel invariant (alpha-engine-config-I6630). Downstream evidence
+    ingestion scopes to the feed cut, so the champion must be its head or the
+    scored names are scored on cold context."""
+    m = _membership(tech_scores=_tech_scores())
+    champion = set(m["cuts"][PREDICTOR_UNIVERSE_CUT]["tickers"])
+    feed = set(m["cuts"][FEED_CUT_NAME]["tickers"])
+    assert champion <= feed
+    # Not vacuous: the feed cut is genuinely wider than the champion.
+    assert len(feed) > len(champion)
+
+
+def test_feed_cut_name_is_derived_from_the_declared_width() -> None:
+    """Guards the pair the consumer resolves against. A hand-edited cut name
+    that no longer matches ``ATTRACTIVENESS_FEED_TOP_N`` would leave
+    nousergon-data's ``_rag_scope.SCOPE_CUT`` resolving a cut this producer
+    never writes — and the resolver raises rather than degrading, so the whole
+    corpus fill stops."""
+    assert FEED_CUT_NAME == f"attractiveness_top_{ATTRACTIVENESS_FEED_TOP_N}"
+    assert ATTRACTIVENESS_FEED_TOP_N in _RANK_CUTS
+
+
+def test_funnel_invariant_fails_loud_when_the_champion_escapes_the_feed_cut(
+    monkeypatch,
+) -> None:
+    """Runtime guard, not a fixture equality. The live 2026-08-07 defect was a
+    champion drawn from one ranking and a downstream scope cut drawn from
+    another; nothing failed because nothing asserted the two were related.
+
+    Simulated here by pointing the champion at the tech_score cut — the exact
+    pre-I4983 shape — while the feed cut stays an attractiveness rank cut."""
+    import scoring.universe_membership as mod
+
+    monkeypatch.setattr(mod, "PREDICTOR_UNIVERSE_CUT", "scanner_top_20")
+    with pytest.raises(UniverseMembershipError, match="funnel invariant"):
+        _membership(tech_scores=_tech_scores())
 
 
 def test_incumbent_arm_disagrees_with_the_champion() -> None:
@@ -288,3 +451,199 @@ def test_tech_scores_from_eval_log_projection() -> None:
     ]
     assert tech_scores_from_eval_log(rows) == {"AAPL": 65.89, "MSFT": 60.61}
     assert tech_scores_from_eval_log(None) == {}
+
+
+# ── 8. Cut refresh cadence (alpha-engine-config-I6666) ───────────────────────
+#
+# Brian's ruling 2026-08-08: the cut stays on its current daily refresh, but
+# moving it to weekly must be a one-switch change. What the switch changes is
+# how often the CUT is re-derived — never whether the artifact is written. A
+# carry-forward run still writes both keys, so `universe_membership_latest`
+# stays honest at cadence `weekday_sf` (config-I6651) and a MISSED Scanner run
+# stays distinguishable from a deliberately held cut.
+
+from scoring.universe_membership import (  # noqa: E402
+    CADENCE_DAILY,
+    CADENCE_WEEKLY,
+    DEFAULT_CUT_REFRESH_CADENCE,
+    carry_forward_cuts,
+    compute_and_write_universe_membership,
+    cut_refresh_cadence,
+    read_latest_membership,
+    should_recut,
+)
+
+
+class _ReadableFakeS3(_FakeS3):
+    """`_FakeS3` that can also serve what was put — the carry-forward path
+    reads `latest.json` back."""
+
+    def __init__(self, seed: dict | None = None):
+        super().__init__()
+        if seed is not None:
+            self.puts["universe_membership/latest.json"] = json.dumps(seed).encode()
+
+    def get_object(self, *, Bucket, Key):  # noqa: N803
+        if Key not in self.puts:
+            raise NoSuchKey("nope")
+
+        class _Body:
+            def __init__(self, b):
+                self._b = b
+
+            def read(self):
+                return self._b
+
+        return {"Body": _Body(self.puts[Key])}
+
+
+class NoSuchKey(Exception):
+    """Named to match botocore's generated ``S3.Client.exceptions.NoSuchKey``,
+    which is what the production path narrows on. A differently-named stand-in
+    would make this test pass against code that cannot recognise the real
+    error."""
+
+
+def _prior(effective_date: str) -> dict:
+    m = _membership()
+    m["cut_effective_date"] = effective_date
+    return m
+
+
+def test_default_cadence_is_daily(monkeypatch):
+    """Live behaviour must be unchanged on merge."""
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    assert DEFAULT_CUT_REFRESH_CADENCE == CADENCE_DAILY
+    assert cut_refresh_cadence() == CADENCE_DAILY
+
+
+def test_env_var_flips_the_cadence_without_a_code_change(monkeypatch):
+    """The whole point of the issue: one switch, no deploy."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "  WEEKLY  ")
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+
+
+def test_unrecognised_cadence_raises_rather_than_defaulting(monkeypatch):
+    """A typo silently selecting daily would be indistinguishable from the
+    setting working."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weeky")
+    with pytest.raises(UniverseMembershipError):
+        cut_refresh_cadence()
+
+
+def test_daily_cadence_always_recuts():
+    assert should_recut("2026-08-04", _prior("2026-08-03"), CADENCE_DAILY) is True
+    assert should_recut("2026-08-04", _prior("2026-08-04"), CADENCE_DAILY) is True
+
+
+def test_weekly_cadence_carries_forward_within_an_iso_week():
+    # 2026-08-03 Mon … 2026-08-07 Fri are one ISO week.
+    assert should_recut("2026-08-04", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+    assert should_recut("2026-08-07", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+
+
+def test_weekly_cadence_recuts_on_the_first_run_of_a_new_iso_week():
+    # 2026-08-08 Sat is still the same ISO week as 08-03; 08-10 Mon is the next.
+    assert should_recut("2026-08-08", _prior("2026-08-03"), CADENCE_WEEKLY) is False
+    assert should_recut("2026-08-10", _prior("2026-08-03"), CADENCE_WEEKLY) is True
+
+
+def test_weekly_cadence_recuts_when_there_is_no_prior_cut():
+    assert should_recut("2026-08-04", None, CADENCE_WEEKLY) is True
+    assert should_recut("2026-08-04", {}, CADENCE_WEEKLY) is True
+    # An artifact predating the field is not a usable prior either.
+    assert should_recut("2026-08-04", {"cuts": {"x": {}}}, CADENCE_WEEKLY) is True
+
+
+def test_carry_forward_holds_cuts_but_keeps_todays_ranks():
+    """The gap between fresh ranks and a held cut is what makes staleness
+    visible; carrying the ranks too would hide it."""
+    prior = _prior("2026-08-03")
+    fresh = _membership()
+    fresh["ranks"] = {"NEWNAME": {"attractiveness_rank": 1, "attractiveness_score": 9.9}}
+    held = carry_forward_cuts(fresh, prior)
+    assert held["cuts"] == prior["cuts"]
+    assert held["cut_effective_date"] == "2026-08-03"
+    assert held["ranks"] == fresh["ranks"]
+
+
+def test_carry_forward_preserves_the_prior_predictor_cut_name():
+    """Changing PREDICTOR_UNIVERSE_CUT must not take effect mid-week without a
+    re-cut — the artifact names the cut, so the held artifact must keep naming
+    the one its tickers actually came from."""
+    prior = _prior("2026-08-03")
+    prior["predictor_universe_cut"] = "some_prior_champion"
+    held = carry_forward_cuts(_membership(), prior)
+    assert held["predictor_universe_cut"] == "some_prior_champion"
+
+
+def test_carried_forward_artifact_still_trips_the_count_match_guard():
+    """The held cut is what the predictor consumes all week — guarding only the
+    freshly-derived path would leave the long-lived artifact unchecked."""
+    prior = _prior("2026-08-03")
+    prior["cuts"] = dict(prior["cuts"])
+    prior["cuts"][PREDICTOR_UNIVERSE_CUT] = {
+        "basis": "attractiveness_rank",
+        "size": 20,
+        "tickers": [f"T{i:03d}" for i in range(20)],
+        "source": "x",
+    }
+    prior["cuts"]["scanner_top_20"] = {
+        "basis": "tech_score_rank",
+        "size": 10,
+        "tickers": [f"T{i:03d}" for i in range(10)],
+        "source": "x",
+    }
+    from scoring.universe_membership import assert_cut_invariants
+
+    with pytest.raises(UniverseMembershipError, match="count-match broken"):
+        assert_cut_invariants(carry_forward_cuts(_membership(), prior), _RUN_DATE)
+
+
+def test_read_latest_membership_returns_none_when_absent():
+    assert read_latest_membership(bucket="b", s3_client=_ReadableFakeS3()) is None
+
+
+def test_read_latest_membership_propagates_a_real_failure():
+    """A swallowed read would look like 'no prior cut', re-cut mid-week, and
+    quietly restore the daily churn the weekly setting exists to stop."""
+
+    class _Denied:
+        def get_object(self, *, Bucket, Key):  # noqa: N803
+            raise RuntimeError("AccessDenied")
+
+    with pytest.raises(RuntimeError):
+        read_latest_membership(bucket="b", s3_client=_Denied())
+
+
+def test_weekly_end_to_end_holds_the_cut_and_still_writes_both_keys(monkeypatch):
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
+    prior = _prior("2026-07-20")  # ISO week 30
+    s3 = _ReadableFakeS3(seed=prior)
+    monkeypatch.setattr(
+        "scoring.universe_membership.attractiveness_for_run",
+        lambda run_date, **kw: _attractiveness(),
+    )
+    # 2026-07-24 is inside ISO week 30 -> carry forward.
+    compute_and_write_universe_membership(_RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3)
+    written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert written["cut_refresh_cadence"] == CADENCE_WEEKLY
+    assert written["cut_effective_date"] == "2026-07-20"
+    assert written["cuts"] == prior["cuts"]
+    assert written["run_date"] == _RUN_DATE  # written every run
+    assert "universe_membership/latest.json" in s3.puts
+
+
+def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    s3 = _ReadableFakeS3(seed=_prior("2026-07-20"))
+    monkeypatch.setattr(
+        "scoring.universe_membership.attractiveness_for_run",
+        lambda run_date, **kw: _attractiveness(),
+    )
+    compute_and_write_universe_membership(_RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3)
+    written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert written["cut_refresh_cadence"] == CADENCE_DAILY
+    assert written["cut_effective_date"] == _RUN_DATE

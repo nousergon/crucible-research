@@ -4,11 +4,23 @@ Order of operations (one ``--daily`` invocation):
 1. budget guard (hard refusal at the monthly cap)
 2. load read-side context (board, signals, macro report, news, RAG probe)
 3. themes: seed if absent / reconcile if a new weekly landed
-4. intake: top-N uncovered by attractiveness (rank-bounded) + stalest refresh
-   — UNLESS gap_fill_only (below), which skips the stalest-refresh half
-5. thesis builds for the intake set
-6. events sweep over all covered names → thesis updates where flagged
-7. churn-gated daily macro-theme update from sweep-surfaced developments
+4. intake SELECTION: top-N uncovered by attractiveness (rank-bounded) +
+   stalest refresh — UNLESS gap_fill_only (below), which skips the
+   stalest-refresh half. The daily branch also enforces the staleness SLA
+   (TT-2.1-staleness-sla-is-actionable, alpha-engine-config-I6478): any
+   covered name past ``stale_after_days`` is force-refreshed regardless of
+   whether the new-names slots were otherwise full — see ``thinktank.ledger
+   .select_intake``.
+5. events sweep over all covered names → thesis updates where flagged, then
+   the churn-gated daily macro-theme update from the developments it surfaced
+6. thesis builds for the intake set (new names, then refreshes)
+
+   Steps 5 and 6 were the other way round until alpha-engine-config-I6650.
+   DETECTION RUNS FIRST: it is the cheap tier that decides what the expensive
+   tier is for, an abort in the thesis loop used to cost the whole day's
+   detection (eight consecutive days of it, 2026-08-03..08), and under a
+   deadline the truncation now lands on per-ticker refresh rather than on a
+   single un-resumable fan-out.
 8. persist ledger, ratings board, challenger selection, events, manifest,
    month cost ledger; flush SFT rows
 
@@ -50,7 +62,7 @@ from datetime import UTC, datetime
 from nousergon_lib.dates import now_dual
 
 from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
-from thinktank.analyst import build_thesis, sweep
+from thinktank.analyst import build_thesis, sweep, triage
 from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, load_context
@@ -228,11 +240,19 @@ def run_daily(
             skip_stale_refill=True,
         )
     else:
+        # stale_after_days/trading_day wired here (only): TT-2.1-staleness-
+        # sla-is-actionable / alpha-engine-config-I6478 — the daily cadence
+        # is the sole enforcer of the staleness SLA (see select_intake's
+        # docstring); refresh_tickers and gap_fill_only intentionally omit
+        # them.
         new_rows, refresh = select_intake(
             ledger,
             ctx.board,
             daily_new_names=settings.daily_new_names,
             rank_ceiling=settings.rank_ceiling,
+            exit_rank=settings.exit_rank,
+            stale_after_days=settings.stale_after_days,
+            trading_day=trading_day,
         )
     manifest.names_added = [r["ticker"] for r in new_rows]
     manifest.names_refreshed = refresh
@@ -253,9 +273,15 @@ def run_daily(
     # ── I5223: wire the shared cost sink for per-call telemetry ────────────────
     from krepis.cost_sink import S3JsonlCostSink
 
+    # prefix MUST be `_cost_raw` (not `_cost`). AggregateCosts reads
+    # `_cost_raw/**/*.jsonl` and writes the dashboard's
+    # `_cost/{date}/cost.parquet`. Writing JSONL into `_cost/` made
+    # every Think Tank run's cost rows invisible to the aggregator —
+    # the stream looked dead on the dashboard even though emission
+    # was live (alpha-engine-config-I5206, verified 2026-08-01).
     cost_sink = S3JsonlCostSink(
         bucket=settings.bucket,
-        prefix="decision_artifacts/_cost",
+        prefix="decision_artifacts/_cost_raw",
         run_id=run_id,
         register_atexit=True,
     )
@@ -371,6 +397,152 @@ def _build_and_sweep(
     if refresh_tickers is None:
         themes.ensure_current()
 
+    # ── DETECTION FIRST (alpha-engine-config-I6650) ─────────────────────────
+    # The events sweep used to run LAST, after intake and refresh. Three
+    # consequences, all of them live:
+    #
+    # 1. Any abort in the thesis loop cost the whole day's DETECTION. Every
+    #    run from 2026-08-03 aborted on a provider 402 partway through the
+    #    `med`-group thesis writes, so `thinktank/events/` produced nothing
+    #    for eight days while `sweep_tickers` sat at 0 and
+    #    `deadline_skipped_sweep` stayed false — the sweep was never
+    #    reached, not skipped.
+    # 2. It inverted the escalation ladder products/thinktank.md §2.4
+    #    describes. Detection is supposed to GATE the expensive tier;
+    #    running the expensive tier first means a bad day at the write tier
+    #    silently costs the cheap pass that decides what is worth writing.
+    # 3. Under a deadline the truncation landed on the sweep — a single
+    #    un-resumable fan-out — rather than on routine refresh, which is
+    #    per-ticker and the most droppable work in the run.
+    #
+    # Running it first also makes two things strictly more correct rather
+    # than merely earlier: `covered_before` genuinely means "covered before
+    # today's additions" now that no addition has happened yet, and themes
+    # absorb the day's macro developments BEFORE any thesis is written
+    # against them.
+    ranked_rows = {s.get("ticker"): s for s in (ctx.board or {}).get("stocks", [])}
+    # ── events sweep over everything covered before today's additions ────────
+    if covered_before and _out_of_time(seconds_remaining):
+        # The sweep is a single LLM fan-out over every covered name — it cannot
+        # be partially completed, so near the deadline it is skipped ENTIRELY
+        # rather than started and lost. Recorded, never silent.
+        manifest.deadline_truncated = True
+        manifest.deadline_skipped_sweep = True
+        logger.warning(
+            "[thinktank] DEADLINE: skipping the events sweep over %d covered "
+            "names — proceeding to terminal writes (alpha-engine-config-I5208)",
+            len(covered_before),
+        )
+    elif covered_before:
+        assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
+        manifest.sweep_tickers = len(covered_before)
+        record_sweep(ledger, covered_before, trading_day)
+        # ── RECORD BEFORE ESCALATE (alpha-engine-config-I6817 D3) ───────────
+        # Every assessment gets its row NOW, before any expensive write can
+        # abort the loop. Measured on run b150c317eeef (2026-08-10), the first
+        # run after the I6650 ordering fix: the sweep completed over 178
+        # tickers across 8 paid calls, then the write tier aborted on the
+        # first flagged name — and `thinktank/events/2026-08-10.jsonl` landed
+        # with SIX rows. Detection ran and was billed; its record did not
+        # survive, because rows were appended interleaved with the writes.
+        #
+        # That is I6650's own failure mode displaced by one stage rather than
+        # closed: running the sweep first stopped an abort from costing the
+        # detection, but not from costing the record of it — and §2.3 grades
+        # the gate on the record. The triage tier makes it strictly worse if
+        # left alone, since it adds a second thing that can raise inside the
+        # same loop.
+        rows_by_ticker: dict[str, dict] = {}
+        for a in assessments:
+            row = EventRecord(
+                ticker=a.ticker,
+                trading_day=trading_day,
+                action=a.action,
+                severity=a.severity,
+                rationale=a.rationale,
+            ).model_dump()
+            rows_by_ticker[a.ticker] = row
+            event_rows.append(row)
+
+        for a in assessments:
+            row = rows_by_ticker[a.ticker]
+            escalated: bool | None = None
+            triage_reason: str | None = None
+            if a.action == "update_thesis":
+                manifest.events_flagged += 1
+                # ── TRIAGE GATE (alpha-engine-config-I6649) ──────────────────
+                # products/thinktank.md §2.4: the expensive write tier fires
+                # only behind an escalation decision that is itself recorded.
+                # The sweep is wide and low-precision by design, so without
+                # this gate every false positive it produces is paid for at
+                # the `med`-group thesis tier — the most expensive stage.
+                #
+                # FAIL-OPEN, deliberately, and it is the one place in this
+                # module that does. A triage error must not silently suppress
+                # a belief update: the gate exists to save cost, and the cost
+                # of wrongly skipping a real re-underwrite is a stale belief
+                # that no later run will revisit (the sweep only flags NEW
+                # events). The error is counted in `triage_errors`, recorded
+                # on the event row, and the escalation proceeds — so the
+                # failure is visible on the manifest rather than absorbed.
+                try:
+                    decision = triage(
+                        store, client, ctx, assessment=a, trading_day=trading_day
+                    )
+                    escalated = decision.escalate
+                    triage_reason = decision.reason
+                except Exception as exc:  # noqa: BLE001 — see fail-open note above
+                    manifest.triage_errors += 1
+                    escalated = True
+                    triage_reason = f"triage failed, escalating: {exc}"
+                    logger.warning(
+                        "[thinktank] triage failed for %s — escalating rather "
+                        "than silently skipping a belief update: %s",
+                        a.ticker,
+                        exc,
+                    )
+                if escalated:
+                    manifest.triage_yes += 1
+                else:
+                    manifest.triage_no += 1
+                    logger.info(
+                        "[thinktank] triage held %s at the gate: %s",
+                        a.ticker,
+                        triage_reason,
+                    )
+                # Stamped BEFORE the write, so a write that aborts still leaves
+                # the gate's verdict on the record — the decision is the thing
+                # §2.4 requires be recorded, and it is already made.
+                row["triage_escalated"] = escalated
+                row["triage_reason"] = triage_reason
+            if a.action == "update_thesis" and escalated:
+                thesis = build_thesis(
+                    store,
+                    client,
+                    ctx,
+                    themes,
+                    ticker=a.ticker,
+                    board_row=ranked_rows.get(a.ticker),
+                    trading_day=trading_day,
+                    calendar_date=calendar_date,
+                    update_reason="event",
+                    event_context=a.rationale,
+                )
+                _checkpoint_thesis_write(
+                    store,
+                    ledger,
+                    ticker=a.ticker,
+                    trading_day=trading_day,
+                    thesis_version=thesis.version,
+                )
+                manifest.event_updates_written += 1
+                manifest.theses_written += 1
+                theses_written.append(thesis)
+                row["thesis_version_written"] = thesis.version
+
+        if macro_notes:
+            themes.ensure_current(daily_developments=macro_notes)
+
     board_by_ticker = {r["ticker"]: r for r in new_rows}
     for idx, ticker in enumerate(manifest.names_added):
         if _out_of_time(seconds_remaining):
@@ -409,7 +581,6 @@ def _build_and_sweep(
         theses_written.append(thesis)
         manifest.theses_written += 1
 
-    ranked_rows = {s.get("ticker"): s for s in (ctx.board or {}).get("stocks", [])}
     refresh_reason = "operator_refresh" if refresh_tickers is not None else "staleness_refresh"
     for idx, ticker in enumerate(refresh):
         if _out_of_time(seconds_remaining):
@@ -437,63 +608,6 @@ def _build_and_sweep(
         _checkpoint_thesis_write(store, ledger, ticker=ticker, trading_day=trading_day, thesis_version=thesis.version)
         theses_written.append(thesis)
         manifest.theses_written += 1
-
-    # ── events sweep over everything covered before today's additions ────────
-    if covered_before and _out_of_time(seconds_remaining):
-        # The sweep is a single LLM fan-out over every covered name — it cannot
-        # be partially completed, so near the deadline it is skipped ENTIRELY
-        # rather than started and lost. Recorded, never silent.
-        manifest.deadline_truncated = True
-        manifest.deadline_skipped_sweep = True
-        logger.warning(
-            "[thinktank] DEADLINE: skipping the events sweep over %d covered "
-            "names — proceeding to terminal writes (alpha-engine-config-I5208)",
-            len(covered_before),
-        )
-    elif covered_before:
-        assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
-        manifest.sweep_tickers = len(covered_before)
-        record_sweep(ledger, covered_before, trading_day)
-        for a in assessments:
-            written_version: int | None = None
-            if a.action == "update_thesis":
-                manifest.events_flagged += 1
-                thesis = build_thesis(
-                    store,
-                    client,
-                    ctx,
-                    themes,
-                    ticker=a.ticker,
-                    board_row=ranked_rows.get(a.ticker),
-                    trading_day=trading_day,
-                    calendar_date=calendar_date,
-                    update_reason="event",
-                    event_context=a.rationale,
-                )
-                _checkpoint_thesis_write(
-                    store,
-                    ledger,
-                    ticker=a.ticker,
-                    trading_day=trading_day,
-                    thesis_version=thesis.version,
-                )
-                manifest.event_updates_written += 1
-                manifest.theses_written += 1
-                theses_written.append(thesis)
-                written_version = thesis.version
-            event_rows.append(
-                EventRecord(
-                    ticker=a.ticker,
-                    trading_day=trading_day,
-                    action=a.action,
-                    severity=a.severity,
-                    rationale=a.rationale,
-                    thesis_version_written=written_version,
-                ).model_dump()
-            )
-        if macro_notes:
-            themes.ensure_current(daily_developments=macro_notes)
-
 
 def _terminal_writes(
     store: ThinktankStore,
@@ -598,14 +712,17 @@ def _compute_coverage_gap(
         return {"error": "universe_board_missing"}
     stocks = board.get("stocks", [])
     if not stocks:
-        return {"top_n": top_n, "covered_pct": 0, "total_covered": len(ledger.entries), "uncovered_count": top_n}
+        return {"top_n": top_n, "covered_pct": 0, "total_covered": len(ledger.covered()), "uncovered_count": top_n}
     sorted_stocks = sorted(
         stocks,
         key=lambda s: s.get("attractiveness_score", 0) or 0,
         reverse=True,
     )
     top_tickers = {s["ticker"] for s in sorted_stocks[:top_n] if s.get("ticker")}
-    covered = set(ledger.entries.keys())
+    # covered(), not entries: a de-covered name keeps its entry and its whole
+    # thesis history, so len(entries) stopped being a coverage count
+    # (config-I6648).
+    covered = ledger.covered()
     covered_in_top = covered & top_tickers
     pct = round(len(covered_in_top) / max(len(top_tickers), 1) * 100, 1)
     return {
@@ -614,7 +731,7 @@ def _compute_coverage_gap(
         "covered_in_top": len(covered_in_top),
         "covered_pct": pct,
         "uncovered_count": len(top_tickers) - len(covered_in_top),
-        "total_covered": len(ledger.entries),
+        "total_covered": len(ledger.covered()),
     }
 
 

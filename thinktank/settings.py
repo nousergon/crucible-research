@@ -41,15 +41,34 @@ class ProviderSpec:
 
 @dataclass(frozen=True)
 class TierSpec:
-    """One model tier (sweep / thesis / themes)."""
+    """One model tier (sweep / thesis / themes / pillar).
+
+    A tier is addressed EITHER by capability group (``group``) or by a pinned
+    ``provider`` + ``model`` — never both, never neither. Group addressing is
+    the target state (alpha-engine-config-I6367, Brian's 2026-08-03 ruling:
+    no agent directly linked to OpenRouter); the pinned form remains
+    expressible so a tier can be held on a specific model deliberately, with
+    that choice visible in the config rather than implied by silence.
+
+    ``price_in_per_m`` / ``price_out_per_m`` are meaningful only for a pinned
+    tier. Under group addressing the serving model is not known until the
+    response returns, so prices come from ``krepis`` keyed on the model that
+    actually served — a per-tier literal would bill the wrong card the moment
+    the chain fell through.
+    """
 
     name: str
-    provider: str
-    model: str
     max_tokens: int
-    price_in_per_m: float
-    price_out_per_m: float
+    group: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    price_in_per_m: float | None = None
+    price_out_per_m: float | None = None
     structured_outputs: bool = False  # provider/model supports response_format json_schema
+
+    @property
+    def is_group_addressed(self) -> bool:
+        return self.group is not None
 
 
 @dataclass(frozen=True)
@@ -63,6 +82,12 @@ class ThinktankSettings:
     budget_ssm_param: str
     providers: dict[str, ProviderSpec] = field(default_factory=dict)
     tiers: dict[str, TierSpec] = field(default_factory=dict)
+    # alpha-engine-config-I6648 / products/thinktank.md §2.1. `rank_ceiling`
+    # is the ENTER threshold; this is the strictly-wider EXIT threshold that
+    # makes the covered set a declared set rather than a monotonic ratchet.
+    # Optional so an un-migrated config keeps today's behaviour (no exit path)
+    # rather than silently de-covering on first load.
+    exit_rank: int | None = None
 
     def tier(self, name: str) -> TierSpec:
         try:
@@ -108,6 +133,91 @@ def _config_path() -> Path:
     )
 
 
+def _parse_exit_rank(coverage: dict) -> int | None:
+    """`coverage.exit_rank`, validated STRICTLY wider than the enter rank.
+
+    Fails LOUD at config load rather than at the first drop
+    (alpha-engine-config-I6648). An exit rank at or inside the enter rank is
+    not a narrow band, it is a de-covering loop: a name enters at rank N and
+    is dropped on the same ranking, every run, forever — and the symptom would
+    be churn in the coverage ledger a long way from the config that caused it.
+
+    Absent ⇒ ``None`` ⇒ no exit path, which is the pre-I6648 behaviour. An
+    un-migrated config must keep working; it must not start de-covering names
+    because a default appeared.
+    """
+    raw = os.environ.get("THINKTANK_EXIT_RANK", coverage.get("exit_rank"))
+    if raw is None or raw == "":
+        return None
+    exit_rank = int(raw)
+    enter_rank = int(
+        os.environ.get("THINKTANK_RANK_CEILING", coverage["rank_ceiling"])
+    )
+    if exit_rank <= enter_rank:
+        raise ValueError(
+            f"thinktank coverage.exit_rank={exit_rank} must be STRICTLY "
+            f"greater than rank_ceiling={enter_rank} — an exit rank at or "
+            "inside the enter rank de-covers every name it just admitted, "
+            "every run (products/thinktank.md §2.1, config-I6648)"
+        )
+    return exit_rank
+
+
+def _parse_tier(name: str, t: dict) -> TierSpec:
+    """One tier, addressed by group XOR by pinned provider+model.
+
+    Both-or-neither is REJECTED rather than resolved by precedence. A tier
+    carrying a group and a pin would have one of them silently ignored, and
+    which one is exactly the sort of fact that is discovered in an incident.
+    """
+    group = t.get("group")
+    provider = t.get("provider")
+    model = t.get("model")
+
+    if group and (provider or model):
+        raise ValueError(
+            f"thinktank.yaml tier {name!r} declares BOTH group={group!r} and "
+            f"a pinned provider/model — one would be silently ignored. "
+            f"Address a tier by capability group OR by a specific model."
+        )
+    if not group and not (provider and model):
+        raise ValueError(
+            f"thinktank.yaml tier {name!r} declares neither a `group` nor a "
+            f"complete `provider` + `model` pin — there is nothing to call."
+        )
+
+    if group:
+        # Prices are NOT read for a group-addressed tier: the serving model
+        # is a call-time fact, so cost is priced from the model that actually
+        # served (krepis PriceCard). Rejecting the keys outright keeps a
+        # stale literal from reading as authoritative.
+        stale = [k for k in ("price_in_per_m", "price_out_per_m") if k in t]
+        if stale:
+            raise ValueError(
+                f"thinktank.yaml tier {name!r} is group-addressed but still "
+                f"carries {stale} — under group addressing the serving model "
+                f"is not known until the response returns, and cost is priced "
+                f"from it. A per-tier literal here would bill the wrong card "
+                f"the moment the chain fell through."
+            )
+        return TierSpec(
+            name=name,
+            group=str(group),
+            max_tokens=int(t["max_tokens"]),
+            structured_outputs=bool(t.get("structured_outputs", False)),
+        )
+
+    return TierSpec(
+        name=name,
+        provider=str(provider),
+        model=str(model),
+        max_tokens=int(t["max_tokens"]),
+        price_in_per_m=float(t["price_in_per_m"]),
+        price_out_per_m=float(t["price_out_per_m"]),
+        structured_outputs=bool(t.get("structured_outputs", False)),
+    )
+
+
 def load_settings() -> ThinktankSettings:
     """Parse thinktank.yaml into typed settings. Hard-fails on missing keys."""
     path = _config_path()
@@ -115,20 +225,18 @@ def load_settings() -> ThinktankSettings:
         raw = yaml.safe_load(f)
     tt = raw["thinktank"]
 
+    # `providers` is OPTIONAL. A config whose tiers are all group-addressed
+    # has no provider endpoints to declare, and requiring an empty block would
+    # make the absence of direct provider linkage look like a malformed file
+    # (alpha-engine-config-I6367 — no agent directly linked to OpenRouter).
+    # Still hard-fails on a MALFORMED entry: a provider missing base_url or
+    # key_secret is a mistake, and only its total absence is meaningful.
     providers = {
         name: ProviderSpec(name=name, base_url=p["base_url"], key_secret=p["key_secret"])
-        for name, p in tt["llm"]["providers"].items()
+        for name, p in (tt["llm"].get("providers") or {}).items()
     }
     tiers = {
-        name: TierSpec(
-            name=name,
-            provider=t["provider"],
-            model=t["model"],
-            max_tokens=int(t["max_tokens"]),
-            price_in_per_m=float(t["price_in_per_m"]),
-            price_out_per_m=float(t["price_out_per_m"]),
-            structured_outputs=bool(t.get("structured_outputs", False)),
-        )
+        name: _parse_tier(name, t)
         for name, t in tt["llm"]["tiers"].items()
     }
 
@@ -138,6 +246,7 @@ def load_settings() -> ThinktankSettings:
         bucket=os.environ.get("RESEARCH_BUCKET", os.environ.get("S3_BUCKET", tt.get("bucket", DEFAULT_BUCKET))),
         daily_new_names=int(os.environ.get("THINKTANK_DAILY_NEW_NAMES", coverage["daily_new_names"])),
         rank_ceiling=int(os.environ.get("THINKTANK_RANK_CEILING", coverage["rank_ceiling"])),
+        exit_rank=_parse_exit_rank(coverage),
         sweep_chunk_size=int(coverage.get("sweep_chunk_size", 25)),
         stale_after_days=int(coverage.get("stale_after_days", 30)),
         monthly_budget_usd_default=float(budget["monthly_usd_default"]),
