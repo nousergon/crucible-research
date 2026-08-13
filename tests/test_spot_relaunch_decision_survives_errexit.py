@@ -1,53 +1,41 @@
-"""``_spot_failure_reason`` must survive the CLI's ordinary "hold" answer.
+"""``_spot_failure_reason`` must correctly classify both `--json` outcomes.
 
-THE DEFECT CLASS
+BACKGROUND
 
-``krepis.ec2_spot relaunch-decision`` signals its verdict by EXIT CODE — ``0``
-= relaunch, ``NO_RELAUNCH_EXIT_CODE`` (75) = hold. Hold is the designed answer
-for every failure that is *not* an AWS spot reclaim, i.e. nearly all of them.
-Every launcher in the fleet called it as::
+``krepis.ec2_spot relaunch-decision`` grew ``--json`` (krepis-PR133, released
+as krepis 0.51.0). With ``--json``, the verdict is a JSON field
+(``{"relaunch": bool, ...}``) on stdout, and the CLI exits ``0`` whenever it
+reached ANY decision — hold included. A non-zero exit with ``--json`` means
+only "the CLI could not answer", never a verdict (alpha-engine-config-I7009).
 
-    _decide_out="$(... relaunch-decision ... )"
-    _decide_rc=$?
-
-under ``set -e``. An assignment fed by a command substitution is a simple
-command whose exit status IS the substitution's, so the ordinary answer is an
-errexit trigger, and ``_decide_rc=$?`` — the line that exists to READ that
-status — is unreachable.
-
-WHAT THIS REPO'S COPIES ACTUALLY DID, MEASURED
-
-Not the same thing the other three repos did, and the difference is worth
-pinning rather than assuming. In ``crucible-predictor``, ``crucible-backtester``
-and ``crucible-dashboard`` the call sits directly in the body of the EXIT trap,
-so errexit destroyed the shell mid-trap, ``terminate-instances`` was never
-reached, and the spot instance leaked — silently, because ``set -e`` does not
-re-enter a trap it is already running. Confirmed on
-``ne-weekly-freshness-pipeline/watch-rerun-2026-08-10-9`` (2026-08-11) via
-CloudTrail: no ``TerminateInstances`` for ``i-092854cbb6e62b753``.
-
-Here the call sits inside ``_spot_failure_reason``, whose sole caller writes::
+This retires this repo's previous exit-code contract
+(``NO_RELAUNCH_EXIT_CODE`` = 75 = hold, 0 = relaunch) in favour of reading the
+JSON payload. The caller-side errexit-suppression convention this test
+originally guarded —
 
     reason="$(_spot_failure_reason "$rc")" || reason=""
 
-Bash suppresses errexit for the entire dynamic extent of a command on the left
-of ``||``, *including inside functions it invokes*. Measured 2026-08-12 with a
-harness reproducing both shapes: this one completes, returns 1, and cleanup
-runs. **No instance was leaked from this repo.** ``nousergon-data`` carries the same shape and the same measurement.
+— is UNCHANGED and still load-bearing: it is a property of this function's
+own return-1/return-0 contract to its caller, not of how the function talks
+to the CLI. This file keeps exercising that convention (errexit ACTIVE at the
+call site, no ``||`` to hide behind) while updating what the stubbed CLI
+speaks.
 
-WHY IT IS STILL FIXED, AND WHY THIS TEST EXISTS
+WHAT THIS TEST ASSERTS
 
-The correctness of this function was a property of one punctuation mark
-at one call site, not of the functions themselves. Deleting that ``||``, or
-adding a second caller without it, converts this into the live defect the other
-three repos had — and nothing would announce it, because the only evidence is
-an absent CloudTrail event.
+(a) The CLI answers "hold" via ``--json`` (``{"relaunch": false, ...}``,
+    exit 0) -> the function returns 1 (not a reclaim; caller proceeds to
+    terminate, no relaunch).
+(b) The CLI itself fails to answer (non-zero exit, no reliable JSON) -> the
+    function ALSO returns 1. A CLI failure is not evidence of a reclaim, so
+    it is treated the same as hold, not retried as if it were confirmed.
+(c) The CLI answers "relaunch" via ``--json`` (``{"relaunch": true, ...}``,
+    exit 0) -> the function returns 0 and echoes ``confirmed-reclaim``.
 
-So the test deliberately calls the function in an errexit-ACTIVE context, which
-is precisely the context the ``||`` was hiding. With the guard, the function
-reaches its diagnostic line and returns 1 (correctly: hold means do not relaunch).
-Without it, the function aborts at the substitution and the diagnostic never
-appears — which is exactly what the assertion looks for.
+Demonstrated against the pre-migration file (stash, run, pop) that (a) and
+(b) both FAIL there: the old code read the CLI's *exit code* as the verdict,
+so a ``--json`` invocation returning ``rc=0`` with a hold payload was
+misread as a confirmed reclaim.
 """
 
 from __future__ import annotations
@@ -59,9 +47,6 @@ from pathlib import Path
 import pytest
 
 _INFRA = Path(__file__).resolve().parent.parent / "infrastructure"
-
-#: The CLI's documented "do not relaunch" status.
-_NO_RELAUNCH_EXIT_CODE = 75
 
 #: (script, instance-id variable read by that copy of the function).
 _LAUNCHERS = (("spot_research_weekly.sh", "INSTANCE_ID"),)
@@ -89,26 +74,39 @@ def _requires_bash():
         pytest.skip("bash unavailable")
 
 
-@pytest.mark.parametrize(
-    ("script_name", "instance_var"),
-    _LAUNCHERS,
-    ids=[s for s, _ in _LAUNCHERS],
-)
-def test_hold_verdict_is_read_not_fatal(
-    script_name: str, instance_var: str, tmp_path: Path
-) -> None:
+def _stub_python(tmp_path: Path, name: str, *, json_body: str, rc: int) -> Path:
+    """A stand-in for $LIB_PYTHON.
+
+    Intercepts the ``-m krepis.ec2_spot relaunch-decision`` invocation (prints
+    the canned ``--json`` payload, exits ``rc``) and delegates every other
+    invocation — notably the function's own ``-c '...json.load...'`` parse
+    step — to the real ``python3`` so the JSON-decoding logic under test
+    actually runs.
+    """
+    stub = tmp_path / name
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "krepis.ec2_spot" ]; then\n'
+        f"  printf '%s\\n' '{json_body}'\n"
+        f"  exit {rc}\n"
+        "else\n"
+        '  exec python3 "$@"\n'
+        "fi\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _run(
+    script_name: str,
+    instance_var: str,
+    tmp_path: Path,
+    lib_python: Path,
+    *,
+    rc_arg: int = 3,
+) -> subprocess.CompletedProcess:
     script = _INFRA / script_name
     lifted = _function_text(script.read_text(), "_spot_failure_reason")
-
-    # Stand-in for $LIB_PYTHON: answers "hold" exactly as the real CLI does —
-    # the TAB-separated line on stdout, then the no-relaunch exit status.
-    hold_python = tmp_path / "hold-python"
-    hold_python.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf 'hold\\tnot-reclaim:other\\tother\\t1\\n'\n"
-        f"exit {_NO_RELAUNCH_EXIT_CODE}\n"
-    )
-    hold_python.chmod(0o755)
 
     harness = tmp_path / "harness.sh"
     harness.write_text(
@@ -123,14 +121,15 @@ def test_hold_verdict_is_read_not_fatal(
         "SF_EXECUTION_TIMEOUT=''\n"
         "SPOT_ATTEMPT=1\n"
         "MAX_SPOT_ATTEMPTS=2\n"
-        f"LIB_PYTHON={hold_python}\n"
-        # rc=3 — a workload failure, not the launch-capacity 64 shortcut.
-        "_spot_failure_reason 3\n"
-        "echo UNREACHABLE_NOT_A_RECLAIM\n"
+        f"LIB_PYTHON={lib_python}\n"
+        # rc passed to the function — a workload failure, not the
+        # launch-capacity 64 shortcut.
+        f"_spot_failure_reason {rc_arg}\n"
+        "echo UNREACHABLE_IF_NOT_A_RECLAIM\n"
     )
     harness.chmod(0o755)
 
-    proc = subprocess.run(
+    return subprocess.run(
         ["bash", str(harness)],
         capture_output=True,
         text=True,
@@ -138,16 +137,77 @@ def test_hold_verdict_is_read_not_fatal(
         timeout=60,
     )
 
-    assert f"rc={_NO_RELAUNCH_EXIT_CODE}" in proc.stderr, (
-        f"{script_name}: _spot_failure_reason aborted at the command "
-        "substitution instead of reading the CLI's hold verdict — its "
-        "diagnostic line never ran. In an EXIT-trap context this is a silently "
-        "skipped terminate-instances and a leaked spot instance.\n"
+
+@pytest.mark.parametrize(
+    ("script_name", "instance_var"),
+    _LAUNCHERS,
+    ids=[s for s, _ in _LAUNCHERS],
+)
+def test_hold_verdict_via_json_is_not_a_reclaim(
+    script_name: str, instance_var: str, tmp_path: Path
+) -> None:
+    """CLI answers via --json, exit 0, relaunch=false -> hold, return 1."""
+    lib_python = _stub_python(
+        tmp_path,
+        "hold-python",
+        json_body='{"relaunch": false, "reason": "other"}',
+        rc=0,
+    )
+    proc = _run(script_name, instance_var, tmp_path, lib_python)
+
+    assert proc.returncode != 0, (
+        "a --json hold verdict (relaunch=false, rc=0) must not read as a "
+        f"reclaim.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "confirmed-reclaim" not in proc.stdout, proc.stdout
+    assert "UNREACHABLE_IF_NOT_A_RECLAIM" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("script_name", "instance_var"),
+    _LAUNCHERS,
+    ids=[s for s, _ in _LAUNCHERS],
+)
+def test_cli_failure_is_treated_as_hold_not_a_reclaim(
+    script_name: str, instance_var: str, tmp_path: Path
+) -> None:
+    """CLI itself fails (non-zero exit) -> could not answer, treat as hold."""
+    lib_python = _stub_python(
+        tmp_path,
+        "fail-python",
+        json_body="",
+        rc=1,
+    )
+    proc = _run(script_name, instance_var, tmp_path, lib_python)
+
+    assert proc.returncode != 0, (
+        "a CLI failure to answer (non-zero exit under --json) must be "
+        "treated as hold, never as a confirmed reclaim.\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
-
-    # Hold means "not a reclaim": the function must return non-zero so the
-    # caller does NOT relaunch, and must NOT claim a confirmed reclaim.
-    assert proc.returncode != 0, "a held verdict must not read as a reclaim"
     assert "confirmed-reclaim" not in proc.stdout, proc.stdout
-    assert "UNREACHABLE_NOT_A_RECLAIM" not in proc.stdout, proc.stdout
+    assert "UNREACHABLE_IF_NOT_A_RECLAIM" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("script_name", "instance_var"),
+    _LAUNCHERS,
+    ids=[s for s, _ in _LAUNCHERS],
+)
+def test_relaunch_verdict_via_json_is_a_confirmed_reclaim(
+    script_name: str, instance_var: str, tmp_path: Path
+) -> None:
+    """CLI answers via --json, exit 0, relaunch=true -> confirmed reclaim."""
+    lib_python = _stub_python(
+        tmp_path,
+        "relaunch-python",
+        json_body='{"relaunch": true, "reason": "spot-reclaim"}',
+        rc=0,
+    )
+    proc = _run(script_name, instance_var, tmp_path, lib_python)
+
+    assert proc.returncode == 0, (
+        f"a --json relaunch verdict must return 0.\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "confirmed-reclaim" in proc.stdout, proc.stdout
