@@ -4247,8 +4247,11 @@ def archive_writer(state: ResearchState) -> dict:
 #      ``…/eod-report?date=YYYY-MM-DD`` is.
 #
 # (This repo's own scoring/attractiveness_trajectory.py already hand-rolled a
-# *different*, likely-stale link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"``
-# — into the analogous host_universe_scanner.py host tab, ignoring the
+# *different* link — ``f"{CONSOLE_BASE_URL}/Attractiveness_Trends"`` — whose
+# CONSOLE_BASE_URL default was measured 404ing on console.nousergon.ai and is
+# fixed to dashboard.nousergon.ai in alpha-engine-config-I6140. The host fix
+# doesn't touch the underlying gap: it's hand-rolled into the analogous
+# host_universe_scanner.py host tab, ignoring the
 # host/tab indirection entirely. That's the failure mode this link avoids by
 # using the real filename-derived slug plus the documented ``?tab=``
 # mechanism, but it's the same class of gap: a dashboard follow-up should
