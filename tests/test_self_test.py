@@ -25,7 +25,6 @@ import pytest
 
 from scoring import self_test as st
 
-
 # ── layer 1: the real battery ───────────────────────────────────────────────
 
 @pytest.fixture(scope="module")

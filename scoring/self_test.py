@@ -108,15 +108,20 @@ import platform
 import signal
 import threading
 import time
+from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
 SCHEMA = "research_self_test-1.0.0"
 COMPONENT = "research"
 
-PASS = "PASS"
+# The fleet verdict vocabulary, shared with grading/attestation and the console
+# so a reader never translates between dialects. (S105 reads "PASS" as a possible
+# credential; it is a verdict constant.)
+PASS = "PASS"  # noqa: S105
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 
@@ -372,6 +377,7 @@ def build_cases() -> list[Case]:
     """The battery. A callable (not a module constant) so no production import
     happens at import time of this module, and so a test can substitute it."""
     from nousergon_lib.quant import attractiveness as attr
+
     from scoring import composite as comp
     from scoring import leaderboard_scoring as lead
 
@@ -537,7 +543,8 @@ def build_cases() -> list[Case]:
             expected=0.0,
             compute=lambda: float(sum(
                 abs(a - b) for a, b in
-                zip(lead._rankdata([10.0, 20.0, 20.0, 30.0]), [1.0, 2.5, 2.5, 4.0])
+                zip(lead._rankdata([10.0, 20.0, 20.0, 30.0]), [1.0, 2.5, 2.5, 4.0],
+                    strict=True)
             )),
         ),
     ]
@@ -948,7 +955,7 @@ def _unclipped_outlier_z() -> float:
 def _rank_error_sum() -> float:
     ranked = _ranked()
     observed = [ranked[f"T{i}"]["cross_sectional_rank"] for i in range(len(_RANK_SCORES))]
-    return float(sum(abs(a - b) for a, b in zip(observed, [1, 2, 2, 4])))
+    return float(sum(abs(a - b) for a, b in zip(observed, [1, 2, 2, 4], strict=True)))
 
 
 def _rank_permutation_delta() -> float:
@@ -966,7 +973,8 @@ def _rank_permutation_delta() -> float:
 def _attractiveness_inversions() -> float:
     out = _attractiveness()
     scores = [float(out[f"T{i}"]["attractiveness_score"]) for i in range(len(_PILLAR_VALUES))]
-    return float(sum(1 for a, b in zip(scores, scores[1:]) if b < a - 1e-12))
+    return float(sum(1 for a, b in zip(scores, scores[1:], strict=False)
+                     if b < a - 1e-12))
 
 
 def _ic_sign_flip_sum() -> float:
@@ -983,7 +991,8 @@ def _ic_monotone_transform_delta() -> float:
 
 def _composite_monotonicity_violations() -> float:
     finals = [float(_composite(quant_score=q * 5.0)["final_score"]) for q in range(21)]
-    return float(sum(1 for a, b in zip(finals, finals[1:]) if b < a - 1e-12))
+    return float(sum(1 for a, b in zip(finals, finals[1:], strict=False)
+                     if b < a - 1e-12))
 
 
 def _composite_missing_is_flagged() -> float:
@@ -1059,7 +1068,12 @@ def code_sha() -> str:
             stamped = lambda_stamp.read_text().strip()
             if stamped:
                 return stamped
-    except Exception:  # noqa: BLE001 — provenance never blocks the battery
+    except Exception:  # noqa: BLE001,S110 — provenance never blocks the battery
+        # Deliberately silent: this is the OPTIONAL Lambda stamp probe, and its
+        # absence is the normal case off-Lambda. The failure mode swallowed is
+        # "no deploy-time SHA stamp here"; the recording surface is the returned
+        # `code_sha`, which falls through to the .git lookup and finally to the
+        # literal "unknown" — a value the artifact carries honestly.
         pass
     try:
         git_dir = Path(__file__).resolve().parents[1] / ".git"
@@ -1121,7 +1135,7 @@ def _call_with_timeout(fn: Callable[[], float], seconds: float) -> float:
 def run_self_test(
     run_date: str | None = None,
     *,
-    case_provider: "Callable[[], list[Case]] | None" = None,
+    case_provider: Callable[[], list[Case]] | None = None,
     component: str = COMPONENT,
     schema: str = SCHEMA,
     case_timeout_seconds: float = CASE_TIMEOUT_SECONDS,
@@ -1362,7 +1376,7 @@ def console_envelope(body: dict, now=None) -> dict:
     STALE when it stops publishing, whatever status it last wrote — the last
     thing a dying check writes is almost always "ok".
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     verdict = body.get("verdict")
     status = {PASS: STATUS_OK, FAIL: STATUS_ERROR}.get(verdict, STATUS_ATTENTION)
@@ -1387,7 +1401,7 @@ def console_envelope(body: dict, now=None) -> dict:
         "schema_version": _ENVELOPE_SCHEMA_VERSION,
         "check_id": CHECK_ID,
         "label": "Research numeric self-test (R slot)",
-        "ran_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "ran_at": (now or datetime.now(UTC)).isoformat(),
         "status": status,
         "summary": (
             f"research known-answer battery: {n_cases - n_failed - n_errored} "
