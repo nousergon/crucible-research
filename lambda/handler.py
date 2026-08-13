@@ -409,6 +409,14 @@ def _run_challengers_only(event: dict) -> dict:
     """
     import json as _json
 
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    # This function backs the SF's ChallengerShadow state exclusively (the
+    # only caller is handler()'s mode="challengers_only" dispatch, which is
+    # exactly the SF's ChallengerShadow invocation shape) — no ambiguity
+    # about which stage this attribution belongs to.
+    _started = datetime.datetime.now(datetime.UTC)
+
     run_date = event.get("date")
     if not run_date:
         raise ValueError("challengers_only requires event['date'] (YYYY-MM-DD)")
@@ -448,12 +456,30 @@ def _run_challengers_only(event: dict) -> dict:
             run_time=datetime.datetime.now(datetime.UTC).isoformat(),
             population=prior_population,
         )
-        return {
+        result = {
             "status": "OK",
             "mode": "challengers_only",
             "date": run_date,
             "written": shadow["written"],
         }
+
+        # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+        # §2.3a rescope): the assertion lives in the stage's own handler,
+        # immediately before it returns, rather than a separate end-of-run
+        # SF state. OBSERVE MODE ONLY — never enables enforcement, never
+        # raises.
+        try:
+            from nousergon_lib.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "ChallengerShadow", run_date=run_date, window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the lib pin predates the module. Observe
+            # mode — the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+
+        return result
     finally:
         archive.close()
 

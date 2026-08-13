@@ -73,6 +73,7 @@ import os
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 
 # Repo root on sys.path so ``from scoring.signals_envelope import ...``
 # resolves under Lambda's task layout. Mirrors the existing shared-image
@@ -128,6 +129,9 @@ def handler(event, context):
     # (config-I6053). Taken before the dry-path return so the field measures
     # the same span the retired runner's stamp measured — the whole handler.
     _health_start = time.time()
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.now(UTC)
 
     from evals.lambda_dry import is_dry
 
@@ -394,7 +398,7 @@ def handler(event, context):
         run_date, target, dated_key,
         len(envelope["universe"]), envelope["market_regime"],
     )
-    return {
+    result = {
         "status": "OK",
         "dated_key": dated_key,
         "latest_key": latest_key,
@@ -402,3 +406,20 @@ def handler(event, context):
         "market_regime": envelope["market_regime"],
         "target": target,
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope): the assertion lives in the stage's own handler,
+    # immediately before it returns, rather than a separate end-of-run SF
+    # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    try:
+        from nousergon_lib.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            "SignalsEnvelope", run_date=run_date, window_start=_started,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the lib pin predates the module. Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

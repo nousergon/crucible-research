@@ -18,6 +18,9 @@ which happens during test collection before per-test fixtures fire.
 from __future__ import annotations
 
 import os
+import sys
+import types
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -68,3 +71,29 @@ def _clear_arctic_union_cache():
     _ARCTIC_UNION_CACHE.clear()
     yield
     _ARCTIC_UNION_CACHE.clear()
+
+
+@pytest.fixture
+def stub_stage_coverage(monkeypatch):
+    """Simulate ``nousergon_lib.stage_coverage`` being present.
+
+    The real module does not exist at this repo's pinned nousergon-lib tag
+    (config-I7214: the shared primitive lands separately and the pin bump
+    is a later wave), so ``from nousergon_lib.stage_coverage import
+    assert_stage_coverage`` genuinely raises ``ImportError`` today — every
+    handler's own call site is exercised UNSTUBBED by any test that does
+    not use this fixture, which is exactly the observe-mode-survives-a-
+    missing-lib path.
+
+    Tests that need to see a verdict land in a handler's payload use this
+    fixture to inject a fake submodule into ``sys.modules`` ahead of the
+    handler's lazy import, so the import succeeds and returns a
+    controllable mock. Returns the mock so a test can assert on
+    call args (stage name, run_date, window_start) or set
+    ``side_effect``/``return_value``.
+    """
+    mock_assert = MagicMock(return_value={"status": "COVERED", "stage": "stub"})
+    fake_module = types.ModuleType("nousergon_lib.stage_coverage")
+    fake_module.assert_stage_coverage = mock_assert
+    monkeypatch.setitem(sys.modules, "nousergon_lib.stage_coverage", fake_module)
+    yield mock_assert

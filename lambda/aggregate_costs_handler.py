@@ -37,6 +37,7 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import UTC, datetime
 from datetime import date as date_type
 
 # Repo root on sys.path so ``from scripts.aggregate_costs import ...``
@@ -84,9 +85,31 @@ def _ensure_init() -> None:
     _init_done = True
 
 
+def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None:
+    """Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    §2.3a rescope): the assertion lives in the stage's own handler,
+    immediately before it returns, rather than a separate end-of-run SF
+    state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    Shared by both this handler's terminal returns (OK and the legitimate
+    SKIPPED no-op) since both are real completions, not failures."""
+    try:
+        from nousergon_lib.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            "AggregateCosts", run_date=run_date, window_start=window_start,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the lib pin predates the module. Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+
 @monitor_handler
 def handler(event, context):
     """Aggregate per-call JSONL cost files into the daily parquet."""
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.now(UTC)
     _ensure_init()
 
     import boto3
@@ -162,11 +185,13 @@ def handler(event, context):
             "skipping parquet write (no error)",
             date_str,
         )
-        return {
+        skipped_result = {
             "status": "SKIPPED",
             "reason": "no_cost_raw_for_date",
             "date": date_str,
         }
+        _attach_stage_coverage(skipped_result, run_date=date_str, window_start=_started)
+        return skipped_result
 
     logger.info(
         "[aggregate_costs_handler] done rows_in=%d total_usd=%.4f output_key=%s",
@@ -174,4 +199,6 @@ def handler(event, context):
         summary.get("total_cost_usd", 0.0),
         summary.get("output_key", ""),
     )
-    return {"status": "OK", "summary": summary, "date": date_str}
+    result = {"status": "OK", "summary": summary, "date": date_str}
+    _attach_stage_coverage(result, run_date=date_str, window_start=_started)
+    return result
