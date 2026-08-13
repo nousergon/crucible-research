@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -89,6 +90,78 @@ JUDGE_ONLY_CW_NAMESPACE = "AlphaEngine/EvalJudgeOnly"
 ``AlphaEngine/Eval`` stream the alarm + rolling-mean Lambda read."""
 
 _BUCKET_DEFAULT = "alpha-engine-research"
+
+
+# ── Deadline budget (alpha-engine-config-I6920 class) ─────────────────────
+#
+# EvalJudgeProcess was killed at its 900s wall in 9 of 28 observed real
+# invocations (32%), all nine inside the parse-retry tail below. Measured
+# 2026-07-26: each synchronous re-judge took 45-105s of wall clock against
+# a cap sized on the comment "40 × ≲8s ≪ the Process Lambda's 15-min
+# ceiling". 40 × 75s is 3000s — 3.3× the wall — so the cap could never
+# bind, and nothing in this module consulted the clock.
+#
+# Killed at the wall means the manifest build never runs, the summary is
+# never returned, and the SF sees States.Timeout with no cause. The evals
+# persisted before the kill are on S3 but nothing says how many of the
+# corpus they represent.
+#
+# Same shape as crucible-backtester's replay/batch.py (config#6920) rather
+# than a new invention — the two are the same primitive and the end state
+# is one copy in nousergon-lib. Lifting it needs a lib tag plus lockstep
+# pin bumps across three repos, which does not belong in a fix for a live
+# pipeline failure; tracked on I6920 as the third adoption.
+
+PROCESS_WRITE_RESERVE_S = 60.0
+"""Time held back from every loop for the write tail — the
+``_eval_by_capture`` manifest build (an S3 LIST + PUT per capture date)
+and the summary return. Without a reserve a loop consumes the whole
+budget and the invocation ends with nothing said about what it covered,
+which is the failure this whole block exists to remove. Larger than the
+concordance's 45s because the manifest build lists S3 prefixes rather
+than emitting a handful of CloudWatch datapoints."""
+
+PROCESS_LLM_ITEM_FLOOR_S = 30.0
+"""Floor for the "does another synchronous judge call fit?" estimate
+before this phase has completed an item. The judge client's own per-call
+ceiling is 180s (``evals/judge.py::_call_openrouter_judge_llm``) with 3
+attempts, so a single item's true worst case is 540s; 30s is the floor on
+the ESTIMATE, not a claim about the worst case — after the first item the
+observed p90 governs."""
+
+PROCESS_STREAM_ITEM_FLOOR_S = 3.0
+"""Floor for the batch-result stream, whose per-item work is a parse plus
+an S3 PUT plus a CloudWatch emit — hundreds of milliseconds, not tens of
+seconds. Kept separate from the LLM floor on purpose: a phase must
+estimate from its OWN items. Sharing one latency sample would let the
+stream's sub-second items license a 100s judge call."""
+
+
+def _next_item_affordable(
+    remaining_s, latencies_ms: list[int], *, floor_s: float,
+) -> tuple[bool, float]:
+    """Can another item of this phase finish before the deadline?
+
+    Estimates from the observed p90 of THIS phase's own item latencies —
+    the workload measures itself rather than trusting a literal — plus the
+    write reserve. Returns ``(affordable, needed_seconds)``.
+
+    ``remaining_s`` is a zero-arg callable returning seconds left, or
+    ``None`` for callers with no deadline (the CLI, spot runs, tests),
+    which are always affordable and behave exactly as before.
+
+    Mirrors ``replay.batch._next_item_affordable`` in crucible-backtester.
+    """
+    if remaining_s is None:
+        return True, 0.0
+    if latencies_ms:
+        ordered = sorted(latencies_ms)
+        p90 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))] / 1000.0
+        estimate = max(floor_s, p90)
+    else:
+        estimate = floor_s
+    needed = estimate + PROCESS_WRITE_RESERVE_S
+    return remaining_s() >= needed, needed
 
 
 # ── Sampling decision ─────────────────────────────────────────────────────
@@ -911,6 +984,7 @@ def process_batch_results(
     cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
     haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
+    remaining_s=None,
 ) -> dict[str, Any]:
     """Stream the completed batch's results, parse + persist + emit
     each, then run any Sonnet escalations synchronously.
@@ -924,16 +998,39 @@ def process_batch_results(
     Sonnet-escalation tail (weekly cadence only): once Haiku results
     are persisted, any artifact whose Haiku score has a dimension
     below ``haiku_escalate_threshold`` is re-evaluated synchronously
-    via ``evaluate_artifact``. Typical cardinality is small (1-3
-    artifacts/run) so the synchronous tail fits trivially in the
-    Process Lambda's 15-min budget — we don't pay batch latency for
-    the escalation path. First-Saturday-of-month cadence
+    via ``evaluate_artifact``. First-Saturday-of-month cadence
     (``force_sonnet_pass=True`` in the plan) already submitted Sonnet
     requests in the batch; this tail is a no-op in that case.
 
+    Its cardinality is DATA-dependent, not bounded by anything: every
+    Haiku eval that flags a borderline dimension adds one synchronous
+    judge call. A week where the judged agents degrade is exactly a week
+    the tail grows, so the runtime rises with the thing it exists to
+    measure. The docstring here used to claim "typical cardinality is
+    small (1-3 artifacts/run) so the synchronous tail fits trivially" —
+    an assumption, never a bound.
+
+    **Deadline discipline (alpha-engine-config-I6920 class).** All three
+    loops — the result stream, the parse-retry tail and the escalation
+    tail — ask before each item whether it still fits in ``remaining_s``
+    (see ``_next_item_affordable``). When it does not, that loop stops,
+    the work already done is kept, the manifest build and summary still
+    run inside ``PROCESS_WRITE_RESERVE_S``, and the summary carries
+    ``complete=False`` plus ``budget_stopped``, ``budget_stopped_phases``
+    and ``n_skipped_for_budget`` so a truncated pass can never be read as
+    a full one (``sf-pipeline-policy.md`` §2.3a: a missing verdict
+    propagates as UNKNOWN, never as pass).
+
+    Args:
+        remaining_s: zero-arg callable returning the seconds left before
+            the caller's deadline, or ``None`` for no deadline. The
+            Process Lambda passes ``context.get_remaining_time_in_millis``
+            divided by 1000; the CLI, spot runs and tests pass nothing and
+            behave exactly as they did before.
+
     Returns a summary dict mirroring the legacy ``evaluate_corpus``
     return shape so dashboards / alarms / SF result inspectors keep
-    working unchanged.
+    working unchanged, plus the four budget fields above.
     """
     s3 = s3_client or boto3.client("s3")
     cw = cloudwatch_client or (
@@ -976,6 +1073,22 @@ def process_batch_results(
     persisted_keys: list[str] = []
     haiku_evals_by_agent_run: dict[tuple[str, str], RubricEvalArtifact] = {}
 
+    # Deadline bookkeeping. Each phase keeps its OWN latency sample —
+    # see PROCESS_STREAM_ITEM_FLOOR_S for why they may not be shared.
+    budget_stopped_phases: list[str] = []
+    n_skipped_for_budget: dict[str, int] = {}
+
+    def _stop_for_budget(phase: str, skipped: int, needed: float) -> None:
+        budget_stopped_phases.append(phase)
+        n_skipped_for_budget[phase] = skipped
+        logger.warning(
+            "[batch_process] stopping %s early on budget: %d items not "
+            "processed (needed ~%.0fs, %.0fs left). The manifest and "
+            "summary still run; the summary is marked incomplete.",
+            phase, skipped, needed,
+            remaining_s() if remaining_s is not None else -1.0,
+        )
+
     def _try_emit(eval_artifact: RubricEvalArtifact) -> None:
         nonlocal metric_emission_failures
         if not emit_metrics:
@@ -993,8 +1106,33 @@ def process_batch_results(
             metric_emission_failures += 1
 
     # Stream batch results unless the synthetic empty-batch sentinel.
+    stream_latencies_ms: list[int] = []
+    stream_processed = 0
+    _item_t0: float | None = None
     if not batch_id.startswith("empty-") and plan["requests"]:
         for result in anthropic_client.messages.batches.results(batch_id):
+            # Close out the PREVIOUS item's latency here rather than at the
+            # bottom of the loop: the body has several `continue` paths, and
+            # a sample taken only on the fall-through path would measure the
+            # cheap outcomes and miss the expensive ones.
+            if _item_t0 is not None:
+                stream_latencies_ms.append(int((time.time() - _item_t0) * 1000))
+            affordable, needed = _next_item_affordable(
+                remaining_s, stream_latencies_ms,
+                floor_s=PROCESS_STREAM_ITEM_FLOOR_S,
+            )
+            if not affordable:
+                # The stream is an iterator, so the residue is derived from
+                # the plan's own request count rather than by draining it —
+                # draining would spend the reserve we just protected.
+                _stop_for_budget(
+                    "batch_stream",
+                    max(0, len(plan["requests"]) - stream_processed),
+                    needed,
+                )
+                break
+            _item_t0 = time.time()
+            stream_processed += 1
             # SDK returns objects; coerce to a stable dict-or-attr access
             # via the helper closure to keep the parsing site agnostic
             # to SDK minor version drift.
@@ -1124,11 +1262,27 @@ def process_batch_results(
     # One synchronous evaluate_artifact per failed item re-rolls the
     # decoder via the sync path's own retry loop. Runs BEFORE the
     # escalation tail so a recovered borderline Haiku eval still
-    # escalates to Sonnet. Cap bounds the Lambda budget: 40 × ≲8s ≪ the
-    # Process Lambda's 15-min ceiling; overflow is terminal-failed loud.
+    # escalates to Sonnet. Overflow past the cap is terminal-failed loud.
+    #
+    # The cap is a COST guard, not a time budget. It was written as one —
+    # "40 × ≲8s ≪ the Process Lambda's 15-min ceiling" — and that assumed
+    # constant is what killed nine invocations. Measured 2026-07-26 on the
+    # live function: 45-105s per retry, i.e. 40 × 75s = 3000s against a
+    # 900s wall, so the cap could never bind on time. Time is now bounded
+    # by the deadline check above, measured from this run's own retries.
     _PARSE_RETRY_CAP = 40
     parse_retry_recovered = 0
+    retry_latencies_ms: list[int] = []
     for i, (entry, orig_err) in enumerate(parse_retry_queue):
+        affordable, needed = _next_item_affordable(
+            remaining_s, retry_latencies_ms, floor_s=PROCESS_LLM_ITEM_FLOOR_S,
+        )
+        if not affordable:
+            _stop_for_budget(
+                "parse_retry", len(parse_retry_queue) - i, needed,
+            )
+            break
+        _retry_t0 = time.time()
         if i >= _PARSE_RETRY_CAP:
             failed.append({
                 "key": entry["capture_s3_key"],
@@ -1178,23 +1332,54 @@ def process_batch_results(
                 "stage": "batch_parse_retry",
                 "error": f"retry: {exc}; original: {orig_err}",
             })
+        retry_latencies_ms.append(int((time.time() - _retry_t0) * 1000))
 
     # Sonnet-escalation tail (weekly cadence only). First-Saturday
     # already submitted Sonnet via the batch so we skip the tail in
     # that path — every artifact already has a Sonnet eval.
+    escalation_latencies_ms: list[int] = []
     if not force_sonnet_pass:
-        for entry in plan["plan_entries"]:
-            if entry["judge_model"] != haiku_model:
-                continue
-            haiku_eval = haiku_evals_by_agent_run.get(
-                (entry["agent_id"], entry["run_id"])
+        # Select first, then spend. The eligibility test is pure in-memory
+        # work over evals already held, so materialising the queue costs
+        # nothing and makes the deadline residue an exact count rather than
+        # "however many entries we had not looked at yet".
+        escalation_queue = [
+            entry for entry in plan["plan_entries"]
+            if entry["judge_model"] == haiku_model
+            and (
+                _he := haiku_evals_by_agent_run.get(
+                    (entry["agent_id"], entry["run_id"])
+                )
+            ) is not None
+            and should_escalate_to_sonnet(
+                _he, threshold=haiku_escalate_threshold,
             )
-            if haiku_eval is None:
-                continue
-            if not should_escalate_to_sonnet(
-                haiku_eval, threshold=haiku_escalate_threshold,
-            ):
-                continue
+        ]
+        logger.info(
+            "[batch_process_escalation] %d of %d haiku evals flagged for "
+            "sonnet escalation", len(escalation_queue),
+            len(haiku_evals_by_agent_run),
+        )
+        _esc_t0: float | None = None
+        for _esc_i, entry in enumerate(escalation_queue):
+            # Close out the previous item here — the body's load-failure
+            # path `continue`s, and a sample that misses it would under-
+            # estimate the phase (same reasoning as the stream loop).
+            if _esc_t0 is not None:
+                escalation_latencies_ms.append(
+                    int((time.time() - _esc_t0) * 1000)
+                )
+            affordable, needed = _next_item_affordable(
+                remaining_s, escalation_latencies_ms,
+                floor_s=PROCESS_LLM_ITEM_FLOOR_S,
+            )
+            if not affordable:
+                _stop_for_budget(
+                    "sonnet_escalation",
+                    len(escalation_queue) - _esc_i, needed,
+                )
+                break
+            _esc_t0 = time.time()
 
             try:
                 artifact = _load_capture_artifact(
@@ -1249,13 +1434,16 @@ def process_batch_results(
     if force_sonnet_pass:
         skipped_empty_input *= 2
 
+    budget_stopped = bool(budget_stopped_phases)
     logger.info(
         "[batch_process] done batch_id=%s date=%s haiku=%d sonnet=%d "
         "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
-        "parse_retry_recovered=%d metric_emission_failures=%d",
+        "parse_retry_recovered=%d metric_emission_failures=%d "
+        "complete=%s budget_stopped_phases=%s",
         batch_id, date, haiku_evaluated, sonnet_evaluated,
         plan.get("skipped_unmapped", 0), skipped_empty_input, len(failed),
         parse_retry_recovered, metric_emission_failures,
+        not budget_stopped, budget_stopped_phases or "-",
     )
 
     return {
@@ -1269,6 +1457,14 @@ def process_batch_results(
         "skipped_empty_input": skipped_empty_input,
         "metric_emission_failures": metric_emission_failures,
         "parse_retry_recovered": parse_retry_recovered,
+        # sf-pipeline-policy.md §2.3a — a pass that covered less of the
+        # corpus than it was asked to must say so, in a field a machine
+        # reads. `complete` is False whenever any phase stopped on budget,
+        # so a truncated eval sweep can never be read as a clean one.
+        "complete": not budget_stopped,
+        "budget_stopped": budget_stopped,
+        "budget_stopped_phases": budget_stopped_phases,
+        "n_skipped_for_budget": n_skipped_for_budget,
         "failed": failed,
         "persisted_keys": persisted_keys,
         "haiku_model": haiku_model,
