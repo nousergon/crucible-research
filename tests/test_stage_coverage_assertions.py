@@ -3,14 +3,19 @@
 Brian ruled the end-of-run ``StageCoverageAssert`` SF state NON-SOTA: the
 assertion belongs in each stage's own handler, immediately before it
 returns, calling the ONE shared implementation
-(``nousergon_lib.stage_coverage.assert_stage_coverage``) rather than a
-per-repo reimplementation. This module pins, per handler:
+(``krepis.stage_coverage.assert_stage_coverage``) rather than a
+per-repo reimplementation. The primitive lives in krepis (relocated
+from an initial nousergon_lib landing — nousergon-lib-PR314 merged,
+PR315 removes the duplicate — because half its callers are bash
+launchers and krepis is published rather than git-pinned, so this
+repo's existing ``krepis>=0.51.0`` floor needs no pin bump once
+krepis-PR148 lands). This module pins, per handler:
 
 1. the verdict lands in the returned payload under ``stage_coverage``
    with the CORRECT stage name;
-2. an ``ImportError`` from the lib (this repo's nousergon-lib pin predates
-   the module) does NOT change the handler's outcome — observe mode
-   cannot break the stage it observes;
+2. an ``ImportError`` from the lib (krepis-PR148 — the module — is not
+   yet merged/published) does NOT change the handler's outcome —
+   observe mode cannot break the stage it observes;
 3. (``eval_judge_submit_handler`` only) BOTH polarities of
    ``force_sonnet_pass`` file under the correct one of
    ``EvalJudgeSubmitFirstSaturday`` / ``EvalJudgeSubmitWeekly``;
@@ -27,12 +32,12 @@ per-repo reimplementation. This module pins, per handler:
    list is the independently-sourced denominator, not a scan of the repo).
 
 The ``stub_stage_coverage`` fixture (root ``conftest.py``) injects a fake
-``nousergon_lib.stage_coverage`` submodule into ``sys.modules`` so the
-handler's lazy ``from nousergon_lib.stage_coverage import
+``krepis.stage_coverage`` submodule into ``sys.modules`` so the
+handler's lazy ``from krepis.stage_coverage import
 assert_stage_coverage`` succeeds against a controllable mock. Tests that
 do NOT request the fixture exercise the REAL (current) unstubbed
-ImportError path, since the module genuinely does not exist at this
-repo's pinned nousergon-lib tag yet.
+ImportError path, since krepis-PR148 (adding the module) is not yet
+merged/published as of this writing.
 """
 
 from __future__ import annotations
@@ -229,8 +234,8 @@ class TestScannerCoverage:
 
     def test_missing_lib_module_does_not_change_outcome(self, scanner_mod):
         # No stub_stage_coverage fixture — exercises the REAL current
-        # ImportError path (the module genuinely does not exist yet at
-        # this repo's pinned nousergon-lib tag).
+        # ImportError path (krepis-PR148, adding the module, is not yet
+        # merged/published).
         with (
             patch.object(scanner_mod, "_ensure_init"),
             patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_scanner_artifact()),

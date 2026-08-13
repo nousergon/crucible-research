@@ -75,15 +75,21 @@ def _clear_arctic_union_cache():
 
 @pytest.fixture
 def stub_stage_coverage(monkeypatch):
-    """Simulate ``nousergon_lib.stage_coverage`` being present.
+    """Simulate ``krepis.stage_coverage`` being present.
 
-    The real module does not exist at this repo's pinned nousergon-lib tag
-    (config-I7214: the shared primitive lands separately and the pin bump
-    is a later wave), so ``from nousergon_lib.stage_coverage import
-    assert_stage_coverage`` genuinely raises ``ImportError`` today — every
-    handler's own call site is exercised UNSTUBBED by any test that does
-    not use this fixture, which is exactly the observe-mode-survives-a-
-    missing-lib path.
+    The primitive lives in krepis (relocated from nousergon_lib.
+    stage_coverage after it shipped there first — nousergon-lib-PR314
+    merged, PR315 removes the duplicate — because half its callers are
+    bash launchers invoking ``python -m krepis.stage_coverage`` and
+    krepis is published rather than git-pinned, so this repo's existing
+    ``krepis>=0.51.0`` floor picks it up on a fresh install with no pin
+    bump; nousergon-lib is git-pinned and would have needed one).
+    krepis-PR148 (adding the module) is open, not yet merged/published
+    at the time these handlers were written, so ``from krepis.
+    stage_coverage import assert_stage_coverage`` genuinely raises
+    ``ImportError`` today — every handler's own call site is exercised
+    UNSTUBBED by any test that does not use this fixture, which is
+    exactly the observe-mode-survives-a-missing-lib path (config-I7214).
 
     Tests that need to see a verdict land in a handler's payload use this
     fixture to inject a fake submodule into ``sys.modules`` ahead of the
@@ -93,7 +99,7 @@ def stub_stage_coverage(monkeypatch):
     ``side_effect``/``return_value``.
     """
     mock_assert = MagicMock(return_value={"status": "COVERED", "stage": "stub"})
-    fake_module = types.ModuleType("nousergon_lib.stage_coverage")
+    fake_module = types.ModuleType("krepis.stage_coverage")
     fake_module.assert_stage_coverage = mock_assert
-    monkeypatch.setitem(sys.modules, "nousergon_lib.stage_coverage", fake_module)
+    monkeypatch.setitem(sys.modules, "krepis.stage_coverage", fake_module)
     yield mock_assert

@@ -166,14 +166,14 @@ def handler(event, context):
     if submit_iso:
         try:
             _run_date_for_coverage = submit_iso[:10]
-            from nousergon_lib.stage_coverage import assert_stage_coverage
+            from krepis.stage_coverage import assert_stage_coverage
 
             result["stage_coverage"] = assert_stage_coverage(
                 "EvalJudgePoll", run_date=_run_date_for_coverage,
                 window_start=_started,
             )
         except ImportError as exc:
-            # Loud, not silent: the lib pin predates the module. Observe
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe
             # mode — the handler's own outcome is unchanged (config-I7214).
             logger.error("stage-coverage assertion unavailable: %s", exc)
     else:
