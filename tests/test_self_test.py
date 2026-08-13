@@ -175,7 +175,13 @@ def test_known_gap_cases_say_so_in_words(body):
     """A pinned-wrong case must never read as an endorsement. The artifact has to
     carry that in words, not leave a reader to infer it from a green row."""
     gaps = [c for c in body["cases"] if c.get("known_gap")]
-    assert len(gaps) == body["n_known_gaps"] >= 3
+    # config-I7272: two of the four regime/attractiveness-trajectory known
+    # gaps (trajectory_zmap_zero_variance_degenerate,
+    # trajectory_zmap_single_observation_degenerate) were FIXED — _zmap now
+    # reports undefined honestly. attractiveness_zero_variance_degenerate
+    # (nousergon_lib, a different repo) and
+    # undefined_representation_divergence_convention remain pinned.
+    assert len(gaps) == body["n_known_gaps"] >= 2
     for case in gaps:
         assert case["gap_issue"].startswith("alpha-engine-config-I")
         assert "NOT" in case["known_gap_note"]
@@ -183,14 +189,18 @@ def test_known_gap_cases_say_so_in_words(body):
 
 
 def test_the_undefined_representation_finding_is_pinned_at_measured(body):
-    """alpha-engine-config-I7272. Three degenerate sites, only ONE reports an
-    undefined value honestly. Pinned at 1.0 so the day the other two are aligned,
-    THIS case fails and must be updated in the same change — the fix cannot land
-    silently, which is the whole point of pinning rather than fixing."""
+    """alpha-engine-config-I7272. Three degenerate sites; this repo's own
+    attractiveness_trajectory._zmap was FIXED to report undefined honestly,
+    moving the count from 1 to 2 of 3. The remaining site
+    (nousergon_lib.quant.attractiveness._zscore) lives in a different repo
+    and is out of scope for this change — still pinned. Pinned at 2.0 so the
+    day that third site is aligned too, THIS case fails and must be updated
+    in the same change — the fix cannot land silently, which is the whole
+    point of pinning rather than fixing."""
     case = next(c for c in body["cases"]
                 if c["case"] == "undefined_representation_divergence_convention")
-    assert case["expected"] == 1.0
-    assert case["actual"] == 1.0
+    assert case["expected"] == 2.0
+    assert case["actual"] == 2.0
     assert case["inputs"]["total_sites"] == 3
     assert case["known_gap"] is True
 

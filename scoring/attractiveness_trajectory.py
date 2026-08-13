@@ -59,16 +59,26 @@ CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", "https://dashboard.nouserg
 
 # ── pure numeric helpers ─────────────────────────────────────────────────────
 
-def _zmap(d: dict[str, float | None]) -> dict[str, float]:
-    """Cross-sectional z-score of the non-null values (std==0 / <2 → all 0)."""
+def _zmap(d: dict[str, float | None]) -> dict[str, float | None]:
+    """Cross-sectional z-score of the non-null values.
+
+    Returns ``None`` for a ticker whose own value is missing (unchanged),
+    AND for EVERY ticker when the cross-section has fewer than 2
+    observations or zero variance. Those two cases are UNDEFINED, not a
+    measured 0.0 (config-I7272): 0.0 is exactly the value a genuinely
+    at-the-mean ticker produces, so "nothing to compare against" and "a
+    real observation" were indistinguishable downstream. The caller
+    excludes ``None`` from any blend/rank rather than voting a
+    fabricated 0.
+    """
     vals = [v for v in d.values() if v is not None]
     if len(vals) < 2:
-        return dict.fromkeys(d, 0.0)
+        return dict.fromkeys(d, None)
     m = sum(vals) / len(vals)
     sd = (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
     if sd == 0:
-        return dict.fromkeys(d, 0.0)
-    return {t: (0.0 if v is None else (v - m) / sd) for t, v in d.items()}
+        return dict.fromkeys(d, None)
+    return {t: (None if v is None else (v - m) / sd) for t, v in d.items()}
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float | None:
@@ -145,14 +155,25 @@ def build_trajectory(
         r["price_ret"] = None if pr is None else round(float(pr), 5)
         r["sector_rel_price_ret"] = None if (pr is None or er is None) else round(float(pr - er), 5)
 
+    # config-I7272: slope_z / relpr_z entries are None when the cross-
+    # section had <2 observations or zero variance (undefined, not a
+    # measured 0.0) — propagate that honestly rather than rounding a
+    # fabricated float.
     slope_z = _zmap({t: r["attr_slope"] for t, r in rows.items()})
     relpr_z = _zmap({t: r.get("sector_rel_price_ret") for t, r in rows.items()})
     for t, r in rows.items():
-        r["attr_slope_z"] = round(slope_z[t], 4)
-        r["price_mom_z"] = round(relpr_z[t], 4)
+        r["attr_slope_z"] = None if slope_z[t] is None else round(slope_z[t], 4)
+        r["price_mom_z"] = None if relpr_z[t] is None else round(relpr_z[t], 4)
 
-    # orthogonalize: residual of slope_z ~ price_mom_z (only over names with price)
-    priced = [t for t in rows if rows[t].get("sector_rel_price_ret") is not None]
+    # orthogonalize: residual of slope_z ~ price_mom_z (only over names with
+    # price AND a defined z on both legs — a name whose z is undefined
+    # cannot be regressed).
+    priced = [
+        t for t in rows
+        if rows[t].get("sector_rel_price_ret") is not None
+        and relpr_z.get(t) is not None
+        and slope_z.get(t) is not None
+    ]
     if len(priced) >= 3:
         X = np.array([relpr_z[t] for t in priced])
         Y = np.array([slope_z[t] for t in priced])
@@ -160,25 +181,41 @@ def build_trajectory(
         resid = {t: float(slope_z[t] - (beta * relpr_z[t] + alpha)) for t in priced}
         beta_used = round(float(beta), 4)
     else:
-        # no usable price cross-section → residual degrades to the raw slope_z
-        resid = {t: slope_z[t] for t in rows}
+        # no usable price cross-section → residual degrades to the raw
+        # slope_z, EXCLUDING names whose slope_z is itself undefined
+        # (dropped, not fabricated).
+        resid = {t: slope_z[t] for t in rows if slope_z.get(t) is not None}
         beta_used = None
     for t, r in rows.items():
-        r["pre_repricing_score"] = round(resid.get(t, slope_z[t]), 4)
+        val = resid.get(t, slope_z.get(t))
+        r["pre_repricing_score"] = None if val is None else round(val, 4)
 
-    cut = _percentile(sorted(r["pre_repricing_score"] for r in rows.values()), pre_repricing_pct)
+    _scored = [r["pre_repricing_score"] for r in rows.values() if r["pre_repricing_score"] is not None]
+    cut = _percentile(sorted(_scored), pre_repricing_pct)
     for r in rows.values():
         r["rising"] = bool(r["attr_slope"] > 0 and r["slope_significant"])
-        r["pre_repricing"] = bool(r["rising"] and cut is not None and r["pre_repricing_score"] >= cut)
+        r["pre_repricing"] = bool(
+            r["rising"] and cut is not None
+            and r["pre_repricing_score"] is not None
+            and r["pre_repricing_score"] >= cut
+        )
 
-    for i, t in enumerate(sorted([t for t in rows if rows[t]["rising"]],
-                                 key=lambda t: -rows[t]["attr_slope_z"])):
+    _rankable_rising = [
+        t for t in rows if rows[t]["rising"] and rows[t]["attr_slope_z"] is not None
+    ]
+    for i, t in enumerate(sorted(_rankable_rising, key=lambda t: -rows[t]["attr_slope_z"])):
         rows[t]["rising_rank"] = i + 1
-    for i, t in enumerate(sorted(rows, key=lambda t: -rows[t]["pre_repricing_score"])):
+    _rankable_scored = [t for t in rows if rows[t]["pre_repricing_score"] is not None]
+    for i, t in enumerate(sorted(_rankable_scored, key=lambda t: -rows[t]["pre_repricing_score"])):
         rows[t]["pre_repricing_rank"] = i + 1
 
     stocks = [{"ticker": t, "rising_rank": None, "pre_repricing_rank": None, **r} for t, r in rows.items()]
-    stocks.sort(key=lambda s: -s["pre_repricing_score"])
+    # None-safe sort: undefined pre_repricing_score sorts last rather than
+    # crashing the comparison (config-I7272).
+    stocks.sort(key=lambda s: (
+        s["pre_repricing_score"] is None,
+        -s["pre_repricing_score"] if s["pre_repricing_score"] is not None else 0.0,
+    ))
 
     return {
         "schema_version": TRAJECTORY_SCHEMA_VERSION,
