@@ -40,9 +40,9 @@ class TestTheHelperExists:
 
     def test_it_sets_both_variables_with_the_exact_literals(self, deploy):
         body = deploy.split("_apply_cost_sink_env() {", 1)[1].split("\n}", 1)[0]
-        assert f'--set KREPIS_COST_SINK_PREFIX={_PREFIX}' in body
+        assert f"--set KREPIS_COST_SINK_PREFIX={_PREFIX}" in body
         assert "--set KREPIS_COST_SINK_BUCKET=\"$BUCKET\"" in body
-        assert re.search(r'^BUCKET="%s"$' % re.escape(_BUCKET), deploy, re.M)
+        assert re.search(rf'^BUCKET="{re.escape(_BUCKET)}"$', deploy, re.M)
 
     def test_it_merges_rather_than_replaces(self, deploy):
         """`update-function-configuration --environment` REPLACES the whole

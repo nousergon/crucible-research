@@ -19,7 +19,6 @@ from scripts.cost_coverage import (
     stages_entered,
 )
 
-
 DECL = {
     "execution_arn": "arn:aws:states:us-east-1:1:execution:ne-weekly-freshness-pipeline:e1",
     "required_producers": {
