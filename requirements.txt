@@ -228,7 +228,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
 # An older krepis raises TypeError on the kwarg rather than degrading, so the
 # floor is load-bearing rather than advisory.
-krepis>=0.43.0
+#
+# 0.51.0 floor (krepis-PR133, alpha-engine-config-I7009): `krepis.ec2_spot
+# relaunch-decision` gained `--json`, putting the verdict on a JSON field
+# instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
+# that field; an older krepis has no `--json` flag at all.
+krepis>=0.51.0
 
 # Scheduling / calendar
 exchange-calendars~=4.13
