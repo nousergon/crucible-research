@@ -171,3 +171,122 @@ class TestHandler:
             )
 
         assert captured["bucket"] == "test-bucket"
+
+
+_COVERAGE_DECL = {
+    "execution_arn": "arn:aws:states:us-east-1:1:execution:ne-weekly-freshness-pipeline:e1",
+    "required_producers": {"ReplayConcordance": ["replay-concordance"]},
+    "conditional_producers": {},
+    "allowed_producers": ["thinktank-*"],
+}
+
+
+class TestFanInCoverage:
+    """alpha-engine-config-I7179 — the check must reach the Step Function's
+    Catch, which fires on a RAISED error. Nothing downstream reads this
+    state's returned status, so a returned ERROR here is silence."""
+
+    def test_a_silent_stage_raises_rather_than_returning_error(self, handler_mod):
+        """It must RAISE. The SF has no Choice on this state's status; its
+        only failure path is the States.ALL Catch that routes to
+        MarkAggregateCostsDegraded."""
+        from scripts.cost_coverage import CostCoverageError
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day",
+                   return_value=_ok_summary()), \
+             patch("scripts.aggregate_costs._list_jsonl_keys",
+                   return_value=["p/d/r/thinktank-sweep.0.jsonl"]), \
+             patch("scripts.cost_coverage.stages_entered",
+                   return_value={"ReplayConcordance"}), \
+             patch("boto3.client", return_value=MagicMock()):
+            with pytest.raises(CostCoverageError, match="replay-concordance"):
+                handler_mod.handler(
+                    {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
+                    context=None,
+                )
+
+    def test_an_empty_partition_is_not_a_free_pass(self, handler_mod):
+        """The branch that mattered most. An EMPTY partition on a day the
+        pipeline's LLM stages ran is the I7179 defect in its purest form,
+        and it used to return SKIPPED with the state succeeding."""
+        from scripts.cost_coverage import CostCoverageError
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day", return_value=None), \
+             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
+             patch("scripts.cost_coverage.stages_entered",
+                   return_value={"ReplayConcordance"}), \
+             patch("boto3.client", return_value=MagicMock()):
+            with pytest.raises(CostCoverageError):
+                handler_mod.handler(
+                    {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
+                    context=None,
+                )
+
+    def test_an_empty_partition_on_a_day_nothing_ran_is_still_skipped(
+        self, handler_mod
+    ):
+        """The other half of the same branch: a quiet week is legitimate,
+        and the declaration plus the execution history is what tells the
+        two apart."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day", return_value=None), \
+             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
+             patch("scripts.cost_coverage.stages_entered",
+                   return_value={"CheckSkipReplayConcordance"}), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
+                context=None,
+            )
+        assert result["status"] == "SKIPPED"
+
+    def test_full_coverage_lands_the_verdict_on_the_summary(self, handler_mod):
+        """The verdict is data, not just an exception message — an
+        exception message is not a surface and cannot be trended."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day",
+                   return_value=_ok_summary()), \
+             patch("scripts.aggregate_costs._list_jsonl_keys",
+                   return_value=["p/d/r/replay-concordance.0.jsonl",
+                                 "p/d/r/thinktank-sweep.0.jsonl"]), \
+             patch("scripts.cost_coverage.stages_entered",
+                   return_value={"ReplayConcordance"}), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
+                context=None,
+            )
+        assert result["status"] == "OK"
+        assert result["summary"]["coverage"]["covered"] == ["replay-concordance"]
+        assert result["summary"]["coverage"]["missing"] == []
+
+    def test_being_unable_to_measure_is_not_a_pass(self, handler_mod):
+        """principles.md §2.7 — no data is never rendered as green. And it
+        is a DIFFERENT exception from a breach, so a harness fault is never
+        reported as a domain finding."""
+        from scripts.cost_coverage import CostCoverageUnmeasured
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day",
+                   return_value=_ok_summary()), \
+             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
+             patch("boto3.client", return_value=MagicMock()):
+            with pytest.raises(CostCoverageUnmeasured):
+                handler_mod.handler(
+                    {"date": "2026-05-25",
+                     "coverage": {**_COVERAGE_DECL, "execution_arn": ""}},
+                    context=None,
+                )
+
+    def test_no_declaration_means_no_check_not_a_failure(self, handler_mod):
+        """The handler is also reachable from the deploy canary and from
+        the CLI, neither of which is a pipeline run."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs.aggregate_day",
+                   return_value=_ok_summary()), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler({"date": "2026-05-25"}, context=None)
+        assert result["status"] == "OK"
+        assert "coverage" not in result["summary"]

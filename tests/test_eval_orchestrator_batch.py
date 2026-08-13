@@ -873,3 +873,110 @@ class TestBatchChainIntegration:
         # client-side skip marker (counted in skipped_empty_input).
         assert summary["haiku_evaluated"] == 3
         assert summary["skipped_empty_input"] == 1
+
+
+class TestBatchCostEmission:
+    """The Anthropic Batches carve-out is the ONE call site that emits its
+    own cost record, and it emits it because `model-router-policy` §4 says
+    the Batches API has no router path — so there is no shared client to
+    emit at. Everything else in the weekly pipeline emits from the
+    environment via krepis>=0.57.0 (alpha-engine-config-I7179).
+    """
+
+    def _message(self, *, input_tokens=1000, output_tokens=200):
+        msg = MagicMock(spec=["content", "usage", "model"])
+        msg.model = "claude-haiku-4-5"
+        msg.content = []
+        usage = MagicMock(
+            spec=[
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+        )
+        usage.input_tokens = input_tokens
+        usage.output_tokens = output_tokens
+        usage.cache_read_input_tokens = 0
+        usage.cache_creation_input_tokens = 0
+        msg.usage = usage
+        return msg
+
+    def test_no_declared_destination_means_no_emission(self, monkeypatch):
+        """Under test nothing declares a destination, so nothing is
+        buffered and a unit run cannot write fake rows into the production
+        partition — which a unit run has already done once, 2026-05-13,
+        ~$1014 of fake-agent rows, dashboard trend inflated 700x."""
+        from evals.orchestrator import _emit_batch_cost_record
+
+        monkeypatch.setattr("evals.orchestrator._resolve_cost_sink", lambda: None)
+        # Must not raise, must not construct a sink.
+        _emit_batch_cost_record(self._message(), entry={"agent_id": "a"})
+
+    def test_record_carries_the_registered_callsite_id(self, monkeypatch):
+        from evals.orchestrator import _emit_batch_cost_record
+
+        captured: list = []
+        monkeypatch.setattr(
+            "evals.orchestrator._resolve_cost_sink", lambda: captured.append
+        )
+        _emit_batch_cost_record(
+            self._message(),
+            entry={"agent_id": "sector_team_tech", "run_id": "r1",
+                   "judge_model": "haiku"},
+        )
+        assert len(captured) == 1, "the batch message was billed and not recorded"
+        record = captured[0]
+        # The row `alpha-engine-config` already owns for this spend.
+        # Inventing a new string would attribute it to nothing, which is
+        # the defect this emitter closes.
+        assert record["callsite_id"] == "evaljudge-batch"
+        assert record["agent_id"] == "sector_team_tech"
+        assert record["run_id"] == "r1"
+        assert record["billing_mode"] == "anthropic_batch"
+
+    def test_batch_discount_halves_dollars_and_leaves_tokens_alone(
+        self, monkeypatch
+    ):
+        """observability-policy §3.2: tokens are the persisted quantity,
+        dollars are derived. Discounting the tokens would corrupt every
+        future reprice; not discounting the dollars would overstate batch
+        spend by 2x, because the price card is the standard rate and the
+        Batches API bills at half of it."""
+        from evals.orchestrator import _BATCH_PRICE_MULTIPLIER, _emit_batch_cost_record
+
+        captured: list = []
+        monkeypatch.setattr(
+            "evals.orchestrator._resolve_cost_sink", lambda: captured.append
+        )
+        _emit_batch_cost_record(self._message(), entry={"agent_id": "a"})
+        record = captured[0]
+        assert record["input_tokens"] == 1000
+        assert record["output_tokens"] == 200
+        assert _BATCH_PRICE_MULTIPLIER == 0.5
+        assert record["cost_source"].endswith("_batch50")
+
+    def test_emission_never_raises(self, monkeypatch):
+        """It runs after the message is decoded and before it is persisted;
+        raising would convert a telemetry fault into a lost eval."""
+        from evals.orchestrator import _emit_batch_cost_record
+
+        def _boom():
+            raise RuntimeError("sink exploded")
+
+        monkeypatch.setattr("evals.orchestrator._resolve_cost_sink", _boom)
+        _emit_batch_cost_record(self._message(), entry={"agent_id": "a"})
+
+    def test_a_message_that_fails_to_parse_is_still_billed(self):
+        """Emitted BEFORE the parse. Anthropic billed the message the
+        moment it succeeded; emitting afterwards would drop the cost of
+        exactly the messages that go to the sync retry queue — the ones
+        paid for twice."""
+        import inspect
+
+        from evals import orchestrator
+
+        src = inspect.getsource(orchestrator.process_batch_results)
+        emit_at = src.index("_emit_batch_cost_record(message_payload")
+        parse_at = src.index("parse_batch_message(message_payload)")
+        assert emit_at < parse_at

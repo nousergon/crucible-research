@@ -974,6 +974,104 @@ def poll_batch(
     }
 
 
+#: Anthropic's Message Batches API bills every batched message at half the
+#: standard rate. `krepis.cost.record_llm_call` prices from the standard rate
+#: card, which is correct for every OTHER call site in the fleet, so the
+#: halving is applied here rather than in the shared library — a batch
+#: discount is a property of this API, not of pricing.
+_BATCH_PRICE_MULTIPLIER = 0.5
+
+#: The call site this spend belongs to, matching the `evaljudge-batch` row in
+#: `alpha-engine-config/private-docs/LLM_CALLSITE_REGISTRY.yaml`. Inventing a
+#: new string here would attribute the spend to nothing, which is the defect
+#: this emitter exists to close.
+_BATCH_CALLSITE_ID = "evaljudge-batch"
+
+
+def _resolve_cost_sink():
+    """The environment-declared cost sink, or ``None``.
+
+    A one-line seam over ``krepis.cost_sink.default_sink_from_env`` so this
+    module's tests do not have to reach into the library to patch it, and
+    so the sink stays THE SAME object every routed call site in this
+    process already uses rather than a second one constructed here.
+    """
+    from krepis.cost_sink import default_sink_from_env
+
+    return default_sink_from_env()
+
+
+def _emit_batch_cost_record(message_payload: Any, *, entry: dict) -> None:
+    """Record one batched judge message's tokens and cost.
+
+    **Why this call site emits its own record when no other one does.**
+    `model-router-policy` §4 carves the Anthropic Batches API out of the
+    router: it has no router path, so there is no shared client to emit
+    at, and the rule that cost records are written once at the router
+    client cannot reach it. Everything else in the weekly pipeline goes
+    through `krepis.llm.LLMClient`, which emits from the environment as of
+    krepis 0.57.0. This is the one exception, and it is the exception
+    *because* the carve-out exists — not because a stage-by-stage retrofit
+    was the design (alpha-engine-config-I7179).
+
+    Emission is best-effort by the same trade
+    `LLMClient._emit_cost_record` makes, and for the same reason:
+
+    (a) Failure mode swallowed: cost-record construction or the sink write
+        failed — an unpriced model card, an S3 error, an SDK shape change.
+    (b) The primary deliverable survives because this runs after the batch
+        message has already been decoded and is about to be persisted.
+        Raising here would convert a telemetry fault into a lost eval.
+    (c) Recording surface, three layers: this ERROR log; the coverage
+        check in `scripts/aggregate_costs.py`, which fails when
+        `evaljudge-batch` is absent from `_cost_raw/{date}/` on a day
+        EvalJudgeProcess ran; and the ARTIFACT_REGISTRY freshness row on
+        the prefix itself. The middle layer is the one this issue added,
+        and it is the one that catches SUSTAINED loss when logs go unread.
+    """
+    try:
+        from krepis.cost import record_llm_call
+
+        # The SAME environment-resolved sink every routed call site uses, not
+        # a second one constructed here. Two consequences, both wanted: in
+        # the Lambda it writes to exactly the prefix `deploy.sh` declared,
+        # and under test — where no destination is declared — it is None and
+        # nothing is buffered, so a unit run cannot write fake rows into the
+        # production partition. That has happened: 2026-05-13, ~$1014 of
+        # fake-agent rows, dashboard trend inflated 700x.
+        sink = _resolve_cost_sink()
+        if sink is None:
+            return
+
+        record = record_llm_call(
+            message_payload,
+            provider="anthropic",
+            extra_fields={
+                "callsite_id": _BATCH_CALLSITE_ID,
+                "run_id": entry.get("run_id"),
+                "agent_id": entry.get("agent_id"),
+                "judge_model": entry.get("judge_model"),
+                "billing_mode": "anthropic_batch",
+            },
+        )
+        # Tokens stay verbatim; only the derived dollars are discounted, so a
+        # later reprice against a corrected card still starts from the real
+        # token counts (observability-policy §3.2: tokens are the persisted
+        # quantity, dollars are derived).
+        if isinstance(record.get("cost_usd"), (int, float)):
+            record["cost_usd"] = record["cost_usd"] * _BATCH_PRICE_MULTIPLIER
+            record["cost_source"] = f"{record.get('cost_source')}_batch50"
+        sink(record)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[batch_process] cost emission failed for callsite_id=%s "
+            "agent_id=%s: %s",
+            _BATCH_CALLSITE_ID,
+            entry.get("agent_id"),
+            exc,
+        )
+
+
 def process_batch_results(
     *,
     batch_id: str,
@@ -1190,6 +1288,14 @@ def process_batch_results(
                     if isinstance(result_payload, dict)
                     else result_payload.message
                 )
+                # Emitted BEFORE the parse, deliberately, and inside this
+                # try because it never raises (see its own docstring).
+                # Anthropic billed this message the moment it succeeded;
+                # whether we can decode the answer is our problem, not the
+                # invoice's. Emitting after the parse would drop the cost of
+                # exactly the messages that go to the sync retry queue — the
+                # expensive ones, since those are the ones paid for twice.
+                _emit_batch_cost_record(message_payload, entry=entry)
                 llm_output = parse_batch_message(message_payload)
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
