@@ -21,7 +21,7 @@ langchain-anthropic~=1.5
 # langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
 # 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
 # current path.
-langchain-openai~=1.4
+langchain-openai~=1.5
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
