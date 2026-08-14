@@ -88,15 +88,19 @@ skip ``None`` rather than treat it as a fabricated 0.0. See config-I7272.
 
 One case remains a pinned, NOT-corrected known gap:
 ``attractiveness_zero_variance_degenerate`` pins
-``nousergon_lib.quant.attractiveness._zscore``, which lives in a DIFFERENT
-repo — out of scope for this change. Changing it moves every historical
-attractiveness score and every gate keyed to one across the whole fleet,
-which is Brian's decision, not a patch — the binding precedent is `I7236`,
-pinned and filed rather than silently "fixed". Its PASS means "still behaves
-as recorded", never "this is correct", and the artifact says so in words so no
-reader has to infer it from a green row. ``undefined_representation_divergence_
-convention`` remains ``known_gap`` too — it counts the remaining
-nousergon_lib gap and pins the new 2-of-3 state.
+``nousergon_lib.quant.attractiveness._zscore``. Brian ruled on 2026-08-13 to
+fix it, and it IS fixed at source — that was the last of the three sites, and
+it lives in a DIFFERENT repo (nousergon-lib). What remains pinned here is not
+the defect but the **pin**: this repo installs ``nousergon-lib@v0.124.3``,
+which predates the fix, so the fabricated ``0.0`` is still what THIS image
+computes. A library fix reaches a consumer only when its pin moves, and until
+then a green row upstream is not a green row here — which is exactly the
+distinction these two cases exist to keep visible. Their PASS means "still
+behaves as INSTALLED", never "this is correct", and the artifact says so in
+words so no reader has to infer it from a green row.
+``undefined_representation_divergence_convention`` remains ``known_gap`` too —
+it now counts the pin gap and pins the as-installed 2-of-3 state. Both move in
+the pin-bump change, together, or that change is not done.
 
 CONTRACT
 --------
@@ -891,22 +895,30 @@ def build_cases() -> list[Case]:
                 "CONVENTION / CROSS-IMPLEMENTATION (alpha-engine-config-I7272). "
                 "Counts how many of the three degenerate-input sites report an "
                 "undefined value as UNDEFINED rather than as a measured-looking "
-                "0.0. Measured 2026-08-13: 1 of 3 (leaderboard_scoring._pearson "
-                "-> None; attractiveness._zscore -> 0.0; "
-                "attractiveness_trajectory._zmap -> 0.0). "
-                "config-I7272 (this change): attractiveness_trajectory._zmap "
-                "FIXED in crucible-research -> None, moving the count to 2 of 3. "
-                "attractiveness._zscore lives in nousergon_lib — OUT OF SCOPE for "
-                "this change (a different repo/PR); it remains PINNED at its "
-                "MEASURED 0.0. Expected 2.0 pins the new measured state. The day "
-                "nousergon_lib is aligned too this case must be updated to 3.0 IN "
-                "THE SAME CHANGE — which is the point: the fix cannot land "
-                "silently"
+                "0.0. All THREE are now fixed AT SOURCE: "
+                "leaderboard_scoring._pearson (already honest), "
+                "attractiveness_trajectory._zmap (crucible-research#628), and "
+                "nousergon_lib.quant.attractiveness._zscore "
+                "(nousergon-lib#<lib-pr>, the last of the three). "
+                "WHAT THIS CASE NOW GUARDS IS THE PIN, NOT THE SOURCE. It probes "
+                "the INSTALLED nousergon_lib, and this repo still pins "
+                "nousergon-lib@v0.124.3 — which predates the fix — so the "
+                "measured count is 2 of 3 HERE even though 3 of 3 is true "
+                "upstream. That divergence IS the remaining gap: a library fix "
+                "does not reach a consumer until its pin moves, and until then "
+                "this repo still computes attractiveness with a fabricated 0.0. "
+                "Expected 2.0 pins the measured, as-installed state. The pin-bump "
+                "change must move this to 3.0 IN THE SAME CHANGE — which is the "
+                "point: neither the fix nor the pin can land silently, and if the "
+                "bump does not actually deliver the fix, THIS case goes red "
+                "instead of the number quietly staying wrong"
             ),
             inputs={"sites": ["leaderboard_scoring._pearson",
                               "attractiveness._zscore",
                               "attractiveness_trajectory._zmap"],
                     "measured_safe_count": 2, "total_sites": 3,
+                    "sites_fixed_at_source": 3,
+                    "blocked_on": "nousergon-lib pin bump (currently v0.124.3)",
                     "units": "count of sites reporting undefined honestly"},
             expected=2.0,
             compute=_undefined_representation_count,
