@@ -540,3 +540,94 @@ def test_scanner_tickers_none_skips_the_check():
     are unaffected; the check is opt-in via passing the list."""
     board = _build(scanner_tickers=None)  # explicit default; must not raise
     assert board["universe_count"] == 3
+
+
+# ── config-I7272: the excluded count is PUBLISHED, even at zero ──────────────
+
+
+def test_attractiveness_coverage_is_published_on_every_board():
+    """An exclusion nobody can see is the same failure as the fabricated 0.0 it
+    replaced (principles.md 2.7). The coverage block is emitted on EVERY board,
+    with its count stated against a denominator and its members named.
+
+    XYZ carries no factor data at all in this fixture, so it is genuinely
+    unscorable — the board excludes it from the ranking and SAYS so, rather than
+    handing it a fabricated score that would rank it against AAPL and LIN."""
+    board = _build()
+    coverage = board["attractiveness_coverage"]
+
+    assert coverage["n_excluded_undefined"] == 1
+    assert coverage["excluded_tickers"] == ["XYZ"]
+    assert coverage["excluded_truncated"] is False
+    # The count is stated against a denominator — a bare number with no total is
+    # not readable as coverage.
+    assert coverage["n_tickers"] == board["universe_count"] == 3
+    assert coverage["n_scored"] == 2
+    # It agrees with the rows it describes; the count can never drift from them.
+    unscored = [s["ticker"] for s in board["stocks"] if s["attractiveness_score"] is None]
+    assert unscored == coverage["excluded_tickers"]
+
+
+def test_attractiveness_coverage_publishes_an_explicit_zero():
+    """The zero case is the one that matters: a healthy run must publish an
+    explicit 0 rather than staying silent, or a reader cannot tell "no
+    exclusions" from "nobody looked" (observability-policy.md — no data is
+    never rendered as green)."""
+    from scoring.universe_board import _attractiveness_coverage
+
+    coverage = _attractiveness_coverage(
+        [{"ticker": t, "attractiveness_score": 50.0} for t in ("AAA", "BBB")]
+    )
+    assert coverage["n_excluded_undefined"] == 0
+    assert coverage["excluded_tickers"] == []
+    assert coverage["excluded_truncated"] is False
+    assert coverage["n_tickers"] == coverage["n_scored"] == 2
+
+
+def test_attractiveness_coverage_names_the_excluded_members():
+    """A number published without its members is unactionable — when the count
+    moves, the reader must be able to ask WHICH names, not just how many."""
+    from scoring.universe_board import _attractiveness_coverage
+
+    stocks = [
+        {"ticker": "AAA", "attractiveness_score": 90.0},
+        {"ticker": "BBB", "attractiveness_score": None},
+        {"ticker": "CCC", "attractiveness_score": None},
+    ]
+    coverage = _attractiveness_coverage(stocks)
+    assert coverage["n_excluded_undefined"] == 2
+    assert coverage["excluded_tickers"] == ["BBB", "CCC"]
+    assert coverage["n_scored"] == 1
+    assert coverage["excluded_truncated"] is False
+
+
+def test_attractiveness_coverage_count_is_never_capped_only_the_member_list():
+    """Truncation is marked IN-BAND and never touches the count — a capped list
+    read as the total would understate the exclusion by design."""
+    from scoring.universe_board import _COVERAGE_MEMBER_CAP, _attractiveness_coverage
+
+    n = _COVERAGE_MEMBER_CAP + 7
+    stocks = [{"ticker": f"T{i:03d}", "attractiveness_score": None} for i in range(n)]
+    coverage = _attractiveness_coverage(stocks)
+    assert coverage["n_excluded_undefined"] == n  # uncapped, the true count
+    assert len(coverage["excluded_tickers"]) == _COVERAGE_MEMBER_CAP
+    assert coverage["excluded_truncated"] is True
+    assert coverage["n_scored"] == 0
+
+
+def test_an_unscored_name_never_takes_a_rank_position():
+    """EXCLUDED, not ranked last. The board keeps unscored names in the artifact
+    for visibility, but they must carry a null score — never a fabricated 0.0
+    that would compete against measured names in the ranking."""
+    board = _build()
+    for stock in board["stocks"]:
+        score = stock["attractiveness_score"]
+        assert score is None or score > 0.0
+    # Scored names lead the artifact; any unscored tail sorts after them.
+    scores = [s["attractiveness_score"] for s in board["stocks"]]
+    seen_none = False
+    for score in scores:
+        if score is None:
+            seen_none = True
+        else:
+            assert not seen_none, "a scored name must never follow an unscored one"
