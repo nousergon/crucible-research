@@ -88,9 +88,16 @@ SUBNETS="${SUBNETS:-subnet-a61ec0fb,subnet-1e58307a,subnet-789d3857,subnet-c6701
 # Saturday-launcher profile; confirm it grants Research SSM-secret reads +
 # s3://alpha-engine-research read/write, and is passable by the dashboard role.
 IAM_PROFILE="${IAM_PROFILE:-alpha-engine-executor-profile}"
-# Lib CLI path: ae-dashboard is the SSM dispatcher box for all Saturday-SF
-# spot states; its .venv carries nousergon_lib/krepis. Bare python3 does NOT.
-LIB_PYTHON="${LIB_PYTHON:-/home/ec2-user/alpha-engine-dashboard/.venv/bin/python}"
+# Lib CLI path: every spot launcher on the dispatcher box resolves its
+# interpreter through the ops-owned guard /opt/nousergon/bin/lib-python
+# (nous-ergon-ops: alpha-engine-dashboard/live/infrastructure/bin/lib-python).
+# That guard execs the box's DECLARED krepis venv and aborts with EX_CONFIG
+# (78), naming the version it found, when the venv is absent or below the
+# launcher floor. It never falls back to a co-tenant checkout — the silent
+# fallback is exactly the defect alpha-engine-config-I6931/I7343 removes.
+# Do NOT add a guard block here: the contract lives ONCE, in the repo that
+# owns this box's provisioning (nine copies across five repos is I6922).
+LIB_PYTHON="${LIB_PYTHON:-/opt/nousergon/bin/lib-python}"
 
 # ── Parse flags ──────────────────────────────────────────────────────────────
 ORIG_ARGS=("$@")
