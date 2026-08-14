@@ -233,7 +233,7 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # relaunch-decision` gained `--json`, putting the verdict on a JSON field
 # instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
 # that field; an older krepis has no `--json` flag at all.
-krepis>=0.51.0
+krepis>=0.59.2
 
 # Scheduling / calendar
 exchange-calendars~=4.13
