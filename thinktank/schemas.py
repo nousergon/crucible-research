@@ -433,6 +433,27 @@ class RunManifest(_Artifact):
     )
     ratings_rows: int = 0
     challenger_selection_written: bool = False
+    # ── Challenger-selection POINTER lag (alpha-engine-config-I7232) ─────────
+    # `challenger_selection/latest.json` is deliberately withheld on the abort
+    # path (see `_terminal_writes`) — the dated key still lands, so the
+    # directory keeps advancing daily while the pointer freezes, and to every
+    # consumer that resolves the arm through the pointer a frozen pointer is
+    # indistinguishable from a healthy one. Measured 2026-08-13: the pointer
+    # was byte-identical to the 08-10 object while 08-11 and 08-12 were written
+    # beside it.
+    #
+    # These two fields make the pointer's staleness a NUMBER published by the
+    # run itself, readable without listing the dated keys next to it, and
+    # published on healthy runs too — where it is 0, because the run just
+    # advanced the pointer. `principles.md` §2.7: a component emitting nothing
+    # is not healthy, it is unobserved, and "no data" is never rendered green.
+    #
+    # `None` on BOTH fields together means the pointer object does not exist at
+    # all — a distinct state from "exists and is N days behind", which is why
+    # the observed trading_day is carried rather than a lone lag integer with
+    # an overloaded sentinel.
+    challenger_selection_pointer_trading_day: str | None = None
+    challenger_selection_pointer_lag_days: int | None = None
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
     total_cost_usd: float = 0.0
     budget_month_spent_usd: float = 0.0

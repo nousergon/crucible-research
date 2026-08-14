@@ -9,7 +9,9 @@ writes nothing, budget breach refuses the run.
 from __future__ import annotations
 
 import json
+import logging
 import re
+from datetime import date
 from types import SimpleNamespace
 
 import boto3
@@ -17,11 +19,22 @@ import pytest
 from moto import mock_aws
 
 from thinktank import LEDGER_KEY
-from thinktank.challenger_selection import CHALLENGER_TOP_N, write_challenger_selection
+from thinktank.challenger_selection import (
+    CHALLENGER_TOP_N,
+    POINTER_LAG_ERROR_DAYS,
+    challenger_pointer_lag,
+    write_challenger_selection,
+)
 from thinktank.client import ThinktankClient
 from thinktank.costs import BudgetExceededError
-from thinktank.run import run_daily
-from thinktank.schemas import CoverageLedger, LedgerEntry, RatingRow, RatingsBoard
+from thinktank.run import _record_pointer_lag, run_daily
+from thinktank.schemas import (
+    CoverageLedger,
+    LedgerEntry,
+    RatingRow,
+    RatingsBoard,
+    RunManifest,
+)
 from thinktank.settings import load_settings
 from thinktank.storage import ThinktankStore
 
@@ -952,3 +965,159 @@ def test_challenger_selection_raises_on_empty_board_with_nonempty_ledger():
                 board_date=None,
                 coverage_gap={"uncovered_count": 1},
             )
+
+
+# ── challenger-selection POINTER lag (alpha-engine-config-I7232) ─────────────
+#
+# `latest.json` is withheld on the abort path by design, and the DATED key is
+# still written. So the directory listing keeps advancing daily while the
+# pointer freezes, and every freshness signal that looks at the directory reads
+# healthy. Measured 2026-08-13: `latest.json` was byte-identical to the 08-10
+# object while 08-11 and 08-12 sat beside it.
+#
+# The fix is not to advance the pointer — withholding it is correct. It is that
+# the run must PUBLISH its pointer's lag as a number, so the staleness is a
+# value in the run's own output rather than a comparison against the dated
+# listing that nothing performs.
+
+
+def test_pointer_lag_is_published_as_zero_on_a_healthy_run(tt_config):
+    """A healthy run advances the pointer, so its lag is 0 — and 0 must be
+    WRITTEN, not implied. `principles.md` §2.7: a component emitting nothing is
+    not healthy, it is unobserved, and "no data" is never rendered green."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        manifest, _store = _run(tt_config, backend, s3)
+
+        assert manifest.challenger_selection_written is True
+        assert manifest.challenger_selection_pointer_lag_days == 0
+        assert (
+            manifest.challenger_selection_pointer_trading_day
+            == manifest.trading_day
+        )
+
+
+def test_an_aborted_run_publishes_the_frozen_pointers_lag(tt_config):
+    """The live I7232 shape, reproduced: a run aborts, the dated key lands, the
+    pointer stays on an older day — and the manifest states by how much.
+
+    Without this the abort is indistinguishable from a healthy run to anything
+    that does not diff the pointer against the newest dated key."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        store = ThinktankStore(BUCKET, s3)
+
+        # A pointer left behind by an earlier, successful run.
+        frozen_day = "2026-06-01"
+        store.put_json(
+            "thinktank/challenger_selection/latest.json",
+            {"trading_day": frozen_day, "selections": []},
+        )
+
+        backend.raise_on_ticker = "T2"
+        with pytest.raises(RuntimeError, match="simulated crash building T2"):
+            _run(tt_config, backend, s3)
+
+        board = store.get_json("thinktank/ratings/latest.json")
+        trading_day = board["trading_day"]
+
+        prefix = f"thinktank/runs/{trading_day}/"
+        keys = [
+            o["Key"]
+            for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])
+        ]
+        assert len(keys) == 1, keys
+        manifest = store.get_json(keys[0])
+        assert manifest["challenger_selection_written"] is False
+
+        # The dated key for THIS run exists — the directory listing, and every
+        # freshness signal reading it, looks healthy.
+        assert store.get_json(
+            f"thinktank/challenger_selection/{trading_day}.json"
+        ) is not None
+        # The pointer was correctly NOT advanced...
+        assert store.get_json(
+            "thinktank/challenger_selection/latest.json"
+        )["trading_day"] == frozen_day
+        # ...and the run published how far behind it now is, in its own output.
+        expected = (
+            date.fromisoformat(trading_day) - date.fromisoformat(frozen_day)
+        ).days
+        assert expected > 0
+        assert manifest["challenger_selection_pointer_trading_day"] == frozen_day
+        assert manifest["challenger_selection_pointer_lag_days"] == expected
+
+
+def test_pointer_lag_reports_absence_distinctly_from_staleness():
+    """No pointer object at all is a STRONGER statement than a stale one, and
+    must not collapse into the same value — hence a carried trading_day rather
+    than a lone integer with an overloaded sentinel."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+        assert challenger_pointer_lag(store, trading_day="2026-07-14") == (None, None)
+
+
+def test_an_unreadable_pointer_raises_rather_than_reporting_no_lag():
+    """The pointer is this arm's only end-to-end health signal. A signal we
+    cannot read is not permission to report nothing — that is the exact shape
+    of a detector that reports green while measuring nothing."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+
+        store.put_json("thinktank/challenger_selection/latest.json", {"run_id": "x"})
+        with pytest.raises(RuntimeError, match="no usable 'trading_day'"):
+            challenger_pointer_lag(store, trading_day="2026-07-14")
+
+        store.put_json("thinktank/challenger_selection/latest.json", ["not", "a", "dict"])
+        with pytest.raises(RuntimeError, match="did not parse to a JSON object"):
+            challenger_pointer_lag(store, trading_day="2026-07-14")
+
+
+def _levels(caplog):
+    """Levels of THIS module's records only — unrelated libraries (botocore
+    credential discovery) emit into the same capture and would otherwise make
+    the assertion depend on which tests ran before it."""
+    return [r.levelname for r in caplog.records if r.name == "thinktank.run"]
+
+
+def test_a_stale_pointer_is_logged_at_ERROR_past_the_threshold(caplog):
+    """The lag crosses to ERROR at POINTER_LAG_ERROR_DAYS, chosen against the
+    LIVE consequence: crucible-executor's thinktank_coverage champion arm
+    refuses to trade a selection older than champion_freshness_max_days (8), so
+    the escalation must land with headroom rather than on the day the arm stops
+    trading."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        store = ThinktankStore(BUCKET, s3)
+        manifest = RunManifest(
+            run_id="r", mode="daily", trading_day="2026-08-13",
+            calendar_date="2026-08-14", started_at="2026-08-14T00:00:00Z",
+        )
+
+        store.put_json(
+            "thinktank/challenger_selection/latest.json",
+            {"trading_day": "2026-08-12"},
+        )
+        with caplog.at_level(logging.WARNING, logger="thinktank.run"):
+            _record_pointer_lag(store, manifest, trading_day="2026-08-13")
+        assert manifest.challenger_selection_pointer_lag_days == 1
+        assert _levels(caplog) == ["WARNING"]
+
+        caplog.clear()
+        store.put_json(
+            "thinktank/challenger_selection/latest.json",
+            {"trading_day": "2026-08-10"},
+        )
+        with caplog.at_level(logging.WARNING, logger="thinktank.run"):
+            _record_pointer_lag(store, manifest, trading_day="2026-08-13")
+        assert manifest.challenger_selection_pointer_lag_days == POINTER_LAG_ERROR_DAYS
+        assert _levels(caplog) == ["ERROR"]
