@@ -54,7 +54,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from krepis.spot_bootstrap import (
     PYTHON,
     SYSTEMCTL_ENABLE_TIMEOUT_SEC,
