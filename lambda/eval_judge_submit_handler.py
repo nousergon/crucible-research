@@ -93,6 +93,9 @@ def _ensure_init() -> None:
 
 @monitor_handler
 def handler(event, context):
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.datetime.now(datetime.UTC)
     _ensure_init()
 
     import anthropic
@@ -123,6 +126,15 @@ def handler(event, context):
         )
         return dry_submit_result(date)
     force_sonnet_pass = bool(event.get("force_sonnet_pass", False))
+    # This one Lambda backs BOTH EvalJudgeSubmitFirstSaturday
+    # (force_sonnet_pass=true) and EvalJudgeSubmitWeekly (false) — the
+    # stage name MUST be derived from the invocation, never hardcoded, or
+    # one stage's assertion is filed under the other's name and a real
+    # miss is attributed to a stage that was working (config-I7214).
+    _stage_name = (
+        "EvalJudgeSubmitFirstSaturday" if force_sonnet_pass
+        else "EvalJudgeSubmitWeekly"
+    )
     haiku_model = event.get("haiku_model", DEFAULT_HAIKU_MODEL)
     sonnet_model = event.get("sonnet_model", DEFAULT_SONNET_MODEL)
     judge_only = bool(event.get("judge_only", False))
@@ -182,7 +194,7 @@ def handler(event, context):
         skip_count, degenerate_skip_count, len(skip_failed),
     )
 
-    return {
+    result = {
         "status": status,
         "batch_id": submit_result["batch_id"],
         "plan_s3_key": submit_result["plan_s3_key"],
@@ -199,3 +211,20 @@ def handler(event, context):
             "judge_only": judge_only,
         },
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope): the assertion lives in the stage's own handler,
+    # immediately before it returns, rather than a separate end-of-run SF
+    # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            _stage_name, run_date=date, window_start=_started,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

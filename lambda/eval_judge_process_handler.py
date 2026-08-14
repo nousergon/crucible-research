@@ -47,6 +47,7 @@ import os
 import sys
 import tempfile
 from datetime import UTC
+from datetime import datetime as _utcnow_cls
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -106,6 +107,9 @@ def _remaining_seconds(context):
 
 @monitor_handler
 def handler(event, context):
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = _utcnow_cls.now(UTC)
     _ensure_init()
 
     import anthropic
@@ -230,7 +234,7 @@ def handler(event, context):
         len(summary["failed"]),
         summary.get("complete", True),
     )
-    return {
+    result = {
         "status": status,
         # Hoisted out of `summary` so a Step Functions Choice can branch on
         # it — sf-pipeline-policy.md §2.3a requires the verdict to reach the
@@ -239,3 +243,33 @@ def handler(event, context):
         "budget_stopped": budget_stopped,
         "summary": summary,
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope). This handler's own event carries no run_date — only
+    # batch_id/plan_s3_key — so the run_date is recovered from
+    # plan_s3_key's own {date} path segment
+    # ("decision_artifacts/_eval_batch_plans/{date}/{batch_id}.json",
+    # written verbatim by eval_judge_submit_handler). OBSERVE MODE ONLY —
+    # never enables enforcement, never raises.
+    try:
+        _plan_key_parts = plan_s3_key.split("/")
+        _run_date_for_coverage = _plan_key_parts[2] if len(_plan_key_parts) > 2 else None
+        if _run_date_for_coverage:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "EvalJudgeProcess", run_date=_run_date_for_coverage,
+                window_start=_started,
+            )
+        else:
+            logger.info(
+                "[eval_judge_process_handler] could not recover run_date "
+                "from plan_s3_key=%r — skipping stage-coverage assertion "
+                "(config-I7214)", plan_s3_key,
+            )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

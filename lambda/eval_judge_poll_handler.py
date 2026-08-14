@@ -76,6 +76,9 @@ _DEFAULT_MAX_WAIT_SECONDS = 21600  # 6h
 
 @monitor_handler
 def handler(event, context):
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.datetime.now(datetime.UTC)
     _ensure_init()
 
     import anthropic
@@ -144,7 +147,7 @@ def handler(event, context):
         exceeded_max_wait,
     )
 
-    return {
+    result = {
         "batch_id": batch_id,
         "processing_status": poll_result["processing_status"],
         "request_counts": poll_result["request_counts"],
@@ -152,3 +155,32 @@ def handler(event, context):
         "elapsed_seconds": elapsed,
         "exceeded_max_wait": exceeded_max_wait,
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope). EvalJudgePoll's own SF Payload carries no run_date
+    # (only batch_id/submit_iso/max_wait_seconds) — the SUBMIT_iso date is
+    # the closest available proxy for the cycle this poll belongs to.
+    # Where even that is unavailable, silence is better than a wrong
+    # attribution (mirrors the ChallengerShadow disambiguation above): skip
+    # the assertion rather than guess today's date.
+    if submit_iso:
+        try:
+            _run_date_for_coverage = submit_iso[:10]
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "EvalJudgePoll", run_date=_run_date_for_coverage,
+                window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe
+            # mode — the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+    else:
+        logger.info(
+            "[eval_judge_poll_handler] no submit_iso on event — skipping "
+            "stage-coverage assertion (no reliable run_date to attribute "
+            "to, config-I7214)",
+        )
+
+    return result

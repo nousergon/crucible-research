@@ -44,6 +44,7 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import UTC, datetime
 
 # Repo root on sys.path so ``from data.scanner_orchestrator import ...``
 # resolves under Lambda's task layout. Mirrors the existing handlers
@@ -93,6 +94,9 @@ def _ensure_init() -> None:
 @monitor_handler
 def handler(event, context):
     """Produce the candidates.json artifact for ``event['run_date']``."""
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.now(UTC)
     _ensure_init()
 
     import boto3
@@ -434,4 +438,21 @@ def handler(event, context):
         "[scanner_handler] METRIC scanner_tickers_count %d",
         summary["scanner_tickers"],
     )
-    return {"status": "OK", "summary": summary, "date": run_date}
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope): the assertion lives in the stage's own handler,
+    # immediately before it returns, rather than a separate end-of-run SF
+    # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    result = {"status": "OK", "summary": summary, "date": run_date}
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            "Scanner", run_date=run_date, window_start=_started,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result
