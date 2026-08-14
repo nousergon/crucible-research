@@ -289,32 +289,54 @@ run_ssm() {
 
 # Each run_ssm step is a fresh SSM shell with a minimal env — export the region
 # + resolve the interpreter per block (AL2023 installs python3.12 with no bare
-# `python` symlink).
+# `python` symlink). STRICT resolution, no fallback: requirements.txt is
+# resolved against 3.12, and a fallback to the AMI's bare python3 silently
+# resolves different wheels (alpha-engine-config-I7372, ported from
+# crucible-predictor#462 / nousergon-data#1296 — removing the fallback from
+# the bootstrap alone was NOT the fix there either; every downstream step
+# reading $PYTHON_BIN had to resolve strictly too).
 read -r -d '' ENV_SOURCE <<'ENV_EOF' || true
 export HOME=/home/ec2-user
 export XDG_CACHE_HOME=/tmp
 export AWS_REGION=us-east-1
 export AWS_DEFAULT_REGION=us-east-1
 export ALPHA_ENGINE_DEPLOYED=1
-command -v python3.12 >/dev/null && PYTHON_BIN=python3.12 || PYTHON_BIN=python3
+command -v python3.12 >/dev/null || { echo "ERROR: python3.12 not found on spot — requirements.txt is resolved against 3.12; refusing to silently fall back to the AMI python3 (alpha-engine-config-I7372)" >&2; exit 1; }
+PYTHON_BIN=python3.12
 export PYTHON_BIN
 ENV_EOF
 
 # ── Bootstrap: watchdog + python + git + clone ───────────────────────────────
-# Spot-side systemd watchdog shuts the box down after MAX_RUNTIME_SECONDS
-# regardless of dispatcher state (orphan backstop — the dispatcher EXIT trap
-# only fires on a clean dispatcher exit). The box runs from a fresh clone +
-# the STAGED private research config surface (see resolved item 2 above).
+# Rendered by krepis.spot_bootstrap (alpha-engine-config-I7372, mirrors
+# nousergon-data#1388 / crucible-predictor#504) rather than hand-carried as an
+# inline heredoc — the fleet's single canonical source for the watchdog unit
+# (SSM-liveness supervision; NOT carried by this file before), the strict
+# python3.12 interpreter assertion, and the clone shape. Repo/branch are baked
+# in as launcher-side literals via --repo-url/--branch rather than left for
+# the remote shell to expand, which removes the spot-expanded-but-never-
+# exported class of bug (crucible-predictor#463: ${REPO_URL}/${BRANCH}
+# interpolated into a heredoc but never exported, so the remote expansion
+# resolved to an empty string and the clone died on `fatal: repository ''`).
+# --max-runtime-seconds arms the SAME systemd-run --on-active hard-timeout
+# timer this heredoc used to hand-carry (now `ec2-spot-hard-timeout`, was
+# `alpha-engine-watchdog`) — a SEPARATE guarantee from the renderer's own
+# `ec2-spot-watchdog` SSM-liveness unit, which this launcher gains for the
+# first time by this cutover.
+#
+# The tarball extract + `ls` prompts-present assertion below is repo-specific
+# staging the renderer cannot express (it only knows `aws s3 cp` config
+# copies, not tar extraction) — kept verbatim, appended after the rendered
+# script into the SAME run_ssm "bootstrap" call rather than as a second inline
+# bootstrap.
 echo "==> Bootstrapping spot (watchdog, python, clone)..."
-run_ssm "bootstrap" 600 <<BOOTSTRAP
-set -eo pipefail
-${ENV_SOURCE}
-systemd-run --on-active=${MAX_RUNTIME_SECONDS} --unit=alpha-engine-watchdog \
-    --description='alpha-engine research spot hard-timeout' /sbin/shutdown -h now
-dnf install -y -q python3.12 python3.12-pip python3.12-devel git gcc 2>/dev/null || \
-    dnf install -y -q python3 python3-pip python3-devel git gcc
-echo "Using: \$(\$PYTHON_BIN --version)"
-git clone --depth 1 --branch ${BRANCH} https://github.com/nousergon/crucible-research.git /home/ec2-user/research
+_BOOTSTRAP_SCRIPT="$("$LIB_PYTHON" -m krepis.spot_bootstrap render \
+    --repo-url https://github.com/nousergon/crucible-research.git \
+    --checkout /home/ec2-user/research \
+    --branch "${BRANCH:-main}" \
+    --region "$AWS_REGION" \
+    --max-runtime-seconds "$MAX_RUNTIME_SECONDS" \
+    --export "S3_STAGING=${S3_STAGING}")"
+_BOOTSTRAP_TAIL="$(cat <<BOOTSTRAP_TAIL
 # Private research config surface (prompts + YAMLs): extract to the
 # prompt_loader/config.py HOME-sibling search path. Without this the box
 # HARD-FAILS at load_prompt (no .example fallback, by design).
@@ -324,7 +346,9 @@ tar -xzf /tmp/research-config.tgz -C /home/ec2-user/alpha-engine-config/research
 rm -f /tmp/research-config.tgz
 ls /home/ec2-user/alpha-engine-config/research/prompts/*.txt >/dev/null || { echo "ERROR: staged prompts missing after extract"; exit 1; }
 echo "Bootstrap complete: crucible-research cloned at ${BRANCH}; research config staged."
-BOOTSTRAP
+BOOTSTRAP_TAIL
+)"
+printf '%s\n%s\n' "$_BOOTSTRAP_SCRIPT" "$_BOOTSTRAP_TAIL" | run_ssm "bootstrap" 600
 
 # ── Install python deps ──────────────────────────────────────────────────────
 echo "==> Installing Python dependencies..."

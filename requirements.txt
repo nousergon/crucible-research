@@ -242,7 +242,19 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # leave the assertion emitting NOTHING — indistinguishable on the console
 # from an assertion that ran and found nothing wrong (config-I7334). The
 # floor is the only thing that makes it measurable where it runs.
-krepis>=0.59.4
+#
+# 0.59.6 floor (alpha-engine-config-I7372): the FIRST published krepis
+# carrying `krepis.spot_bootstrap`'s `--max-runtime-seconds` flag and
+# `scan_for_inline_bootstraps`. `infrastructure/spot_research_weekly.sh`'s
+# bootstrap step passes `--max-runtime-seconds`; an older krepis rejects it
+# as an unrecognized argument — AFTER the spot instance already exists and
+# is billing, not at dispatch. `tests/test_spot_bootstrap_invariants.py`
+# imports `scan_for_inline_bootstraps`, which does not exist below 0.59.6 —
+# `ImportError` at collection on an older resolve (measured live on
+# crucible-predictor-PR505 against this exact symbol). A `>=0.59.4` floor
+# lets `pip` resolve past both silently whenever the newest publish happens
+# to satisfy it, which is resolution luck, not a requirement.
+krepis>=0.59.6
 
 # Scheduling / calendar
 exchange-calendars~=4.13
