@@ -116,6 +116,60 @@ def _team_accuracy_enabled() -> bool:
     return os.environ.get("TEAM_ACCURACY_PRODUCER_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
+def _maybe_emit_self_test(trading_date: datetime.date) -> None:
+    """Run the numeric self-test and publish its artifact + console row.
+
+    alpha-engine-config-I7262. Mirrors the shadow-safe posture of
+    `_maybe_emit_scorecard` / `_maybe_emit_team_accuracy`, with one difference
+    that matters: those are OBSERVABILITY producers whose absence degrades a
+    dashboard, while this one is a §2.3a CORRECTNESS VERDICT whose absence must
+    never read as a pass. So the failure paths are deliberately asymmetric:
+
+    * the battery itself never raises (its own contract), and a FAIL or UNKNOWN
+      verdict is logged at ERROR and carried into the artifact — it does NOT
+      fail the run, because a verdict stage that dies must not kill the stages
+      that do not depend on it;
+    * a failed ARTIFACT write is logged at ERROR and continues, because the
+      verdict is already in the logs and the briefing is the primary
+      deliverable;
+    * a failed CONSOLE publish is swallowed by the emitter, and the console
+      renders the missing row as `unreadable`/stale rather than green — so the
+      gap stays visible rather than becoming a false all-clear.
+
+    The swallowed failure mode here is "the self-test itself could not run";
+    the primary deliverable (the weekly signal set) survives untouched; the
+    recording surface is the ERROR log plus the ABSENT artifact and console row.
+    """
+    run_date = trading_date.isoformat()
+    try:
+        from scoring.self_test import publish_console_row, run_self_test, write_self_test
+
+        result = run_self_test(run_date=run_date)
+        log_at = logger.info if result.get("verdict") == "PASS" else logger.error
+        log_at(
+            "Research self-test: verdict=%s cases=%s failed=%s errored=%s "
+            "known_gaps=%s libs=%s",
+            result.get("verdict"), result.get("n_cases"), result.get("n_failed"),
+            result.get("n_errored"), result.get("n_known_gaps"),
+            result.get("libraries"),
+        )
+        try:
+            bucket = os.environ.get("S3_BUCKET", "alpha-engine-research")
+            write_self_test(bucket, run_date, result)
+        except Exception:  # noqa: BLE001 — evidence emission never blocks the run
+            logger.error(
+                "self-test artifact emission failed for %s (verdict=%s is still "
+                "in the logs)", run_date, result.get("verdict"), exc_info=True,
+            )
+        # `principles.md` §2.7 — a check that reports nowhere is unobserved.
+        publish_console_row(result)
+    except Exception:  # noqa: BLE001 — the battery must never fail the briefing
+        logger.error(
+            "Research self-test could not run at all — NO correctness guarantee "
+            "is granted for this run's numbers.", exc_info=True,
+        )
+
+
 def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
     """Build + write the per-team historical-accuracy artifact. Shadow-safe.
 
@@ -612,6 +666,18 @@ def handler(event, context):
         # accruing now, ahead of `ADAPTIVE_SLOT_ALLOCATION_ENABLED` being
         # flipped for the soak. Same shadow-mode WARN-and-continue posture.
         _maybe_emit_team_accuracy(archive, trading_date)
+
+        # alpha-engine-config-I7262 — the R slot's numeric CORRECTNESS verdict
+        # (`sf-pipeline-policy.md` §2.3a), computed where the numbers are
+        # computed: in the deployed interpreter, on the deployed wheels. CI
+        # proves the code is right on a runner; this proves the INSTRUMENT is
+        # right on the image that produced this week's signal set.
+        #
+        # Runs BEFORE the graph so the verdict exists even if the pipeline
+        # later fails, and CANNOT block it: `run_self_test` never raises and
+        # this block is isolated. An accuracy instrument that can take down the
+        # pipeline is a worse defect than the one it detects.
+        _maybe_emit_self_test(trading_date)
 
         # Build and run the LangGraph pipeline
         graph = build_graph()

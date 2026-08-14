@@ -43,6 +43,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Captured 2026-05-27.
 EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "archive/manager.py": 5,
+    # research/{run_date}/self_test.json (the §2.3a numeric-correctness verdict)
+    # + ops/checks/ae-research-self-test/latest.json (its console envelope).
+    # BOTH REGISTERED in ARTIFACT_REGISTRY.yaml as research_self_test /
+    # research_self_test_check, not grandfathered: a missing correctness verdict
+    # is exactly the absence that makes every consumer succeed as though the
+    # check had passed (sf-pipeline-policy §2.3a), so its absence must page
+    # rather than pass. severity=warning while no consumer hard-blocks on it
+    # (the evaluator tile is not yet wired). config-I7262
+    "scoring/self_test.py": 2,
     "data/fetchers/analyst_fetcher.py": 1,
     "data/fetchers/insider_fetcher.py": 1,
     "data/fetchers/revision_fetcher.py": 1,

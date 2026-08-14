@@ -72,6 +72,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 
 # Repo root on sys.path so ``from scoring.signals_envelope import ...``
 # resolves under Lambda's task layout. Mirrors the existing shared-image
@@ -123,6 +124,11 @@ def _ensure_init() -> None:
 def handler(event, context):
     """Build + write the no-agent signals envelope. Raises on failure (see
     module doc's RAISE contract)."""
+    # Wall-clock start for the research health stamp's duration_seconds
+    # (config-I6053). Taken before the dry-path return so the field measures
+    # the same span the retired runner's stamp measured — the whole handler.
+    _health_start = time.time()
+
     from evals.lambda_dry import is_dry
 
     # Shell-run dry path — boot + imports above already exercised the
@@ -301,6 +307,86 @@ def handler(event, context):
                 source="signals_envelope_handler:trajectory",
                 dedup_key=f"trajectory_write_fail:{run_date}",
             )
+
+        # ── Research module health stamp (config-I6053 / config-I6344) ────
+        # REPOINTED WRITER, not a new artifact. `health/research.json` had
+        # exactly one writer — nousergon_lib.health.write_health(
+        # module_name="research") inside crucible-research
+        # `lambda/handler.py::handler()`, downstream of the multi-agent
+        # Research graph that nousergon-data#814 (config-I2515) removed from
+        # the weekly SF on 2026-07-14. No SF state invokes that path any more
+        # (`alpha-engine-research-runner:live` is invoked only with
+        # `mode="challengers_only"` by ChallengerShadow, and by the deploy
+        # canary with `dry_run_llm=true`), so the stamp froze at
+        # 2026-07-21T12:49Z carrying `{"status": "failed", "error": "[Errno 28]
+        # No space left on device"}` — the last real full_run, which failed.
+        #
+        # That is ARCHITECTURE §128's exact shape one layer up: retiring a
+        # producer leaves every consumer's read path working, so the dashboard
+        # health checker kept succeeding on a file that had stopped changing.
+        # It is ALSO now load-bearing on the weekly SF's terminal status:
+        # config-I6891 (shipped 2026-08-12) routes any degraded run through
+        # CheckDegradedOutcome -> WriteCompletionMarkerDegraded -> DegradedRun,
+        # a Fail state, and `SaturdayHealthCheck` exits non-zero on any stale
+        # entry — so a dead health stamp now FAILS the whole weekly run.
+        #
+        # The fix is the repoint the ARTIFACT_REGISTRY row's own comment names
+        # as the correct option (config-I6344): the champion scanner ->
+        # signals-envelope -> predictor path owns research-module health now.
+        # This handler is the right writer of the three because the stamp's
+        # declared required deliverable IS `signals`, and this handler is the
+        # sole producer of `signals/{date}/signals.json` + `signals/latest.json`
+        # since the cutover. Deleting the row instead was rejected: the four
+        # health_* rows are a lockstep contract (nousergon_lib.health.
+        # REGISTRY_HEALTH_ARTIFACTS + validate_artifact_registry.py +
+        # the dashboard alignment tests), and research is DECOMPOSED, not
+        # retired — a live capability whose freshness detector we would be
+        # deleting rather than repairing (principles.md §2.7).
+        #
+        # Gated to a real production cycle: `target == "production"` (the
+        # enclosing branch) AND `not preflight` — the Friday-PM shell run
+        # threads preflight=true and must never stamp research health fresh
+        # off a transport smoke, which is the false-green this stamp exists
+        # to make impossible.
+        #
+        # Fail-soft with an alert, mirroring the two secondary artifacts
+        # above: signals.json is already persisted, so sinking the run on an
+        # observability write would trade the primary deliverable for the
+        # stamp. Never silent — the alert is the recording surface.
+        if not preflight:
+            try:
+                from nousergon_lib.health import Deliverable, write_health
+
+                write_health(
+                    module_name="research",
+                    deliverables=[
+                        Deliverable(name="signals", required=True, produced=True),
+                    ],
+                    run_date=run_date,
+                    duration_seconds=time.time() - _health_start,
+                    summary={
+                        "producer": "signals_envelope_handler",
+                        "universe_count": len(envelope["universe"]),
+                        "market_regime": envelope["market_regime"],
+                        "dated_key": dated_key,
+                    },
+                    bucket=bucket,
+                    s3_client=s3,
+                )
+            except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+                logger.warning(
+                    "[signals_envelope_handler] research health stamp write "
+                    "FAILED (non-fatal — signals.json unaffected): %s", e,
+                )
+                from observe_alerts import publish_observe_alert
+                publish_observe_alert(
+                    f"research health stamp write FAILED for {run_date} "
+                    f"(non-fatal, signals.json already persisted). "
+                    f"health/research.json will read stale to "
+                    f"SaturdayHealthCheck: {e}",
+                    source="signals_envelope_handler:health",
+                    dedup_key=f"research_health_write_fail:{run_date}",
+                )
 
     logger.info(
         "[signals_envelope_handler] done run_date=%s target=%s dated_key=%s "

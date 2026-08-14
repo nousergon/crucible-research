@@ -21,7 +21,7 @@ langchain-anthropic~=1.5
 # langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
 # 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
 # current path.
-langchain-openai~=1.4
+langchain-openai~=1.5
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
@@ -29,7 +29,7 @@ langchain-openai~=1.4
 # builds even though a fresh resolve already picked a newer version; `~=0.8.18`
 # hard-excludes every pre-fix release while staying within the 0.8.x line
 # (minimum version movement that clears the advisory).
-langsmith~=0.8.18
+langsmith~=0.10.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
@@ -40,7 +40,7 @@ openai>=2.53.0
 agentevals~=0.0
 
 # Data
-yfinance~=1.5.2
+yfinance~=1.6.0
 requests-ratelimiter~=0.10
 pandas~=2.2
 numpy~=1.26
@@ -228,7 +228,12 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
 # An older krepis raises TypeError on the kwarg rather than degrading, so the
 # floor is load-bearing rather than advisory.
-krepis>=0.43.0
+#
+# 0.51.0 floor (krepis-PR133, alpha-engine-config-I7009): `krepis.ec2_spot
+# relaunch-decision` gained `--json`, putting the verdict on a JSON field
+# instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
+# that field; an older krepis has no `--json` flag at all.
+krepis>=0.59.2
 
 # Scheduling / calendar
 exchange-calendars~=4.13
@@ -249,7 +254,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.46
+edgartools~=5.48
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9

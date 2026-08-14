@@ -133,6 +133,12 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_BOARD_SCHEMA_VERSION = 3
 
+# Cap on the MEMBER list inside ``attractiveness_coverage``. The count itself is
+# never capped — see ``_attractiveness_coverage``. 50 is well above any expected
+# exclusion count on a healthy ~900-name board (the measured steady state is 0),
+# so hitting it is itself a signal rather than routine truncation.
+_COVERAGE_MEMBER_CAP = 50
+
 # Known-bad gate block (alpha-engine-config#4820). These two dated boards were
 # written BEFORE this module enforced the gate-passed-count producer contract
 # (``_assert_gate_passed_matches_scanner_tickers``) and are frozen with an
@@ -465,6 +471,49 @@ def _gate_trace(row: dict, gate_config: dict | None) -> tuple[list[dict], str]:
     return trace, stage
 
 
+def _attractiveness_coverage(stocks: list[dict]) -> dict:
+    """How many names the attractiveness ranking EXCLUDED, and which ones.
+
+    Emitted on every board UNCONDITIONALLY — a healthy run publishes an explicit
+    zero rather than nothing. A component that says nothing is unobserved, not
+    healthy (``observability-policy.md`` §3.4: records rejected WITH reason), and
+    an exclusion nobody can see is the same failure as the fabricated ``0.0``
+    this replaced (config-I7272, ``principles.md`` §2.7).
+
+    ``n_excluded_undefined`` counts names carrying ``attractiveness_score: None``
+    — every pillar leg undefined, so there is no measured position to rank them
+    at. They are absent from the ranking, NOT ranked last: the board's sort keeps
+    them after the scored names purely so the artifact has a stable order, and
+    ``attractiveness_rank`` is never assigned to them (see
+    ``universe_membership._rank_table``, which is fed a None-filtered dict).
+
+    ``excluded_tickers`` is capped at ``_COVERAGE_MEMBER_CAP`` because the board
+    is a dashboard artifact read on every page load; ``n_excluded_undefined`` is
+    always the true, uncapped count, and ``excluded_truncated`` says so in-band
+    rather than letting a reader mistake the cap for the total.
+
+    STOPGAP, deliberately (config-I7272): ``nousergon_lib.quant.attractiveness``
+    now publishes this same report itself, via
+    ``compute_cross_sectional_attractiveness_with_coverage``. This repo still
+    pins ``nousergon-lib@v0.124.3``, which predates that API, so the count is
+    derived here from the scores the pinned lib already returns — an identical
+    derivation over the identical input, not a second definition of the metric.
+    The pin-bump follow-up switches this to the library's own report so exactly
+    one implementation survives (``shared-code-policy.md``); until then the fork
+    is one function with this note on it.
+    """
+    excluded = sorted(
+        str(s["ticker"]) for s in stocks if s.get("attractiveness_score") is None
+    )
+    return {
+        "n_tickers": len(stocks),
+        "n_scored": len(stocks) - len(excluded),
+        "n_excluded_undefined": len(excluded),
+        "excluded_tickers": excluded[:_COVERAGE_MEMBER_CAP],
+        "excluded_truncated": len(excluded) > _COVERAGE_MEMBER_CAP,
+    }
+
+
 def _assert_gate_passed_matches_scanner_tickers(stocks: list[dict], scanner_tickers: list[str], run_date: str) -> None:
     """Producer contract invariant (alpha-engine-config#4820): the board's own
     derived ``gate_stage == "passed"`` membership must equal the AUTHORITATIVE
@@ -654,6 +703,13 @@ def build_universe_board(
         )
 
     # ── Attractiveness (SOTA z-blend → percentile) via the shared chokepoint ──
+    # config-I7272: a name whose every pillar leg is UNDEFINED (no cross-sectional
+    # dispersion to z-score against) comes back with attractiveness_score None and
+    # is EXCLUDED from the ranking rather than scored — a fabricated 0.0 would have
+    # competed against measured names, and a None sorted to one end would still
+    # occupy a rank position, silently and systematically. The exclusion is counted
+    # and published below: an exclusion nobody can see is the same failure as the
+    # fabricated zero it replaced (principles.md §2.7).
     attractiveness = compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
     for stock, _ in records:
         a = attractiveness.get(stock["ticker"], {})
@@ -674,10 +730,13 @@ def build_universe_board(
     if scanner_tickers is not None:
         _assert_gate_passed_matches_scanner_tickers(stocks, scanner_tickers, run_date)
 
+    coverage = _attractiveness_coverage(stocks)
+
     return {
         "schema_version": UNIVERSE_BOARD_SCHEMA_VERSION,
         "as_of": run_date,
         "universe_count": len(stocks),
+        "attractiveness_coverage": coverage,
         "attractiveness_method": "sector_neutral_zscore_percentile",
         "tradeability_method": _TRADEABILITY_METHOD,
         "tradeability_reference_notional_usd": _reference_notional(tradeability_config),

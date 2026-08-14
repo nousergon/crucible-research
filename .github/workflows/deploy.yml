@@ -34,6 +34,7 @@ on:
       - 'thinktank/**'
       - 'Dockerfile*'
       - 'infrastructure/deploy.sh'
+      - 'infrastructure/setup-openrouter-shadow-schedule.sh'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:  # manual trigger from Actions UI
   repository_dispatch:
@@ -101,7 +102,7 @@ jobs:
       # crucible-evaluator hit exactly this gap as a hard `ModuleNotFoundError`
       # on 2026-07-01. Pin matches requirements.txt's `krepis>=0.7.0` floor.
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
@@ -252,6 +253,29 @@ jobs:
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh openrouter_shadow
+
+      # alpha-engine-config-I7052. `setup-openrouter-shadow-schedule.sh` was
+      # committed 2026-08 (config#2934) as a one-time operator bootstrap
+      # script and, measured 2026-08-12, was never actually run against the
+      # account: `aws events describe-rule --name
+      # alpha-research-openrouter-shadow-weekly` returned
+      # ResourceNotFoundException, so the Lambda above has deployed code and
+      # zero invocations in 45 days — a trigger that was written and never
+      # created, the same "committed but not applied" shape as
+      # `nous-ergon-ops-I314`'s IAM rows. The script's own docstring states
+      # it is idempotent (put-rule / put-targets / add-permission-tolerant /
+      # put-metric-alarm are all upserts), so running it on every deploy is
+      # safe and closes the class rather than the instance: a future PR that
+      # edits the schedule (day, alarm threshold) now deploys the way every
+      # other change here does, with no separate manual step to forget.
+      # `github-actions-lambda-deploy` already holds every permission the
+      # script calls (events:PutRule/PutTargets, cloudwatch:PutMetricAlarm,
+      # lambda:AddPermission) via infrastructure/iam/github-actions-lambda-
+      # deploy/github-actions-lambda-deploy-policy.json in nous-ergon-ops —
+      # no new identity, no new grant.
+      - name: Apply the openrouter-shadow EventBridge schedule (idempotent)
+        working-directory: alpha-engine-research
+        run: bash infrastructure/setup-openrouter-shadow-schedule.sh
 
       - name: Deploy perturbation-battery Lambda (alpha-engine-research-perturbation-battery)
         working-directory: alpha-engine-research

@@ -470,3 +470,110 @@ class TestTradingDayNormalization:
         payload = _envelope()
         self._run(handler_mod, "2026-08-07", payload=payload)
         assert "calendar_date" not in payload
+
+
+class TestResearchHealthStamp:
+    """config-I6053 / config-I6344 — the repointed ``health/research.json``
+    writer.
+
+    Its only prior writer sat downstream of the multi-agent Research graph
+    that config-I2515 removed from the weekly SF on 2026-07-14, so the stamp
+    froze at 2026-07-21 carrying the last full_run's FAILURE payload
+    (``[Errno 28] No space left on device``). Since config-I6891 routes a
+    degraded weekly run into a ``Fail`` terminal, a dead stamp now fails the
+    entire Saturday pipeline via ``SaturdayHealthCheck``. These tests pin the
+    repoint so the writer cannot silently detach a second time.
+    """
+
+    @staticmethod
+    def _run(handler_mod, event, health_side_effect=None):
+        health = MagicMock(side_effect=health_side_effect)
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch(
+                 "scoring.signals_envelope.write_envelope",
+                 return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+             ), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief"), \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory"), \
+             patch("nousergon_lib.health.write_health", health), \
+             patch("observe_alerts.publish_observe_alert") as alert:
+            result = handler_mod.handler(event, None)
+        return result, health, alert
+
+    def test_production_run_stamps_research_health(self, handler_mod):
+        result, health, _ = self._run(
+            handler_mod, {"run_date": "2026-07-14", "target": "production"},
+        )
+        assert result["status"] == "OK"
+        health.assert_called_once()
+        kwargs = health.call_args.kwargs
+        assert kwargs["module_name"] == "research", (
+            "the stamp must be written under the 'research' module name — it "
+            "is the key health/research.json resolves from, and the four "
+            "health_* ARTIFACT_REGISTRY rows are a lockstep contract"
+        )
+        assert kwargs["run_date"] == "2026-07-14"
+        # The declared required deliverable IS signals — that is why this
+        # handler, not the Scanner, owns the stamp.
+        deliverables = kwargs["deliverables"]
+        assert [d.name for d in deliverables] == ["signals"]
+        assert deliverables[0].required is True
+        assert deliverables[0].produced is True
+
+    def test_shadow_target_does_not_stamp(self, handler_mod):
+        """A shadow cycle is not a real research run and must never make the
+        stamp read fresh."""
+        _, health, _ = self._run(
+            handler_mod, {"run_date": "2026-07-14", "target": "shadow"},
+        )
+        health.assert_not_called()
+
+    def test_friday_preflight_does_not_stamp(self, handler_mod):
+        """The Friday-PM shell run threads preflight=true with
+        target=production. It is a transport smoke, not a research cycle —
+        stamping there would manufacture exactly the false green this
+        detector exists to prevent."""
+        _, health, _ = self._run(
+            handler_mod,
+            {"run_date": "2026-07-14", "target": "production", "preflight": True},
+        )
+        health.assert_not_called()
+
+    def test_health_write_failure_is_fail_soft_and_alerts(self, handler_mod):
+        """signals.json is already persisted; an observability write must not
+        sink it. It must never be silent either."""
+        result, health, alert = self._run(
+            handler_mod,
+            {"run_date": "2026-07-14", "target": "production"},
+            health_side_effect=RuntimeError("boom"),
+        )
+        assert result["status"] == "OK"
+        assert result["dated_key"] == "signals/2026-07-14/signals.json"
+        health.assert_called_once()
+        alert.assert_called_once()
+        assert "health" in alert.call_args.kwargs["source"]
+
+    def test_stamp_uses_trading_day_not_calendar_date(self, handler_mod):
+        """config-I6653's axis applies to the stamp too: a Saturday cycle
+        threads the calendar date, and the stamp must carry the trading day
+        every other artifact of the same run is keyed by."""
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("boto3.client", return_value=MagicMock()), \
+             patch("nousergon_lib.dates.resolve_trading_day", return_value="2026-08-07"), \
+             patch("scoring.signals_envelope.read_universe_board", return_value=_board()), \
+             patch("scoring.signals_envelope.read_regime_substrate", return_value=None), \
+             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()), \
+             patch("scoring.signals_envelope.write_envelope", return_value=("k1", "k2")), \
+             patch("scoring.morning_brief.build_morning_brief_markdown", return_value="# brief"), \
+             patch("scoring.morning_brief.write_morning_brief"), \
+             patch("scoring.attractiveness_trajectory.compute_and_write_trajectory"), \
+             patch("nousergon_lib.health.write_health") as health:
+            handler_mod.handler(
+                {"run_date": "2026-08-08", "target": "production"}, None,
+            )
+        assert health.call_args.kwargs["run_date"] == "2026-08-07"
