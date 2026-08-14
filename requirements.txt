@@ -233,7 +233,16 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # relaunch-decision` gained `--json`, putting the verdict on a JSON field
 # instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
 # that field; an older krepis has no `--json` flag at all.
-krepis>=0.59.2
+#
+# 0.59.4 floor (alpha-engine-config-I7214): the FIRST published krepis
+# carrying `krepis.stage_coverage`, which every weekly-SF-backed handler in
+# lambda/ imports to self-assert its declared output before returning. The
+# call site's ImportError guard is deliberately silent about the handler's
+# own outcome (observe mode), so a deploy resolving an older krepis would
+# leave the assertion emitting NOTHING — indistinguishable on the console
+# from an assertion that ran and found nothing wrong (config-I7334). The
+# floor is the only thing that makes it measurable where it runs.
+krepis>=0.59.4
 
 # Scheduling / calendar
 exchange-calendars~=4.13

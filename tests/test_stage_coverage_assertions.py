@@ -7,15 +7,14 @@ returns, calling the ONE shared implementation
 per-repo reimplementation. The primitive lives in krepis (relocated
 from an initial nousergon_lib landing — nousergon-lib-PR314 merged,
 PR315 removes the duplicate — because half its callers are bash
-launchers and krepis is published rather than git-pinned, so this
-repo's existing ``krepis>=0.51.0`` floor needs no pin bump once
-krepis-PR148 lands). This module pins, per handler:
+launchers and krepis is published rather than git-pinned) and ships
+from krepis 0.59.4, which ``requirements.txt`` now floors. This module
+pins, per handler:
 
 1. the verdict lands in the returned payload under ``stage_coverage``
    with the CORRECT stage name;
-2. an ``ImportError`` from the lib (krepis-PR148 — the module — is not
-   yet merged/published) does NOT change the handler's outcome —
-   observe mode cannot break the stage it observes;
+2. an ``ImportError`` from the lib does NOT change the handler's
+   outcome — observe mode cannot break the stage it observes;
 3. (``eval_judge_submit_handler`` only) BOTH polarities of
    ``force_sonnet_pass`` file under the correct one of
    ``EvalJudgeSubmitFirstSaturday`` / ``EvalJudgeSubmitWeekly``;
@@ -34,10 +33,22 @@ krepis-PR148 lands). This module pins, per handler:
 The ``stub_stage_coverage`` fixture (root ``conftest.py``) injects a fake
 ``krepis.stage_coverage`` submodule into ``sys.modules`` so the
 handler's lazy ``from krepis.stage_coverage import
-assert_stage_coverage`` succeeds against a controllable mock. Tests that
-do NOT request the fixture exercise the REAL (current) unstubbed
-ImportError path, since krepis-PR148 (adding the module) is not yet
-merged/published as of this writing.
+assert_stage_coverage`` succeeds against a controllable mock.
+
+Tests that do NOT request it get the autouse
+``_stage_coverage_absent_unless_stubbed`` default from the same
+conftest, which makes that import raise ``ImportError`` — a SIMULATED
+absence. It was an ambient one until 2026-08-14: these tests read "the
+installed krepis has no such module" as a standing fact, and the real
+module (which builds its own boto3 S3/CloudWatch clients) started
+running inside every handler test the moment krepis published it,
+wedging CI on live AWS calls the runner could not make.
+
+``TestPrimitiveIsImportable`` covers what neither simulated side can:
+that the real module is importable under this repo's declared pins. A
+coverage assertion that cannot import emits nothing, in a shape
+indistinguishable from an assertion that found nothing wrong
+(alpha-engine-config-I7334).
 """
 
 from __future__ import annotations
@@ -144,6 +155,20 @@ def aggregate_costs_mod():
     yield mod
 
 
+@pytest.fixture
+def absent_stage_coverage(monkeypatch):
+    """Force ``from krepis.stage_coverage import ...`` to raise ImportError.
+
+    The root ``conftest.py`` installs the same default suite-wide (so no
+    handler test reaches real S3 through the primitive); requesting it
+    explicitly here states the precondition these tests depend on rather
+    than borrowing it — which is how it silently stopped holding once
+    krepis published the module.
+    """
+    monkeypatch.setitem(sys.modules, "krepis.stage_coverage", None)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _stub_universe_membership():
     """Scanner's membership write is NOT fail-soft (config-I4818) — an
@@ -232,10 +257,10 @@ class TestScannerCoverage:
         assert kwargs["run_date"] == "2026-05-29"  # normalized to trading day
         assert kwargs["window_start"] is not None
 
-    def test_missing_lib_module_does_not_change_outcome(self, scanner_mod):
-        # No stub_stage_coverage fixture — exercises the REAL current
-        # ImportError path (krepis-PR148, adding the module, is not yet
-        # merged/published).
+    def test_missing_lib_module_does_not_change_outcome(self, scanner_mod, absent_stage_coverage):
+        # `absent_stage_coverage` forces the ImportError explicitly —
+        # the observe-mode degrade path, simulated rather than inherited
+        # from whichever krepis happens to be installed.
         with (
             patch.object(scanner_mod, "_ensure_init"),
             patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_scanner_artifact()),
@@ -267,7 +292,7 @@ class TestSignalsEnvelopeCoverage:
         assert args[0] == "SignalsEnvelope"
         assert kwargs["run_date"] == "2026-07-14"
 
-    def test_missing_lib_module_does_not_change_outcome(self, signals_envelope_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, signals_envelope_mod, absent_stage_coverage):
         with (
             patch.object(signals_envelope_mod, "_ensure_init"),
             patch("boto3.client", return_value=MagicMock()),
@@ -306,7 +331,7 @@ class TestChallengerShadowCoverage:
         assert args[0] == "ChallengerShadow"
         assert kwargs["run_date"] == "2026-05-30"
 
-    def test_missing_lib_module_does_not_change_outcome(self, runner_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, runner_mod, absent_stage_coverage):
         archive = MagicMock()
         archive.bucket = "alpha-engine-research"
         archive.s3.get_object.return_value = {
@@ -362,7 +387,7 @@ class TestEvalJudgeSubmitCoverage:
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "EvalJudgeSubmitWeekly"
 
-    def test_missing_lib_module_does_not_change_outcome(self, submit_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, submit_mod, absent_stage_coverage):
         result = self._invoke(submit_mod, {"date": "2026-05-16", "force_sonnet_pass": False})
         assert result["status"] == "OK"
         assert "stage_coverage" not in result
@@ -405,7 +430,7 @@ class TestEvalJudgePollCoverage:
         assert "stage_coverage" not in result
         stub_stage_coverage.assert_not_called()
 
-    def test_missing_lib_module_does_not_change_outcome(self, poll_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, poll_mod, absent_stage_coverage):
         with (
             patch.object(poll_mod, "_ensure_init"),
             patch("anthropic.Anthropic", return_value=MagicMock()),
@@ -461,7 +486,7 @@ class TestEvalJudgeProcessCoverage:
         assert args[0] == "EvalJudgeProcess"
         assert kwargs["run_date"] == "2026-05-16"
 
-    def test_missing_lib_module_does_not_change_outcome(self, process_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, process_mod, absent_stage_coverage):
         result = self._invoke(
             process_mod,
             {
@@ -506,7 +531,7 @@ class TestEvalRollingMeanCoverage:
         assert args[0] == "EvalRollingMean"
         assert kwargs["run_date"] == "2026-06-06"
 
-    def test_missing_lib_module_does_not_change_outcome(self, rolling_mean_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, rolling_mean_mod, absent_stage_coverage):
         result = self._invoke(rolling_mean_mod, {"end_time_iso": "2026-06-06T00:00:00Z"})
         assert result["status"] == "OK"
         assert "stage_coverage" not in result
@@ -541,7 +566,7 @@ class TestRationaleClusteringCoverage:
         assert args[0] == "RationaleClustering"
         assert kwargs["run_date"] == "2026-05-09"
 
-    def test_missing_lib_module_does_not_change_outcome(self, clustering_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, clustering_mod, absent_stage_coverage):
         with (
             patch.object(clustering_mod, "_ensure_init"),
             patch("evals.rationale_clustering.compute_and_emit", return_value=_clustering_summary()),
@@ -588,7 +613,7 @@ class TestAggregateCostsCoverage:
         assert result["status"] == "SKIPPED"
         assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
 
-    def test_missing_lib_module_does_not_change_outcome(self, aggregate_costs_mod):
+    def test_missing_lib_module_does_not_change_outcome(self, aggregate_costs_mod, absent_stage_coverage):
         with (
             patch.object(aggregate_costs_mod, "_ensure_init"),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_aggregate_costs_summary()),
@@ -679,3 +704,42 @@ class TestTotalityAndEnforcement:
                 f"{filename} calls assert_stage_coverage without threading "
                 f"window_start (config-I7214)"
             )
+
+
+# ── The primitive must actually be installable, not merely called ───────────
+
+
+class TestPrimitiveIsImportable:
+    """alpha-engine-config-I7334 class: an assertion whose import fails
+    emits nothing, and "emitted nothing" is byte-identical on the console
+    to "found nothing wrong". Every test above passes whether or not
+    krepis really carries the module, so one test has to look at the real
+    one — otherwise this whole file is a suite that cannot tell a working
+    coverage assertion from an absent one."""
+
+    def test_krepis_stage_coverage_is_importable(self, monkeypatch):
+        monkeypatch.delitem(sys.modules, "krepis.stage_coverage", raising=False)
+        import importlib  # noqa: PLC0415 — deliberately deferred past the delitem
+
+        mod = importlib.import_module("krepis.stage_coverage")
+        assert callable(mod.assert_stage_coverage), (
+            "krepis.stage_coverage imported but exposes no callable "
+            "assert_stage_coverage — every handler's observe-mode call "
+            "would measure nothing"
+        )
+
+    def test_assert_stage_coverage_accepts_the_signature_every_handler_calls(
+        self, monkeypatch
+    ):
+        """Every call site here is
+        ``assert_stage_coverage(stage, run_date=..., window_start=...)``.
+        Signature drift in krepis would otherwise surface only in the
+        deployed Lambda, as a logged error nobody is watching for."""
+        monkeypatch.delitem(sys.modules, "krepis.stage_coverage", raising=False)
+        import importlib  # noqa: PLC0415 — deliberately deferred past the delitem
+        import inspect  # noqa: PLC0415
+
+        mod = importlib.import_module("krepis.stage_coverage")
+        inspect.signature(mod.assert_stage_coverage).bind(
+            "Scanner", run_date="2026-05-29", window_start=None
+        )

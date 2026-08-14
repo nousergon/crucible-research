@@ -73,29 +73,52 @@ def _clear_arctic_union_cache():
     _ARCTIC_UNION_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def _stage_coverage_absent_unless_stubbed(monkeypatch):
+    """Default-deny the config-I7214 stage-coverage primitive in tests.
+
+    Every weekly-SF-backed handler in ``lambda/`` calls
+    ``krepis.stage_coverage.assert_stage_coverage`` immediately before it
+    returns. That function builds its OWN boto3 S3 and CloudWatch clients
+    and reads a registry object out of S3 — it does not inherit a test's
+    ``patch("boto3.client")``. So the moment krepis 0.59.4 actually
+    published the module, EVERY handler test that runs a handler end to
+    end began issuing live AWS calls; on the CI runner (no credentials,
+    no route) those retried until the job wedged and the runner was killed
+    (run 31817900321 — cancelled after 2m30s with no test output past
+    collection, which reads as infrastructure flakiness rather than as the
+    test defect it is).
+
+    ``None`` in ``sys.modules`` forces the handler's lazy import to raise
+    ``ImportError`` deterministically. That keeps the suite hermetic AND
+    makes "the lib is missing" a SIMULATED precondition rather than an
+    ambient property of whatever krepis is installed — the assumption that
+    silently expired under this suite.
+
+    ``stub_stage_coverage`` overrides this for tests that need to see a
+    verdict land (monkeypatch reverts LIFO at teardown).
+    """
+    monkeypatch.setitem(sys.modules, "krepis.stage_coverage", None)
+    yield
+
+
 @pytest.fixture
-def stub_stage_coverage(monkeypatch):
+def stub_stage_coverage(monkeypatch, _stage_coverage_absent_unless_stubbed):
     """Simulate ``krepis.stage_coverage`` being present.
 
-    The primitive lives in krepis (relocated from nousergon_lib.
-    stage_coverage after it shipped there first — nousergon-lib-PR314
-    merged, PR315 removes the duplicate — because half its callers are
-    bash launchers invoking ``python -m krepis.stage_coverage`` and
-    krepis is published rather than git-pinned, so this repo's existing
-    ``krepis>=0.51.0`` floor picks it up on a fresh install with no pin
-    bump; nousergon-lib is git-pinned and would have needed one).
-    krepis-PR148 (adding the module) is open, not yet merged/published
-    at the time these handlers were written, so ``from krepis.
-    stage_coverage import assert_stage_coverage`` genuinely raises
-    ``ImportError`` today — every handler's own call site is exercised
-    UNSTUBBED by any test that does not use this fixture, which is
-    exactly the observe-mode-survives-a-missing-lib path (config-I7214).
+    The primitive lives in krepis (relocated from an initial
+    ``nousergon_lib.stage_coverage`` landing — nousergon-lib-PR314 merged,
+    PR315 removes the duplicate — because half its callers are bash
+    launchers invoking ``python -m krepis.stage_coverage`` and krepis is
+    published rather than git-pinned). It ships from krepis 0.59.4, which
+    this repo's ``requirements.txt`` floor now requires.
 
     Tests that need to see a verdict land in a handler's payload use this
     fixture to inject a fake submodule into ``sys.modules`` ahead of the
     handler's lazy import, so the import succeeds and returns a
-    controllable mock. Returns the mock so a test can assert on
-    call args (stage name, run_date, window_start) or set
+    controllable mock — a fake rather than the real module because the
+    real one talks to S3 and CloudWatch. Returns the mock so a test can
+    assert on call args (stage name, run_date, window_start) or set
     ``side_effect``/``return_value``.
     """
     mock_assert = MagicMock(return_value={"status": "COVERED", "stage": "stub"})
