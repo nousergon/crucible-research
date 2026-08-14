@@ -75,15 +75,28 @@ and the blend then treats a *measured nothing* as a *measured average*. This is
 the `I7237` class ("a measured-looking zero where the value is undefined") at the
 signal layer, and it is filed as **alpha-engine-config-I7272**.
 
-PIN, DO NOT FIX
----------------
-The three cases marked ``known_gap`` pin that behaviour at its MEASURED value so
-further drift goes red. They are NOT corrected here: changing how an undefined
-z-score is represented moves every historical attractiveness score and every gate
-keyed to one, which is Brian's decision, not a patch — the binding precedent is
-`I7236`, pinned and filed rather than silently "fixed". Their PASS means "still
-behaves as recorded", never "this is correct", and the artifact says so in words
-so no reader has to infer it from a green row.
+PIN, DO NOT FIX — AND WHAT WAS FIXED
+-------------------------------------
+Of the three degenerate-input sites this module originally pinned, TWO —
+``trajectory_zmap_zero_variance_degenerate`` and
+``trajectory_zmap_single_observation_degenerate``, both in
+``scoring/attractiveness_trajectory.py::_zmap`` in THIS repo — are now FIXED:
+``_zmap`` reports undefined cross-sections as ``None``, and every downstream
+consumer in ``build_trajectory`` (the z-scores, the orthogonalized residual,
+the percentile cut, both rank orders, the final sort) was audited to drop or
+skip ``None`` rather than treat it as a fabricated 0.0. See config-I7272.
+
+One case remains a pinned, NOT-corrected known gap:
+``attractiveness_zero_variance_degenerate`` pins
+``nousergon_lib.quant.attractiveness._zscore``, which lives in a DIFFERENT
+repo — out of scope for this change. Changing it moves every historical
+attractiveness score and every gate keyed to one across the whole fleet,
+which is Brian's decision, not a patch — the binding precedent is `I7236`,
+pinned and filed rather than silently "fixed". Its PASS means "still behaves
+as recorded", never "this is correct", and the artifact says so in words so no
+reader has to infer it from a green row. ``undefined_representation_divergence_
+convention`` remains ``known_gap`` too — it counts the remaining
+nousergon_lib gap and pins the new 2-of-3 state.
 
 CONTRACT
 --------
@@ -733,36 +746,30 @@ def build_cases() -> list[Case]:
         Case(
             name="trajectory_zmap_zero_variance_degenerate",
             description=(
-                "KNOWN GAP (alpha-engine-config-I7272), PINNED NOT FIXED. "
-                "scoring/attractiveness_trajectory.py::_zmap independently makes "
-                "the SAME choice: sd == 0 => every ticker gets 0.0. A second "
-                "implementation reproducing the first's defect is what makes this "
-                "a convention rather than a bug, and why it is filed as one"
+                "FIXED (alpha-engine-config-I7272). "
+                "scoring/attractiveness_trajectory.py::_zmap on a ZERO-VARIANCE "
+                "cross-section now reports UNDEFINED (None) for every ticker "
+                "rather than a finite 0.0 — 0.0 is also exactly what a genuinely "
+                "at-the-mean ticker produces, so the two were indistinguishable "
+                "downstream. 1.0 iff undefined."
             ),
-            inputs={"values": {"A": 4.0, "B": 4.0, "C": 4.0},
-                    "correct_behaviour": "None", "measured_behaviour": 0.0,
-                    "units": "z-score"},
-            expected=0.0,
-            compute=lambda: float(_zmap({"A": 4.0, "B": 4.0, "C": 4.0})["A"]),
-            known_gap=True,
-            gap_issue="alpha-engine-config-I7272",
+            inputs={"values": {"A": 4.0, "B": 4.0, "C": 4.0}, "units": "z-score"},
+            expected=1.0,
+            compute=lambda: _is_undefined(_zmap({"A": 4.0, "B": 4.0, "C": 4.0})["A"]),
+            tolerance=0.0,
         ),
         Case(
             name="trajectory_zmap_single_observation_degenerate",
             description=(
-                "KNOWN GAP (alpha-engine-config-I7272), PINNED NOT FIXED. "
-                "A single observation has no cross-section at all, and _zmap "
-                "returns 0.0 for it — the THIRD site making the same substitution "
-                "of a measured-looking zero for an undefined value. Pinned at "
-                "measured; PASS means 'unchanged', NOT 'correct'"
+                "FIXED (alpha-engine-config-I7272). "
+                "A single observation has no cross-section at all — _zmap now "
+                "reports UNDEFINED (None) rather than the previous fabricated "
+                "0.0. 1.0 iff undefined."
             ),
-            inputs={"values": {"A": 4.0}, "n": 1,
-                    "correct_behaviour": "None", "measured_behaviour": 0.0,
-                    "units": "z-score"},
-            expected=0.0,
-            compute=lambda: float(_zmap({"A": 4.0})["A"]),
-            known_gap=True,
-            gap_issue="alpha-engine-config-I7272",
+            inputs={"values": {"A": 4.0}, "n": 1, "units": "z-score"},
+            expected=1.0,
+            compute=lambda: _is_undefined(_zmap({"A": 4.0})["A"]),
+            tolerance=0.0,
         ),
     ]
 
@@ -884,19 +891,24 @@ def build_cases() -> list[Case]:
                 "CONVENTION / CROSS-IMPLEMENTATION (alpha-engine-config-I7272). "
                 "Counts how many of the three degenerate-input sites report an "
                 "undefined value as UNDEFINED rather than as a measured-looking "
-                "0.0. Measured 2026-08-13: only 1 of 3 does "
-                "(leaderboard_scoring._pearson -> None; attractiveness._zscore -> "
-                "0.0; attractiveness_trajectory._zmap -> 0.0). Expected 1.0 pins "
-                "that MEASURED state. When I7272 is ruled and the sites are "
-                "aligned this case must be updated to 3.0 IN THE SAME CHANGE — "
-                "which is the point: the fix cannot land silently"
+                "0.0. Measured 2026-08-13: 1 of 3 (leaderboard_scoring._pearson "
+                "-> None; attractiveness._zscore -> 0.0; "
+                "attractiveness_trajectory._zmap -> 0.0). "
+                "config-I7272 (this change): attractiveness_trajectory._zmap "
+                "FIXED in crucible-research -> None, moving the count to 2 of 3. "
+                "attractiveness._zscore lives in nousergon_lib — OUT OF SCOPE for "
+                "this change (a different repo/PR); it remains PINNED at its "
+                "MEASURED 0.0. Expected 2.0 pins the new measured state. The day "
+                "nousergon_lib is aligned too this case must be updated to 3.0 IN "
+                "THE SAME CHANGE — which is the point: the fix cannot land "
+                "silently"
             ),
             inputs={"sites": ["leaderboard_scoring._pearson",
                               "attractiveness._zscore",
                               "attractiveness_trajectory._zmap"],
-                    "measured_safe_count": 1, "total_sites": 3,
+                    "measured_safe_count": 2, "total_sites": 3,
                     "units": "count of sites reporting undefined honestly"},
-            expected=1.0,
+            expected=2.0,
             compute=_undefined_representation_count,
             tolerance=0.0,
             known_gap=True,
