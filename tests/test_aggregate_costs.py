@@ -835,3 +835,109 @@ class TestPerAgentCwMetrics:
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 30), cw_client=cw)
         assert summary is None
         cw.put_metric_data.assert_not_called()
+
+
+# ── config-I7407: the window, not one date ──────────────────────────────────
+# `aggregate_day` covers ONE date and the weekly SF invokes it with exactly
+# one: `$.run_date`. Capture is DAILY — krepis.cost_sink writes under the
+# wall-clock date of the call, so the Think Tank's daily runs land on dates no
+# SF ever names.
+#
+# Measured 2026-08-15: `_cost_raw/` held 08-10, 08-11 and 08-12; `_cost/`
+# stopped at 08-10. Two days of real cost rows captured and never aggregated,
+# and the Saturday run asked for 08-14, which had no raw at all — so the stage
+# "succeeded" having produced nothing, the `cost_telemetry` transparency row
+# failed its 8-day freshness window against a parquet from 08-10, and that
+# single [FAIL] is why the weekly run terminated DEGRADED.
+
+from datetime import date as _date  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from scripts.aggregate_costs import (  # noqa: E402
+    DEFAULT_LOOKBACK_DAYS,
+    CostWindowGapError,
+    aggregate_window,
+)
+
+
+def _s3_with_raw_on(dates):
+    """A fake S3 whose `_cost_raw/{d}/` prefix is non-empty for `dates`."""
+    s3 = MagicMock()
+
+    def list_objects_v2(Bucket, Prefix, MaxKeys=None):  # noqa: N803
+        day = Prefix.rstrip("/").rsplit("/", 1)[-1]
+        return {"KeyCount": 1 if day in dates else 0}
+
+    s3.list_objects_v2.side_effect = list_objects_v2
+    return s3
+
+
+class TestAggregateWindow:
+    def test_it_aggregates_every_date_with_raw_not_just_the_end(self):
+        raw = {"2026-08-10", "2026-08-11", "2026-08-12"}
+        s3 = _s3_with_raw_on(raw)
+        with patch("scripts.aggregate_costs.aggregate_day",
+                   return_value={"rows_in": 1}) as agg:
+            out = aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+        assert set(out["aggregated"]) == raw
+        assert {c.kwargs["target_date"].isoformat() for c in agg.call_args_list} == raw
+
+    def test_the_end_date_having_no_raw_is_not_a_failure(self):
+        """THE 2026-08-15 CASE: run_date 08-14 was empty; 08-10..08-12 were not."""
+        s3 = _s3_with_raw_on({"2026-08-12"})
+        with patch("scripts.aggregate_costs.aggregate_day",
+                   return_value={"rows_in": 1}):
+            out = aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+        assert out["aggregated"] == ["2026-08-12"]
+        assert "2026-08-14" in out["skipped"]
+
+    def test_a_wholly_quiet_window_aggregates_nothing_and_does_not_raise(self):
+        s3 = _s3_with_raw_on(set())
+        out = aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+        assert out["aggregated"] == []
+        assert len(out["skipped"]) == 9  # inclusive of both ends
+
+    def test_raw_present_but_no_parquet_written_RAISES(self):
+        """The silent gap this exists to make loud: `aggregate_day` returning
+        None for a date that demonstrably has rows is a contract violation,
+        not a quiet day."""
+        s3 = _s3_with_raw_on({"2026-08-11"})
+        with patch("scripts.aggregate_costs.aggregate_day", return_value=None):
+            with pytest.raises(CostWindowGapError, match="2026-08-11"):
+                aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+
+    def test_a_per_date_failure_names_the_date_and_the_cause(self):
+        s3 = _s3_with_raw_on({"2026-08-11"})
+        with patch("scripts.aggregate_costs.aggregate_day",
+                   side_effect=RuntimeError("parquet engine exploded")):
+            with pytest.raises(CostWindowGapError) as exc:
+                aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+        assert "2026-08-11" in str(exc.value)
+        assert "parquet engine exploded" in str(exc.value)
+
+    def test_one_bad_date_does_not_stop_the_others_being_aggregated(self):
+        """A hole in the middle of the window must not cost the rest of it."""
+        s3 = _s3_with_raw_on({"2026-08-11", "2026-08-12"})
+
+        def agg(s3_client, bucket, target_date, cw_client=None, **kw):
+            if target_date.isoformat() == "2026-08-11":
+                raise RuntimeError("boom")
+            return {"rows_in": 1}
+
+        with patch("scripts.aggregate_costs.aggregate_day", side_effect=agg):
+            with pytest.raises(CostWindowGapError):
+                aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=8)
+        # 08-12 was still written before the raise — verified by the call.
+
+    def test_the_default_window_matches_the_consumers_freshness_assertion(self):
+        """cost_telemetry declares max_age_days: 8 in
+        nousergon-lib's transparency_inventory.yaml. A producer covering less
+        than its consumer asserts is a gap by construction."""
+        assert DEFAULT_LOOKBACK_DAYS == 8
+
+    def test_existence_is_probed_not_enumerated(self):
+        """One truncated LIST per date — the prefix accumulates forever."""
+        s3 = _s3_with_raw_on(set())
+        aggregate_window(s3, "b", _date(2026, 8, 14), lookback_days=2)
+        for call in s3.list_objects_v2.call_args_list:
+            assert call.kwargs["MaxKeys"] == 1

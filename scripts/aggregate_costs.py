@@ -48,6 +48,7 @@ import json
 import logging
 import sys
 from datetime import date as date_type
+from datetime import timedelta
 from typing import Any
 
 import boto3
@@ -535,6 +536,119 @@ def print_summary(summary: dict, *, target_date: date_type) -> None:
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
+
+
+# ── Window aggregation (config-I7407) ───────────────────────────────────────
+# `aggregate_day` covers ONE date, and the weekly SF invokes it with exactly
+# one: `$.run_date`. Capture, meanwhile, is DAILY -- `krepis.cost_sink` writes
+# under the wall-clock date of the call, so the Think Tank's daily runs land on
+# dates no SF ever names.
+#
+# Measured 2026-08-15: `_cost_raw/` held 2026-08-10, 08-11 and 08-12; `_cost/`
+# stopped at 08-10. Two days of real cost rows were captured and never
+# aggregated, and the Saturday run asked for 2026-08-14, which had no raw at
+# all, so the stage "succeeded" having produced nothing. The `cost_telemetry`
+# transparency row then failed its 8-day freshness window against a parquet
+# from 08-10 -- which is the single [FAIL] that made the 2026-08-15 weekly run
+# terminate DEGRADED.
+#
+# Probing N dates rather than listing the prefix: N is small and bounded, a
+# HEAD-shaped probe per date is cheaper and more predictable than paginating a
+# prefix that accumulates forever, and the window is the same 8 days the
+# consumer's `max_age_days` declares.
+DEFAULT_LOOKBACK_DAYS = 8
+
+
+class CostWindowGapError(CostAggregationError):
+    """Raw rows exist for a date and no parquet was produced for it.
+
+    A separate exception from CostAggregationError because the causes differ:
+    that one means the filter and the producer disagree about a row, this one
+    means aggregation never reached a date that had data. Both are contract
+    violations a producer may not swallow; only this one is invisible without
+    being named, because the per-date call returns a legitimate None.
+    """
+
+
+def aggregate_window(
+    s3_client: Any,
+    bucket: str,
+    end_date: date_type,
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    cw_client: Any = None,
+) -> dict:
+    """Aggregate every date in ``[end_date - lookback_days, end_date]`` that
+    has raw cost rows.
+
+    Returns ``{"aggregated": [...], "skipped": [...], "failed": [...]}`` where
+    each entry is an ISO date string. A date with no raw partition is neither
+    aggregated nor a failure -- it is a quiet day, and lands in ``skipped``.
+
+    Idempotent by construction: re-aggregating a date rewrites the same
+    parquet from the same immutable JSONL, so a re-run over an overlapping
+    window is a no-op in effect. That is deliberate -- it means a missed week
+    self-heals on the next run instead of needing an operator backfill.
+    """
+    aggregated: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    for offset in range(lookback_days, -1, -1):
+        d = end_date - timedelta(days=offset)
+        iso = d.isoformat()
+        if not _has_raw_rows(s3_client, bucket, d):
+            skipped.append(iso)
+            continue
+        try:
+            summary = aggregate_day(
+                s3_client=s3_client, bucket=bucket, target_date=d,
+                cw_client=cw_client,
+            )
+        except Exception as exc:  # noqa: BLE001 — recorded, re-raised below
+            logger.error(
+                "[aggregate_costs] %s had raw rows and failed to aggregate: "
+                "%s: %s", iso, type(exc).__name__, exc,
+            )
+            failed.append((iso, f"{type(exc).__name__}: {exc}"))
+            continue
+        if summary is None:
+            # `_has_raw_rows` said yes and `aggregate_day` produced nothing.
+            # That is the silent gap this function exists to make loud.
+            failed.append((iso, "raw rows present but no parquet written"))
+            continue
+        aggregated.append(iso)
+
+    logger.info(
+        "[aggregate_costs] window %s..%s: aggregated=%d quiet=%d failed=%d",
+        (end_date - timedelta(days=lookback_days)).isoformat(),
+        end_date.isoformat(), len(aggregated), len(skipped), len(failed),
+    )
+
+    if failed:
+        raise CostWindowGapError(
+            "cost aggregation left "
+            f"{len(failed)} date(s) with raw rows unaggregated: "
+            + "; ".join(f"{d}: {why}" for d, why in failed)
+            + ". Raw JSONL exists for these dates and no parquet was produced, "
+            "so every consumer of decision_artifacts/_cost/ is reading a "
+            "window with holes in it."
+        )
+
+    return {"aggregated": aggregated, "skipped": skipped, "failed": []}
+
+
+def _has_raw_rows(s3_client: Any, bucket: str, target_date: date_type) -> bool:
+    """Whether ``_cost_raw/{date}/`` holds at least one JSONL object.
+
+    One truncated LIST, not a full enumeration: the question is existence.
+    """
+    resp = s3_client.list_objects_v2(
+        Bucket=bucket,
+        Prefix=f"{_INPUT_PREFIX}/{target_date.isoformat()}/",
+        MaxKeys=1,
+    )
+    return bool(resp.get("KeyCount") or resp.get("Contents"))
 
 
 def main(argv: list[str] | None = None) -> int:

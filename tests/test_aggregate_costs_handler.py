@@ -52,11 +52,13 @@ def _ok_summary() -> dict:
 
 
 class TestHandler:
-    def test_ok_when_aggregate_returns_summary(self, handler_mod):
+    def test_ok_when_the_window_aggregated_at_least_one_date(self, handler_mod):
         # Real boto3 clients are constructed inside the handler before
-        # aggregate_day is called; patch the boto3 module wholesale to
+        # aggregation is called; patch the boto3 module wholesale to
         # avoid network credential errors in CI.
         with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs._has_raw_rows",
+                   side_effect=lambda s3, b, d: d.isoformat() == "2026-05-24"), \
              patch("scripts.aggregate_costs.aggregate_day",
                    return_value=_ok_summary()), \
              patch("boto3.client", return_value=MagicMock()):
@@ -64,26 +66,26 @@ class TestHandler:
                 {"date": "2026-05-25"}, context=None,
             )
         assert result["status"] == "OK"
-        assert result["summary"]["rows_in"] == 1234
+        assert result["summary"]["dates_aggregated"] == ["2026-05-24"]
         assert result["date"] == "2026-05-25"
 
-    def test_skipped_when_aggregate_returns_none(self, handler_mod):
-        # aggregate_day returns None for "no JSONL files for the date" —
-        # legitimate upstream no-op. Per L3277 audit + data #295 pattern
-        # the SF consumer (canary or task state) must accept SKIPPED.
+    def test_skipped_only_when_the_WHOLE_window_is_quiet(self, handler_mod):
+        # config-I7407: this used to fire whenever the ONE named date was
+        # empty — the common case, not the exceptional one, since capture is
+        # daily and the SF names a single run_date.
         with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=None), \
+             patch("scripts.aggregate_costs._has_raw_rows", return_value=False), \
              patch("boto3.client", return_value=MagicMock()):
             result = handler_mod.handler(
                 {"date": "2026-05-25"}, context=None,
             )
         assert result["status"] == "SKIPPED"
-        assert result["reason"] == "no_cost_raw_for_date"
+        assert result["reason"] == "no_cost_raw_in_window"
         assert result["date"] == "2026-05-25"
 
     def test_error_when_aggregate_raises(self, handler_mod):
         with patch.object(handler_mod, "_ensure_init"), \
+             patch("scripts.aggregate_costs._has_raw_rows", return_value=True), \
              patch("scripts.aggregate_costs.aggregate_day",
                    side_effect=RuntimeError("S3 unreachable")), \
              patch("boto3.client", return_value=MagicMock()):

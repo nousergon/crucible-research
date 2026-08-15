@@ -591,6 +591,7 @@ class TestAggregateCostsCoverage:
     def test_verdict_lands_on_ok(self, aggregate_costs_mod, stub_stage_coverage):
         with (
             patch.object(aggregate_costs_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=True),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_aggregate_costs_summary()),
             patch("boto3.client", return_value=MagicMock()),
         ):
@@ -602,11 +603,11 @@ class TestAggregateCostsCoverage:
         assert kwargs["run_date"] == "2026-05-25"
 
     def test_verdict_lands_on_skipped(self, aggregate_costs_mod, stub_stage_coverage):
-        # SKIPPED (no _cost_raw partitions) is a legitimate completion, not
-        # a failure — the assertion still runs.
+        # SKIPPED (no _cost_raw partitions anywhere in the window, config-I7407)
+        # is a legitimate completion, not a failure — the assertion still runs.
         with (
             patch.object(aggregate_costs_mod, "_ensure_init"),
-            patch("scripts.aggregate_costs.aggregate_day", return_value=None),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=False),
             patch("boto3.client", return_value=MagicMock()),
         ):
             result = aggregate_costs_mod.handler({"date": "2026-05-25"}, context=None)
@@ -616,6 +617,7 @@ class TestAggregateCostsCoverage:
     def test_missing_lib_module_does_not_change_outcome(self, aggregate_costs_mod, absent_stage_coverage):
         with (
             patch.object(aggregate_costs_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=True),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_aggregate_costs_summary()),
             patch("boto3.client", return_value=MagicMock()),
         ):
