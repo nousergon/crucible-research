@@ -14,16 +14,23 @@ override sets entry point at deploy time.
 Event shape (all fields optional except ``date``):
 
     {
-      "date": "2026-05-25",            # ISO YYYY-MM-DD (required)
+      "date": "2026-05-25",            # ISO YYYY-MM-DD (required) — the END
+                                       #   of the aggregation window
+      "lookback_days": 8,              # optional; default DEFAULT_LOOKBACK_DAYS
       "bucket": "alpha-engine-research", # default RESEARCH_BUCKET env / fallback
       "dry_run_llm": true,              # shell-run dry path — early return
     }
 
+``date`` names the window END, not the only date aggregated (config-I7407).
+Capture is daily and this Lambda is invoked weekly with the SF's ``run_date``,
+so a single-date aggregation left every intervening day's rows unaggregated —
+measured 2026-08-15, two days of real cost rows and a DEGRADED weekly run.
+
 Returns one of:
 
     {"status": "OK", "summary": {...}}                — aggregated + parquet written
-    {"status": "SKIPPED", "reason": "no_cost_raw_for_date", "date": "..."}
-                                                       — no JSONL partitions for the date
+    {"status": "SKIPPED", "reason": "no_cost_raw_in_window", "date": "..."}
+                                                       — no JSONL partitions anywhere in the window
     {"status": "ERROR", "error": "<msg>"}             — exception caught hard
 
 The ``SKIPPED`` status mirrors data #295's pattern (deploy.sh canary
@@ -115,7 +122,10 @@ def handler(event, context):
     import boto3
 
     from evals.lambda_dry import is_dry
-    from scripts.aggregate_costs import aggregate_day
+    from scripts.aggregate_costs import (
+        DEFAULT_LOOKBACK_DAYS,
+        aggregate_window,
+    )
 
     # Shell-run dry path — boot + imports above already exercised the
     # bootstrap smoke. Return BEFORE aggregate_day (which reads S3 +
@@ -160,11 +170,26 @@ def handler(event, context):
     s3_client = boto3.client("s3")
     cw_client = boto3.client("cloudwatch")
 
+    # config-I7407: aggregate the WINDOW ending at `date`, not that one date.
+    # Capture is daily (krepis.cost_sink writes under the wall-clock date of
+    # the call, so the Think Tank's daily runs land on dates no SF names)
+    # while this Lambda was invoked with a single `$.run_date`. Measured
+    # 2026-08-15: raw existed for 08-10/08-11/08-12, parquet stopped at 08-10,
+    # and the Saturday run asked for 08-14 -- which had no raw at all, so the
+    # stage produced nothing and reported SKIPPED. The `cost_telemetry`
+    # transparency row then failed its 8-day freshness check, which is the
+    # single [FAIL] behind that run's DEGRADED terminal.
+    #
+    # The window default matches that row's `max_age_days`, so the producer
+    # covers exactly what the consumer asserts. Overridable per invocation for
+    # a wider backfill.
+    lookback = int(event.get("lookback_days", DEFAULT_LOOKBACK_DAYS))
     try:
-        summary = aggregate_day(
+        result = aggregate_window(
             s3_client=s3_client,
             bucket=bucket,
-            target_date=target_date,
+            end_date=target_date,
+            lookback_days=lookback,
             cw_client=cw_client,
         )
     except Exception as exc:  # noqa: BLE001
@@ -173,31 +198,43 @@ def handler(event, context):
         )
         return {"status": "ERROR", "error": str(exc)}
 
+    # A window with nothing to do is the legitimate quiet case; a window that
+    # aggregated at least one date is a success naming what it covered.
+    summary = None if not result["aggregated"] else {
+        "dates_aggregated": result["aggregated"],
+        "dates_quiet": result["skipped"],
+        "lookback_days": lookback,
+    }
+
     if summary is None:
-        # Legitimate upstream no-op — no JSONL partitions emitted for
-        # this date (e.g. Saturday SF ran with cost-telemetry kill
-        # switch on, or a recovery SF that bypassed Research). Per
+        # Legitimate upstream no-op — no JSONL partitions emitted ANYWHERE
+        # in the window (e.g. cost-telemetry kill switch on, or a genuinely
+        # quiet stretch). config-I7407 narrowed what this means: it used to
+        # fire whenever the ONE named date was empty, which is the common
+        # case rather than the exceptional one. Per
         # [[feedback_no_silent_fails]] the no-op is loudly visible
         # (WARN-log + named SKIPPED status), but does NOT raise — the
         # consumer / canary must accept SKIPPED as pass.
         logger.info(
-            "[aggregate_costs_handler] no _cost_raw partitions for %s — "
-            "skipping parquet write (no error)",
-            date_str,
+            "[aggregate_costs_handler] no _cost_raw partitions in the %d-day "
+            "window ending %s — skipping parquet write (no error)",
+            lookback, date_str,
         )
         skipped_result = {
             "status": "SKIPPED",
-            "reason": "no_cost_raw_for_date",
+            "reason": "no_cost_raw_in_window",
             "date": date_str,
+            "lookback_days": lookback,
         }
         _attach_stage_coverage(skipped_result, run_date=date_str, window_start=_started)
         return skipped_result
 
     logger.info(
-        "[aggregate_costs_handler] done rows_in=%d total_usd=%.4f output_key=%s",
-        summary.get("rows_in", 0),
-        summary.get("total_cost_usd", 0.0),
-        summary.get("output_key", ""),
+        "[aggregate_costs_handler] done dates_aggregated=%s quiet=%d "
+        "lookback_days=%d",
+        ",".join(summary["dates_aggregated"]),
+        len(summary["dates_quiet"]),
+        lookback,
     )
     result = {"status": "OK", "summary": summary, "date": date_str}
     _attach_stage_coverage(result, run_date=date_str, window_start=_started)
