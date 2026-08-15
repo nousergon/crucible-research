@@ -56,14 +56,15 @@ class TestHandler:
         # Real boto3 clients are constructed inside the handler before
         # aggregation is called; patch the boto3 module wholesale to
         # avoid network credential errors in CI.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs._has_raw_rows",
-                   side_effect=lambda s3, b, d: d.isoformat() == "2026-05-24"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=_ok_summary()), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", side_effect=lambda s3, b, d: d.isoformat() == "2026-05-24"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"date": "2026-05-25"}, context=None,
+                {"date": "2026-05-25"},
+                context=None,
             )
         assert result["status"] == "OK"
         assert result["summary"]["dates_aggregated"] == ["2026-05-24"]
@@ -73,24 +74,29 @@ class TestHandler:
         # config-I7407: this used to fire whenever the ONE named date was
         # empty — the common case, not the exceptional one, since capture is
         # daily and the SF names a single run_date.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs._has_raw_rows", return_value=False), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=False),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"date": "2026-05-25"}, context=None,
+                {"date": "2026-05-25"},
+                context=None,
             )
         assert result["status"] == "SKIPPED"
         assert result["reason"] == "no_cost_raw_in_window"
         assert result["date"] == "2026-05-25"
 
     def test_error_when_aggregate_raises(self, handler_mod):
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs._has_raw_rows", return_value=True), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   side_effect=RuntimeError("S3 unreachable")), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=True),
+            patch("scripts.aggregate_costs.aggregate_day", side_effect=RuntimeError("S3 unreachable")),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
-                {"date": "2026-05-25"}, context=None,
+                {"date": "2026-05-25"},
+                context=None,
             )
         assert result["status"] == "ERROR"
         assert "S3 unreachable" in result["error"]
@@ -109,7 +115,8 @@ class TestHandler:
     def test_error_when_date_invalid(self, handler_mod):
         with patch.object(handler_mod, "_ensure_init"):
             result = handler_mod.handler(
-                {"date": "not-a-date"}, context=None,
+                {"date": "not-a-date"},
+                context=None,
             )
         assert result["status"] == "ERROR"
         assert "not-a-date" in result["error"]
@@ -118,9 +125,11 @@ class TestHandler:
         # dry_run_llm shell-run path must NOT touch S3 or call
         # aggregate_day. Mirrors the rationale_clustering / eval_judge
         # dry path used by Friday-Preflight shell runs.
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day") as mock_agg, \
-             patch("boto3.client") as mock_boto:
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day") as mock_agg,
+            patch("boto3.client") as mock_boto,
+        ):
             result = handler_mod.handler(
                 {"dry_run_llm": True, "date": "2026-05-25"},
                 context=None,
@@ -140,10 +149,11 @@ class TestHandler:
             captured.update(kwargs)
             return _ok_summary()
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   side_effect=fake_aggregate), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", side_effect=fake_aggregate),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             handler_mod.handler({"date": "2026-05-25"}, context=None)
 
         assert captured["target_date"] == date_type(2026, 5, 25)
@@ -161,10 +171,11 @@ class TestHandler:
             captured.update(kwargs)
             return _ok_summary()
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   side_effect=fake_aggregate), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", side_effect=fake_aggregate),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             handler_mod.handler(
                 {"date": "2026-05-25", "bucket": "test-bucket"},
                 context=None,
@@ -192,14 +203,13 @@ class TestFanInCoverage:
         MarkAggregateCostsDegraded."""
         from scripts.cost_coverage import CostCoverageError
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=_ok_summary()), \
-             patch("scripts.aggregate_costs._list_jsonl_keys",
-                   return_value=["p/d/r/thinktank-sweep.0.jsonl"]), \
-             patch("scripts.cost_coverage.stages_entered",
-                   return_value={"ReplayConcordance"}), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=["p/d/r/thinktank-sweep.0.jsonl"]),
+            patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             with pytest.raises(CostCoverageError, match="replay-concordance"):
                 handler_mod.handler(
                     {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
@@ -212,30 +222,34 @@ class TestFanInCoverage:
         and it used to return SKIPPED with the state succeeding."""
         from scripts.cost_coverage import CostCoverageError
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day", return_value=None), \
-             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
-             patch("scripts.cost_coverage.stages_entered",
-                   return_value={"ReplayConcordance"}), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "scripts.aggregate_costs.aggregate_window", return_value={"aggregated": [], "skipped": ["2026-05-25"]}
+            ),
+            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             with pytest.raises(CostCoverageError):
                 handler_mod.handler(
                     {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
                     context=None,
                 )
 
-    def test_an_empty_partition_on_a_day_nothing_ran_is_still_skipped(
-        self, handler_mod
-    ):
+    def test_an_empty_partition_on_a_day_nothing_ran_is_still_skipped(self, handler_mod):
         """The other half of the same branch: a quiet week is legitimate,
         and the declaration plus the execution history is what tells the
         two apart."""
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day", return_value=None), \
-             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
-             patch("scripts.cost_coverage.stages_entered",
-                   return_value={"CheckSkipReplayConcordance"}), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch(
+                "scripts.aggregate_costs.aggregate_window", return_value={"aggregated": [], "skipped": ["2026-05-25"]}
+            ),
+            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("scripts.cost_coverage.stages_entered", return_value={"CheckSkipReplayConcordance"}),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
                 {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
                 context=None,
@@ -245,15 +259,16 @@ class TestFanInCoverage:
     def test_full_coverage_lands_the_verdict_on_the_summary(self, handler_mod):
         """The verdict is data, not just an exception message — an
         exception message is not a surface and cannot be trended."""
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=_ok_summary()), \
-             patch("scripts.aggregate_costs._list_jsonl_keys",
-                   return_value=["p/d/r/replay-concordance.0.jsonl",
-                                 "p/d/r/thinktank-sweep.0.jsonl"]), \
-             patch("scripts.cost_coverage.stages_entered",
-                   return_value={"ReplayConcordance"}), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch(
+                "scripts.aggregate_costs._list_jsonl_keys",
+                return_value=["p/d/r/replay-concordance.0.jsonl", "p/d/r/thinktank-sweep.0.jsonl"],
+            ),
+            patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler(
                 {"date": "2026-05-25", "coverage": _COVERAGE_DECL},
                 context=None,
@@ -268,25 +283,26 @@ class TestFanInCoverage:
         reported as a domain finding."""
         from scripts.cost_coverage import CostCoverageUnmeasured
 
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=_ok_summary()), \
-             patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             with pytest.raises(CostCoverageUnmeasured):
                 handler_mod.handler(
-                    {"date": "2026-05-25",
-                     "coverage": {**_COVERAGE_DECL, "execution_arn": ""}},
+                    {"date": "2026-05-25", "coverage": {**_COVERAGE_DECL, "execution_arn": ""}},
                     context=None,
                 )
 
     def test_no_declaration_means_no_check_not_a_failure(self, handler_mod):
         """The handler is also reachable from the deploy canary and from
         the CLI, neither of which is a pipeline run."""
-        with patch.object(handler_mod, "_ensure_init"), \
-             patch("scripts.aggregate_costs.aggregate_day",
-                   return_value=_ok_summary()), \
-             patch("boto3.client", return_value=MagicMock()):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
             result = handler_mod.handler({"date": "2026-05-25"}, context=None)
         assert result["status"] == "OK"
         assert "coverage" not in result["summary"]

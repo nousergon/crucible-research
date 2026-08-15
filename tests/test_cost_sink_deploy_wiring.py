@@ -41,7 +41,7 @@ class TestTheHelperExists:
     def test_it_sets_both_variables_with_the_exact_literals(self, deploy):
         body = deploy.split("_apply_cost_sink_env() {", 1)[1].split("\n}", 1)[0]
         assert f"--set KREPIS_COST_SINK_PREFIX={_PREFIX}" in body
-        assert "--set KREPIS_COST_SINK_BUCKET=\"$BUCKET\"" in body
+        assert '--set KREPIS_COST_SINK_BUCKET="$BUCKET"' in body
         assert re.search(rf'^BUCKET="{re.escape(_BUCKET)}"$', deploy, re.M)
 
     def test_it_merges_rather_than_replaces(self, deploy):
@@ -66,8 +66,8 @@ class TestEveryPublishedFunctionGetsIt:
             '"$FUNCTION_EVAL_ROLLING_MEAN"',
             '"$FUNCTION_RATIONALE_CLUSTERING"',
             '"$fn_name"',  # the shared-image path: submit / poll / process /
-                           # aggregate_costs / scanner / signals_envelope /
-                           # openrouter_shadow / perturbation_battery
+            # aggregate_costs / scanner / signals_envelope /
+            # openrouter_shadow / perturbation_battery
         ],
     )
     def test_target_is_covered(self, deploy, target):
@@ -98,9 +98,24 @@ class TestTheSinkStaysAnEnvironmentFact:
     the next call site, which is how this started."""
 
     def test_the_krepis_floor_is_pinned(self):
+        """The floor must be AT LEAST 0.57.0 — asserted as a version
+        comparison, not as a literal string.
+
+        A literal `"krepis>=0.57.0" in req` passes only while the floor is
+        exactly that value, so the next legitimate raise (0.59.7 shipped the
+        cost-record contract columns, config-I7393) fails a guard that has
+        nothing to say about the raise. A guard keyed on a constant it does
+        not own reports every correct change as a defect.
+        """
+        import re
+
         req = (_REPO_ROOT / "requirements.txt").read_text()
-        assert "krepis>=0.57.0" in req, (
-            "an older krepis has no environment-resolved cost sink and no "
-            "merge-lambda-env subcommand — the deploy would fail loudly, "
-            "which is right, but the floor is what says so"
+        m = re.search(r"^krepis>=(\d+)\.(\d+)\.(\d+)", req, re.MULTILINE)
+        assert m, "requirements.txt declares no krepis floor at all"
+        floor = tuple(int(g) for g in m.groups())
+        assert floor >= (0, 57, 0), (
+            f"krepis floor is {'.'.join(map(str, floor))}; below 0.57.0 there "
+            "is no environment-resolved cost sink and no merge-lambda-env "
+            "subcommand — the deploy would fail loudly, which is right, but "
+            "the floor is what says so"
         )
