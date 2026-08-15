@@ -215,6 +215,15 @@ def handler(event, context):
         # [[feedback_no_silent_fails]] the no-op is loudly visible
         # (WARN-log + named SKIPPED status), but does NOT raise — the
         # consumer / canary must accept SKIPPED as pass.
+        #
+        # It is NOT, however, a pass for coverage, and this is the branch
+        # that mattered most: an EMPTY partition on a day the pipeline's
+        # LLM stages ran is the I7179 defect in its purest form, and until
+        # this line existed it returned SKIPPED and the state succeeded.
+        # "Legitimately quiet" and "every producer went silent" are the
+        # same shape here, so the coverage check runs FIRST and the
+        # declaration is what tells them apart.
+        _check_fan_in_coverage(event, bucket, date_str)
         logger.info(
             "[aggregate_costs_handler] no _cost_raw partitions in the %d-day "
             "window ending %s — skipping parquet write (no error)",
@@ -236,6 +245,73 @@ def handler(event, context):
         len(summary["dates_quiet"]),
         lookback,
     )
+
+    # ── fan-in coverage (alpha-engine-config-I7179) ────────────────────
+    #
+    # Deliberately AFTER the parquet write and deliberately NOT inside the
+    # try/except above.
+    #
+    # After, because the parquet is the primary deliverable and a coverage
+    # verdict must not cost the run its artifact. Outside the except,
+    # because that block converts a failure into `{"status": "ERROR"}` —
+    # and nothing downstream reads this state's status. The Step Function
+    # has no Choice on it; its only failure path is the `States.ALL` Catch,
+    # which fires on a RAISED error and routes to
+    # MarkAggregateCostsDegraded. A returned ERROR here would be silent,
+    # which is the exact shape of defect this check exists to end.
+    coverage_verdict = _check_fan_in_coverage(event, bucket, date_str)
+    if coverage_verdict is not None:
+        summary["coverage"] = coverage_verdict
+
     result = {"status": "OK", "summary": summary, "date": date_str}
     _attach_stage_coverage(result, run_date=date_str, window_start=_started)
     return result
+
+
+def _check_fan_in_coverage(event, bucket: str, date_str: str):
+    """Assert every stage that ran also emitted a cost record.
+
+    Returns the verdict dict, or ``None`` when the Step Function supplied
+    no ``coverage`` block (a manual or legacy invocation — this handler is
+    also reachable from the deploy canary and from
+    ``scripts/aggregate_costs.py``). Raises on a breach or on being unable
+    to measure; both reach the SF's Catch.
+    """
+    declaration = event.get("coverage")
+    if not declaration:
+        logger.info(
+            "[aggregate_costs_handler] no coverage declaration in the event — "
+            "fan-in coverage NOT checked for %s. This is expected for a manual "
+            "or canary invocation and never for a weekly-SF run.",
+            date_str,
+        )
+        return None
+
+    import boto3
+
+    from scripts.aggregate_costs import _INPUT_PREFIX, _list_jsonl_keys
+    from scripts.cost_coverage import (
+        evaluate_coverage,
+        observed_producers,
+        stages_entered,
+    )
+
+    keys = _list_jsonl_keys(
+        boto3.client("s3"), bucket, f"{_INPUT_PREFIX}/{date_str}/"
+    )
+    observed = observed_producers(keys)
+    entered = stages_entered(
+        declaration.get("execution_arn", ""),
+        sfn_client=boto3.client("stepfunctions"),
+    )
+    verdict = evaluate_coverage(
+        observed=observed, declaration=declaration, entered=entered
+    )
+    logger.info(
+        "[aggregate_costs_handler] fan-in coverage OK for %s — covered=%s "
+        "stages_not_entered=%s",
+        date_str,
+        ",".join(verdict["covered"]) or "(none)",
+        ",".join(verdict["stages_not_entered"]) or "(none)",
+    )
+    return verdict

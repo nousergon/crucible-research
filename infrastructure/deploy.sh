@@ -155,6 +155,41 @@ _verify_live_alias() {
 # into a file and merged by python, never printed, never passed on a command
 # line. Do NOT trace this script (see AGENTS.md: a shell trace expands the
 # variable JSON).
+# -- Cost-sink addressing for EVERY research Lambda (config-I7179) ----------
+#
+# Measured 2026-08-13: every per-call cost record in
+# decision_artifacts/_cost_raw/ came from ONE producer -- the Think Tank,
+# which left the weekly pipeline on 2026-08-10 -- while every LLM-calling
+# stage of that pipeline was attributed to nothing. The cause was not a
+# broken writer: `krepis.llm.LLMClient` only emitted when a call site
+# remembered to pass `cost_sink=`, so coverage equalled the set of authors
+# who thought about it, and decayed with every stage added.
+#
+# krepis>=0.57.0 inverts that: a client with no `cost_sink` argument
+# resolves one from KREPIS_COST_SINK_BUCKET + KREPIS_COST_SINK_PREFIX.
+# Setting them here makes emission a property of the DEPLOYMENT, so a new
+# Lambda -- or a new LLM call inside an existing one -- emits by
+# construction and cannot silently reproduce the gap.
+#
+# Applied to EVERY function this script publishes, not to a hand-picked
+# subset. A function that makes no LLM call simply never emits; picking
+# the subset by hand is the same judgement that produced the gap.
+#
+# ORDERING IS LOAD-BEARING: a published Lambda version snapshots the
+# environment, and the `live` alias points at a published version. This
+# must run BEFORE `publish-version` or the alias serves a version without
+# the variables, while `get-function-configuration` on $LATEST shows them
+# set -- a deploy-path defect that is invisible in every file.
+#
+# Merge, never replace: `krepis.aws merge-lambda-env` is read-modify-write
+# and preserves the provider keys, RAG_DATABASE_URL and LangSmith config
+# that exist only on the live functions. It echoes key NAMES only.
+_apply_cost_sink_env() {
+  local fn="$1"
+  echo "  Applying cost-sink addressing to $fn (merge, not replace)..."
+  python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set KREPIS_COST_SINK_BUCKET="$BUCKET" --set KREPIS_COST_SINK_PREFIX=decision_artifacts/_cost_raw --region "$REGION"
+}
+
 _apply_router_env() {
   local fn="$1"
   echo "  Applying router addressing to $fn (merge, not replace)..."
@@ -431,6 +466,7 @@ build_and_deploy_main() {
   echo "  $FUNCTION_MAIN deployed (container image)."
 
   _apply_router_env "$FUNCTION_MAIN"
+  _apply_cost_sink_env "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
@@ -663,6 +699,8 @@ deploy_eval_judge() {
   fi
   echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
 
+  _apply_cost_sink_env "$FUNCTION_EVAL_JUDGE"
+
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
   VERSION=$(aws lambda publish-version \
@@ -723,6 +761,8 @@ deploy_eval_rolling_mean() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_ROLLING_MEAN deployed (CMD=eval_rolling_mean_handler.handler)."
+
+  _apply_cost_sink_env "$FUNCTION_EVAL_ROLLING_MEAN"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" 2>/dev/null || sleep 5
@@ -797,6 +837,8 @@ deploy_rationale_clustering() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
+
+  _apply_cost_sink_env "$FUNCTION_RATIONALE_CLUSTERING"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
@@ -878,6 +920,8 @@ _deploy_image_shared_lambda() {
       --region "$REGION" > /dev/null
   fi
   echo "  $fn_name deployed (CMD=${handler_module}.handler timeout=${timeout_s}s memory=${memory_mb}MB)."
+
+  _apply_cost_sink_env "$fn_name"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5

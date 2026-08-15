@@ -234,6 +234,16 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
 # that field; an older krepis has no `--json` flag at all.
 #
+# 0.57.0 floor (krepis-PR140, alpha-engine-config-I7179): `LLMClient` with no
+# `cost_sink=` argument now resolves one from KREPIS_COST_SINK_BUCKET +
+# KREPIS_COST_SINK_PREFIX, and `krepis.aws merge-lambda-env` is what
+# `infrastructure/deploy.sh` uses to set them. On an older krepis the deploy
+# fails loudly on an unknown subcommand — which is the right failure, because
+# the alternative is a deploy that succeeds while every Lambda it published
+# emits no cost record at all. That silence ran for months. Subsumed by the
+# higher floor below; kept because the floor's REASON is not recoverable from
+# the version number.
+#
 # 0.59.4 floor (alpha-engine-config-I7214): the FIRST published krepis
 # carrying `krepis.stage_coverage`, which every weekly-SF-backed handler in
 # lambda/ imports to self-assert its declared output before returning. The
