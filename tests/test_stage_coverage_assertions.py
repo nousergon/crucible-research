@@ -88,9 +88,7 @@ def scanner_mod():
 
 @pytest.fixture
 def signals_envelope_mod():
-    mod = _load_handler(
-        "signals_envelope_handler.py", "lambda_i7214_signals_envelope_handler"
-    )
+    mod = _load_handler("signals_envelope_handler.py", "lambda_i7214_signals_envelope_handler")
     mod._init_done = False
     yield mod
 
@@ -103,54 +101,42 @@ def runner_mod():
 
 @pytest.fixture
 def submit_mod():
-    mod = _load_handler(
-        "eval_judge_submit_handler.py", "lambda_i7214_eval_judge_submit_handler"
-    )
+    mod = _load_handler("eval_judge_submit_handler.py", "lambda_i7214_eval_judge_submit_handler")
     mod._init_done = False
     yield mod
 
 
 @pytest.fixture
 def poll_mod():
-    mod = _load_handler(
-        "eval_judge_poll_handler.py", "lambda_i7214_eval_judge_poll_handler"
-    )
+    mod = _load_handler("eval_judge_poll_handler.py", "lambda_i7214_eval_judge_poll_handler")
     mod._init_done = False
     yield mod
 
 
 @pytest.fixture
 def process_mod():
-    mod = _load_handler(
-        "eval_judge_process_handler.py", "lambda_i7214_eval_judge_process_handler"
-    )
+    mod = _load_handler("eval_judge_process_handler.py", "lambda_i7214_eval_judge_process_handler")
     mod._init_done = False
     yield mod
 
 
 @pytest.fixture
 def rolling_mean_mod():
-    mod = _load_handler(
-        "eval_rolling_mean_handler.py", "lambda_i7214_eval_rolling_mean_handler"
-    )
+    mod = _load_handler("eval_rolling_mean_handler.py", "lambda_i7214_eval_rolling_mean_handler")
     mod._init_done = False
     yield mod
 
 
 @pytest.fixture
 def clustering_mod():
-    mod = _load_handler(
-        "rationale_clustering_handler.py", "lambda_i7214_rationale_clustering_handler"
-    )
+    mod = _load_handler("rationale_clustering_handler.py", "lambda_i7214_rationale_clustering_handler")
     mod._init_done = False
     yield mod
 
 
 @pytest.fixture
 def aggregate_costs_mod():
-    mod = _load_handler(
-        "aggregate_costs_handler.py", "lambda_i7214_aggregate_costs_handler"
-    )
+    mod = _load_handler("aggregate_costs_handler.py", "lambda_i7214_aggregate_costs_handler")
     mod._init_done = False
     yield mod
 
@@ -245,7 +231,10 @@ class TestScannerCoverage:
         with (
             patch.object(scanner_mod, "_ensure_init"),
             patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_scanner_artifact()),
-            patch("data.scanner_orchestrator.write_candidates_artifact", return_value="candidates/2026-05-30/candidates.json"),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
             patch("boto3.client", return_value=MagicMock()),
         ):
             result = scanner_mod.handler({"run_date": "2026-05-30"}, context=None)
@@ -264,7 +253,10 @@ class TestScannerCoverage:
         with (
             patch.object(scanner_mod, "_ensure_init"),
             patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_scanner_artifact()),
-            patch("data.scanner_orchestrator.write_candidates_artifact", return_value="candidates/2026-05-30/candidates.json"),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
             patch("boto3.client", return_value=MagicMock()),
         ):
             result = scanner_mod.handler({"run_date": "2026-05-30"}, context=None)
@@ -283,7 +275,10 @@ class TestSignalsEnvelopeCoverage:
             patch("scoring.signals_envelope.read_universe_board", return_value=_board()),
             patch("scoring.signals_envelope.read_regime_substrate", return_value=None),
             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()),
-            patch("scoring.signals_envelope.write_envelope", return_value=("signals/2026-07-14/signals.json", "signals/latest.json")),
+            patch(
+                "scoring.signals_envelope.write_envelope",
+                return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+            ),
         ):
             result = signals_envelope_mod.handler({"run_date": "2026-07-14"}, context=None)
         assert result["status"] == "OK"
@@ -299,7 +294,10 @@ class TestSignalsEnvelopeCoverage:
             patch("scoring.signals_envelope.read_universe_board", return_value=_board()),
             patch("scoring.signals_envelope.read_regime_substrate", return_value=None),
             patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope()),
-            patch("scoring.signals_envelope.write_envelope", return_value=("signals/2026-07-14/signals.json", "signals/latest.json")),
+            patch(
+                "scoring.signals_envelope.write_envelope",
+                return_value=("signals/2026-07-14/signals.json", "signals/latest.json"),
+            ),
         ):
             result = signals_envelope_mod.handler({"run_date": "2026-07-14"}, context=None)
         assert result["status"] == "OK"
@@ -310,15 +308,23 @@ class TestSignalsEnvelopeCoverage:
 
 
 class TestChallengerShadowCoverage:
+    """The event carries the SF's CALENDAR date (`$.run_date`, a Saturday) and
+    every artifact is keyed on the trading day — `_run_challengers_only`
+    normalises between them (alpha-engine-config-I7419). The fixtures below
+    therefore pair a Saturday event date with a Friday-keyed
+    `signals/latest.json`, which is the only combination the live pipeline can
+    produce; the earlier all-Saturday fixture described a state that cannot
+    exist under DATE_CONVENTIONS."""
+
     def test_verdict_lands_under_correct_stage_name(self, runner_mod, stub_stage_coverage):
         archive = MagicMock()
         archive.bucket = "alpha-engine-research"
         archive.s3.get_object.return_value = {
-            "Body": MagicMock(read=MagicMock(return_value=b'{"date": "2026-05-30"}')),
+            "Body": MagicMock(read=MagicMock(return_value=b'{"date": "2026-05-29"}')),
         }
         archive.load_population.return_value = [
             {"ticker": "AAPL", "entry_date": "2026-05-23"},
-            {"ticker": "MSFT", "entry_date": "2026-05-30"},
+            {"ticker": "MSFT", "entry_date": "2026-05-29"},
         ]
         with (
             patch("archive.manager.ArchiveManager", return_value=archive),
@@ -329,13 +335,13 @@ class TestChallengerShadowCoverage:
         assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "ChallengerShadow"
-        assert kwargs["run_date"] == "2026-05-30"
+        assert kwargs["run_date"] == "2026-05-29"  # the trading day, not the calendar date
 
     def test_missing_lib_module_does_not_change_outcome(self, runner_mod, absent_stage_coverage):
         archive = MagicMock()
         archive.bucket = "alpha-engine-research"
         archive.s3.get_object.return_value = {
-            "Body": MagicMock(read=MagicMock(return_value=b'{"date": "2026-05-30"}')),
+            "Body": MagicMock(read=MagicMock(return_value=b'{"date": "2026-05-29"}')),
         }
         archive.load_population.return_value = [
             {"ticker": "AAPL", "entry_date": "2026-05-23"},
@@ -661,8 +667,7 @@ class TestTotalityAndEnforcement:
             checked_files.add(filename)
             source = (_LAMBDA_DIR / filename).read_text()
             assert "assert_stage_coverage" in source, (
-                f"{filename} backs weekly-SF stage {stage!r} but never "
-                f"calls assert_stage_coverage (config-I7214)"
+                f"{filename} backs weekly-SF stage {stage!r} but never calls assert_stage_coverage (config-I7214)"
             )
 
     def test_every_call_site_names_a_stage_from_the_declared_set(self):
@@ -703,8 +708,7 @@ class TestTotalityAndEnforcement:
         for filename in set(_WEEKLY_SF_STAGE_TO_HANDLER_FILE.values()):
             source = (_LAMBDA_DIR / filename).read_text()
             assert "window_start=" in source, (
-                f"{filename} calls assert_stage_coverage without threading "
-                f"window_start (config-I7214)"
+                f"{filename} calls assert_stage_coverage without threading window_start (config-I7214)"
             )
 
 
@@ -730,9 +734,7 @@ class TestPrimitiveIsImportable:
             "would measure nothing"
         )
 
-    def test_assert_stage_coverage_accepts_the_signature_every_handler_calls(
-        self, monkeypatch
-    ):
+    def test_assert_stage_coverage_accepts_the_signature_every_handler_calls(self, monkeypatch):
         """Every call site here is
         ``assert_stage_coverage(stage, run_date=..., window_start=...)``.
         Signature drift in krepis would otherwise surface only in the
@@ -742,6 +744,4 @@ class TestPrimitiveIsImportable:
         import inspect  # noqa: PLC0415
 
         mod = importlib.import_module("krepis.stage_coverage")
-        inspect.signature(mod.assert_stage_coverage).bind(
-            "Scanner", run_date="2026-05-29", window_start=None
-        )
+        inspect.signature(mod.assert_stage_coverage).bind("Scanner", run_date="2026-05-29", window_start=None)
