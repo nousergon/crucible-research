@@ -254,7 +254,18 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # crucible-predictor-PR505 against this exact symbol). A `>=0.59.4` floor
 # lets `pip` resolve past both silently whenever the newest publish happens
 # to satisfy it, which is resolution luck, not a requirement.
-krepis>=0.59.6
+krepis>=0.59.7  # floor raised for the cost-record contract columns
+# (alpha-engine-config-I7393): schema_version / run_id / agent_id / model_name
+# first ship in 0.59.7 (krepis-PR154). nousergon-lib's transparency_inventory
+# `cost_telemetry` row asserts all four present, and this repo is the ONLY
+# constructor of a cost sink in the fleet (evals/judge.py,
+# producers/single_agent.py) — so an older krepis here means the weekly
+# substrate health check keeps reporting cost_telemetry as its single [FAIL].
+#
+# The floor is also what DEPLOYS the fix: .github/workflows/deploy.yml only
+# rebuilds the image when a path it watches changes, and `requirements*.txt`
+# is one of them. Leaving the floor at 0.59.6 would resolve to 0.59.7 on a
+# fresh build but never trigger one.
 
 # Scheduling / calendar
 exchange-calendars~=4.13
