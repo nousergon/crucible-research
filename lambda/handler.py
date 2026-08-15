@@ -60,7 +60,9 @@ _install_ls_patch()
 from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging  # noqa: E402
 
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
-_FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
+_FLOW_DOCTOR_YAML = os.path.join(
+    os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml"
+)
 setup_logging(
     "research",
     flow_doctor_yaml=_FLOW_DOCTOR_YAML,
@@ -89,6 +91,7 @@ def _ensure_init() -> None:
         return
     import exchange_calendars  # noqa: F401 — heavy; cached in sys.modules
     import pytz  # noqa: F401
+
     _init_done = True
 
 
@@ -147,10 +150,12 @@ def _maybe_emit_self_test(trading_date: datetime.date) -> None:
         result = run_self_test(run_date=run_date)
         log_at = logger.info if result.get("verdict") == "PASS" else logger.error
         log_at(
-            "Research self-test: verdict=%s cases=%s failed=%s errored=%s "
-            "known_gaps=%s libs=%s",
-            result.get("verdict"), result.get("n_cases"), result.get("n_failed"),
-            result.get("n_errored"), result.get("n_known_gaps"),
+            "Research self-test: verdict=%s cases=%s failed=%s errored=%s known_gaps=%s libs=%s",
+            result.get("verdict"),
+            result.get("n_cases"),
+            result.get("n_failed"),
+            result.get("n_errored"),
+            result.get("n_known_gaps"),
             result.get("libraries"),
         )
         try:
@@ -158,15 +163,17 @@ def _maybe_emit_self_test(trading_date: datetime.date) -> None:
             write_self_test(bucket, run_date, result)
         except Exception:  # noqa: BLE001 — evidence emission never blocks the run
             logger.error(
-                "self-test artifact emission failed for %s (verdict=%s is still "
-                "in the logs)", run_date, result.get("verdict"), exc_info=True,
+                "self-test artifact emission failed for %s (verdict=%s is still in the logs)",
+                run_date,
+                result.get("verdict"),
+                exc_info=True,
             )
         # `principles.md` §2.7 — a check that reports nowhere is unobserved.
         publish_console_row(result)
     except Exception:  # noqa: BLE001 — the battery must never fail the briefing
         logger.error(
-            "Research self-test could not run at all — NO correctness guarantee "
-            "is granted for this run's numbers.", exc_info=True,
+            "Research self-test could not run at all — NO correctness guarantee is granted for this run's numbers.",
+            exc_info=True,
         )
 
 
@@ -192,6 +199,7 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
         import boto3  # local import — only paid when flag is on
 
         from evals.team_accuracy import analyze_team_performance, save_team_accuracy
+
         team_accuracy = analyze_team_performance(archive.db_conn, as_of_date=trading_date)
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         save_team_accuracy(
@@ -203,8 +211,7 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
         # analyze_team_performance already WARNs with the full counts when
         # status="insufficient".
         logger.info(
-            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d "
-            "n_resolved_outcomes=%d (%s)",
+            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d n_resolved_outcomes=%d (%s)",
             team_accuracy["status"],
             team_accuracy["n_teams"],
             team_accuracy["n_advance_picks"],
@@ -224,9 +231,9 @@ def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
             exc_info=True,
         )
         from observe_alerts import publish_observe_alert
+
         publish_observe_alert(
-            f"team_accuracy producer emission FAILED (non-fatal, live path "
-            f"unaffected): {tae}",
+            f"team_accuracy producer emission FAILED (non-fatal, live path unaffected): {tae}",
             source="research-runner:team_accuracy",
             dedup_key=f"team_accuracy_emit_fail:{trading_date}",
         )
@@ -251,6 +258,7 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
         import boto3  # local import — only paid when flag is on
 
         from evals.last_week_scorecard import build_scorecard, emit_scorecard_to_s3
+
         sc = build_scorecard(archive.db_conn, as_of_date=trading_date)
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         result = emit_scorecard_to_s3(
@@ -259,8 +267,7 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
             bucket=bucket,
         )
         logger.info(
-            "scorecard emitted run_id=%s dated_key=%s n_resolved_predictions=%d "
-            "n_resolved_signals_21d=%d",
+            "scorecard emitted run_id=%s dated_key=%s n_resolved_predictions=%d n_resolved_signals_21d=%d",
             result["run_id"],
             result["dated_key"],
             sc.n_resolved_predictions,
@@ -278,9 +285,9 @@ def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
             exc_info=True,
         )
         from observe_alerts import publish_observe_alert
+
         publish_observe_alert(
-            f"scorecard producer emission FAILED (non-fatal, live path "
-            f"unaffected): {sce}",
+            f"scorecard producer emission FAILED (non-fatal, live path unaffected): {sce}",
             source="research-runner:scorecard",
             dedup_key=f"scorecard_emit_fail:{trading_date}",
         )
@@ -312,9 +319,7 @@ def _emit_flow_doctor_heartbeat() -> None:
     """
     fd = get_flow_doctor()
     if fd and hasattr(fd, "emit_heartbeat"):
-        fd.emit_heartbeat(
-            bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
-        )
+        fd.emit_heartbeat(bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"))
 
 
 def is_trading_day(date: datetime.date | None = None) -> bool:
@@ -326,6 +331,7 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     produced the 2026-05-30 calendar-vs-trading-day recovery failure.
     """
     from nousergon_lib import trading_calendar as _tc
+
     d = date or datetime.date.today()
     return _tc.is_trading_day(d)
 
@@ -360,6 +366,7 @@ def is_early_close(date: datetime.date | None = None) -> bool:
     These still run — the morning report executes normally.
     """
     from exchange_calendars import get_calendar
+
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     try:
@@ -385,6 +392,7 @@ def _is_scheduled_run_time() -> bool:
     Only the invocation that lands in 5:45am PT proceeds.
     """
     import pytz
+
     pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
@@ -394,8 +402,40 @@ def _run_challengers_only(event: dict) -> dict:
     shadow cohort for the MOST RECENT weekly run without re-running the
     champion graph.
 
-    Event: ``{"mode": "challengers_only", "date": "YYYY-MM-DD"}`` where
-    ``date`` is the run_date of the latest completed weekly run.
+    Event: ``{"mode": "challengers_only", "date": "YYYY-MM-DD"}``. ``date`` may
+    be either the CALENDAR date of the run (what the weekly SF passes as
+    ``$.run_date``) or a trading day; it is normalised to the **trading day**
+    before anything reads it, because every artifact this function touches --
+    ``signals/latest.json``, the population table's ``entry_date`` -- is keyed
+    on the knowledge axis (``DATE_CONVENTIONS``: ``trading_day`` is always
+    backward-looking, and is *"the right answer for ~99% of consumers"*).
+
+    **Why the normalisation is load-bearing (alpha-engine-config-I7419).**
+    The weekly SF passes the execution's calendar date, and the weekly run is
+    a SATURDAY -- never itself a session. So the guard below compared Saturday
+    against Friday's population commit and raised on **every scheduled weekly
+    run**, measured on both 2026-08-15 executions::
+
+        ValueError: challengers_only is only valid for the latest run
+        (latest='2026-08-14', requested='2026-08-15')
+
+    The stage is non-blocking, so it degraded rather than failing -- but
+    ``$.research_degraded_local`` propagates to ``$.degraded_summary``, and
+    since ``config-I6891`` a degraded summary terminates the run in the
+    ``DegradedRun`` Fail state. This one argument therefore made an honest
+    weekly terminal impossible on any Saturday for as long as it was wired.
+
+    ``nousergon_lib.dates.resolve_trading_day`` is the fleet chokepoint the
+    backtester, evaluator, Scanner and ``signals_envelope_handler`` all resolve
+    through -- the last of which carries a comment about this exact class. This
+    function was the holdout.
+
+    The freshness guard is KEPT, not replaced by the resolution: resolving the
+    trading day answers *which* run this is, and the comparison against
+    ``signals/latest.json`` answers whether that run's population commit is
+    actually the most recent one. Dropping the comparison -- e.g. by reading
+    the date out of ``latest.json`` instead -- would silently reconstruct
+    against a stale cohort on any cycle where ``SignalsEnvelope`` did not run.
 
     The Saturday path snapshots the PRIOR population before the champion
     mutates it; after the fact that snapshot is gone, so this mode
@@ -417,42 +457,55 @@ def _run_challengers_only(event: dict) -> dict:
     # about which stage this attribution belongs to.
     _started = datetime.datetime.now(datetime.UTC)
 
-    run_date = event.get("date")
-    if not run_date:
+    from nousergon_lib.dates import resolve_trading_day
+
+    calendar_date = event.get("date")
+    if not calendar_date:
         raise ValueError("challengers_only requires event['date'] (YYYY-MM-DD)")
 
+    run_date = resolve_trading_day(calendar_date[:10])
+    if run_date != calendar_date[:10]:
+        logger.info(
+            "[challengers_only] normalized run_date %s (calendar) -> %s "
+            "(trading day) - signals/ and the population table are keyed on "
+            "the knowledge axis (config-I7419)",
+            calendar_date,
+            run_date,
+        )
+
     from archive.manager import ArchiveManager
+
     archive = ArchiveManager()
     archive.download_db()
     try:
-        latest = _json.loads(
-            archive.s3.get_object(
-                Bucket=archive.bucket, Key="signals/latest.json"
-            )["Body"].read()
-        )
+        latest = _json.loads(archive.s3.get_object(Bucket=archive.bucket, Key="signals/latest.json")["Body"].read())
         latest_date = latest.get("date")
         if latest_date != run_date:
             raise ValueError(
                 f"challengers_only is only valid for the latest run "
-                f"(latest={latest_date!r}, requested={run_date!r}) — the prior-"
-                f"population reconstruction is membership-exact only against "
-                f"the most recent population commit (config#1683)."
+                f"(latest={latest_date!r}, requested={run_date!r}, from "
+                f"calendar date {calendar_date!r}) — the prior-population "
+                f"reconstruction is membership-exact only against the most "
+                f"recent population commit (config#1683). Both dates are "
+                f"trading days: this is a genuinely stale cohort, not the "
+                f"calendar-vs-trading-day mismatch of config-I7419."
             )
 
         population = archive.load_population()
-        prior_population = [
-            p for p in population if p.get("entry_date") != run_date
-        ]
+        prior_population = [p for p in population if p.get("entry_date") != run_date]
         logger.info(
-            "[challengers_only] run_date=%s prior_population=%d "
-            "(current %d minus %d entered on run_date)",
-            run_date, len(prior_population), len(population),
+            "[challengers_only] run_date=%s prior_population=%d (current %d minus %d entered on run_date)",
+            run_date,
+            len(prior_population),
+            len(population),
             len(population) - len(prior_population),
         )
 
         from producers.runner import run_challengers
+
         shadow = run_challengers(
-            archive, run_date,
+            archive,
+            run_date,
             run_time=datetime.datetime.now(datetime.UTC).isoformat(),
             population=prior_population,
         )
@@ -472,7 +525,9 @@ def _run_challengers_only(event: dict) -> dict:
             from krepis.stage_coverage import assert_stage_coverage
 
             result["stage_coverage"] = assert_stage_coverage(
-                "ChallengerShadow", run_date=run_date, window_start=_started,
+                "ChallengerShadow",
+                run_date=run_date,
+                window_start=_started,
             )
         except ImportError as exc:
             # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe
@@ -544,6 +599,7 @@ def handler(event, context):
         from archive.manager import ArchiveManager
         from dry_run import install_dry_run_stubs
         from graph.research_graph import build_graph, create_initial_state
+
         _dry_run_date = resolve_trading_day(datetime.date.today().isoformat())
         logger.info(
             "dry_run_llm=True: boot/import/wiring validation only "
@@ -593,6 +649,7 @@ def handler(event, context):
     # ANTHROPIC_API_KEY is resolved on-demand via
     # alpha_engine_lib.secrets.get_secret() at consumer sites.
     from preflight import ResearchPreflight
+
     ResearchPreflight(
         bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
         mode="weekly",
@@ -627,9 +684,12 @@ def handler(event, context):
         try:
             import boto3
             from botocore.exceptions import ClientError
+
             s3 = boto3.client("s3")
-            s3.head_object(Bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                           Key=f"signals/{run_date}/signals.json")
+            s3.head_object(
+                Bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+                Key=f"signals/{run_date}/signals.json",
+            )
             logger.info("Signals already exist for %s — skipping (use force=True to override)", run_date)
             return {"status": "SKIPPED", "reason": "already_run", "date": run_date}
         except ClientError as e:
@@ -641,7 +701,9 @@ def handler(event, context):
     run_type = "weekly population refresh" if weekly else "weekday"
     logger.info(
         "Starting alpha-engine-research run for %s (%s)%s",
-        run_date, run_type, " [early close]" if early_close else "",
+        run_date,
+        run_type,
+        " [early close]" if early_close else "",
     )
 
     _health_start = time.time()
@@ -653,6 +715,7 @@ def handler(event, context):
         # ── Validate required env vars (fail fast, not 30 min in) ─────
         from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
         from graph.research_graph import build_graph, create_initial_state
+
         _missing = []
         if not ANTHROPIC_API_KEY:
             _missing.append("ANTHROPIC_API_KEY")
@@ -716,6 +779,7 @@ def handler(event, context):
         # Extract episodic memories from newly completed signal outcomes
         try:
             from memory.episodic import extract_memories
+
             n_memories = extract_memories(archive.db_conn)
             if n_memories:
                 logger.info("Extracted %d new episodic memories from outcomes", n_memories)
@@ -725,9 +789,9 @@ def handler(event, context):
             # but loud on an alarmed surface, not a silent WARN.
             logger.warning("memory extraction skipped: %s", _me)
             from observe_alerts import publish_observe_alert
+
             publish_observe_alert(
-                f"episodic memory extraction FAILED (non-fatal, live path "
-                f"unaffected): {_me}",
+                f"episodic memory extraction FAILED (non-fatal, live path unaffected): {_me}",
                 source="research-runner:memory_extraction",
                 dedup_key=f"memory_extraction_fail:{run_date}",
             )
@@ -740,6 +804,7 @@ def handler(event, context):
         # (which is itself the stub-only mode, no real pass to gate).
         if not skip_dry_run_gate and not dry_run_llm:
             from dry_run import install_dry_run_stubs
+
             logger.info("Stub-LLM dry-run gate: starting...")
             _restore = install_dry_run_stubs(archive)
             try:
@@ -756,8 +821,7 @@ def handler(event, context):
                 # catches sub-LLM-layer bugs before we burn Anthropic
                 # budget on the real pass. flow-doctor must escalate.
                 logger.error(
-                    "Stub-LLM dry-run gate: FAILED — halting before real LLM calls. "
-                    "Stub-pass error: %s",
+                    "Stub-LLM dry-run gate: FAILED — halting before real LLM calls. Stub-pass error: %s",
                     _se,
                     exc_info=True,
                 )
@@ -801,8 +865,10 @@ def handler(event, context):
         # loud (feedback_no_silent_fails). run_challengers itself raises
         # ChallengerShadowGapError on any producer gap.
         from producers.runner import run_challengers
+
         _shadow = run_challengers(
-            archive, run_date,
+            archive,
+            run_date,
             run_time=final_state.get("run_time", "") or run_date,
             population=_prior_population,
         )
@@ -812,12 +878,14 @@ def handler(event, context):
         _trajectory_result = None
         try:
             from evals.trajectory import validate_trajectory
+
             _trajectory_result = validate_trajectory(
                 project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
                 final_state=final_state,
             )
             if _trajectory_result and not _trajectory_result["passed"]:
                 import logging as _logging
+
                 _logging.getLogger("evals.trajectory").error(
                     "Trajectory validation failed: %s", _trajectory_result["failures"]
                 )
@@ -831,9 +899,9 @@ def handler(event, context):
             # carve-out; promoting to a hard raise is a follow-up judgment call.
             logger.warning("trajectory validation skipped: %s", _te)
             from observe_alerts import publish_observe_alert
+
             publish_observe_alert(
-                f"trajectory validation INFRA error (non-fatal, signals already "
-                f"shipped): {_te}",
+                f"trajectory validation INFRA error (non-fatal, signals already shipped): {_te}",
                 source="research-runner:trajectory_validation",
                 dedup_key=f"trajectory_validation_infra_fail:{run_date}",
             )
@@ -843,6 +911,7 @@ def handler(event, context):
         # Write health status on success
         try:
             from nousergon_lib.health import Deliverable, write_health
+
             _population = final_state.get("new_population", [])
             _rotations = final_state.get("population_rotation_events", [])
             _email_sent = final_state.get("email_sent", False)
@@ -871,6 +940,7 @@ def handler(event, context):
         # Write data manifest
         try:
             from data_manifest import write_data_manifest
+
             write_data_manifest(
                 bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
@@ -905,6 +975,7 @@ def handler(event, context):
                 import boto3 as _boto3_agg
 
                 from scripts.aggregate_costs import aggregate_day
+
                 _agg_summary = aggregate_day(
                     s3_client=_boto3_agg.client("s3"),
                     bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
@@ -947,6 +1018,7 @@ def handler(event, context):
                 import boto3 as _boto3_cs
 
                 from scripts.corpus_stats import compute_corpus_stats
+
                 _cs = compute_corpus_stats(
                     s3_client=_boto3_cs.client("s3"),
                     bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
@@ -961,8 +1033,7 @@ def handler(event, context):
                 )
             except Exception as _cs_exc:
                 logger.warning(
-                    "[corpus_stats] stats refresh failed (non-fatal — "
-                    "console panel renders last artifact): %s",
+                    "[corpus_stats] stats refresh failed (non-fatal — console panel renders last artifact): %s",
                     _cs_exc,
                 )
 
@@ -992,6 +1063,7 @@ def handler(event, context):
         # Write health status on failure
         try:
             from nousergon_lib.health import Deliverable, write_health
+
             write_health(
                 module_name="research",
                 deliverables=[
