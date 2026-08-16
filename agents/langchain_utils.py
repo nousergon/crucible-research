@@ -1149,6 +1149,11 @@ def invoke_structured_with_validation_retry(
         failure (all retries exhausted) ``parsing_error`` carries the LAST
         ``ValidationError`` and the caller's existing fail-loud branch
         (e.g., ``raise RuntimeError(...)``) fires as before.
+
+        Plus ``structured_output_attempts``: how many sends this call took,
+        1-based. Added for callers that need to know whether the retry path
+        actually ran — a probe asserting recovery cannot distinguish "recovered"
+        from "never tripped" without it (alpha-engine-config-I7459).
     """
     from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -1185,6 +1190,13 @@ def invoke_structured_with_validation_retry(
                     label,
                     attempt,
                 )
+            # How many sends it took. Additive: every existing consumer reads
+            # `parsed` / `parsing_error` / `raw` and is untouched. It exists
+            # because a caller could not otherwise tell one attempt from three,
+            # and the canary's validation-retry probe reported PASS whether or
+            # not the recovery path it exists to exercise ever ran
+            # (alpha-engine-config-I7459).
+            final_resp["structured_output_attempts"] = attempt + 1
             return final_resp
 
         # Parse failed. Log this attempt loudly with the raw payload head so a
@@ -1214,6 +1226,7 @@ def invoke_structured_with_validation_retry(
                 max_retries,
                 parsing_error,
             )
+            final_resp["structured_output_attempts"] = attempt + 1
             return final_resp
 
         # Build a correction that names the specific schema violation so the
