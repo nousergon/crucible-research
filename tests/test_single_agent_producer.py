@@ -180,7 +180,7 @@ class _FakeAgentPrompt:
         return {}
 
 
-def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch):
+def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch, live_router_resolution):
     import agents.prompt_loader as prompt_loader
 
     monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
@@ -255,7 +255,7 @@ def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch):
     assert spec.structured_outputs is False
 
 
-def test_assess_candidates_reads_no_openrouter_key(monkeypatch):
+def test_assess_candidates_reads_no_openrouter_key(monkeypatch, live_router_resolution):
     """Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent
     directly linked to OpenRouter. This call site used to RAISE when
     config.OPENROUTER_API_KEY was empty — the key was load-bearing. It must

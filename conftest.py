@@ -126,3 +126,92 @@ def stub_stage_coverage(monkeypatch, _stage_coverage_absent_unless_stubbed):
     fake_module.assert_stage_coverage = mock_assert
     monkeypatch.setitem(sys.modules, "krepis.stage_coverage", fake_module)
     yield mock_assert
+
+
+@pytest.fixture
+def live_router_resolution():
+    """Opt OUT of the autouse resolver stub below.
+
+    Requested by tests whose subject IS ``resolve_group_spec`` — they fake
+    krepis' registry read (``resolve_group_structured``) and assert on the spec
+    the REAL resolver builds from it, which the stub would replace wholesale.
+    Still hermetic: no network, no registry file, no credential.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _router_resolution_is_stubbed_unless_a_test_says_otherwise(monkeypatch, request):
+    """No unit test performs a LIVE router group resolution.
+
+    ``agents.langchain_utils.make_agent_llm`` resolves every capability class
+    through ``krepis.router.resolve_group_spec`` (alpha-engine-config-I7005).
+    That resolver health-probes the local egress proxy and the router edge, and
+    on a CI runner neither exists and no consumer credential is resolvable — so
+    it correctly FAILS CLOSED with ``ValueError: No model in group 'low' is
+    reachable ...`` (model-router-policy R20). Nine tests that only ever wanted
+    a stand-in chat model went red on that, and every one of them would have
+    been asserting the runner's network rather than the code under test.
+
+    So the resolution is stubbed for the whole suite, at the seam the factory
+    actually imports. The fake returns a router-edge route, which is also what
+    keeps ``_assert_routed_through_the_proxy`` satisfied from any declared
+    context.
+
+    This does NOT weaken the guards on the factory itself: every property of
+    the real resolution — that the client is bound to the returned spec, that
+    the context is declared and passed verbatim, that a direct-provider route
+    raises, that a resolver failure propagates — is asserted in
+    ``tests/test_agent_llm_factory.py``, which installs its OWN resolver per
+    test. A later ``monkeypatch``/``patch`` of the same attribute wins over
+    this one and is restored to it at teardown, so opting out is just patching.
+    """
+    if "live_router_resolution" in request.fixturenames:
+        yield
+        return
+
+    try:
+        import krepis.router as krepis_router
+    except ImportError:
+        yield
+        return
+
+    from krepis.llm_config import ModelSpec
+
+    def _stub_spec(max_tokens):
+        """A REAL ``ModelSpec``, not a duck type.
+
+        ``agents.langchain_utils`` reads four attributes off it, but the same
+        resolver serves ``producers/single_agent.py``, which hands the spec
+        straight to ``krepis.llm.LLMClient`` — that reads
+        ``supports_automatic_prefix_caching`` and would ``AttributeError`` on a
+        hand-rolled stand-in. Constructing the real dataclass keeps the stub
+        honest about the contract every consumer of the resolver actually has.
+        """
+        return ModelSpec(
+            provider="litellm_proxy",
+            model="stub-model",
+            max_tokens=max_tokens if max_tokens is not None else 4096,
+            base_url="https://router.invalid/v1",
+            api_key_env=None,  # placeholder auth: no credential to resolve
+            registry_id="litellm:group:stub",
+        )
+
+    def _stub_resolve(group, *, exec_context=None, wire=None, max_tokens=None, **kw):
+        route = {
+            "route": "litellm_proxy",
+            "registry_id": f"litellm:group:{group}",
+            "primary_registry_id": f"litellm:group:{group}",
+            "deployment_id": f"{group}-stub",
+            "provider": "litellm",
+            "api_base_url": "https://router.invalid/v1",
+            # Echo the DECLARED context (R29) rather than inventing one, so a
+            # test that declares `lambda` still exercises the guard's
+            # non-laptop branch.
+            "exec_context": exec_context or "laptop",
+            "skipped_entries": [],
+        }
+        return _stub_spec(max_tokens), route
+
+    monkeypatch.setattr(krepis_router, "resolve_group_spec", _stub_resolve, raising=True)
+    yield

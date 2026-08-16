@@ -461,7 +461,18 @@ CIO_CRITIC_ENABLED: bool = (
 LLM_CFG: dict = _cfg["llm"]
 # Capability CLASSES, not concrete models. A model id in consumer config is a
 # selection fact living outside the registry (model-portability-policy I1).
-_DEFAULT_CLASS_FOR = {"per_stock_class": "low", "strategic_class": "med"}
+_DEFAULT_CLASS_FOR = {
+    "per_stock_class": "low",
+    "strategic_class": "med",
+    # The Saturday-replay canary's validation-retry probe (alpha-engine-config
+    # -I7448). It is deliberately NOT `per_stock_class`: the probe is the one
+    # research call whose job is to prove the structured-output retry path
+    # still recovers, and Brian's 2026-08-16 ruling routes it at the router's
+    # top capability tier rather than at whatever tier the per-stock agents
+    # happen to be configured for. A class, not a model — the registry still
+    # owns which deployment serves `high`.
+    "canary_probe_class": "high",
+}
 
 
 def _resolve_class(key: str) -> str:
@@ -470,6 +481,7 @@ def _resolve_class(key: str) -> str:
 
 PER_STOCK_CLASS: str = _resolve_class("per_stock_class")
 STRATEGIC_CLASS: str = _resolve_class("strategic_class")
+CANARY_PROBE_CLASS: str = _resolve_class("canary_probe_class")
 
 # THE CLASS IS THE ONLY ROUTING FACT THIS CONFIG HOLDS, DELIBERATELY.
 #
