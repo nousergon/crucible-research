@@ -201,3 +201,102 @@ class TestRetryHelperReportsAttempts:
                 MagicMock(), [MagicMock()], label="t", max_retries=2
             )
         assert resp["structured_output_attempts"] == 3
+
+
+class TestNoToolCallIsRetried:
+    """`tool_choice="auto"` lets a model answer in prose. That must be a RETRY,
+    not a terminal failure whose own error reads `None`.
+
+    Measured on the canary box 2026-08-16 (marker
+    ``pr-nousergon-crucible-research-638-472bfa7c04b4``): the validation-retry
+    probe reported ``terminal validation failure after retries: None`` — the
+    loop keyed entirely on ``parsing_error``, so a response with no tool call
+    (``parsed=None, parsing_error=None``) returned on the first attempt with
+    nothing to act on. Only reachable since structured output moved to
+    ``tool_choice="auto"``; a forced tool choice cannot produce it, and a
+    reasoning model rejects a forced tool choice.
+    """
+
+    def test_prose_answer_is_retried_and_can_recover(self):
+        from agents.langchain_utils import invoke_structured_with_validation_retry
+
+        parsed = MagicMock()
+        responses = [
+            # No tool call: nothing parsed, and no error to explain it.
+            {"parsed": None, "parsing_error": None, "raw": None},
+            {"parsed": parsed, "parsing_error": None, "raw": None},
+        ]
+        with patch(
+            "agents.langchain_utils.invoke_anthropic_safe", side_effect=responses
+        ):
+            resp = invoke_structured_with_validation_retry(
+                MagicMock(), [MagicMock()], label="t"
+            )
+
+        assert resp["parsed"] is parsed
+        assert resp["structured_output_attempts"] == 2, (
+            "a missing tool call must consume a retry — returning on attempt 1 "
+            "is the defect this pins"
+        )
+
+    def test_persistent_prose_fails_with_an_actionable_error(self):
+        from agents.langchain_utils import invoke_structured_with_validation_retry
+
+        none_call = {"parsed": None, "parsing_error": None, "raw": None}
+        with patch(
+            "agents.langchain_utils.invoke_anthropic_safe",
+            side_effect=[none_call, none_call, none_call],
+        ):
+            resp = invoke_structured_with_validation_retry(
+                MagicMock(), [MagicMock()], label="t", max_retries=2
+            )
+
+        assert resp["structured_output_attempts"] == 3
+        assert resp["parsing_error"] is not None, (
+            "the terminal error must say what went wrong; `None` is what the "
+            "caller used to report"
+        )
+        assert "no tool call" in str(resp["parsing_error"])
+
+
+class TestReasoningHeadroom:
+    """A thinking model spends the SAME max_tokens on its chain of thought, so
+    every budget sized against Anthropic silently shrank when these agents
+    moved onto the router (I7005). Measured: the qual-analyst pillar extraction
+    died with StructuredOutputTruncationError at `stop_reason=max_tokens`,
+    mid-tool-call."""
+
+    @staticmethod
+    def _spec(reasoning, max_tokens=4096):
+        spec = MagicMock()
+        spec.reasoning = reasoning
+        spec.max_tokens = max_tokens
+        spec.model = "stub"
+        return spec
+
+    def test_no_reasoning_gets_no_headroom(self):
+        from agents.langchain_utils import _with_reasoning_headroom
+
+        assert _with_reasoning_headroom(self._spec(None), model_class="low") == 4096
+
+    def test_excluded_reasoning_gets_no_headroom(self):
+        from agents.langchain_utils import _with_reasoning_headroom
+
+        assert (
+            _with_reasoning_headroom(self._spec({"exclude": True}), model_class="low")
+            == 4096
+        )
+
+    def test_thinking_model_gets_headroom_on_top_of_the_callers_budget(self):
+        from agents.langchain_utils import (
+            REASONING_OUTPUT_HEADROOM_TOKENS,
+            _with_reasoning_headroom,
+        )
+
+        got = _with_reasoning_headroom(
+            self._spec({"effort": "max"}), model_class="high"
+        )
+        assert got == 4096 + REASONING_OUTPUT_HEADROOM_TOKENS, (
+            "the caller's number must keep meaning 'answer tokens' — headroom is "
+            "added, not substituted"
+        )

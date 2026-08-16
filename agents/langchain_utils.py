@@ -324,6 +324,59 @@ def _log_route(route: dict, *, model_class: str) -> None:
         log.exception("[agent_route:%s] route telemetry failed — degradation is blind for this call", model_class)
 
 
+#: Output tokens a thinking model may spend BEFORE the answer starts.
+#:
+#: On a reasoning model the visible answer and the hidden chain of thought come
+#: out of the SAME `max_tokens` ceiling. Every budget in this repo was sized
+#: against Anthropic, where they do not, so the migration onto the router
+#: (alpha-engine-config-I7005) silently cut each one — `max_tokens_strategic:
+#: 4096` stopped meaning "4096 tokens of answer" and started meaning "4096
+#: tokens of thinking AND answer, thinking first".
+#:
+#: Measured on the canary box 2026-08-16 (marker
+#: pr-nousergon-crucible-research-638-472bfa7c04b4): the qual-analyst pillar
+#: extraction died with StructuredOutputTruncationError — `stop_reason:
+#: max_tokens` mid-tool-call, the model having spent the budget reasoning. A
+#: direct probe of the same group with max_tokens=64 returned
+#: `finish_reason: "length"` with an EMPTY content and a populated
+#: `reasoning_content`, which is the same failure in miniature.
+#:
+#: Headroom rather than a multiplier: the caller's number keeps meaning what it
+#: says (how much ANSWER it needs), and the thinking allowance is a model fact
+#: that belongs next to the model. Costed on tokens actually emitted, not on the
+#: ceiling, so a generous allowance is free where it goes unused — and the
+#: DeepSeek entries' provider ceiling is 393216, so this is nowhere near it.
+REASONING_OUTPUT_HEADROOM_TOKENS = 16384
+
+
+def _with_reasoning_headroom(spec, *, model_class: str) -> int:
+    """The caller's answer budget plus a thinking allowance, when the resolved
+    model thinks.
+
+    ``spec.reasoning`` is the registry's per-model statement. ``None`` means the
+    model does not reason (or the entry does not say so), and ``{"exclude":
+    True}`` means reasoning is turned OFF for this entry — neither gets
+    headroom, because neither spends output tokens before answering.
+    """
+    reasoning = getattr(spec, "reasoning", None)
+    if not reasoning or (isinstance(reasoning, dict) and reasoning.get("exclude")):
+        return spec.max_tokens
+
+    effective = spec.max_tokens + REASONING_OUTPUT_HEADROOM_TOKENS
+    # Logged, not silent: the number sent is not the number the caller asked
+    # for, and a budget that differs from the one in the logs is the exact
+    # defect the `resolve_group_spec(max_tokens=...)` comment above warns about.
+    log.info(
+        "[agent_route:%s] reasoning model %s — max_tokens %d + %d headroom = %d",
+        model_class,
+        spec.model,
+        spec.max_tokens,
+        REASONING_OUTPUT_HEADROOM_TOKENS,
+        effective,
+    )
+    return effective
+
+
 def make_agent_llm(
     *,
     model_class: str,
@@ -390,11 +443,13 @@ def make_agent_llm(
         # guess made for a different model — the registry owns it.
         kwargs.setdefault("extra_body", {})["reasoning"] = spec.reasoning
 
+    effective_max_tokens = _with_reasoning_headroom(spec, model_class=model_class)
+
     return ChatOpenAI(
         model=spec.model,
         base_url=spec.base_url,
         api_key=key,
-        max_tokens=spec.max_tokens,
+        max_tokens=effective_max_tokens,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=cbs,
@@ -1105,6 +1160,16 @@ def bind_structured_output(llm, schema, *, include_raw: bool = False, **kw):
 STRUCTURED_OUTPUT_MAX_RETRIES = 2
 
 
+class _NoToolCallError(RuntimeError):
+    """The model answered without calling the bound tool.
+
+    Its own class so the retry loop can send the right correction: a schema
+    violation and a missing tool call need different instructions, and quoting a
+    violation that does not exist tells the model to fix a field it never
+    emitted.
+    """
+
+
 def invoke_structured_with_validation_retry(
     structured_llm,
     messages: list,
@@ -1183,6 +1248,30 @@ def invoke_structured_with_validation_retry(
         # a validation-retry attempt.
         raise_if_truncated(final_resp, label=label, schema_name=schema_name)
         parsing_error = final_resp.get("parsing_error")
+        if parsing_error is None and final_resp.get("parsed") is None:
+            # NO TOOL CALL AT ALL — not a schema violation, and until now not a
+            # retry either: the loop keyed entirely on `parsing_error`, so this
+            # returned immediately with `parsed=None, parsing_error=None` and
+            # every caller's fail-loud branch reported "terminal validation
+            # failure after retries: None". A failure whose own error is the
+            # word None is a failure nobody can act on.
+            #
+            # It became reachable when structured output moved to
+            # `tool_choice="auto"` (alpha-engine-config-I7448): a forced tool
+            # choice cannot produce this, and a reasoning model rejects a forced
+            # tool choice, so the two arrived together. Measured on the canary
+            # box 2026-08-16, marker
+            # pr-nousergon-crucible-research-638-472bfa7c04b4.
+            #
+            # Retrying is right BECAUSE the cause is usually recoverable: the
+            # model answered in prose instead of calling the tool, and saying so
+            # fixes it. The correction below is deliberately not the schema
+            # correction — there is no violation to quote.
+            parsing_error = _NoToolCallError(
+                "the model returned no tool call, so nothing was parsed "
+                "(tool_choice='auto' lets it decline)"
+            )
+            final_resp["parsing_error"] = parsing_error
         if parsing_error is None:
             if attempt > 0:
                 log.info(
@@ -1233,7 +1322,18 @@ def invoke_structured_with_validation_retry(
         # LLM can fix the offending field directly. The failed ``raw`` AIMessage
         # from the prior attempt is included so the model sees its own output in
         # context (full conversation, not just a fresh prompt).
-        correction_text = (
+        if isinstance(parsing_error, _NoToolCallError):
+            # Different failure, different correction. Quoting a schema
+            # violation that does not exist would tell the model to fix a field
+            # it never emitted.
+            correction_text = (
+                "Your prior response did not call the required tool, so nothing "
+                "could be extracted from it. Re-answer by CALLING THE TOOL with "
+                "the same substantive content — do not reply in prose, and do "
+                "not wrap the JSON in text."
+            )
+        else:
+            correction_text = (
             f"Your prior response failed schema validation:\n\n"
             f"{type(parsing_error).__name__}: {parsing_error}\n\n"
             f"Please re-submit your response with the schema corrections "
@@ -1244,7 +1344,7 @@ def invoke_structured_with_validation_retry(
             f"the exact type (string vs number vs boolean vs list). "
             f"Preserve all the substantive content from your prior "
             f"response — only fix the schema violation."
-        )
+            )
 
         raw = final_resp.get("raw")
         # ``with_structured_output`` is FORCED TOOL-USE: on a validation failure
