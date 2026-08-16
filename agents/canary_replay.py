@@ -186,6 +186,7 @@ def probe_validation_retry(api_key: str | None) -> dict:
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
+        bind_structured_output,
         invoke_structured_with_validation_retry,
         make_agent_llm,
     )
@@ -199,8 +200,8 @@ def probe_validation_retry(api_key: str | None) -> dict:
             max_tokens=MAX_TOKENS_STRATEGIC,
             api_key=api_key,
         )
-        structured_llm = llm.with_structured_output(
-            _CanaryConfidenceProbe, include_raw=True
+        structured_llm = bind_structured_output(
+            llm, _CanaryConfidenceProbe, include_raw=True
         )
         # Prompt text lives in alpha-engine-config (research/prompts/
         # canary_validation_retry_probe.txt) — same load_prompt() chokepoint

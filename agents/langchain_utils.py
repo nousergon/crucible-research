@@ -1039,6 +1039,43 @@ def _schema_name_of(structured_llm) -> str | None:
     return None
 
 
+# ── Structured-output binding — ONE place that decides HOW ────────────────────
+
+
+def bind_structured_output(llm, schema, *, include_raw: bool = False, **kw):
+    """Bind *schema* to *llm* for structured extraction.
+
+    THE METHOD IS THE POINT. ``langchain_openai>=1.0`` changed the
+    ``with_structured_output`` default from ``function_calling`` to
+    ``json_schema``, which sends an OpenAI ``response_format``. Under
+    ``ChatAnthropic`` that default never applied; the moment these agents
+    resolved through the router to DeepSeek (alpha-engine-config-I7005 /
+    I7448) every extraction started returning::
+
+        litellm.BadRequestError: OpenAIException -
+        This response_format type is unavailable now.
+        Received Model Group=high-deepseek-v4-pro-max
+
+    Measured on the canary-replay box, 2026-08-16, marker
+    ``pr-nousergon-crucible-research-606-f1f856480de2`` — a provider-capability
+    mismatch that is invisible to every mocked test, because a fake
+    ``with_structured_output`` accepts any method.
+
+    ``function_calling`` is the portable choice, not merely the working one:
+    tool calling is supported by Anthropic, OpenAI, DeepSeek and every
+    OpenAI-compatible endpoint the registry can resolve, so this survives the
+    next provider swap (``model-portability-policy``). ``json_schema`` is an
+    OpenAI-family capability we would be depending on by accident.
+
+    Call sites pass the schema and (where they need the raw message)
+    ``include_raw=True``, and say nothing about method — same split as
+    ``make_agent_llm``: the call site names WHAT it wants, this module owns HOW.
+    """
+    return llm.with_structured_output(
+        schema, include_raw=include_raw, method="function_calling", **kw
+    )
+
+
 # ── SOTA structured-output retry with validation feedback ─────────────────────
 
 

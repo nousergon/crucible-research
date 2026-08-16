@@ -152,7 +152,13 @@ def test_malformed_catalysts_raises_after_reroll(monkeypatch):
         )
 
     assert structured.invoke_calls == 3
-    assert fake_llm.with_structured_output_kwargs == {"include_raw": True}
+    assert fake_llm.with_structured_output_kwargs == {
+        "include_raw": True,
+        # Pinned by agents.langchain_utils.bind_structured_output — the
+        # langchain_openai default ('json_schema') is rejected by DeepSeek
+        # behind the router (alpha-engine-config-I7448).
+        "method": "function_calling",
+    }
 
 
 def test_reroll_recovers_when_a_later_attempt_valid(monkeypatch):

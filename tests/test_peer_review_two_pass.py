@@ -116,7 +116,7 @@ def _patch_two_pass(selection: JointSelectionOutput, rationales: dict[str, str])
     # did during the I4459 migration before this was updated (a live 400 from
     # LiteLLM surfaced in the suite).
     class _Rebound:
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, *a, **k):
             return fake_with_structured_output(None, schema)
 
     return patch(

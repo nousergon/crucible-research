@@ -114,10 +114,15 @@ def test_quant_extraction_happy_path(fresh_modules):
     assert result["error"] is None
     assert len(result["ranked_picks"]) == 2
     assert {p["ticker"] for p in result["ranked_picks"]} == {"AAPL", "MSFT"}
-    # Verify the extraction call happened with QuantAnalystOutput + include_raw
+    # Verify the extraction call happened with QuantAnalystOutput + include_raw,
+    # and pinned method='function_calling'. The method is not incidental: the
+    # langchain_openai default is 'json_schema', which DeepSeek rejects behind
+    # the router (alpha-engine-config-I7448), so it is bound once in
+    # agents.langchain_utils.bind_structured_output and asserted here.
     fake_llm.with_structured_output.assert_called_once_with(
         QuantAnalystOutput,
         include_raw=True,
+        method="function_calling",
     )
 
 
@@ -450,8 +455,11 @@ def test_quant_analyst_does_not_use_response_format():
         "resurrects the 2026-05-02 ValidationError class. Use the decoupled "
         "with_structured_output pattern (see macro_agent.py)."
     )
-    # Defensive — the decoupled call site MUST be present.
-    assert "with_structured_output(" in code
+    # Defensive — the decoupled call site MUST be present. It now binds through
+    # agents.langchain_utils.bind_structured_output (config-I7448); the
+    # chokepoint itself is guarded by
+    # tests/test_structured_output_binding_chokepoint.py.
+    assert "bind_structured_output(" in code
 
 
 def test_qual_analyst_does_not_use_response_format():
@@ -461,4 +469,4 @@ def test_qual_analyst_does_not_use_response_format():
     src = (Path(__file__).parent.parent / "agents" / "sector_teams" / "qual_analyst.py").read_text()
     code = _strip_comments_and_strings(src)
     assert "response_format=" not in code
-    assert "with_structured_output(" in code
+    assert "bind_structured_output(" in code
