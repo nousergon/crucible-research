@@ -104,6 +104,18 @@ def probe_thesis_update(am, tickers: list[dict]) -> dict:
                 team_id="canary",
             )
             updated.append({"ticker": ticker, "rating": result.get("rating")})
+        # Same shape as the qual probe (I7463): "it returned" is not "it
+        # worked". A run of `None` ratings means the extraction produced
+        # nothing usable, and counting rows would report it as a full pass.
+        rated = [u for u in updated if u["rating"] is not None]
+        if len(rated) < len(tickers):
+            return _probe_result(
+                "thesis_update",
+                "FAIL",
+                f"{len(rated)}/{len(tickers)} held tickers came back with a "
+                f"rating: {updated}",
+                time.monotonic() - start,
+            )
         return _probe_result(
             "thesis_update",
             "PASS",
@@ -141,7 +153,28 @@ def probe_qual_analyst(am, tickers: list[dict]) -> dict:
             market_regime="neutral",
             run_date=CANARY_RUN_DATE,
         )
-        n = len(result.get("assessments", []))
+        assessments = result.get("assessments") or []
+        n = len(assessments)
+        # `run_qual_analyst` SWALLOWS its own failures by design — it returns
+        # `{"assessments": [], "error": ..., "partial": ...}` so the score
+        # aggregator can treat a dead team as degraded rather than fatal. A
+        # probe that only checks "did it raise" therefore reports PASS through
+        # a total outage: on 2026-08-16 this said `PASS / 0 assessments
+        # returned` while every call in the run was answered `401 Authorization
+        # Required` (alpha-engine-config-I7463). Had the sibling probes been
+        # healthy, the canary would have returned overall_status PASS for a run
+        # that made no successful model call.
+        error = result.get("error")
+        partial = result.get("partial")
+        if error is not None or partial or n == 0:
+            return _probe_result(
+                "qual_analyst",
+                "FAIL",
+                f"{n} assessments for {len(tickers)} real held tickers "
+                f"(error={error!r}, partial={partial!r}, "
+                f"partial_reason={result.get('partial_reason')!r})",
+                time.monotonic() - start,
+            )
         return _probe_result(
             "qual_analyst", "PASS", f"{n} assessments returned", time.monotonic() - start
         )
@@ -217,6 +250,7 @@ def probe_validation_retry(api_key: str | None) -> dict:
         )
         parsed = resp.get("parsed")
         parsing_error = resp.get("parsing_error")
+        attempts = resp.get("structured_output_attempts")
         if parsing_error is not None or parsed is None:
             return _probe_result(
                 "validation_retry",
@@ -224,10 +258,30 @@ def probe_validation_retry(api_key: str | None) -> dict:
                 f"terminal validation failure after retries: {parsing_error}",
                 time.monotonic() - start,
             )
+        if attempts == 1:
+            # The probe's subject is the RECOVERY path, not the model. A first
+            # -attempt success means the deliberately-unsatisfiable enum did
+            # not trip, so this run proved nothing about
+            # `invoke_structured_with_validation_retry` — and reporting PASS
+            # for it is how a probe quietly stops measuring its own name
+            # (alpha-engine-config-I7459). Likelier since the probe moved to
+            # the `high` class: a stronger model coerces its answer into the
+            # enum. The fix when this fires is to strengthen the prompt in
+            # alpha-engine-config/research/prompts/canary_validation_retry_probe.txt,
+            # not to relax this branch.
+            return _probe_result(
+                "validation_retry",
+                "FAIL",
+                f"schema satisfied on the FIRST attempt (confidence="
+                f"{parsed.confidence!r}) — the injected validation failure did "
+                f"not trip, so the retry/recovery path was never exercised. "
+                f"Strengthen the probe prompt.",
+                time.monotonic() - start,
+            )
         return _probe_result(
             "validation_retry",
             "PASS",
-            f"resolved to confidence={parsed.confidence!r}",
+            f"recovered on attempt {attempts} to confidence={parsed.confidence!r}",
             time.monotonic() - start,
         )
     except Exception as e:
