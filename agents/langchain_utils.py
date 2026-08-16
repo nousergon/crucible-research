@@ -1072,7 +1072,23 @@ def bind_structured_output(llm, schema, *, include_raw: bool = False, **kw):
     ``make_agent_llm``: the call site names WHAT it wants, this module owns HOW.
     """
     return llm.with_structured_output(
-        schema, include_raw=include_raw, method="function_calling", **kw
+        schema,
+        include_raw=include_raw,
+        method="function_calling",
+        # `tool_choice="auto"` overrides langchain's FORCED choice
+        # (`tool_choice: <tool name>`, hardcoded for this method). A reasoning
+        # model refuses a forced tool: measured against the live router edge,
+        # 2026-08-16, `high` group —
+        #   forced tool_choice -> 400 "Thinking mode does not support this tool_choice"
+        #   tool_choice="auto" -> 200, model calls the tool
+        # Auto means the model CAN decline to call it, which surfaces as
+        # `parsed=None` + `parsing_error`. That path is not new and is not
+        # silent: every extraction here goes through
+        # `invoke_structured_with_validation_retry`, which re-prompts with the
+        # violation and then fails loud, and strict mode raises. A forced
+        # choice that 400s has no such recovery.
+        tool_choice="auto",
+        **kw,
     )
 
 

@@ -158,6 +158,9 @@ def test_malformed_catalysts_raises_after_reroll(monkeypatch):
         # langchain_openai default ('json_schema') is rejected by DeepSeek
         # behind the router (alpha-engine-config-I7448).
         "method": "function_calling",
+        # A reasoning model rejects langchain's forced tool choice with
+        # "Thinking mode does not support this tool_choice" (measured live).
+        "tool_choice": "auto",
     }
 
 

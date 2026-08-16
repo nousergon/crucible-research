@@ -110,3 +110,13 @@ def test_the_chokepoint_pins_function_calling():
         "Falling back to the langchain_openai default ('json_schema') reintroduces "
         "the provider-capability dependency this function exists to remove."
     )
+
+    tool_choice = next(
+        (kw.value for kw in call.keywords if kw.arg == "tool_choice"), None
+    )
+    assert isinstance(tool_choice, ast.Constant) and tool_choice.value == "auto", (
+        "bind_structured_output must pass tool_choice='auto'. langchain hardcodes a "
+        "FORCED tool choice for method='function_calling', and a reasoning model "
+        "rejects it: measured against the live router, 'Thinking mode does not "
+        "support this tool_choice' (400) versus 200 with 'auto'."
+    )

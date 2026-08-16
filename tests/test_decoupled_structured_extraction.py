@@ -123,6 +123,7 @@ def test_quant_extraction_happy_path(fresh_modules):
         QuantAnalystOutput,
         include_raw=True,
         method="function_calling",
+        tool_choice="auto",
     )
 
 
