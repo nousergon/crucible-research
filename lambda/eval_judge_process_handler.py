@@ -21,10 +21,23 @@ Returns:
       "summary": <process_batch_results return dict>
     }
 
-``OK`` = no failures. ``PARTIAL`` = at least one batch result failed
-but the run completed. ``ERROR`` = the run itself blew up. Mirrors
-the legacy single-Lambda contract so the Saturday SF + dashboard
-result inspectors keep working unchanged.
+``OK`` = no failures and full coverage. ``PARTIAL`` = at least one batch
+result failed, OR a phase stopped on the deadline budget and the pass
+covered less of the corpus than it was asked to. ``ERROR`` = the run
+itself blew up. Mirrors the legacy single-Lambda contract so the Saturday
+SF + dashboard result inspectors keep working unchanged.
+
+**alpha-engine-config-I6920 class (deadline discipline).** This function
+was killed at its 900s wall in 9 of 28 observed real invocations,
+every one of them inside ``process_batch_results``'s parse-retry tail.
+Killed at the wall means no manifest, no summary, no cause — the SF sees
+``States.Timeout`` and routes to ``MarkEvalJudgeDegraded`` knowing
+nothing about what was covered. The orchestrator now consumes a stated
+fraction of the invocation's own clock, stops each loop when the next
+item no longer fits, and returns a PARTIAL envelope carrying
+``complete`` / ``budget_stopped`` / ``n_skipped_for_budget`` — hoisted to
+the TOP level of the return so a Step Functions ``Choice`` can read it
+without digging into ``$.summary``.
 """
 
 from __future__ import annotations
@@ -34,6 +47,7 @@ import os
 import sys
 import tempfile
 from datetime import UTC
+from datetime import datetime as _utcnow_cls
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -72,8 +86,67 @@ def _ensure_init() -> None:
     _init_done = True
 
 
+def _remaining_seconds(context):
+    """Zero-arg callable giving the seconds left in this invocation.
+
+    ``None`` when there is no Lambda context (local runs, tests), which
+    the orchestrator treats as "no deadline" — identical behaviour to
+    before alpha-engine-config-I6920.
+
+    NOT decorated with ``@monitor_handler``: that decorator belongs on the
+    entry point, and putting it on a helper both leaves the real handler
+    unwrapped and misreports the helper's frame as the handler's. (The
+    concordance Lambda in crucible-backtester has exactly that defect
+    today — see the PR body.)
+    """
+    getter = getattr(context, "get_remaining_time_in_millis", None)
+    if not callable(getter):
+        return None
+    return lambda: getter() / 1000.0
+
+
 @monitor_handler
 def handler(event, context):
+    """Entry point. Runs the handler, then flushes cost telemetry.
+
+    The `finally` is the whole point (alpha-engine-config-I7423).
+    `krepis.cost_sink.S3JsonlCostSink` buffers to 200 records per
+    `(date, callsite_id)` group and otherwise relies on an `atexit` hook —
+    and **an AWS Lambda container is FROZEN between invocations, not exited,
+    so `atexit` never runs.** A handler finishing below the threshold writes
+    nothing at all, and the container may be reclaimed hours later without
+    ever reaching interpreter shutdown.
+
+    Measured 2026-08-15 on weekly-SF execution `watch-rerun-2026-08-15-2`:
+    `AggregateCosts` reported `single-agent-quant` among `2 stage(s) ran and
+    emitted no cost record ... Observed producers: (none)`. The env wiring was
+    correct, the sink was constructed, the records were priced and accepted,
+    and every one of them died in memory.
+
+    Applied to EVERY handler in this directory rather than to the ones known
+    to call an LLM today: `flush_default_sink` returns 0 when no sink is
+    configured and never raises, so the uniform rule costs nothing and leaves
+    no per-handler judgment call for the next producer to get wrong.
+    """
+    try:
+        return _run(event, context)
+    finally:
+        try:
+            from krepis.cost_sink import flush_default_sink
+            _n = flush_default_sink()
+            if _n:
+                logger.info("cost sink flushed: %d object(s)", _n)
+        except ImportError as exc:
+            # Loud, not silent: the image's krepis pin predates the function
+            # (floor is >=0.59.8). Cost records for this invocation are lost,
+            # and AggregateCosts' fan-in coverage check will name this stage.
+            logger.error("cost-sink flush unavailable — records lost: %s", exc)
+
+
+def _run(event, context):
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = _utcnow_cls.now(UTC)
     _ensure_init()
 
     import anthropic
@@ -119,6 +192,7 @@ def handler(event, context):
             plan_s3_key=plan_s3_key,
             bucket=bucket,
             anthropic_client=client,
+            remaining_s=_remaining_seconds(context),
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_process_handler] process failed hard")
@@ -165,19 +239,74 @@ def handler(event, context):
             "batch_id": batch_id,
             "error": _process_error,
             "manifest_capture_dates": manifest_dates,
+            # An ERROR covered an unknown fraction of the corpus. Saying
+            # anything else here would let a crashed pass read as complete
+            # on the same field a truncated one reports honestly.
+            "complete": False,
+            "budget_stopped": False,
         }
 
     summary["manifest_capture_dates"] = manifest_dates
 
-    status = "PARTIAL" if summary["failed"] else "OK"
+    # I6920: a pass that stopped on budget covered less of the corpus than
+    # it was asked to. That is partial signal, and reporting OK would make
+    # a truncated sweep read as a full one.
+    budget_stopped = bool(summary.get("budget_stopped"))
+    if budget_stopped:
+        logger.warning(
+            "[eval_judge_process_handler] stopped on budget in %s: %s "
+            "items not processed",
+            summary.get("budget_stopped_phases"),
+            summary.get("n_skipped_for_budget"),
+        )
+    status = "PARTIAL" if (summary["failed"] or budget_stopped) else "OK"
     logger.info(
         "[eval_judge_process_handler] done status=%s haiku=%d sonnet=%d "
-        "skipped_unmapped=%d skipped_empty_input=%d failed=%d",
+        "skipped_unmapped=%d skipped_empty_input=%d failed=%d complete=%s",
         status,
         summary["haiku_evaluated"],
         summary["sonnet_evaluated"],
         summary["skipped_unmapped"],
         summary["skipped_empty_input"],
         len(summary["failed"]),
+        summary.get("complete", True),
     )
-    return {"status": status, "summary": summary}
+    result = {
+        "status": status,
+        # Hoisted out of `summary` so a Step Functions Choice can branch on
+        # it — sf-pipeline-policy.md §2.3a requires the verdict to reach the
+        # machine, not only the operator reading the log.
+        "complete": bool(summary.get("complete", True)),
+        "budget_stopped": budget_stopped,
+        "summary": summary,
+    }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope). This handler's own event carries no run_date — only
+    # batch_id/plan_s3_key — so the run_date is recovered from
+    # plan_s3_key's own {date} path segment
+    # ("decision_artifacts/_eval_batch_plans/{date}/{batch_id}.json",
+    # written verbatim by eval_judge_submit_handler). OBSERVE MODE ONLY —
+    # never enables enforcement, never raises.
+    try:
+        _plan_key_parts = plan_s3_key.split("/")
+        _run_date_for_coverage = _plan_key_parts[2] if len(_plan_key_parts) > 2 else None
+        if _run_date_for_coverage:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "EvalJudgeProcess", run_date=_run_date_for_coverage,
+                window_start=_started,
+            )
+        else:
+            logger.info(
+                "[eval_judge_process_handler] could not recover run_date "
+                "from plan_s3_key=%r — skipping stage-coverage assertion "
+                "(config-I7214)", plan_s3_key,
+            )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

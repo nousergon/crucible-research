@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 
 # Repo root on sys.path so ``from evals.rolling_mean import ...``
 # resolves under Lambda's task layout.
@@ -72,7 +72,47 @@ def _ensure_init() -> None:
 
 @monitor_handler
 def handler(event, context):
+    """Entry point. Runs the handler, then flushes cost telemetry.
+
+    The `finally` is the whole point (alpha-engine-config-I7423).
+    `krepis.cost_sink.S3JsonlCostSink` buffers to 200 records per
+    `(date, callsite_id)` group and otherwise relies on an `atexit` hook —
+    and **an AWS Lambda container is FROZEN between invocations, not exited,
+    so `atexit` never runs.** A handler finishing below the threshold writes
+    nothing at all, and the container may be reclaimed hours later without
+    ever reaching interpreter shutdown.
+
+    Measured 2026-08-15 on weekly-SF execution `watch-rerun-2026-08-15-2`:
+    `AggregateCosts` reported `single-agent-quant` among `2 stage(s) ran and
+    emitted no cost record ... Observed producers: (none)`. The env wiring was
+    correct, the sink was constructed, the records were priced and accepted,
+    and every one of them died in memory.
+
+    Applied to EVERY handler in this directory rather than to the ones known
+    to call an LLM today: `flush_default_sink` returns 0 when no sink is
+    configured and never raises, so the uniform rule costs nothing and leaves
+    no per-handler judgment call for the next producer to get wrong.
+    """
+    try:
+        return _run(event, context)
+    finally:
+        try:
+            from krepis.cost_sink import flush_default_sink
+            _n = flush_default_sink()
+            if _n:
+                logger.info("cost sink flushed: %d object(s)", _n)
+        except ImportError as exc:
+            # Loud, not silent: the image's krepis pin predates the function
+            # (floor is >=0.59.8). Cost records for this invocation are lost,
+            # and AggregateCosts' fan-in coverage check will name this stage.
+            logger.error("cost-sink flush unavailable — records lost: %s", exc)
+
+
+def _run(event, context):
     """Compute + emit the rolling 4-week mean derived metric."""
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.now(UTC)
     _ensure_init()
 
     # Imports deferred until after _ensure_init in case the rolling-mean
@@ -84,6 +124,11 @@ def handler(event, context):
         datetime.fromisoformat(end_time_iso.replace("Z", "+00:00"))
         if end_time_iso else None
     )
+    # This handler's own event carries no run_date — only end_time_iso
+    # ($$.Execution.StartTime, SF-threaded). Its date portion is the
+    # closest available proxy for the cycle this stage belongs to
+    # (config-I7214).
+    _run_date_for_coverage = (end_time or _started).date().isoformat()
 
     logger.info(
         "[eval_rolling_mean_handler] start end_time_iso=%s",
@@ -249,7 +294,7 @@ def handler(event, context):
         )
         producer_leaderboard = {"status": "ERROR", "error": str(exc)}
 
-    return {
+    result = {
         "status": status,
         "summary": summary,
         "calibration": calibration,
@@ -257,3 +302,21 @@ def handler(event, context):
         "agent_quality": agent_quality,
         "producer_leaderboard": producer_leaderboard,
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope): the assertion lives in the stage's own handler,
+    # immediately before it returns, rather than a separate end-of-run SF
+    # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            "EvalRollingMean", run_date=_run_date_for_coverage,
+            window_start=_started,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

@@ -1,0 +1,57 @@
+name: Fetch alpha-engine-config
+
+# GitHub withholds repository secrets from any `pull_request`-triggered
+# workflow run whose PR author is dependabot[bot] — even on a same-repo
+# (non-fork) branch, even on a manual rerun — to stop a malicious dependency
+# bump from exfiltrating them (alpha-engine-config#7266/#7268). That's why
+# every one of crucible-research's dependabot PRs failed ci.yml's
+# "Checkout alpha-engine-config" step identically: TOKEN arrived empty
+# regardless of the secret's validity.
+#
+# This workflow is the safe half of the split: it runs under
+# `pull_request_target` (secrets ARE available there) but never checks out
+# or executes a single line of the PR's own code — it only clones the
+# private alpha-engine-config repo and uploads it as an artifact keyed by
+# the PR's head SHA. ci.yml's `test` job (still plain `pull_request`, still
+# zero secrets) downloads that artifact instead of cloning directly when
+# ALPHA_ENGINE_CONFIG_TOKEN comes back empty. Because no PR-authored code
+# ever runs in a context that holds the token, a compromised dependency bump
+# has nothing to exfiltrate it with.
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: fetch-alpha-engine-config-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      # Branch-aware, same convention as ci.yml/judge-perturbation-smoke.yml:
+      # stacked prompt-versioning PRs keep a same-named branch in
+      # alpha-engine-config; fall back to its default branch otherwise.
+      - name: Checkout alpha-engine-config (branch-aware)
+        env:
+          TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${TOKEN}@github.com/nousergon/alpha-engine-config.git"
+          if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
+            echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
+          else
+            git clone --depth 1 "$REPO_URL" alpha-engine-config
+            echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
+          fi
+          rm -rf alpha-engine-config/.git
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: alpha-engine-config-${{ github.event.pull_request.head.sha }}
+          path: alpha-engine-config
+          retention-days: 1

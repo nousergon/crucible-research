@@ -52,6 +52,7 @@ without inheriting its client-construction risk.
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 from thinktank import (
     CHALLENGER_SELECTION_KEY_TMPL,
@@ -74,6 +75,56 @@ CHALLENGER_TOP_N = 20
 Tank's own rating. Distinct from ``thinktank.run.GAP_FILL_TOP_N`` (60, the
 coverage-window size that gates ``coverage_complete``); this is how many of
 those covered names actually get submitted as the challenger arm's picks."""
+
+
+POINTER_LAG_ERROR_DAYS = 3
+"""Calendar-day lag at which a frozen ``latest.json`` is logged at ERROR
+rather than WARNING.
+
+Any lag above zero after a run is already wrong — the run either advanced the
+pointer or it did not produce. The threshold exists because the LIVE
+consequence has its own bound: ``crucible-executor``'s ``thinktank_coverage``
+champion arm hard-refuses to trade a selection older than its
+``champion_freshness_max_days`` (default 8, ``executor/champion.py``). Three
+days leaves headroom to notice before a trading decision is at stake, instead
+of escalating on the day the arm stops trading."""
+
+
+def challenger_pointer_lag(
+    store: ThinktankStore, *, trading_day: str
+) -> tuple[str | None, int | None]:
+    """Read ``latest.json`` and report ``(pointer_trading_day, lag_days)``
+    relative to *trading_day*.
+
+    Called AFTER the run's own write, so on the success path the pointer is
+    this run's and the lag is 0 by construction. On the abort path — where the
+    pointer is deliberately withheld and the dated key still lands — the lag is
+    the real staleness, and it is the only value in the run's own output that
+    distinguishes a frozen pointer from a healthy one (alpha-engine-config-I7232).
+
+    ``(None, None)`` means the pointer object does not exist. A malformed or
+    date-less pointer RAISES: it is the single end-to-end health signal for this
+    arm, and a signal we cannot read is not permission to report nothing.
+    """
+    pointer = store.get_json(CHALLENGER_SELECTION_LATEST_KEY)
+    if pointer is None:
+        return None, None
+    if not isinstance(pointer, dict):
+        raise RuntimeError(
+            f"challenger selection: {CHALLENGER_SELECTION_LATEST_KEY} did not "
+            f"parse to a JSON object (got {type(pointer).__name__}) — the "
+            "pointer is this arm's only end-to-end health signal and must be "
+            "readable."
+        )
+    pointer_day = pointer.get("trading_day")
+    if not isinstance(pointer_day, str) or not pointer_day:
+        raise RuntimeError(
+            f"challenger selection: {CHALLENGER_SELECTION_LATEST_KEY} carries "
+            f"no usable 'trading_day' (got {pointer_day!r}) — its lag cannot "
+            "be computed, so its staleness cannot be published."
+        )
+    lag = (date.fromisoformat(trading_day) - date.fromisoformat(pointer_day)).days
+    return pointer_day, lag
 
 
 def write_challenger_selection(

@@ -198,6 +198,13 @@ _FROZEN_FIELDS = {
         "theme_updates_written",
         "ratings_rows",
         "challenger_selection_written",
+        # alpha-engine-config-I7232 — challenger_selection_written says the
+        # pointer was withheld; these say how stale the pointer LEFT BEHIND
+        # now is. The dated key still lands on the abort path, so the
+        # directory listing keeps advancing and only the pointer's own lag
+        # distinguishes a frozen pointer from a healthy one.
+        "challenger_selection_pointer_trading_day",
+        "challenger_selection_pointer_lag_days",
         "context_sources_present",
         "usage_by_tier",
         "total_cost_usd",

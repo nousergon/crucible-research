@@ -21,7 +21,7 @@ langchain-anthropic~=1.5
 # langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
 # 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
 # current path.
-langchain-openai~=1.4
+langchain-openai~=1.5
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
@@ -29,7 +29,7 @@ langchain-openai~=1.4
 # builds even though a fresh resolve already picked a newer version; `~=0.8.18`
 # hard-excludes every pre-fix release while staying within the 0.8.x line
 # (minimum version movement that clears the advisory).
-langsmith~=0.8.18
+langsmith~=0.10.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
@@ -40,7 +40,7 @@ openai>=2.53.0
 agentevals~=0.0
 
 # Data
-yfinance~=1.5.2
+yfinance~=1.6.0
 requests-ratelimiter~=0.10
 pandas~=2.2
 numpy~=1.26
@@ -228,7 +228,59 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
 # An older krepis raises TypeError on the kwarg rather than degrading, so the
 # floor is load-bearing rather than advisory.
-krepis>=0.43.0
+#
+# 0.51.0 floor (krepis-PR133, alpha-engine-config-I7009): `krepis.ec2_spot
+# relaunch-decision` gained `--json`, putting the verdict on a JSON field
+# instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
+# that field; an older krepis has no `--json` flag at all.
+#
+# 0.57.0 floor (krepis-PR140, alpha-engine-config-I7179): `LLMClient` with no
+# `cost_sink=` argument now resolves one from KREPIS_COST_SINK_BUCKET +
+# KREPIS_COST_SINK_PREFIX, and `krepis.aws merge-lambda-env` is what
+# `infrastructure/deploy.sh` uses to set them. On an older krepis the deploy
+# fails loudly on an unknown subcommand — which is the right failure, because
+# the alternative is a deploy that succeeds while every Lambda it published
+# emits no cost record at all. That silence ran for months. Subsumed by the
+# higher floor below; kept because the floor's REASON is not recoverable from
+# the version number.
+#
+# 0.59.4 floor (alpha-engine-config-I7214): the FIRST published krepis
+# carrying `krepis.stage_coverage`, which every weekly-SF-backed handler in
+# lambda/ imports to self-assert its declared output before returning. The
+# call site's ImportError guard is deliberately silent about the handler's
+# own outcome (observe mode), so a deploy resolving an older krepis would
+# leave the assertion emitting NOTHING — indistinguishable on the console
+# from an assertion that ran and found nothing wrong (config-I7334). The
+# floor is the only thing that makes it measurable where it runs.
+#
+# 0.59.6 floor (alpha-engine-config-I7372): the FIRST published krepis
+# carrying `krepis.spot_bootstrap`'s `--max-runtime-seconds` flag and
+# `scan_for_inline_bootstraps`. `infrastructure/spot_research_weekly.sh`'s
+# bootstrap step passes `--max-runtime-seconds`; an older krepis rejects it
+# as an unrecognized argument — AFTER the spot instance already exists and
+# is billing, not at dispatch. `tests/test_spot_bootstrap_invariants.py`
+# imports `scan_for_inline_bootstraps`, which does not exist below 0.59.6 —
+# `ImportError` at collection on an older resolve (measured live on
+# crucible-predictor-PR505 against this exact symbol). A `>=0.59.4` floor
+# lets `pip` resolve past both silently whenever the newest publish happens
+# to satisfy it, which is resolution luck, not a requirement.
+# Raised to >=0.59.8 (alpha-engine-config-I7423): the first published krepis
+# carrying krepis.cost_sink.flush_default_sink(), which every handler in
+# lambda/ now calls in a `finally`. 0.59.7 emits the four cost-contract
+# columns and has no way to WRITE them — a frozen Lambda container never
+# runs the atexit hook the sink otherwise relies on.
+krepis>=0.59.8  # floor raised for the cost-record contract columns + the flush
+# (alpha-engine-config-I7393): schema_version / run_id / agent_id / model_name
+# first ship in 0.59.7 (krepis-PR154). nousergon-lib's transparency_inventory
+# `cost_telemetry` row asserts all four present, and this repo is the ONLY
+# constructor of a cost sink in the fleet (evals/judge.py,
+# producers/single_agent.py) — so an older krepis here means the weekly
+# substrate health check keeps reporting cost_telemetry as its single [FAIL].
+#
+# The floor is also what DEPLOYS the fix: .github/workflows/deploy.yml only
+# rebuilds the image when a path it watches changes, and `requirements*.txt`
+# is one of them. Leaving the floor at 0.59.6 would resolve to 0.59.7 on a
+# fresh build but never trigger one.
 
 # Scheduling / calendar
 exchange-calendars~=4.13
@@ -249,7 +301,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.46
+edgartools~=5.48
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9

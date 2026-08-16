@@ -85,28 +85,38 @@ from graph.state_schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Process-scoped cost sink for every OpenRouter judge call. Constructed
-# lazily so importing this module costs nothing; shared across all
-# evaluate_artifact / evaluate_artifact_openrouter invocations in the
-# process so a judge Lambda's many calls flush as one JSONL object per
-# (date, run_id, callsite_id) rather than one object per call. Without
-# this the judge's per-call spend is invisible to AggregateCosts
-# (alpha-engine-config-I5206).
-_JUDGE_COST_SINK = None
 
 
 def _judge_cost_sink():
-    """Return the process-scoped S3JsonlCostSink, constructing it on first use."""
-    global _JUDGE_COST_SINK
-    if _JUDGE_COST_SINK is None:
-        from krepis.cost_sink import S3JsonlCostSink
+    """Return the PROCESS-DEFAULT sink - never a private instance.
 
-        _JUDGE_COST_SINK = S3JsonlCostSink(
-            bucket=S3_BUCKET,
-            prefix="decision_artifacts/_cost_raw",
-            register_atexit=True,
-        )
-    return _JUDGE_COST_SINK
+    alpha-engine-config-I7423. This used to construct its own
+    ``S3JsonlCostSink`` and memoise it in a module global. That instance
+    was invisible to ``krepis.cost_sink.flush_default_sink()``, which the
+    judge Lambdas now call in a ``finally``, so its only exit path was
+    ``register_atexit=True`` - and an AWS Lambda container is FROZEN between
+    invocations, not exited, so ``atexit`` never runs. Every judge record
+    below the 200-per-group buffer threshold died in memory.
+
+    Measured on the sibling callsite ``single-agent-quant`` (weekly-SF
+    execution ``watch-rerun-2026-08-16-1``, 2026-08-16): a real DeepSeek call
+    completed, artifacts were written, and ``AggregateCosts`` still reported
+    ``1 stage(s) ran and emitted no cost record``. The judge chain carries the
+    identical shape and would have failed the same way the next time
+    ``EvalJudgeProcess`` entered a run.
+
+    ``default_sink_from_env`` memoises per ``(bucket, prefix, run_id)``
+    itself, so the module-level cache this replaces bought nothing: the whole
+    process already shares one sink and one buffer, which is the
+    one-PUT-per-group behaviour that module global existed to get.
+
+    Returns ``None`` when cost emission is deliberately switched off (neither
+    environment variable set); ``LLMClient`` treats that as "no sink" and
+    never raises.
+    """
+    from krepis.cost_sink import default_sink_from_env
+
+    return default_sink_from_env()
 
 
 def _new_judge_run_id() -> str:
@@ -319,6 +329,35 @@ def _render_rubric(
         agent_input=artifact.input_data_snapshot,
         agent_output=artifact.agent_output,
     )
+
+
+def _split_rubric_for_caching(rendered: str) -> tuple[str, str]:
+    """Split a rendered rubric into a cacheable system prompt and volatile
+    user content.
+
+    After the prompt-template reorder (I4930), each eval rubric places its
+    dimension criteria FIRST and the per-call ``{agent_input}`` /
+    ``{agent_output}`` block at the END.  Everything before the first
+    ``{agent_input}`` occurrence is the static, cacheable system prompt;
+    the remainder (the volatile agent framing) is the per-call user turn.
+
+    When no split is possible (pre-reorder template, or a rubric that
+    embeds ``{agent_input}`` in the criteria text — none known today),
+    falls back to empty system + full user content, preserving the
+    existing behaviour exactly.
+
+    Returns ``(system_part, user_part)``.
+    """
+    marker = "{agent_input}"
+    idx = rendered.find(marker)
+    if idx == -1:
+        return "", rendered
+    # Split before the marker line; include everything from marker onward
+    # as user content.  The system part is everything before the first
+    # line that contains ``{agent_input}``.
+    system = rendered[:idx].rstrip("\n")
+    user = rendered[idx:]
+    return system, user
 
 
 def _make_skip_eval_artifact(
@@ -553,6 +592,7 @@ def build_batch_request(
 
     loaded_prompt = load_prompt(rubric_name)
     rendered = _render_rubric(artifact, loaded_prompt)
+    system_part, user_part = _split_rubric_for_caching(rendered)
     tool_spec = _build_rubric_tool_spec()
 
     # Force the model to call the rubric tool — equivalent to
@@ -563,11 +603,22 @@ def build_batch_request(
     # ``judge_model`` is the logical key; pin it to the dated snapshot
     # for the actual API call (L4578(a)). The custom_id (built by the
     # caller) keeps the logical key so persistence/dimension stay stable.
+    #
+    # System prompt (config-I4930): the rubric's static criteria are
+    # hoisted into ``system_prompt`` so the cacheable prefix (the
+    # dimension criteria shared across N fanned-out evals) lands in the
+    # system block where Anthropic's tiered caching can serve it. Only
+    # the volatile per-artifact agent_input/agent_output framing goes
+    # into the user turn. ``cache_system=True`` engages caching on the
+    # system block (the rubric criteria easily clear the model's
+    # cache_min_tokens after the I4930 reorder).
     return build_batches_request_params(
         custom_id=custom_id,
         model=request_model_for(judge_model),
         max_tokens=max_tokens,
-        user_content=rendered,
+        user_content=user_part or rendered,
+        system_prompt=system_part or None,
+        cache_system=bool(system_part),
         tools=[tool_spec],
         tool_choice={"type": "tool", "name": _RUBRIC_TOOL_NAME},
     )
@@ -761,6 +812,7 @@ def evaluate_artifact(
         )
 
     rendered = _render_rubric(artifact, loaded_prompt)
+    system_part, user_part = _split_rubric_for_caching(rendered)
 
     # ``judge_model`` stays the stable logical key (persisted + dimension —
     # see docstring). The ACTUAL request model is the OpenRouter default
@@ -768,7 +820,8 @@ def evaluate_artifact(
     # for both Haiku and Sonnet tiers per Brian's ruling (see docstring).
     request_model = OPENROUTER_SHADOW.request_model
     call_result = _call_openrouter_judge_llm(
-        rendered,
+        user_part or rendered,
+        system_prompt=system_part,
         agent_id=artifact.agent_id,
         request_model=request_model,
         max_tokens=max_tokens,
@@ -876,6 +929,7 @@ def _call_openrouter_judge_llm(
     api_key: str | None,
     max_retries: int,
     log_prefix: str,
+    system_prompt: str = "",
     callsite_id: str = "evaljudge-sync",
 ) -> _OpenRouterJudgeCallResult:
     """Shared OpenRouter judge-call core: forced-tool-call request + leak
@@ -884,6 +938,14 @@ def _call_openrouter_judge_llm(
     ``evaluate_artifact_openrouter`` (shadow tier, config#2575) — the only
     difference between the two callers is which ``request_model`` /
     ``judge_model`` identity they persist onto the result.
+
+    **Cache-aware system prompt (I4930).** When ``system_prompt`` is
+    non-empty (the rubric's static criteria, split from the volatile
+    agent_input/agent_output framing), it REPLACES the generic "You are
+    a strict, evidence-grounded rubric judge" default — the rubric's own
+    role definition is the correct system instruction for this call, and
+    it is re-usable across all fanned-out judge calls for the same rubric.
+    Pass ``system_prompt=""`` to preserve the existing generic default.
 
     Leak guard (config#2575 item 3): before accepting ANY OpenRouter
     response as a valid structured judge output, checks it against
@@ -934,7 +996,7 @@ def _call_openrouter_judge_llm(
     for attempt in range(1, max_retries + 1):
         try:
             result = llm_client.complete(
-                system="You are a strict, evidence-grounded rubric judge.",
+                system=system_prompt or "You are a strict, evidence-grounded rubric judge.",
                 user_content=rendered,
                 max_tokens=max_tokens,
                 extra={
@@ -1134,9 +1196,11 @@ def evaluate_artifact_openrouter(
         )
 
     rendered = _render_rubric(artifact, loaded_prompt)
+    system_part, user_part = _split_rubric_for_caching(rendered)
     request_model = request_model_for(judge_model)
     call_result = _call_openrouter_judge_llm(
-        rendered,
+        user_part or rendered,
+        system_prompt=system_part,
         agent_id=artifact.agent_id,
         request_model=request_model,
         max_tokens=max_tokens,

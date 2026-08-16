@@ -44,9 +44,20 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # dependabot[bot] PRs never receive secrets on a pull_request-triggered
+    # run (GitHub withholds them even same-repo — alpha-engine-config#7266/
+    # #7268), and this job needs a live OPENROUTER_API_KEY to call the judge
+    # LLM plus PR-controlled code (evals/judge.py, evals/perturbation.py) —
+    # unlike ci.yml's config checkout, that combination can't be split
+    # safely into a secrets-holding, code-executing step. A dependency bump
+    # never legitimately touches judge/perturbation code (the requirements.txt
+    # path filter is what pulls dependabot PRs in here incidentally), so skip
+    # entirely rather than widen what a compromised dependency update could
+    # exfiltrate or spend. Not a required check — skip is a clean pass.
+    if: github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Eval rubric prompts are gitignored here; load_prompt() resolves
       # them from $GITHUB_WORKSPACE/alpha-engine-config/research/prompts/.

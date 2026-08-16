@@ -11,10 +11,12 @@ permissions: {}
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read  # only for the artifact-download fallback below
 
     steps:
       - name: Checkout research repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: alpha-engine-research
 
@@ -28,18 +30,56 @@ jobs:
       # exists. This lets the prompt-content regression locks in
       # tests/test_prompts_no_inline_json_schema.py see the PR's prompt
       # changes instead of stale main-branch prompts.
+      #
+      # dependabot[bot] PRs never receive ALPHA_ENGINE_CONFIG_TOKEN — GitHub
+      # withholds secrets from pull_request-triggered runs it authors, even
+      # same-repo, even on a manual rerun (alpha-engine-config#7266/#7268).
+      # When TOKEN comes back empty, fall back to the artifact that
+      # fetch-alpha-engine-config.yml (pull_request_target, which DOES get
+      # the secret, and never executes PR code) uploaded for this head SHA.
       - name: Checkout alpha-engine-config (branch-aware)
+        id: direct_checkout
         env:
           TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          REPO_URL="https://x-access-token:${TOKEN}@github.com/nousergon/alpha-engine-config.git"
-          if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
-            echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
+          set -euo pipefail
+          if [ -n "$TOKEN" ]; then
+            REPO_URL="https://x-access-token:${TOKEN}@github.com/nousergon/alpha-engine-config.git"
+            if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
+              echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
+            else
+              git clone --depth 1 "$REPO_URL" alpha-engine-config
+              echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
+            fi
           else
-            git clone --depth 1 "$REPO_URL" alpha-engine-config
-            echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
+            echo "ALPHA_ENGINE_CONFIG_TOKEN unavailable (bot-authored PR) — falling back to fetch-alpha-engine-config.yml's artifact"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Download alpha-engine-config artifact (dependabot fallback)
+        if: steps.direct_checkout.outputs.fallback == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_NAME="alpha-engine-config-${SHA}"
+          ARTIFACT_ID=""
+          for i in $(seq 1 30); do
+            ARTIFACT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '.artifacts[0].id // empty')
+            if [ -n "$ARTIFACT_ID" ]; then break; fi
+            echo "Waiting for fetch-alpha-engine-config.yml's artifact ($i/30)..."
+            sleep 10
+          done
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::alpha-engine-config artifact '${ARTIFACT_NAME}' never appeared — check the 'Fetch alpha-engine-config' workflow run for this PR"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > config.zip
+          mkdir -p alpha-engine-config
+          unzip -q config.zip -d alpha-engine-config
+          rm config.zip
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:

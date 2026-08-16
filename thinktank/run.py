@@ -61,9 +61,17 @@ from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
 
-from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
+from thinktank import (
+    CHALLENGER_SELECTION_LATEST_KEY,
+    EVENTS_KEY_TMPL,
+    MANIFEST_KEY_TMPL,
+)
 from thinktank.analyst import build_thesis, sweep, triage
-from thinktank.challenger_selection import write_challenger_selection
+from thinktank.challenger_selection import (
+    POINTER_LAG_ERROR_DAYS,
+    challenger_pointer_lag,
+    write_challenger_selection,
+)
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, load_context
 from thinktank.costs import BudgetGuard
@@ -676,6 +684,7 @@ def _terminal_writes(
         update_latest_pointer=not aborted,
     )
     manifest.challenger_selection_written = not aborted
+    _record_pointer_lag(store, manifest, trading_day=trading_day)
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
@@ -694,6 +703,60 @@ def _terminal_writes(
         manifest.model_dump(),
     )
     client.flush_sft(store.s3, store.bucket, trading_day)
+
+
+def _record_pointer_lag(
+    store: ThinktankStore, manifest: RunManifest, *, trading_day: str
+) -> None:
+    """Publish how stale ``challenger_selection/latest.json`` is, as a number,
+    on EVERY run (alpha-engine-config-I7232).
+
+    The pointer is withheld on the abort path by design — but the dated key is
+    still written, so the directory keeps advancing daily while the pointer
+    freezes. Measured 2026-08-13: ``latest.json`` was byte-identical to the
+    08-10 object while 08-11 and 08-12 sat beside it, and the only way to see
+    that was to compare the pointer against the newest dated key, which nothing
+    did. To every consumer resolving the arm through the pointer — including
+    ``crucible-executor``'s ``thinktank_coverage`` champion arm — a frozen
+    pointer and a healthy one are the same object.
+
+    This is the run stating its own pointer's lag into the manifest, so the
+    staleness is a published value rather than a comparison nobody performs.
+    It is written on the healthy path too, where it is 0: a component emitting
+    nothing is not healthy, it is unobserved (``principles.md`` §2.7).
+
+    Called from ``_terminal_writes``, which runs on the success path AND from
+    the abort handler, so there is no run shape that skips it.
+    """
+    pointer_day, lag = challenger_pointer_lag(store, trading_day=trading_day)
+    manifest.challenger_selection_pointer_trading_day = pointer_day
+    manifest.challenger_selection_pointer_lag_days = lag
+
+    if pointer_day is None:
+        logger.error(
+            "[thinktank] %s does not exist — this arm has no end-to-end "
+            "health signal at all, which is a stronger statement than a stale "
+            "one and must not read as 'nothing to report'.",
+            CHALLENGER_SELECTION_LATEST_KEY,
+        )
+        return
+    if lag <= 0:
+        logger.info(
+            "[thinktank] challenger-selection pointer lag: %d day(s) "
+            "(pointer trading_day=%s)",
+            lag, pointer_day,
+        )
+        return
+    logger.log(
+        logging.ERROR if lag >= POINTER_LAG_ERROR_DAYS else logging.WARNING,
+        "[thinktank] challenger-selection pointer is STALE by %d day(s): %s "
+        "carries trading_day=%s while this run is %s. The dated key for this "
+        "run WAS written, so the directory listing looks healthy — any "
+        "consumer resolving the arm through the pointer (crucible-executor "
+        "champion arm thinktank_coverage) is reading a %d-day-old selection "
+        "(alpha-engine-config-I7232).",
+        lag, CHALLENGER_SELECTION_LATEST_KEY, pointer_day, trading_day, lag,
+    )
 
 
 def _compute_coverage_gap(
