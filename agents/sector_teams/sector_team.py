@@ -20,6 +20,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_structured_with_validation_retry,
     make_agent_llm,
 )
@@ -726,7 +727,8 @@ def _update_thesis_for_held_stock(
     #   are never persisted), so an SF redrive re-attempts only it.
     from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-    structured_llm = llm.with_structured_output(
+    structured_llm = bind_structured_output(
+        llm,
         HeldThesisUpdateLLMOutput,
         include_raw=True,
     )

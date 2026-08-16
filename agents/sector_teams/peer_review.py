@@ -15,6 +15,7 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_anthropic_safe,
     make_agent_llm,
 )
@@ -265,7 +266,7 @@ def _quant_reviews_addition(
     from graph.state_schemas import QuantAcceptanceVerdict
     from strict_mode import is_strict_validation_enabled
 
-    structured_llm = llm.with_structured_output(QuantAcceptanceVerdict)
+    structured_llm = bind_structured_output(llm, QuantAcceptanceVerdict)
     try:
         verdict: QuantAcceptanceVerdict = invoke_anthropic_safe(
             structured_llm,
@@ -426,7 +427,7 @@ def _joint_finalization(
         team_picks_per_run=TEAM_PICKS_PER_RUN,
     )
 
-    selection_structured = finalization_llm.with_structured_output(JointSelectionOutput)
+    selection_structured = bind_structured_output(finalization_llm, JointSelectionOutput)
     selection: JointSelectionOutput | None = None
     try:
         selection = invoke_anthropic_safe(
@@ -472,7 +473,9 @@ def _joint_finalization(
 
     # ── Pass 2: per-ticker rationale ─────────────────────────────────
     rationale_prompt = load_prompt("peer_review_per_ticker_rationale")
-    rationale_structured = finalization_llm.with_structured_output(JointFinalizationDecision)
+    rationale_structured = bind_structured_output(
+        finalization_llm, JointFinalizationDecision
+    )
     rationale_by_ticker: dict[str, str] = {}
 
     for ticker in selected:

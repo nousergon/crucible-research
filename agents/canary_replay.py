@@ -6,9 +6,10 @@ Friday dry-preflight structurally cannot reach (``dry_run_llm=true`` only
 validates boot/wiring via installed stubs — see ``lambda/handler.py``
 around the ``dry_run_llm`` branch). This module exercises the real
 held-thesis-update and qual-analyst extraction paths against the live
-Anthropic API and the live research archive, plus a deliberately-injected
-validation-retry probe, so a regression in any of the three is caught
-before Saturday instead of during it.
+model router (``krepis.router``, reached at its TLS edge with the
+``research`` consumer credential) and the live research archive, plus a
+deliberately-injected validation-retry probe, so a regression in any of
+the three is caught before Saturday instead of during it.
 
 Runs from ``alpha-engine-config/infrastructure/canary_replay_spot_bootstrap.sh``
 alongside the sibling data-repo probe
@@ -172,25 +173,35 @@ def probe_validation_retry(api_key: str | None) -> dict:
     shared ``invoke_structured_with_validation_retry`` chokepoint (issue
     #2246's third probe) — confirms the retry/recovery path recovers
     weekly, rather than relying on a real thesis-update call happening to
-    trip it (which it may or may not do on any given run)."""
+    trip it (which it may or may not do on any given run).
+
+    Addresses ``config.CANARY_PROBE_CLASS`` (``high``) rather than the
+    per-stock class, per Brian's 2026-08-16 ruling: this probe is the
+    weekly-SF rehearsal's structured-output check and it runs at the router's
+    top tier. Two consequences worth stating rather than discovering:
+    the probe no longer rehearses the tier the per-stock agents call at, and a
+    stronger model is likelier to satisfy the schema on the FIRST attempt — a
+    PASS here has never asserted that a retry actually fired, and now needs to
+    (alpha-engine-config-I7459)."""
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
+        bind_structured_output,
         invoke_structured_with_validation_retry,
         make_agent_llm,
     )
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC, PER_STOCK_CLASS
+    from config import CANARY_PROBE_CLASS, MAX_TOKENS_STRATEGIC
 
     start = time.monotonic()
     try:
         llm = make_agent_llm(
-            model_class=PER_STOCK_CLASS,
+            model_class=CANARY_PROBE_CLASS,
             max_tokens=MAX_TOKENS_STRATEGIC,
             api_key=api_key,
         )
-        structured_llm = llm.with_structured_output(
-            _CanaryConfidenceProbe, include_raw=True
+        structured_llm = bind_structured_output(
+            llm, _CanaryConfidenceProbe, include_raw=True
         )
         # Prompt text lives in alpha-engine-config (research/prompts/
         # canary_validation_retry_probe.txt) — same load_prompt() chokepoint

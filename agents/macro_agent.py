@@ -15,6 +15,7 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_anthropic_safe,
     make_agent_llm,
 )
@@ -377,7 +378,9 @@ def run_macro_agent(
     # field directly. include_raw=True captures parse failures as a
     # ``parsing_error`` rather than raising; the strict-mode gate below raises
     # explicitly to match the "no silent fallbacks" rule.
-    structured_llm = llm.with_structured_output(MacroEconomistRawOutput, include_raw=True)
+    structured_llm = bind_structured_output(
+        llm, MacroEconomistRawOutput, include_raw=True
+    )
     # ALL-AGENTS-STRICT (Brian, 2026-05-16): the macro economist is one
     # of the agents in scope. Deadline-bounded (~75 min) 429 retry so
     # an org TPM ceiling is ridden out; if it persists past the
@@ -597,7 +600,7 @@ def run_macro_critic(
     # raises on parse failure; lax mode keeps the silent-accept fallback
     # because the critic is an editorial gate — accepting the initial macro
     # classification is the conservative behavior on critic failure.
-    structured_llm = llm.with_structured_output(MacroCriticOutput)
+    structured_llm = bind_structured_output(llm, MacroCriticOutput)
     try:
         # Deadline-bounded 429 retry (all-agents-strict): the critic is
         # part of the macro agent. A 429 rides out the ~75-min window;
