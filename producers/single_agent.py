@@ -271,7 +271,7 @@ def assess_candidates(
     from krepis.router import resolve_group_spec
 
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
+    from config import MAX_TOKENS_STRATEGIC
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = (
