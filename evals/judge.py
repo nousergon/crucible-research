@@ -85,28 +85,38 @@ from graph.state_schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Process-scoped cost sink for every OpenRouter judge call. Constructed
-# lazily so importing this module costs nothing; shared across all
-# evaluate_artifact / evaluate_artifact_openrouter invocations in the
-# process so a judge Lambda's many calls flush as one JSONL object per
-# (date, run_id, callsite_id) rather than one object per call. Without
-# this the judge's per-call spend is invisible to AggregateCosts
-# (alpha-engine-config-I5206).
-_JUDGE_COST_SINK = None
 
 
 def _judge_cost_sink():
-    """Return the process-scoped S3JsonlCostSink, constructing it on first use."""
-    global _JUDGE_COST_SINK
-    if _JUDGE_COST_SINK is None:
-        from krepis.cost_sink import S3JsonlCostSink
+    """Return the PROCESS-DEFAULT sink - never a private instance.
 
-        _JUDGE_COST_SINK = S3JsonlCostSink(
-            bucket=S3_BUCKET,
-            prefix="decision_artifacts/_cost_raw",
-            register_atexit=True,
-        )
-    return _JUDGE_COST_SINK
+    alpha-engine-config-I7423. This used to construct its own
+    ``S3JsonlCostSink`` and memoise it in a module global. That instance
+    was invisible to ``krepis.cost_sink.flush_default_sink()``, which the
+    judge Lambdas now call in a ``finally``, so its only exit path was
+    ``register_atexit=True`` - and an AWS Lambda container is FROZEN between
+    invocations, not exited, so ``atexit`` never runs. Every judge record
+    below the 200-per-group buffer threshold died in memory.
+
+    Measured on the sibling callsite ``single-agent-quant`` (weekly-SF
+    execution ``watch-rerun-2026-08-16-1``, 2026-08-16): a real DeepSeek call
+    completed, artifacts were written, and ``AggregateCosts`` still reported
+    ``1 stage(s) ran and emitted no cost record``. The judge chain carries the
+    identical shape and would have failed the same way the next time
+    ``EvalJudgeProcess`` entered a run.
+
+    ``default_sink_from_env`` memoises per ``(bucket, prefix, run_id)``
+    itself, so the module-level cache this replaces bought nothing: the whole
+    process already shares one sink and one buffer, which is the
+    one-PUT-per-group behaviour that module global existed to get.
+
+    Returns ``None`` when cost emission is deliberately switched off (neither
+    environment variable set); ``LLMClient`` treats that as "no sink" and
+    never raises.
+    """
+    from krepis.cost_sink import default_sink_from_env
+
+    return default_sink_from_env()
 
 
 def _new_judge_run_id() -> str:

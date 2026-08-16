@@ -262,11 +262,11 @@ def assess_candidates(
 
     ``client_factory`` is the krepis.llm.LLMClient test seam: a callable
     ``(spec, api_key) -> transport_client``. Production leaves it unset.
-    ``cost_sink`` is the shared ``S3JsonlCostSink`` (or any callable) —
-    when omitted, a process-local sink writing to
-    ``decision_artifacts/_cost_raw`` is constructed so this challenger
-    never silently skips cost emission (alpha-engine-config-I5206)."""
-    from krepis.cost_sink import S3JsonlCostSink
+    ``cost_sink`` is a test seam (any callable taking a record dict). When
+    omitted, ``LLMClient`` resolves the PROCESS-DEFAULT sink from the
+    environment — the one ``krepis.cost_sink.flush_default_sink()`` can reach
+    at the end of a Lambda invocation (alpha-engine-config-I7423). This
+    function must NOT construct its own; see the note at the call site."""
     from krepis.llm import LLMClient
     from krepis.router import resolve_group_spec
 
@@ -277,15 +277,25 @@ def assess_candidates(
     prompt = (
         loaded.text + "\n\n## Candidates\n" + _format_candidate_block(scanner_tickers, technical_scores, sector_map)
     )
-    # Default sink so a production call without an injected sink still
-    # emits. The sink never raises on a failed PUT, so constructing one
-    # in tests is harmless (they either inject their own or ignore S3).
-    if cost_sink is None:
-        cost_sink = S3JsonlCostSink(
-            bucket=S3_BUCKET,
-            prefix="decision_artifacts/_cost_raw",
-            register_atexit=True,
-        )
+    # NO private sink (alpha-engine-config-I7423). `LLMClient` resolves
+    # `krepis.cost_sink.default_sink_from_env()` when `cost_sink is None`, and
+    # that PROCESS-DEFAULT sink is the one `flush_default_sink()` can reach.
+    #
+    # Constructing a private `S3JsonlCostSink` here shadowed it: the records
+    # went into an instance nothing else held a reference to, whose only exit
+    # path was `register_atexit=True` — and an AWS Lambda container is FROZEN
+    # between invocations, not exited, so `atexit` never runs.
+    #
+    # Measured 2026-08-16 on weekly-SF execution `watch-rerun-2026-08-16-1`,
+    # AFTER the handler-level flush shipped: `ChallengerShadow` made a real
+    # DeepSeek call (`input_tokens=4296 output_tokens=7906`), wrote both
+    # shadow signal sets, and `AggregateCosts` still reported
+    # `1 stage(s) ran and emitted no cost record: single-agent-quant`. The
+    # `cost sink: process default active` line never appeared in the log,
+    # because the default sink was never constructed at all.
+    #
+    # `cost_sink` stays a parameter: it is the test seam, and an explicit
+    # injection still wins.
     # The registry decides model, endpoint and credential; this module decides
     # only which capability tier it wants and where it is running. krepis
     # resolves the credential by NAME at call time, so no key is read here —
