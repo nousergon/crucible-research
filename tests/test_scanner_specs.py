@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data import scanner_specs  # noqa: E402
 from data.scanner_specs import (  # noqa: E402
+    SHADOW_FACTOR_LOADING_COLS,
     ScannerSpec,
+    _rank_mom_12_1_sleeve,
     _rank_momentum_sleeve,
     build_shadow_artifacts,
     build_shadow_status_record,
@@ -37,6 +39,74 @@ def _loadings():
         "D": {"momentum_20d_zscore": 0.5, "return_60d_zscore": 0.5},  # mean 0.5
         # E intentionally absent — eligible but unscorable, must be dropped.
     }
+
+
+def _horizon_loadings():
+    """Loadings where short-horizon and 12-1 momentum DISAGREE.
+
+    Mirrors the live cross-section: on the 2026-08-14 snapshot over 901
+    names, mom_12_1_pct is Spearman -0.14 against momentum_20d. A fixture
+    where the two agree would let a broken 12-1 arm pass by accidentally
+    reproducing the short-horizon ranking.
+    """
+    return {
+        "A": {"momentum_20d_zscore": 2.0, "return_60d_zscore": 2.0, "mom_12_1_pct_zscore": -1.0},
+        "B": {"momentum_20d_zscore": 1.0, "return_60d_zscore": 1.0, "mom_12_1_pct_zscore": -2.0},
+        "C": {"momentum_20d_zscore": 9.0, "return_60d_zscore": 9.0, "mom_12_1_pct_zscore": 9.0},
+        "D": {"momentum_20d_zscore": 0.5, "return_60d_zscore": 0.5, "mom_12_1_pct_zscore": 3.0},
+    }
+
+
+def test_mom_12_1_sleeve_ranks_eligible_by_12_1_zscore():
+    out = _rank_mom_12_1_sleeve(_eval_log(), _horizon_loadings(), {"momentum_top_n": 2})
+    # Ranked by mom_12_1_pct_zscore alone: D (3.0) then A (-1.0).
+    # C excluded (liquidity_pass 0), E dropped (no loading).
+    assert out == ["D", "A"], out
+
+
+def test_mom_12_1_sleeve_ignores_the_short_horizon_loadings():
+    """The arm must read ONLY mom_12_1_pct_zscore.
+
+    If it fell back to the short-horizon factors the ranking would invert to
+    ["A", "B"] on this fixture. That inversion is the whole experiment, so a
+    silent fallback would make the leaderboard compare two arms that are
+    secretly measuring the same thing.
+    """
+    out = _rank_mom_12_1_sleeve(_eval_log(), _horizon_loadings(), {"momentum_top_n": 3})
+    short = _rank_momentum_sleeve(_eval_log(), _horizon_loadings(), {"momentum_top_n": 3})
+    assert out == ["D", "A", "B"], out
+    assert short == ["A", "B", "D"], short
+    assert out != short, "the two arms must not resolve to the same ranking"
+
+
+def test_mom_12_1_sleeve_drops_names_without_the_loading():
+    """A name with no 12-1 loading is dropped, never neutral-filled.
+
+    Imputing 0.0 would seed the middle of the cut with names that were never
+    scored on the axis the cut is defined by.
+    """
+    lo = {"A": {"mom_12_1_pct_zscore": -3.0}, "B": {"momentum_20d_zscore": 5.0}}
+    out = _rank_mom_12_1_sleeve(
+        [{"ticker": "A", "liquidity_pass": 1}, {"ticker": "B", "liquidity_pass": 1}],
+        lo,
+        {"momentum_top_n": 5},
+    )
+    assert out == ["A"], out
+
+
+def test_mom_12_1_sleeve_no_loadings_returns_empty():
+    assert _rank_mom_12_1_sleeve(_eval_log(), None, {"momentum_top_n": 5}) == []
+
+
+def test_shadow_loading_cols_cover_every_registered_challenger_input():
+    """Every loading a challenger arm reads must be requested by the shadow
+    read. An arm reading a column absent from SHADOW_FACTOR_LOADING_COLS gets
+    None for it on every live cycle and silently emits an empty cut — which
+    scores as a miss forever without ever raising.
+    """
+    assert "mom_12_1_pct_zscore" in SHADOW_FACTOR_LOADING_COLS
+    assert "momentum_20d_zscore" in SHADOW_FACTOR_LOADING_COLS
+    assert "return_60d_zscore" in SHADOW_FACTOR_LOADING_COLS
 
 
 def test_momentum_sleeve_ranks_eligible_by_zscore():
@@ -212,3 +282,89 @@ def test_forced_momentum_sleeve_failure_produces_explicit_miss_end_to_end(monkey
     assert record["status"] == "failed"
     assert record["artifacts"][0]["status"] == "absent"
     assert "momentum_sleeve forced failure" in record["artifacts"][0]["reason"]
+
+
+class TestShadowLoadingReadFallback:
+    """A newly-added loading column must never cost an ESTABLISHED arm a cycle.
+
+    The ArcticDB read path projects the requested columns straight into the
+    ReadRequest, so requesting a column the daily cross-sectional pass has not
+    written yet can fail the entire read. Without a fallback that failure
+    skips EVERY challenger arm — and an unscored cycle is unrecoverable
+    (champion-challenger-policy.md §3), because the counterfactual is gone.
+    """
+
+    def _patched(self, side_effects):
+        from unittest.mock import patch
+
+        import data.scanner_orchestrator as orch
+
+        calls = {"n": 0}
+
+        def _reader(*args, **kwargs):
+            idx = calls["n"]
+            calls["n"] += 1
+            out = side_effects[idx]
+            if isinstance(out, Exception):
+                raise out
+            return out
+
+        return orch, patch(
+            "data.fetchers.feature_store_reader.read_latest_factor_loadings",
+            side_effect=_reader,
+        ), calls
+
+    def test_wide_read_failure_retries_with_default_columns(self):
+        """Wide read raises -> retry with defaults -> established arms score."""
+        from unittest.mock import patch
+
+        from data.scanner import run_quant_filter
+
+        narrow = {
+            "A": {"momentum_20d_zscore": 2.0, "return_60d_zscore": 2.0},
+            "B": {"momentum_20d_zscore": 1.0, "return_60d_zscore": 1.0},
+        }
+        orch, reader_patch, calls = self._patched(
+            [RuntimeError("column mom_12_1_pct_zscore not in library"), narrow]
+        )
+        eval_log = [
+            {"ticker": "A", "liquidity_pass": 1},
+            {"ticker": "B", "liquidity_pass": 1},
+        ]
+        with patch.object(run_quant_filter, "_last_eval_log", eval_log, create=True), \
+                reader_patch, \
+                patch.object(orch, "_resolved_scanner_params", return_value={"momentum_top_n": 2}):
+            artifacts, errors = orch.build_shadow_candidate_artifacts(_live_artifact())
+
+        assert calls["n"] == 2, "the wide read must be retried with default columns"
+        # momentum_sleeve still produced a cut — its evidence was NOT lost.
+        assert "momentum_sleeve" in artifacts, (artifacts, errors)
+        # The 12-1 arm has no loading to rank on, so it emits an EMPTY cut —
+        # recorded with spec_scored == 0, not silently omitted. Policy §3:
+        # silent absence and a genuine zero must not render identically, and
+        # spec_scored is what tells them apart here.
+        assert artifacts["mom_12_1_sleeve"]["scanner_tickers"] == []
+        assert artifacts["mom_12_1_sleeve"]["stats"]["spec_scored"] == 0
+
+    def test_both_reads_failing_skips_every_spec(self):
+        """When even the default-column read fails, every arm is a miss.
+
+        A whole-cycle skip must be a miss for EVERY registered spec, not just
+        the one whose column was missing (config#6428).
+        """
+        from unittest.mock import patch
+
+        from data.scanner import run_quant_filter
+
+        orch, reader_patch, calls = self._patched(
+            [RuntimeError("wide read failed"), RuntimeError("default read failed")]
+        )
+        eval_log = [{"ticker": "A", "liquidity_pass": 1}]
+        with patch.object(run_quant_filter, "_last_eval_log", eval_log, create=True), \
+                reader_patch, \
+                patch.object(orch, "_resolved_scanner_params", return_value={"momentum_top_n": 2}):
+            artifacts, errors = orch.build_shadow_candidate_artifacts(_live_artifact())
+
+        assert calls["n"] == 2
+        assert artifacts == {}
+        assert set(errors) == {s.name for s in challenger_specs()}

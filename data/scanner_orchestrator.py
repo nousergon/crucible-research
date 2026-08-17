@@ -504,7 +504,11 @@ def build_shadow_candidate_artifacts(
     """
     from data.fetchers.feature_store_reader import read_latest_factor_loadings
     from data.scanner import run_quant_filter
-    from data.scanner_specs import build_shadow_artifacts, challenger_specs
+    from data.scanner_specs import (
+        SHADOW_FACTOR_LOADING_COLS,
+        build_shadow_artifacts,
+        challenger_specs,
+    )
 
     def _all_specs_missing(reason: str) -> dict[str, str]:
         return {spec.name: reason for spec in challenger_specs()}
@@ -525,15 +529,45 @@ def build_shadow_candidate_artifacts(
     # this builds the champion/challenger SHADOW substrate, which must never
     # jeopardize candidates.json. A staleness raise from the reader is caught
     # and downgraded to the same skip as any other missing input.
+    #
+    # Columns come from SHADOW_FACTOR_LOADING_COLS rather than the reader's
+    # default tuple: the challenger arms need loadings the champion cut does
+    # not read (mom_12_1_pct_zscore), and widening the reader's DEFAULT would
+    # push that requirement onto the live attractiveness path, which is NOT
+    # fail-soft. A column that only the shadow substrate needs must only be
+    # requested where a missing column is survivable.
+    #
+    # Two-step read, NOT one wide read. The ArcticDB path projects the
+    # requested columns straight into the ReadRequest, so asking for a column
+    # the daily cross-sectional pass has not written yet can fail the whole
+    # read — which would skip EVERY challenger arm, not just the one needing
+    # the new column. An arm's unscored cycle is unrecoverable
+    # (champion-challenger-policy.md §3), so a newly-added loading must never
+    # be able to cost an established arm its evidence. On a wide-read failure
+    # we retry with the reader's default columns: the new arm then emits an
+    # empty cut and is recorded as a miss for itself alone, which is the
+    # honest outcome and self-resolves once the column ships.
     try:
-        factor_loadings = read_latest_factor_loadings(tickers=shadow_tickers)
-    except Exception as exc:
-        reason = f"factor-loading read failed: {exc}"
-        logger.warning(
-            "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
-            reason,
+        factor_loadings = read_latest_factor_loadings(
+            columns=SHADOW_FACTOR_LOADING_COLS,
+            tickers=shadow_tickers,
         )
-        return {}, _all_specs_missing(reason)
+    except Exception as wide_exc:
+        logger.warning(
+            "[scanner_orchestrator] wide factor-loading read failed (%s) — "
+            "retrying with default columns so established challenger arms "
+            "still score this cycle",
+            wide_exc,
+        )
+        try:
+            factor_loadings = read_latest_factor_loadings(tickers=shadow_tickers)
+        except Exception as exc:
+            reason = f"factor-loading read failed: {exc}"
+            logger.warning(
+                "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
+                reason,
+            )
+            return {}, _all_specs_missing(reason)
     if not factor_loadings:
         reason = "factor loadings unavailable this cycle"
         logger.warning(
