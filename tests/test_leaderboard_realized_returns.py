@@ -179,7 +179,7 @@ def test_unmeasurable_leaderboard_is_written_labelled_and_alerted() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
             side_effect=LeaderboardUnmeasurableError("horizon 21 > retention 7"),
         ),
         patch(
@@ -221,8 +221,8 @@ def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
-            return_value={},
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+            return_value=({}, {}),
         ),
         patch(
             "scoring.leaderboard_producers.publish_observe_alert",
@@ -253,8 +253,8 @@ def test_zero_cohorts_past_the_horizon_escalates_to_unmeasurable() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
-            return_value={},
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+            return_value=({}, {}),
         ),
         patch("scoring.leaderboard_producers.publish_observe_alert") as alert,
     ):

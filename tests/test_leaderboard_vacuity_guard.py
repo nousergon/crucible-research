@@ -104,7 +104,7 @@ def test_identical_membership_triggers_the_alarm(builder, loader_target):
     with (
         patch(loader_target, return_value=(champion, challengers)),
         patch("scoring.leaderboard_producers._cohort_dates", return_value=[_COHORT_DATE]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
         patch("scoring.leaderboard_producers.publish_observe_alert") as mock_alert,
     ):
         res = builder(_FakeS3(), "bkt", "2026-07-29", write=False)
@@ -134,7 +134,7 @@ def test_distinct_membership_does_not_alarm(builder, loader_target):
     with (
         patch(loader_target, return_value=(champion, challengers)),
         patch("scoring.leaderboard_producers._cohort_dates", return_value=[_COHORT_DATE]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
         patch("scoring.leaderboard_producers.publish_observe_alert") as mock_alert,
     ):
         builder(_FakeS3(), "bkt", "2026-07-29", write=False)
@@ -150,7 +150,7 @@ def test_collision_is_recorded_on_the_leaderboard_artifact():
     with (
         patch("scoring.leaderboard_producers._load_scanner_specs", return_value=(champion, challengers)),
         patch("scoring.leaderboard_producers._cohort_dates", return_value=[_COHORT_DATE]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
         patch("scoring.leaderboard_producers.publish_observe_alert"),
     ):
         res = build_scanner_leaderboard(_FakeS3(), "bkt", "2026-07-29", write=False)
@@ -167,7 +167,7 @@ def test_no_collision_is_an_empty_list_not_absent():
     with (
         patch("scoring.leaderboard_producers._load_scanner_specs", return_value=(champion, challengers)),
         patch("scoring.leaderboard_producers._cohort_dates", return_value=[_COHORT_DATE]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
         patch("scoring.leaderboard_producers.publish_observe_alert"),
     ):
         res = build_scanner_leaderboard(_FakeS3(), "bkt", "2026-07-29", write=False)
@@ -187,7 +187,7 @@ def test_producer_leaderboard_with_no_champion_never_raises():
     with (
         patch("scoring.leaderboard_producers._load_producer_specs", return_value=(None, [challenger])),
         patch("scoring.leaderboard_producers._cohort_dates", return_value=[_COHORT_DATE]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
         patch("scoring.leaderboard_producers.publish_observe_alert") as mock_alert,
     ):
         res = build_producer_leaderboard(_FakeS3(), "bkt", "2026-07-29", write=False)

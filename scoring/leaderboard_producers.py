@@ -50,6 +50,29 @@ must be visible, not silent. Previously this existed only as a fixture-based
 unit test (``tests/test_universe_membership.py::
 test_incumbent_arm_disagrees_with_the_champion``) that never ran against a
 live cycle's actual resolved membership.
+
+MULTI-HORIZON (alpha-engine-config-I7540). Every arm is now scored at 21, 126
+AND 252 trading sessions — one block per horizon under ``horizons``, each with
+its own ``n_dates`` and its own per-spec rows. 21 alone could not answer the
+~1-year question the scanner exists to ask. The panel is read ONCE, sized to
+the longest horizon, and every horizon's returns are derived from it. The 21-
+session block remains the artifact's TOP LEVEL, unchanged in shape and value,
+because a promoted arm keeps its history (champion-challenger-policy.md §3) and
+every existing consumer reads that surface.
+
+PER-ROW CONFIDENCE (alpha-engine-config-I7542). Every spec row carries
+``confidence`` — ``insufficient`` / ``thin`` / ``ok`` — against the slot
+registry's ``min_dates_for_inference``. A one-date mean with a null SE and a
+null t-stat is not a result, and before this it rendered in the same shape as
+one. Rows are never suppressed on the strength of that status: §3 requires the
+miss to stay visible, and a hidden thin row is indistinguishable from an arm
+that was never scored.
+
+The long horizons make immaturity the DOMINANT rendering for months — a
+252-session horizon needs ~252 trading days of shadow history before any date
+scores. That is honest immaturity by construction: it renders as
+``status: "immature"`` with a reason and every row ``insufficient``, never as a
+numeric result and never as a zero (§7.2).
 """
 
 from __future__ import annotations
@@ -74,9 +97,13 @@ from nousergon_lib.trading_calendar import count_trading_days
 from observe_alerts import publish_observe_alert
 from scoring.leaderboard_scoring import (
     DEFAULT_HORIZON_DAYS,
+    HORIZON_IMMATURE,
+    HORIZON_OK,
+    HORIZON_UNMEASURABLE,
     SpecDay,
     SpecHistory,
-    score_leaderboard,
+    score_multi_horizon,
+    slot_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,9 +250,25 @@ def _closes_panel_from_arcticdb(
 
     earliest = min(entry_dates)
     # Cover earliest entry → today, plus slack so the horizon session after the
-    # LAST entry date is inside the window. Trading days are ~0.7 of calendar
-    # days; 2x plus a fixed pad is comfortably conservative and costs only a
-    # slightly wider read.
+    # LAST entry date is inside the window AND the panel holds at least
+    # ``horizon_days`` sessions in total (which is what
+    # ``_assert_horizon_is_satisfiable`` checks).
+    #
+    # alpha-engine-config-I7540 widened this: ``horizon_days`` is now the
+    # LONGEST horizon scored (252 sessions), not 21. Trading sessions run ~252
+    # per 365 calendar days (~0.69), so H sessions span ~H/0.69 calendar days —
+    # 252 sessions ≈ 366 calendar days. The 2x + 10 slack therefore yields ~514
+    # calendar days of pad against the ~366 actually needed at the longest
+    # horizon, and proportionally more at the shorter ones. Deliberately kept
+    # multiplicative rather than pinned to a constant: a slack that does not
+    # scale with the horizon is exactly the shape of the I5195 defect (a
+    # measurement whose window silently could not serve its own horizon).
+    #
+    # ArcticDB carries no lifecycle expiry (verified live 2026-08-17: the
+    # ``alpha-engine-research`` bucket has exactly two lifecycle rules, on
+    # ``staging/`` and ``features/``, neither matching ``arcticdb/``), and
+    # ``load_universe_ohlcv`` defaults to a 730-day window, so a ~570-day read
+    # is comfortably inside what the source holds.
     span_days = (pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timestamp(earliest)).days
     lookback = max(span_days, 1) + horizon_days * 2 + 10
 
@@ -279,10 +322,27 @@ def _resolve_realized_returns(
     """
     if not entry_dates:
         return {}
-    # Injectable so the source is a parameter, not a hard binding: tests supply
-    # a panel directly, and a backfill can point at an alternative store
-    # without editing this module. Production default is the durable ArcticDB
-    # read.
+    panel = _load_closes_panel(bucket, entry_dates, horizon_days, symbols, closes_panel_loader)
+    return _realized_from_panel(panel, entry_dates, horizon_days)
+
+
+def _load_closes_panel(
+    bucket: str,
+    entry_dates: list[str],
+    horizon_days: int,
+    symbols: set[str] | None,
+    closes_panel_loader: Any,
+) -> dict[str, dict[str, float]]:
+    """Load the closes panel once, wide enough for ``horizon_days``.
+
+    Injectable so the source is a parameter, not a hard binding: tests supply a
+    panel directly, and a backfill can point at an alternative store without
+    editing this module. Production default is the durable ArcticDB read.
+
+    An EMPTY panel raises rather than returning ``{}`` — a silently-empty panel
+    is indistinguishable from "no cohort has matured", and that ambiguity is
+    exactly what hid I5195 for a month.
+    """
     loader = closes_panel_loader or _closes_panel_from_arcticdb
     panel = loader(bucket, entry_dates, horizon_days, symbols)
     if not panel:
@@ -291,7 +351,17 @@ def _resolve_realized_returns(
             f"any of {len(set(entry_dates))} cohort date(s). Check the ArcticDB "
             "universe library and MorningArcticAppend."
         )
+    return panel
 
+
+def _realized_from_panel(
+    panel: dict[str, dict[str, float]],
+    entry_dates: list[str],
+    horizon_days: int,
+) -> dict[str, dict[str, float]]:
+    """``{entry_date: {ticker: forward_return}}`` at ONE horizon, from an
+    already-loaded closes panel. Raises ``LeaderboardUnmeasurableError`` when
+    the panel structurally cannot serve this horizon (§7.1)."""
     close_dates = sorted(panel)
     _assert_horizon_is_satisfiable(close_dates, entry_dates, horizon_days)
 
@@ -312,6 +382,123 @@ def _resolve_realized_returns(
         if fwd:
             realized[entry] = fwd
     return realized
+
+
+def _resolve_realized_returns_by_horizon(
+    bucket: str,
+    entry_dates: list[str],
+    horizons_days: list[int],
+    *,
+    symbols: set[str] | None = None,
+    closes_panel_loader: Any = None,
+) -> tuple[dict[int, dict[str, dict[str, float]]], dict[int, tuple[str, str]]]:
+    """Realized forward returns at EVERY horizon, from ONE closes-panel read
+    (alpha-engine-config-I7540).
+
+    Returns ``({horizon_days: realized}, {horizon_days: (status, reason)})`` —
+    the second map naming only the horizons that could not be measured at all.
+
+    The panel is loaded ONCE, sized to the LONGEST horizon, and every horizon's
+    forward returns are derived from it. Three reads of an ArcticDB slice for
+    three horizons would triple the Lambda's dominant cost for data it already
+    holds in memory.
+
+    FAILURE ISOLATION, deliberately asymmetric:
+
+    - The PRIMARY horizon (``horizons_days[0]``, 21) raises as it always has.
+      An unmeasurable primary is an unmeasurable leaderboard, and the caller
+      turns that into the loud ``unmeasurable`` verdict (§7.2). Behaviour here
+      is byte-unchanged from before this issue.
+    - A LONGER horizon that the source cannot serve is recorded as an
+      ``unmeasurable`` BLOCK with its reason and does not sink the artifact.
+      A 252-session horizon the panel cannot span is a fact about that horizon;
+      failing the whole leaderboard on it would take the working 21-day series
+      down with it, which §3 forbids.
+    """
+    if not entry_dates:
+        return {h: {} for h in horizons_days}, {}
+
+    panel = _load_closes_panel(bucket, entry_dates, max(horizons_days), symbols, closes_panel_loader)
+
+    by_horizon: dict[int, dict[str, dict[str, float]]] = {}
+    notes: dict[int, tuple[str, str]] = {}
+    primary = horizons_days[0]
+    for h in horizons_days:
+        try:
+            by_horizon[h] = _realized_from_panel(panel, entry_dates, h)
+        except LeaderboardUnmeasurableError as exc:
+            if h == primary:
+                raise
+            logger.warning(
+                "[leaderboard] %sd horizon is unmeasurable against this closes "
+                "panel (the %sd primary is unaffected): %s",
+                h, primary, exc,
+            )
+            by_horizon[h] = {}
+            notes[h] = (HORIZON_UNMEASURABLE, str(exc))
+    return by_horizon, notes
+
+
+def _annotate_horizon_maturity(
+    leaderboard_id: str,
+    blocks: list[dict],
+    dates: list[str],
+    as_of: str,
+    primary_horizon: int,
+) -> None:
+    """Give every zero-scored horizon block an explicit, honest status, in
+    place (alpha-engine-config-I7540 + §7.2).
+
+    A block that scored zero cohorts is NEVER left reading ``ok`` with
+    ``n_dates: 0`` and a list of null metrics — that is the exact rendering
+    that let I5195 run four weeks unnoticed, and at 126/252 sessions it would
+    be the normal state for months, so the reader has no way to tell "not yet"
+    from "broken" without being told.
+
+    Two states, and the difference is bounded-ness:
+
+    - ``immature`` — no cohort has aged past this horizon yet. Self-resolving,
+      expected, and must NOT alert: a 252d block will sit here for the better
+      part of a year and alerting on it every cycle manufactures exactly the
+      fatigue that hides real findings.
+    - ``unmeasurable`` — the oldest cohort IS old enough to have matured and
+      still nothing scored. Immaturity is bounded; this is not. Alerts.
+
+    The PRIMARY horizon is skipped here: its overdue escalation replaces the
+    WHOLE artifact with an ``unmeasurable`` result in the caller, which is
+    pre-existing behaviour this change does not touch.
+    """
+    for block in blocks:
+        h = block["horizon_days"]
+        if h == primary_horizon or block["status"] != HORIZON_OK or block["n_dates"]:
+            continue
+        overdue = _overdue_zero_cohort_reason(dates, h, as_of)
+        if overdue is None:
+            block["status"] = HORIZON_IMMATURE
+            block["reason"] = (
+                f"no cohort date has aged {h} trading sessions yet — the "
+                f"{h}-session horizon is not yet measurable for any arm. This "
+                "is immaturity, not a result: every spec row is reported "
+                "confidence=insufficient rather than as a zero."
+            )
+            continue
+        block["status"] = HORIZON_UNMEASURABLE
+        block["reason"] = overdue
+        logger.error(
+            "[leaderboard] %s %sd horizon OVERDUE on %s: %s",
+            leaderboard_id, h, as_of, overdue,
+        )
+        publish_observe_alert(
+            message=(
+                f"[leaderboard] {leaderboard_id} leaderboard: the {h}-session "
+                f"horizon is UNMEASURABLE on {as_of}: {overdue}. The primary "
+                f"{primary_horizon}-session block is unaffected; this horizon "
+                "is reported status=unmeasurable so the gap is visible rather "
+                "than silent (alpha-engine-config-I7540, §7.2)."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=f"{leaderboard_id}_leaderboard_horizon_overdue:{h}:{as_of}",
+        )
 
 
 # ── Shadow-artifact → SpecHistory loaders ─────────────────────────────────────
@@ -511,6 +698,29 @@ def _picked_symbols(
     return out
 
 
+def _resolve_horizons(
+    horizons_days: list[int] | None,
+    primary_horizon_days: int,
+    registered: tuple[int, ...],
+) -> list[int]:
+    """The horizons to score, PRIMARY FIRST (alpha-engine-config-I7540).
+
+    Defaults to the slot registry's ``horizons_days``
+    (champion-challenger-policy.md §10: the slot names its own horizons; this
+    module does not carry them as literals). An explicit ``horizons_days``
+    argument wins — a backfill scoring one horizon at a time is a legitimate
+    caller.
+
+    ``primary_horizon_days`` is always FIRST and always present, whatever the
+    caller passed. §3 continuity is not a caller's option to drop: the primary
+    horizon is the artifact's top-level block, and a call that omitted it would
+    silently rewrite a promoted arm's series shape.
+    """
+    chosen = list(horizons_days) if horizons_days else list(registered)
+    ordered = [primary_horizon_days] + [h for h in chosen if h != primary_horizon_days]
+    return ordered
+
+
 def _overdue_zero_cohort_reason(dates: list[str], horizon_days: int, as_of: str) -> str | None:
     """Reason a zero-scored leaderboard is a DEFECT rather than immaturity.
 
@@ -685,6 +895,7 @@ def build_scanner_leaderboard(
     *,
     top_n: int = 50,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    horizons_days: list[int] | None = None,
     write: bool = True,
     closes_panel_loader: Any = None,
 ) -> dict:
@@ -692,19 +903,26 @@ def build_scanner_leaderboard(
     cohort dates, write ``scanner/leaderboard/{date}.json`` (``date_str`` = the
     run date keying the output), return ``{"status", "key"?, "leaderboard"?}``.
 
+    ``horizons_days`` defaults to the scanner slot's registered horizons
+    (``LEADERBOARD_SLOTS["scanner"]``, currently 21/126/252 sessions —
+    alpha-engine-config-I7540). ``horizon_days`` remains the PRIMARY horizon
+    and stays the artifact's top-level block, so the existing 21-day series is
+    continuous across this change.
+
     OBSERVE-ONLY + FAIL-SOFT: any failure logs + returns ``{"status": "error"}``;
     it NEVER raises into the caller (the scanner Lambda's live path)."""
     try:
+        slot = slot_spec("scanner")
+        horizons = _resolve_horizons(horizons_days, horizon_days, slot.horizons_days)
         dates = _cohort_dates(s3, bucket, "candidates_shadow/", depth=1)
         champion, challengers = _load_scanner_specs(s3, bucket, dates)
         vacuous = _vacuous_membership_collisions(champion, challengers)
         _alert_vacuous_collisions("scanner", champion.name if champion else None, vacuous)
         try:
-            realized = _resolve_realized_returns(
-                s3,
+            realized_by_horizon, horizon_notes = _resolve_realized_returns_by_horizon(
                 bucket,
                 dates,
-                horizon_days,
+                horizons,
                 symbols=_picked_symbols(champion, challengers),
                 closes_panel_loader=closes_panel_loader,
             )
@@ -719,13 +937,16 @@ def build_scanner_leaderboard(
                 reason=str(exc),
                 write=write,
             )
-        leaderboard = score_leaderboard(
+        leaderboard = score_multi_horizon(
             champion,
             challengers,
-            realized,
+            realized_by_horizon,
             top_n=top_n,
-            horizon_days=horizon_days,
+            horizons_days=horizons,
+            min_dates_for_inference=slot.min_dates_for_inference,
+            horizon_notes=horizon_notes,
         )
+        _annotate_horizon_maturity("scanner", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "scanner"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
@@ -776,6 +997,7 @@ def build_producer_leaderboard(
     *,
     top_n: int = 50,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    horizons_days: list[int] | None = None,
     write: bool = True,
     closes_panel_loader: Any = None,
 ) -> dict:
@@ -783,8 +1005,17 @@ def build_producer_leaderboard(
     available cohort dates, write ``research/producer_leaderboard/{date}.json``,
     return ``{"status", "key"?, "leaderboard"?}``.
 
+    ``horizons_days`` defaults to the producer slot's registered horizons
+    (``LEADERBOARD_SLOTS["producer"]``, currently 21/126/252 sessions —
+    alpha-engine-config-I7540). ``horizon_days`` remains the PRIMARY horizon
+    and the artifact's top-level block, so the existing 21-day series that
+    ``crucible-backtester``'s champion-promotion gate reads is continuous
+    across this change (champion-challenger-policy.md §3).
+
     OBSERVE-ONLY + FAIL-SOFT: never raises into the caller (the research Lambda)."""
     try:
+        slot = slot_spec("producer")
+        horizons = _resolve_horizons(horizons_days, horizon_days, slot.horizons_days)
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
         champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
         # Vacuity guard compares champion against LIVE challengers only — a
@@ -814,11 +1045,10 @@ def build_producer_leaderboard(
                 date_str,
             )
         try:
-            realized = _resolve_realized_returns(
-                s3,
+            realized_by_horizon, horizon_notes = _resolve_realized_returns_by_horizon(
                 bucket,
                 dates,
-                horizon_days,
+                horizons,
                 symbols=_picked_symbols(champion, challengers),
                 closes_panel_loader=closes_panel_loader,
             )
@@ -833,13 +1063,16 @@ def build_producer_leaderboard(
                 reason=str(exc),
                 write=write,
             )
-        leaderboard = score_leaderboard(
+        leaderboard = score_multi_horizon(
             champion,
             challengers,
-            realized,
+            realized_by_horizon,
             top_n=top_n,
-            horizon_days=horizon_days,
+            horizons_days=horizons,
+            min_dates_for_inference=slot.min_dates_for_inference,
+            horizon_notes=horizon_notes,
         )
+        _annotate_horizon_maturity("producer", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "producer"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous

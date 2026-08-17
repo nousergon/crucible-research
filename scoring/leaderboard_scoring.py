@@ -55,8 +55,155 @@ from statistics import fmean
 logger = logging.getLogger(__name__)
 
 # Default forward-return horizon: 21 trading days (~1 month), the horizon both
-# cutover gates name ("realized 21d outcomes").
+# cutover gates name ("realized 21d outcomes"). This stays the PRIMARY horizon
+# — the top-level block of every leaderboard artifact and the one every
+# existing consumer reads — so that a promoted arm's series is continuous
+# across this change (champion-challenger-policy.md §3: a promoted arm keeps
+# its history; promotion does not reset a series, and neither may a scorer
+# change).
 DEFAULT_HORIZON_DAYS = 21
+
+# Every horizon an arm is scored at, PRIMARY FIRST (alpha-engine-config-I7540).
+#
+# 21 alone could not answer the question the scanner exists to answer. The
+# scanner's stated objective is to surface names attractive over ~1 year,
+# comparable to sell-side coverage; grading every arm on a 21-session horizon
+# marks a long-horizon thesis on a horizon ~12x shorter than the thing it is
+# trying to do. An arm built for a long view loses that comparison whether or
+# not its view is correct, and a momentum-tilted arm wins it whether or not the
+# tilt serves the objective.
+#
+# 126 ≈ 6 months, 252 ≈ 1 year, in TRADING sessions (the panel's own calendar).
+#
+# This was historically blocked, not merely unbuilt: the leaderboards read
+# ``staging/daily_closes/``, a prefix under a 7-day S3 expiry, so even 21
+# sessions was structurally unservable (alpha-engine-config-I5195). The source
+# is now the durable ArcticDB universe library, which carries NO lifecycle
+# expiry rule (verified live 2026-08-17 against
+# ``get-bucket-lifecycle-configuration`` on ``alpha-engine-research``: exactly
+# two rules, ``expire-staging-after-7-days`` on ``staging/`` and
+# ``feature-store-retention`` on ``features/`` — neither matches ``arcticdb/``)
+# and ``nousergon_lib.arcticdb`` already defaults to a 730-day read window. So
+# there is no storage cost and no new producer behind a 252-session horizon —
+# only cohort maturity, which is a matter of TIME and must render as immature
+# rather than as a zero (§7.2).
+LONG_HORIZONS_DAYS: tuple[int, ...] = (21, 126, 252)
+
+# Below this many scored dates a per-date mean is not an inference, it is an
+# anecdote (alpha-engine-config-I7542). ``date_clustered_stats`` already
+# returns ``se: None`` / ``t_stat: None`` at n=1 — but a mean rendered beside
+# two nulls in the SAME shape as a real result reads as a result. 5 is the
+# smallest n at which the date-clustered SE is computed over enough weeks-as-N
+# clusters to carry any signal at all; it is a per-slot fact and lives in the
+# slot registry below (champion-challenger-policy.md §10), never at a call
+# site.
+MIN_DATES_FOR_INFERENCE = 5
+
+# Per-spec confidence vocabulary. Deliberately NOT shared with the
+# leaderboard-level ``status`` vocabulary (``ok`` / ``unmeasurable``): machine
+# health and experiment performance never share a grade vocabulary
+# (champion-challenger-policy.md §8), and these three answer "how much evidence
+# stands behind THIS row", not "did the measurement work".
+CONFIDENCE_OK = "ok"
+CONFIDENCE_THIN = "thin"
+CONFIDENCE_INSUFFICIENT = "insufficient"
+
+
+@dataclass(frozen=True)
+class SlotMeasurementSpec:
+    """The measurement contract for one champion/challenger SLOT.
+
+    champion-challenger-policy.md §10: *"Every slot names, in its registry, the
+    metric, horizon, benchmark, count-matching width, and hysteresis margins it
+    uses. This document deliberately does not enumerate them — they are
+    per-slot facts that CI can check against code."*
+
+    This is that registry for the two leaderboard-scored slots. It is the SSoT
+    for the horizons an arm is graded at and the evidence floor below which a
+    row is not comparable; call sites read it rather than carrying literals.
+    """
+
+    slot_id: str
+    # The slot's primary objective — the metric a promotion consumer ranks on.
+    primary_metric: str
+    # Every horizon scored, PRIMARY FIRST. The primary horizon is the
+    # artifact's top-level block (§3 continuity).
+    horizons_days: tuple[int, ...]
+    benchmark_ticker: str | None
+    # Count-matching width (§4): every arm in the slot is compared at this size.
+    top_n: int
+    # Evidence floor for a comparable row (§7.2 at arm granularity).
+    min_dates_for_inference: int
+
+
+LEADERBOARD_SLOTS: dict[str, SlotMeasurementSpec] = {
+    "scanner": SlotMeasurementSpec(
+        slot_id="scanner",
+        primary_metric="topn_alpha_vs_benchmark",
+        horizons_days=LONG_HORIZONS_DAYS,
+        benchmark_ticker="SPY",
+        top_n=50,
+        min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
+    ),
+    "producer": SlotMeasurementSpec(
+        slot_id="producer",
+        primary_metric="topn_alpha_vs_benchmark",
+        horizons_days=LONG_HORIZONS_DAYS,
+        benchmark_ticker="SPY",
+        top_n=50,
+        min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
+    ),
+}
+
+
+def slot_spec(slot_id: str) -> SlotMeasurementSpec:
+    """The registered measurement contract for ``slot_id``. Raises on an
+    unregistered slot — an arm scored under a slot with no registry row is the
+    ``thinktank_coverage`` defect repeating (§10), and a silent default here
+    would hide exactly that."""
+    try:
+        return LEADERBOARD_SLOTS[slot_id]
+    except KeyError:
+        raise KeyError(
+            f"no slot registry row for {slot_id!r} — every scored slot must "
+            f"name its metric, horizons, benchmark, count-matching width and "
+            f"evidence floor in LEADERBOARD_SLOTS "
+            f"(champion-challenger-policy.md §10). Known: "
+            f"{sorted(LEADERBOARD_SLOTS)}"
+        ) from None
+
+
+def confidence_for(n_dates_scored: int | None, min_dates_for_inference: int) -> str:
+    """How much evidence stands behind a spec row (alpha-engine-config-I7542).
+
+    - ``insufficient`` — nothing scored. There is no result here at all.
+    - ``thin`` — scored, but on fewer than ``min_dates_for_inference`` dates.
+      The mean exists and is honest; it is NOT comparable against another arm's
+      mean, and ``se``/``t_stat`` are null because they cannot be computed.
+    - ``ok`` — enough date clusters for the clustered statistic to mean
+      something.
+
+    Why this is not covered by the guards that already exist: the producers
+    handle the WHOLE-LEADERBOARD cases (``n_dates == 0`` structurally
+    impossible → ``unmeasurable`` + alert; ``n_dates == 0`` overdue → escalate;
+    ``n_dates == 0`` immature → silent and self-resolving, correctly). None of
+    them says anything at ARM granularity. Live artifact
+    ``research/producer_leaderboard/2026-08-14.json`` carried
+    ``thinktank_coverage`` with ``n_dates_scored: 1``, ``se: null``,
+    ``t_stat: null``, a mean of -0.107 — rendered in exactly the shape of the
+    champion's real two-date row. Read by a human or an agent, that says "the
+    Think Tank arm is losing badly". It says nothing of the kind.
+
+    The row is NEVER suppressed on the strength of this status: §3 requires the
+    miss to stay visible, and a hidden thin row is indistinguishable from an
+    arm that was never scored. The defect is the rendering, not the row.
+    """
+    n = int(n_dates_scored or 0)
+    if n <= 0:
+        return CONFIDENCE_INSUFFICIENT
+    if n < min_dates_for_inference:
+        return CONFIDENCE_THIN
+    return CONFIDENCE_OK
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -263,6 +410,7 @@ def score_leaderboard(
     top_n: int = 50,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     benchmark_ticker: str | None = "SPY",
+    min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
 ) -> dict:
     """Score the champion (if any) + every challenger on the cutover-gate
     objectives, joined to ``realized`` (``{date: {ticker: forward_return}}``).
@@ -289,7 +437,8 @@ def score_leaderboard(
              "realized_rank_ic": <clustered stats | None>,
              "topn_alpha_vs_champion": <clustered stats | None>,  # None for the champion, and whenever champion is None
              "topn_alpha_vs_benchmark": <clustered stats | None>,  # champion-free direct lift vs benchmark_ticker
-             "n_dates_scored": <#dates this spec contributed>},
+             "n_dates_scored": <#dates this spec contributed>,
+             "confidence": "ok" | "thin" | "insufficient"},   # alpha-engine-config-I7542
             ...
           ],
         }
@@ -328,6 +477,9 @@ def score_leaderboard(
                 "topn_alpha_vs_champion": alpha_vs_champion,
                 "topn_alpha_vs_benchmark": alpha_vs_benchmark,
                 "n_dates_scored": n_scored,
+                # alpha-engine-config-I7542 — how much evidence stands behind
+                # this row. Additive: every numeric field above is unchanged.
+                "confidence": confidence_for(n_scored, min_dates_for_inference),
             }
         except Exception as exc:  # noqa: BLE001 — observe artifact, per-spec isolation
             logger.warning(
@@ -341,6 +493,7 @@ def score_leaderboard(
                 "topn_alpha_vs_champion": None,
                 "topn_alpha_vs_benchmark": None,
                 "n_dates_scored": 0,
+                "confidence": CONFIDENCE_INSUFFICIENT,
                 "error": str(exc),
             }
 
@@ -357,3 +510,106 @@ def score_leaderboard(
         "n_dates": len(dates_with_join),
         "specs": spec_rows,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Multi-horizon assembly (alpha-engine-config-I7540)
+# ──────────────────────────────────────────────────────────────────────────
+
+# Per-horizon block statuses. Distinct from the leaderboard-level status, and
+# from the per-spec confidence, on purpose: three different questions.
+HORIZON_OK = "ok"
+HORIZON_IMMATURE = "immature"
+HORIZON_UNMEASURABLE = "unmeasurable"
+
+
+def score_multi_horizon(
+    champion: SpecHistory | None,
+    challengers: Sequence[SpecHistory],
+    realized_by_horizon: Mapping[int, Mapping[str, Mapping[str, float]]],
+    *,
+    top_n: int = 50,
+    horizons_days: Sequence[int] = LONG_HORIZONS_DAYS,
+    benchmark_ticker: str | None = "SPY",
+    min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
+    horizon_notes: Mapping[int, tuple[str, str]] | None = None,
+) -> dict:
+    """Score every arm at EVERY horizon in ``horizons_days`` and assemble one
+    leaderboard artifact. PURE — no I/O.
+
+    ``realized_by_horizon`` is ``{horizon_days: {date: {ticker: forward_return}}}``
+    — one realized-return map per horizon, all derived by the caller from ONE
+    closes panel read.
+
+    ``horizon_notes`` optionally carries ``{horizon_days: (status, reason)}``
+    for horizons the caller already knows could not be measured (e.g. the
+    source cannot serve a 252-session lookforward at all). A horizon named
+    there is emitted with that status and reason rather than ``ok``.
+
+    CONTINUITY (champion-challenger-policy.md §3). ``horizons_days[0]`` is the
+    PRIMARY horizon, and its block is spread across the TOP LEVEL of the
+    returned dict exactly as ``score_leaderboard`` has always returned it —
+    same keys, same values, same rounding. Every existing consumer
+    (``crucible-backtester``'s ``champion_promotion._score_thinktank_coverage``
+    reads ``specs[].topn_alpha_vs_benchmark.mean`` off the top level; the
+    console leaderboard pane reads ``specs`` and ``n_dates``) therefore sees an
+    unchanged 21-day series across this change. A scorer that silently
+    re-based a promoted arm's history would break the same invariant a
+    promotion is forbidden from breaking.
+
+    The new ``horizons`` list is the CANONICAL surface: one block per horizon,
+    each carrying its OWN ``n_dates`` and its own per-spec rows. The primary
+    horizon appears in both places, by design — the duplication is the price of
+    continuity and is cheap (an observe artifact of a few KB).
+
+    Block shape::
+
+        {"horizon_days": 252,
+         "status": "ok" | "immature" | "unmeasurable",
+         "reason": <str | None>,          # why, whenever status != "ok"
+         "n_dates": <#dates with ANY realized join at this horizon>,
+         "specs": [...]}                  # same row shape, incl. "confidence"
+
+    A horizon with no matured cohort emits ``n_dates: 0`` and every spec row at
+    ``confidence: "insufficient"`` — never a numeric result and never a zero.
+    At rollout a 252-session horizon will be immature for every arm, because a
+    252-session horizon needs ~252 trading days of shadow history before ANY
+    date scores. That is honest immaturity by construction, and rendering it as
+    such is part of this deliverable rather than a follow-up (§7.2).
+    """
+    if not horizons_days:
+        raise ValueError("horizons_days must name at least the primary horizon")
+
+    notes = dict(horizon_notes or {})
+    blocks: list[dict] = []
+    primary: dict | None = None
+
+    for h in horizons_days:
+        scored = score_leaderboard(
+            champion,
+            challengers,
+            realized_by_horizon.get(h) or {},
+            top_n=top_n,
+            horizon_days=h,
+            benchmark_ticker=benchmark_ticker,
+            min_dates_for_inference=min_dates_for_inference,
+        )
+        if primary is None:
+            primary = scored
+        status, reason = notes.get(h, (HORIZON_OK, None))
+        blocks.append(
+            {
+                "horizon_days": h,
+                "status": status,
+                "reason": reason,
+                "n_dates": scored["n_dates"],
+                "specs": scored["specs"],
+            }
+        )
+
+    assert primary is not None  # noqa: S101 — horizons_days is non-empty above
+    out = dict(primary)
+    out["horizons_days"] = list(horizons_days)
+    out["min_dates_for_inference"] = min_dates_for_inference
+    out["horizons"] = blocks
+    return out
