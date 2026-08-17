@@ -340,11 +340,25 @@ def _continuity_fixture():
     return champ, [chal], realized
 
 
+# Fields added AFTER _PRE_CHANGE_21D was captured. §3 protects the pre-change
+# numbers from moving; it does not forbid a row carrying new information
+# alongside them. Each entry must be genuinely additive — a field that REPLACES
+# or rescales an existing one does not belong here, it belongs in a new pin.
+#
+#   confidence                 alpha-engine-config-I7542 — evidence behind a row
+#   topn_alpha_vs_population   alpha-engine-config-I7576 — lift vs the scored
+#                              population, alongside (never instead of) the
+#                              unchanged SPY series
+_ADDITIVE_SINCE_CAPTURE = ("confidence", "topn_alpha_vs_population")
+
+
 def _numeric_only(row: dict) -> dict:
-    """A spec row with the ADDITIVE confidence field dropped — what §3 protects
-    is the numbers, and ``confidence`` is new information about a row, not a
-    change to it."""
-    return {k: v for k, v in row.items() if k != "confidence"}
+    """A spec row reduced to the fields that existed when the pin was captured.
+
+    Deliberately a subtraction from the LIVE row rather than a re-capture of the
+    literals: re-pinning would let a future change to the protected numbers slide
+    through under cover of an unrelated addition."""
+    return {k: v for k, v in row.items() if k not in _ADDITIVE_SINCE_CAPTURE}
 
 
 class TestTwentyOneDayContinuity:

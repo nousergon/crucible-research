@@ -137,14 +137,23 @@ class SlotMeasurementSpec:
 
 
 LEADERBOARD_SLOTS: dict[str, SlotMeasurementSpec] = {
+    # The scanner slot measures CANDIDATE GENERATION, where the definitionally
+    # correct question is whether the cut beat the population it narrowed — not
+    # whether it beat the market (alpha-engine-config-I7576). The SPY series is
+    # still emitted on every row and its definition is unchanged; only which
+    # metric a promotion consumer ranks on moves.
     "scanner": SlotMeasurementSpec(
         slot_id="scanner",
-        primary_metric="topn_alpha_vs_benchmark",
+        primary_metric="topn_alpha_vs_population",
         horizons_days=LONG_HORIZONS_DAYS,
         benchmark_ticker="SPY",
         top_n=50,
         min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
     ),
+    # The producer slot deliberately keeps the SPY primary for now: it mixes
+    # selection with sizing, so "beat the population you selected from" is not
+    # the whole of its objective. Moving it is a separate argument and a
+    # separate change, not a side effect of this one.
     "producer": SlotMeasurementSpec(
         slot_id="producer",
         primary_metric="topn_alpha_vs_benchmark",
@@ -402,6 +411,69 @@ def _topn_alpha_vs_benchmark_metric(
     return date_clustered_stats(per_date)
 
 
+def _population_return_by_date(
+    ret: Mapping[str, float], benchmark_ticker: str | None,
+) -> float | None:
+    """Equal-weight mean realized return of the SCORED POPULATION for one date.
+
+    The population is every ticker with a realized return on that date — i.e.
+    the set the arm ranked and narrowed from. It is deliberately NOT read from
+    a separate artifact: taking it from ``realized`` guarantees the cut and its
+    baseline are drawn from one join, so a partial price panel narrows both
+    sides identically instead of biasing the difference.
+
+    The benchmark is excluded when it is an index proxy that is not itself a
+    selectable name (SPY). Leaving it in would let a single ETF vote in an
+    equal-weight mean of ~900 equities — negligible in magnitude, but the
+    population must mean "names the arm could have picked" or the metric is
+    not the one this function claims to compute.
+    """
+    rets = [r for t, r in ret.items() if t != benchmark_ticker]
+    return fmean(rets) if rets else None
+
+
+def _topn_alpha_vs_population_metric(
+    spec: SpecHistory,
+    realized: Mapping[str, Mapping[str, float]],
+    top_n: int,
+    benchmark_ticker: str | None,
+) -> dict | None:
+    """Date-clustered long-only top-N excess over the scored population
+    (alpha-engine-config-I7576): mean(spec top-N) − mean(all scored names),
+    per date, clustered across dates.
+
+    **This is the question a SELECTION stage is actually answering.** An arm's
+    job at this stage is not to beat the market — it is to beat the universe it
+    narrowed. Those give different verdicts, and in the current regime they give
+    opposite ones: measured 2026-08-17 over 903 tracked names, SPY returned
+    +0.73% over 21 sessions against the equal-weight population's +2.13%, and
+    +1.95% vs +4.59% over 42. An arm returning +1.5% over 21 sessions therefore
+    books ``topn_alpha_vs_benchmark`` of +0.77% (a win) while being −0.63%
+    against the names it selected from (a loss). The gap widens with horizon,
+    so the 126- and 252-session blocks are the more distorted ones, not less.
+
+    ``topn_alpha_vs_benchmark`` is retained unchanged alongside it — "did this
+    beat the market" is a real and different question, and closer to the
+    executor's own objective. This adds a metric; it does not redefine one.
+
+    A date contributes only when BOTH the spec's top-N return and a non-empty
+    population return exist for that date.
+    """
+    per_date: list[float] = []
+    for date_str, day in spec.by_date.items():
+        ret = realized.get(date_str)
+        if not ret:
+            continue
+        pop_r = _population_return_by_date(ret, benchmark_ticker)
+        if pop_r is None:
+            continue
+        spec_r = _top_n_return_by_date(day, ret, top_n)
+        if spec_r is None:
+            continue
+        per_date.append(spec_r - pop_r)
+    return date_clustered_stats(per_date)
+
+
 def score_leaderboard(
     champion: SpecHistory | None,
     challengers: Sequence[SpecHistory],
@@ -437,6 +509,7 @@ def score_leaderboard(
              "realized_rank_ic": <clustered stats | None>,
              "topn_alpha_vs_champion": <clustered stats | None>,  # None for the champion, and whenever champion is None
              "topn_alpha_vs_benchmark": <clustered stats | None>,  # champion-free direct lift vs benchmark_ticker
+             "topn_alpha_vs_population": <clustered stats | None>, # lift vs the scored population it narrowed (I7576)
              "n_dates_scored": <#dates this spec contributed>,
              "confidence": "ok" | "thin" | "insufficient"},   # alpha-engine-config-I7542
             ...
@@ -467,6 +540,12 @@ def score_leaderboard(
                 _topn_alpha_vs_benchmark_metric(spec, realized, top_n, benchmark_ticker)
                 if benchmark_ticker else None
             )
+            # Needs no benchmark — the population comes from the realized join
+            # itself, so this metric is available on every slot and every date
+            # that any other metric is.
+            alpha_vs_population = _topn_alpha_vs_population_metric(
+                spec, realized, top_n, benchmark_ticker,
+            )
             n_scored = sum(
                 1 for d in spec.by_date if realized.get(d)
             )
@@ -476,6 +555,7 @@ def score_leaderboard(
                 "realized_rank_ic": rank_ic,
                 "topn_alpha_vs_champion": alpha_vs_champion,
                 "topn_alpha_vs_benchmark": alpha_vs_benchmark,
+                "topn_alpha_vs_population": alpha_vs_population,
                 "n_dates_scored": n_scored,
                 # alpha-engine-config-I7542 — how much evidence stands behind
                 # this row. Additive: every numeric field above is unchanged.
@@ -492,6 +572,7 @@ def score_leaderboard(
                 "realized_rank_ic": None,
                 "topn_alpha_vs_champion": None,
                 "topn_alpha_vs_benchmark": None,
+                "topn_alpha_vs_population": None,
                 "n_dates_scored": 0,
                 "confidence": CONFIDENCE_INSUFFICIENT,
                 "error": str(exc),
