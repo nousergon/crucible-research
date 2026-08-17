@@ -898,6 +898,65 @@ def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
+def champion_momentum_weight(
+    bucket: str | None = None, s3_client: Any = None
+) -> float:
+    """The momentum pillar's weight in the LIVE champion composite.
+
+    Read from the same chokepoint the cut producer uses
+    (``universe_board._load_pillar_weights`` → the optional private
+    ``config/factor_attractiveness_weights.json``, equal-weight when absent),
+    so this can never disagree with the weights the champion cut was actually
+    ranked by. Returns 0.0 on any read failure — the conservative direction,
+    because a zero reading only suppresses observe-only arms.
+    """
+    from scoring.universe_board import _load_pillar_weights
+
+    try:
+        return float(_load_pillar_weights(bucket, s3_client).get("momentum", 0.0))
+    except Exception as exc:  # noqa: BLE001 — gating an observe-only arm
+        logger.info(
+            "[universe_membership] champion momentum weight unreadable (%s) — "
+            "treating as 0 and suppressing the momentum arms",
+            exc,
+        )
+        return 0.0
+
+
+def momentum_arms_applicable(
+    bucket: str | None = None, s3_client: Any = None
+) -> bool:
+    """Whether either momentum challenger arm can express a real experiment.
+
+    **Both arms vary something that the champion's momentum weight multiplies.**
+    ``mom121`` changes the momentum pillar's COMPONENTS; ``momzero`` changes its
+    WEIGHT to zero. When the live champion already weights momentum at 0:
+
+      * ``momzero`` is the champion, by definition — same profiles, same weights;
+      * ``mom121`` is *also* the champion, because a re-composed pillar
+        multiplied by zero contributes exactly what the old pillar did.
+
+    Both arms would then emit membership identical to ``attractiveness_top_N``
+    and trip the §4 vacuity guard in :func:`assert_cut_invariants`, turning a
+    correct configuration into a RED Scanner run — and membership is
+    load-bearing for the predictor's universe.
+
+    That guard is right to fire on an identical cut *when momentum carries
+    weight*, because identity then means the override silently did not apply.
+    It is wrong when the weight is zero, because identity is the arithmetically
+    correct answer. So the applicability test belongs here, upstream of the
+    guard, rather than as an exception inside it.
+
+    Brian ruling 2026-08-17: the live champion weights momentum at 0 so the
+    top-60 captures ~1-year candidates rather than short-term movers
+    (``config/factor_attractiveness_weights.json``). Under that ruling both arms
+    are inapplicable, not failed — they are omitted and the leaderboard records
+    no arm, rather than recording a tie against the champion. Restore a non-zero
+    momentum weight and both arms resume automatically with no code change.
+    """
+    return champion_momentum_weight(bucket, s3_client) > 1e-9
+
+
 def momzero_attractiveness_for_run(
     run_date: str, *, bucket: str | None = None, s3_client: Any = None
 ) -> dict[str, float] | None:
@@ -917,6 +976,14 @@ def momzero_attractiveness_for_run(
         _read_factor_profiles,
         attractiveness_from_factor_profiles,
     )
+
+    if not momentum_arms_applicable(bucket, s3_client):
+        logger.info(
+            "[universe_membership] momzero arm inapplicable — the live champion "
+            "already weights momentum at 0, so this arm IS the champion; cuts "
+            "omitted (not a miss, not a tie)"
+        )
+        return None
 
     try:
         profiles = _read_factor_profiles(run_date, bucket, s3_client) or {}
@@ -957,6 +1024,14 @@ def challenger_attractiveness_for_run(
 
     from scoring.factor_scoring import CHALLENGER_PROFILE_PREFIX
     from scoring.universe_board import attractiveness_from_factor_profiles
+
+    if not momentum_arms_applicable(bucket, s3_client):
+        logger.info(
+            "[universe_membership] mom121 arm inapplicable — the live champion "
+            "weights momentum at 0, so a re-composed momentum pillar contributes "
+            "nothing and this arm resolves to the champion; cuts omitted"
+        )
+        return None
 
     key = f"{CHALLENGER_PROFILE_PREFIX}/{run_date}/by_ticker.json"
     try:
