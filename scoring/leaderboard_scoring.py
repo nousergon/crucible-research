@@ -134,6 +134,15 @@ class SlotMeasurementSpec:
     top_n: int
     # Evidence floor for a comparable row (§7.2 at arm granularity).
     min_dates_for_inference: int
+    # When True, arms in this slot are scored at their OWN natural width and the
+    # rows are NOT comparable to each other — only to the population
+    # (alpha-engine-config-I7584). Legitimate exactly when the slot's arms are
+    # not competing selection rules: the funnel's own stages differ in breadth
+    # BY DEFINITION, so count-matching them would measure a truncation nobody
+    # consumes. Default False — a slot must opt out of count-matching
+    # explicitly, because silently mixed widths are the confound §4 exists to
+    # prevent.
+    per_arm_width: bool = False
 
 
 LEADERBOARD_SLOTS: dict[str, SlotMeasurementSpec] = {
@@ -154,6 +163,20 @@ LEADERBOARD_SLOTS: dict[str, SlotMeasurementSpec] = {
     # selection with sizing, so "beat the population you selected from" is not
     # the whole of its objective. Moving it is a separate argument and a
     # separate change, not a side effect of this one.
+    # The funnel's own stages plus its downstream consumer's window. These are
+    # NOT competing candidate-generation rules — attractiveness_top_20 is the
+    # HEAD of attractiveness_top_60, so asking which "wins" against the other is
+    # incoherent. Each is compared to the population it narrowed, which is what
+    # makes differing widths legitimate here and only here.
+    "cuts": SlotMeasurementSpec(
+        slot_id="cuts",
+        primary_metric="topn_alpha_vs_population",
+        horizons_days=LONG_HORIZONS_DAYS,
+        benchmark_ticker="SPY",
+        top_n=0,  # unused; per_arm_width governs
+        min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
+        per_arm_width=True,
+    ),
     "producer": SlotMeasurementSpec(
         slot_id="producer",
         primary_metric="topn_alpha_vs_benchmark",
