@@ -34,7 +34,7 @@ import time
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +185,23 @@ def probe_qual_analyst(am, tickers: list[dict]) -> dict:
         )
 
 
+# The probe's own output budget (alpha-engine-config-I7589), deliberately NOT
+# MAX_TOKENS_STRATEGIC. This is ONE call per canary run, so sizing it
+# generously costs nothing, and borrowing a constant tuned for strategic agent
+# calls coupled the probe to a number changed for unrelated reasons.
+#
+# It truncated on EVERY run before this, and the cause is the probe's own
+# design — which is otherwise exactly right: the prompt's semantically-correct
+# answer is NOT one of the enum values, so the model argues its way to a
+# non-conforming answer and `reasoning` grows; the retry then re-prompts WITH
+# the validation error appended, so each attempt carries more context and less
+# headroom than the one before. Against a shared 4096 the later attempts had
+# nowhere to land, and `invoke_structured_with_validation_retry` correctly
+# reported StructuredOutputTruncationError rather than letting a partial
+# tool-call surface downstream as a confusing Pydantic shape error.
+_CANARY_PROBE_MAX_TOKENS = 8192
+
+
 class _CanaryConfidenceProbe(BaseModel):
     """Deliberately tight schema mirroring the 2026-05-24 incident class
     that motivated ``invoke_structured_with_validation_retry`` in the
@@ -198,7 +215,14 @@ class _CanaryConfidenceProbe(BaseModel):
     """
 
     confidence: Literal["low", "medium", "high"]
-    reasoning: str
+    # BOUNDED (alpha-engine-config-I7589). An unbounded free-text field inside a
+    # schema whose whole job is to be retried is the part that consumes the
+    # budget, and it grows on exactly the retries this probe exists to trigger.
+    # The bound is on the SCHEMA rather than only in the prompt because a prompt
+    # instruction is advice and a field constraint is a contract — and if the
+    # model overruns it, the validation error that produces is itself a
+    # legitimate exercise of the retry path this probe is measuring.
+    reasoning: str = Field(max_length=600)
 
 
 def probe_validation_retry(api_key: str | None) -> dict:
@@ -224,13 +248,13 @@ def probe_validation_retry(api_key: str | None) -> dict:
         make_agent_llm,
     )
     from agents.prompt_loader import load_prompt
-    from config import CANARY_PROBE_CLASS, MAX_TOKENS_STRATEGIC
+    from config import CANARY_PROBE_CLASS
 
     start = time.monotonic()
     try:
         llm = make_agent_llm(
             model_class=CANARY_PROBE_CLASS,
-            max_tokens=MAX_TOKENS_STRATEGIC,
+            max_tokens=_CANARY_PROBE_MAX_TOKENS,
             api_key=api_key,
         )
         structured_llm = bind_structured_output(
