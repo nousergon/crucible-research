@@ -396,9 +396,16 @@ HOLIDAY_CALENDAR: str = SCHEDULE_CFG["holiday_calendar"]
 # ── Predictor ─────────────────────────────────────────────────────────────────
 _pred_cfg: dict = _cfg.get("predictor", {})
 PREDICTOR_PREDICTIONS_KEY: str = _pred_cfg.get("s3_predictions_key", "predictor/predictions/latest.json")
-# Minimum GBM prediction_confidence required to apply the confirmation gate veto.
-# Below this threshold the prediction is treated as low-conviction and ignored.
-MIN_PREDICTION_CONFIDENCE: float = float(_pred_cfg.get("min_confidence", 0.60))
+# `MIN_PREDICTION_CONFIDENCE` removed 2026-08-17 (alpha-engine-config-I7527).
+# It was read from universe.yaml's `predictor.min_confidence` and never used by
+# anything: its only consumer was the `predictor_enrichment` block in
+# scoring/technical.py, deleted under alpha-engine-config-I4983 (Brian
+# 2026-07-28) because it closed a predictor -> tech_score -> scanner feedback
+# loop. Its docstring described a "confirmation gate veto" that does not exist
+# in this repo. It also carried 0.65/0.60 defaults on the retired
+# winner-probability confidence axis — `prediction_confidence` has been
+# `|p_up - 0.5| * 2` since crucible-predictor PR #143 (2026-05-12), so any
+# future reader copying this constant would have gated on the wrong scale.
 
 # ── Adaptive slot allocation (config#926) ────────────────────────────────────
 # When enabled, compute_team_slots nudges each team's eligible-pick count ±1 by
