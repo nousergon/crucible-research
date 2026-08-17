@@ -102,6 +102,7 @@ from scoring.leaderboard_scoring import (
     HORIZON_UNMEASURABLE,
     SpecDay,
     SpecHistory,
+    population_return_from_panel,
     score_multi_horizon,
     slot_spec,
 )
@@ -111,6 +112,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BUCKET = "alpha-engine-research"
 # ArcticDB universe library stores title-case OHLCV columns.
 _CLOSE_COL = "Close"
+# The index proxy excluded from the population baseline — not a selectable name.
+_BENCHMARK_TICKER = "SPY"
 
 _SCANNER_OUTPUT = "scanner/leaderboard/{date}.json"
 _PRODUCER_OUTPUT = "research/producer_leaderboard/{date}.json"
@@ -391,7 +394,7 @@ def _resolve_realized_returns_by_horizon(
     *,
     symbols: set[str] | None = None,
     closes_panel_loader: Any = None,
-) -> tuple[dict[int, dict[str, dict[str, float]]], dict[int, tuple[str, str]]]:
+) -> tuple[dict[int, dict[str, dict[str, float]]], dict[int, tuple[str, str]], dict[int, dict[str, float]]]:
     """Realized forward returns at EVERY horizon, from ONE closes-panel read
     (alpha-engine-config-I7540).
 
@@ -416,7 +419,7 @@ def _resolve_realized_returns_by_horizon(
       down with it, which §3 forbids.
     """
     if not entry_dates:
-        return {h: {} for h in horizons_days}, {}
+        return {h: {} for h in horizons_days}, {}, {}
 
     panel = _load_closes_panel(bucket, entry_dates, max(horizons_days), symbols, closes_panel_loader)
 
@@ -436,7 +439,30 @@ def _resolve_realized_returns_by_horizon(
             )
             by_horizon[h] = {}
             notes[h] = (HORIZON_UNMEASURABLE, str(exc))
-    return by_horizon, notes
+
+    # The population baseline for `topn_alpha_vs_population`
+    # (alpha-engine-config-I7576), derived from the SAME panel — one read, two
+    # uses. It is computed here rather than inside the scorer precisely because
+    # only this layer knows whether the panel spans the population or was
+    # narrowed to the arms' picks; see the metric's own docstring for why a
+    # narrowed baseline is a silent wrong answer rather than a missing one.
+    population: dict[int, dict[str, float]] = {}
+    if symbols is None:
+        for h, realized in by_horizon.items():
+            per_date = {}
+            for date_str, ret in realized.items():
+                pop = population_return_from_panel(ret, _BENCHMARK_TICKER)
+                if pop is not None:
+                    per_date[date_str] = pop
+            population[h] = per_date
+    else:
+        logger.info(
+            "[leaderboard] closes panel was narrowed to %d picked symbols — "
+            "topn_alpha_vs_population will be null for every arm (a narrowed "
+            "baseline would be the wrong population, not a smaller one)",
+            len(symbols),
+        )
+    return by_horizon, notes, population
 
 
 def _annotate_horizon_maturity(
@@ -919,11 +945,17 @@ def build_scanner_leaderboard(
         vacuous = _vacuous_membership_collisions(champion, challengers)
         _alert_vacuous_collisions("scanner", champion.name if champion else None, vacuous)
         try:
-            realized_by_horizon, horizon_notes = _resolve_realized_returns_by_horizon(
+            realized_by_horizon, horizon_notes, population_by_horizon = _resolve_realized_returns_by_horizon(
                 bucket,
                 dates,
                 horizons,
-                symbols=_picked_symbols(champion, challengers),
+                # FULL universe, not `_picked_symbols(...)`. The narrowing was a
+                # cost optimisation that predates topn_alpha_vs_population being
+                # this slot's primary metric — and that metric needs the
+                # population the arms chose FROM, not the union of what they
+                # chose (alpha-engine-config-I7576). Still exactly ONE panel
+                # read; only its width changed.
+                symbols=None,
                 closes_panel_loader=closes_panel_loader,
             )
         except LeaderboardUnmeasurableError as exc:
@@ -945,6 +977,7 @@ def build_scanner_leaderboard(
             horizons_days=horizons,
             min_dates_for_inference=slot.min_dates_for_inference,
             horizon_notes=horizon_notes,
+            population_by_horizon=population_by_horizon,
         )
         _annotate_horizon_maturity("scanner", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "scanner"
@@ -1045,11 +1078,17 @@ def build_producer_leaderboard(
                 date_str,
             )
         try:
-            realized_by_horizon, horizon_notes = _resolve_realized_returns_by_horizon(
+            realized_by_horizon, horizon_notes, population_by_horizon = _resolve_realized_returns_by_horizon(
                 bucket,
                 dates,
                 horizons,
-                symbols=_picked_symbols(champion, challengers),
+                # FULL universe, not `_picked_symbols(...)`. The narrowing was a
+                # cost optimisation that predates topn_alpha_vs_population being
+                # this slot's primary metric — and that metric needs the
+                # population the arms chose FROM, not the union of what they
+                # chose (alpha-engine-config-I7576). Still exactly ONE panel
+                # read; only its width changed.
+                symbols=None,
                 closes_panel_loader=closes_panel_loader,
             )
         except LeaderboardUnmeasurableError as exc:
@@ -1071,6 +1110,7 @@ def build_producer_leaderboard(
             horizons_days=horizons,
             min_dates_for_inference=slot.min_dates_for_inference,
             horizon_notes=horizon_notes,
+            population_by_horizon=population_by_horizon,
         )
         _annotate_horizon_maturity("producer", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "producer"

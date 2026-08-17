@@ -411,22 +411,21 @@ def _topn_alpha_vs_benchmark_metric(
     return date_clustered_stats(per_date)
 
 
-def _population_return_by_date(
+def population_return_from_panel(
     ret: Mapping[str, float], benchmark_ticker: str | None,
 ) -> float | None:
-    """Equal-weight mean realized return of the SCORED POPULATION for one date.
+    """Equal-weight mean realized return over ``ret``, excluding the benchmark.
 
-    The population is every ticker with a realized return on that date — i.e.
-    the set the arm ranked and narrowed from. It is deliberately NOT read from
-    a separate artifact: taking it from ``realized`` guarantees the cut and its
-    baseline are drawn from one join, so a partial price panel narrows both
-    sides identically instead of biasing the difference.
+    **Only valid when ``ret`` spans the whole scored population.** Callers that
+    narrow their closes read to the arms' own picks — which every leaderboard
+    producer does, since an arm's other metrics only ever reference its picks —
+    MUST NOT pass that narrowed map here. See
+    :func:`_topn_alpha_vs_population_metric` for why that is a silent wrong
+    answer rather than a missing one; this helper exists so a producer holding
+    a genuine full-universe panel can build the input in one obvious place.
 
-    The benchmark is excluded when it is an index proxy that is not itself a
-    selectable name (SPY). Leaving it in would let a single ETF vote in an
-    equal-weight mean of ~900 equities — negligible in magnitude, but the
-    population must mean "names the arm could have picked" or the metric is
-    not the one this function claims to compute.
+    The benchmark is excluded: it is an index proxy, not a name any arm could
+    have picked, and the population must mean "the names I chose from".
     """
     rets = [r for t, r in ret.items() if t != benchmark_ticker]
     return fmean(rets) if rets else None
@@ -436,7 +435,7 @@ def _topn_alpha_vs_population_metric(
     spec: SpecHistory,
     realized: Mapping[str, Mapping[str, float]],
     top_n: int,
-    benchmark_ticker: str | None,
+    population_returns: Mapping[str, float] | None,
 ) -> dict | None:
     """Date-clustered long-only top-N excess over the scored population
     (alpha-engine-config-I7576): mean(spec top-N) − mean(all scored names),
@@ -456,16 +455,31 @@ def _topn_alpha_vs_population_metric(
     beat the market" is a real and different question, and closer to the
     executor's own objective. This adds a metric; it does not redefine one.
 
-    A date contributes only when BOTH the spec's top-N return and a non-empty
-    population return exist for that date.
+    ``population_returns`` is ``{date: equal-weight return of the whole scored
+    population}`` and MUST be supplied by the caller. Returns ``None`` when it
+    is absent — deliberately a missing metric rather than one derived from
+    ``realized``.
+
+    **Why it cannot be derived from ``realized``.** Every leaderboard producer
+    narrows its closes read to ``_picked_symbols()`` — the union of the arms'
+    own picks plus the benchmark — because an arm's other two metrics never
+    reference anything else, and pulling ~900 tickers for three horizons is the
+    Lambda's dominant cost. Taking the mean of that narrowed map would silently
+    compute "excess over the other arms' picks", which is a plausible number,
+    close to zero, and not the quantity this metric names. A metric that is
+    absent is recoverable; one that is quietly the wrong baseline is the defect
+    this whole issue was filed about, reintroduced one level down.
+
+    A date contributes only when the spec's top-N return AND that date's
+    population return both exist.
     """
+    if not population_returns:
+        return None
     per_date: list[float] = []
     for date_str, day in spec.by_date.items():
         ret = realized.get(date_str)
-        if not ret:
-            continue
-        pop_r = _population_return_by_date(ret, benchmark_ticker)
-        if pop_r is None:
+        pop_r = population_returns.get(date_str)
+        if not ret or pop_r is None:
             continue
         spec_r = _top_n_return_by_date(day, ret, top_n)
         if spec_r is None:
@@ -483,6 +497,7 @@ def score_leaderboard(
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     benchmark_ticker: str | None = "SPY",
     min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
+    population_returns: Mapping[str, float] | None = None,
 ) -> dict:
     """Score the champion (if any) + every challenger on the cutover-gate
     objectives, joined to ``realized`` (``{date: {ticker: forward_return}}``).
@@ -540,11 +555,10 @@ def score_leaderboard(
                 _topn_alpha_vs_benchmark_metric(spec, realized, top_n, benchmark_ticker)
                 if benchmark_ticker else None
             )
-            # Needs no benchmark — the population comes from the realized join
-            # itself, so this metric is available on every slot and every date
-            # that any other metric is.
+            # None unless the caller supplied genuine full-population returns —
+            # never derived from the pick-narrowed `realized` map.
             alpha_vs_population = _topn_alpha_vs_population_metric(
-                spec, realized, top_n, benchmark_ticker,
+                spec, realized, top_n, population_returns,
             )
             n_scored = sum(
                 1 for d in spec.by_date if realized.get(d)
@@ -614,6 +628,7 @@ def score_multi_horizon(
     benchmark_ticker: str | None = "SPY",
     min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
     horizon_notes: Mapping[int, tuple[str, str]] | None = None,
+    population_by_horizon: Mapping[int, Mapping[str, float]] | None = None,
 ) -> dict:
     """Score every arm at EVERY horizon in ``horizons_days`` and assemble one
     leaderboard artifact. PURE — no I/O.
@@ -674,6 +689,7 @@ def score_multi_horizon(
             horizon_days=h,
             benchmark_ticker=benchmark_ticker,
             min_dates_for_inference=min_dates_for_inference,
+            population_returns=(population_by_horizon or {}).get(h),
         )
         if primary is None:
             primary = scored

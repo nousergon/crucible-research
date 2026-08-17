@@ -47,7 +47,7 @@ def _no_matured_cohorts():
     case. An immature cohort is covered in test_leaderboard_realized_returns."""
     with (
         patch("scoring.leaderboard_producers._cohort_dates", return_value=["2026-06-01", "2026-06-10"]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {})),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {}, {})),
         patch("scoring.leaderboard_producers._get_json", return_value=None),
     ):
         yield
@@ -99,7 +99,7 @@ def test_a_measurable_leaderboard_still_reports_ok():
     }
     with (
         patch("scoring.leaderboard_producers._cohort_dates", return_value=["2026-07-02"]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({21: {"2026-07-02": {}}}, {})),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({21: {"2026-07-02": {}}}, {}, {})),
         patch("scoring.leaderboard_producers.score_multi_horizon", return_value=scored),
         patch("scoring.leaderboard_producers._get_json", return_value=None),
     ):

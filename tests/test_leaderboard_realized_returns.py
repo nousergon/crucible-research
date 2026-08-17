@@ -222,7 +222,7 @@ def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
         ),
         patch(
             "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
-            return_value=({}, {}),
+            return_value=({}, {}, {}),
         ),
         patch(
             "scoring.leaderboard_producers.publish_observe_alert",
@@ -254,7 +254,7 @@ def test_zero_cohorts_past_the_horizon_escalates_to_unmeasurable() -> None:
         ),
         patch(
             "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
-            return_value=({}, {}),
+            return_value=({}, {}, {}),
         ),
         patch("scoring.leaderboard_producers.publish_observe_alert") as alert,
     ):
