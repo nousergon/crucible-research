@@ -31,11 +31,18 @@ from the sibling universe-board write, which is dashboard-only and fail-soft.
 
 Cuts emitted (each carries ``basis`` = how membership was decided):
 
-  ``scanner_candidates``     the scanner's own gate cut — the tickers in
-                             ``candidates.json::scanner_tickers`` verbatim.
-                             basis=``scanner_gate``. A ``tech_score`` momentum
-                             ranking, NOT an alpha ranking; retained as the
-                             incumbent challenger arm and as the churn baseline.
+  ``scanner_gate_baseline_60``
+                             FEEDS NOTHING LIVE. A recorded baseline: the
+                             scanner's own gate cut, ``candidates.json::
+                             scanner_tickers`` verbatim, basis=``scanner_gate``.
+                             A ``tech_score`` momentum ranking, NOT an alpha
+                             ranking — near-disjoint from the attractiveness
+                             rank the champion is drawn from (12 of 60 overlap,
+                             measured 2026-08-17). Retained as the incumbent
+                             challenger arm and the churn baseline.
+                             Was ``scanner_candidates``; that key is still
+                             emitted as a deprecated alias
+                             (alpha-engine-config-I7578).
   ``attractiveness_top_20``  top 20 by cross-sectional attractiveness rank.
                              **This is the cut the predictor resolves from**
                              (alpha-engine-config-I4983) — see
@@ -166,6 +173,22 @@ PRODUCER = "crucible-research/scoring/universe_membership.py"
 # but spliced into the multi-agent graph, so it was orphaned when that layer was
 # retired as champion (config#1580) — see alpha-engine-config-I4980.
 PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
+
+# ── The gate cut's name (alpha-engine-config-I7578, Brian ruling 2026-08-17) ──
+# Two 60-wide cuts exist and only one is the funnel — and until this rename, the
+# one that is NOT the funnel was the one whose name said "scanner". It was read
+# backwards three times, each caught by hand rather than by a check. Measured
+# 2026-08-17: the two 60s overlap on 12 of 60, and the champion 20 overlaps the
+# gate cut on 3 of 20. They are near-disjoint sets and only one advances.
+#
+# The funnel INVARIANT was already enforced (I6630, ``assert_cut_invariants``).
+# What was unguarded is the NAMING: nothing stopped a reader, an agent, or a new
+# consumer from resolving "the scanner's top 60" to the gate cut and scoping to
+# a set that feeds nothing. The word "baseline" is load-bearing — reading this
+# name as the funnel now requires ignoring it.
+GATE_BASELINE_CUT = "scanner_gate_baseline_60"
+GATE_LEGACY_CUT = "scanner_candidates"
+"""Deprecated alias, emitted alongside the new name for one window."""
 
 # Attractiveness-rank cuts emitted every cycle. 60 is count-matched to the
 # scanner's ``momentum_top_n`` so scanner-cut-vs-rank-cut is an apples-to-apples
@@ -441,6 +464,43 @@ def _tech_score_rank_table(scanner_tickers: list[str], tech_scores: dict[str, fl
     return {ticker: {"tech_score_rank": i + 1, "tech_score": score} for i, (ticker, score) in enumerate(ordered)}
 
 
+def assert_gate_cut_feeds_nothing_live(membership: dict, run_date: str) -> None:
+    """The gate cut must not be named as the source of any live consumer.
+
+    This is the check whose ABSENCE produced alpha-engine-config-I6630: the RAG
+    corpus was scoped to the gate cut while the champion was drawn from the
+    attractiveness rank, they overlapped on 2 of 20, and nothing asserted the
+    two were related. The funnel invariant added there catches a champion that
+    escapes the feed cut; it does not catch a consumer that was pointed at the
+    wrong 60 in the first place, because that consumer's own cut is internally
+    consistent.
+
+    Enforced on the ARTIFACT rather than by grepping consumers, because the
+    artifact is the contract: every live consumer resolves its set through one
+    of the fields checked here.
+    """
+    live_fields = ("predictor_universe_cut", "feed_cut")
+    gate_names = {GATE_BASELINE_CUT, GATE_LEGACY_CUT}
+    for field in live_fields:
+        named = membership.get(field)
+        if named in gate_names:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: {field}={named!r} — the "
+                f"scanner GATE cut is a recorded baseline and feeds nothing "
+                f"live. It is a tech_score momentum ranking, near-disjoint "
+                f"from the attractiveness rank the champion is drawn from "
+                f"(12 of 60 overlap, measured 2026-08-17). Pointing a live "
+                f"consumer at it is alpha-engine-config-I6630 repeating."
+            )
+    funnel = membership.get("funnel") or {}
+    for consumer, named in (funnel.get("advances_to") or {}).items():
+        if named in gate_names:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: funnel.advances_to."
+                f"{consumer}={named!r} — the gate cut feeds nothing live."
+            )
+
+
 def assert_cut_invariants(membership: dict, run_date: str) -> None:
     """Raise ``UniverseMembershipError`` if the artifact's cuts violate an invariant.
 
@@ -666,13 +726,30 @@ def build_universe_membership(
         )
 
     ranks = _rank_table(attractiveness)
+    _gate_block = {
+        "basis": "scanner_gate",
+        "size": len(set(scanner_tickers)),
+        "tickers": sorted(set(scanner_tickers)),
+        "source": f"candidates/{run_date}/candidates.json::scanner_tickers",
+        "feeds": [],
+        "role": (
+            "recorded baseline and incumbent challenger arm. Feeds NOTHING "
+            "live — not the predictor universe, not the RAG corpus scope, not "
+            "Think Tank's coverage window. See the funnel block."
+        ),
+    }
     cuts: dict[str, dict] = {
-        "scanner_candidates": {
-            "basis": "scanner_gate",
-            "size": len(set(scanner_tickers)),
-            "tickers": sorted(set(scanner_tickers)),
-            "source": f"candidates/{run_date}/candidates.json::scanner_tickers",
-        }
+        GATE_BASELINE_CUT: dict(_gate_block),
+        # Deprecated alias (alpha-engine-config-I7578). Emitted so a consumer
+        # pinned on the old name keeps working through the deprecation window
+        # rather than reading a missing key as an empty cut — silently trading
+        # a rename for a zero-size universe is the worse failure. Known live
+        # reader: crucible-dashboard/loaders/universe_churn.py.
+        GATE_LEGACY_CUT: {
+            **_gate_block,
+            "deprecated_alias_for": GATE_BASELINE_CUT,
+            "removal_tracked_by": "alpha-engine-config-I7578 follow-up",
+        },
     }
     for n in _RANK_CUTS:
         tickers = _top_n(ranks, n)
@@ -748,6 +825,24 @@ def build_universe_membership(
         "generated_at": generated_at or datetime.now(UTC).isoformat(timespec="seconds"),
         "universe_count": len(ranks),
         "predictor_universe_cut": PREDICTOR_UNIVERSE_CUT,
+        "feed_cut": FEED_CUT_NAME,
+        # alpha-engine-config-I7578. The chain, stated in the artifact rather
+        # than only in this module, so a reader can answer "what advances?"
+        # without reading the producer's source. Every name here is a key in
+        # ``cuts`` except ``population``, which is the rank table's width.
+        "funnel": {
+            "population": len(ranks),
+            "feed_cut": {"name": FEED_CUT_NAME,
+                         "size": len(cuts.get(FEED_CUT_NAME, {}).get("tickers", []))},
+            "champion_cut": {"name": PREDICTOR_UNIVERSE_CUT,
+                             "size": len(cuts.get(PREDICTOR_UNIVERSE_CUT, {}).get("tickers", []))},
+            "advances_to": {
+                "predictor_universe": PREDICTOR_UNIVERSE_CUT,
+                "rag_corpus_scope": FEED_CUT_NAME,
+                "thinktank_coverage_window": FEED_CUT_NAME,
+            },
+            "feeds_nothing_live": [GATE_BASELINE_CUT, GATE_LEGACY_CUT],
+        },
         # alpha-engine-config-I6666 — a freshly built artifact is by definition
         # re-cut today; ``carry_forward_cuts`` overwrites this when the run
         # holds the prior cut instead. ``cut_effective_date == run_date`` is
@@ -760,6 +855,9 @@ def build_universe_membership(
         membership["scanner_ranks"] = scanner_ranks
     if backfilled_from:
         membership["backfilled_from"] = backfilled_from
+    # Runs on the ASSEMBLED artifact, unlike the cut invariants above: what it
+    # checks are the routing fields, which do not exist until the dict is built.
+    assert_gate_cut_feeds_nothing_live(membership, run_date)
     membership["turnover"] = compute_turnover(membership, prior)
     return membership
 
