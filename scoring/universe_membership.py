@@ -213,6 +213,47 @@ _INCUMBENT_CUT_N = 20
 CHALLENGER_CUT_PREFIX = "attractiveness_mom121_top_"
 _CHALLENGER_CUT_NS = (20, ATTRACTIVENESS_FEED_TOP_N)
 
+# ── Challenger cut registry (alpha-engine-config-I7574) ─────────────────────
+# Each arm varies ONE thing about how the ~903-name universe is ranked, so the
+# leaderboard can attribute a win to that thing. Two variables are in play and
+# they are deliberately NOT combined into one arm:
+#
+#   mom121   momentum stays 1/6 of the composite; its COMPONENTS move to the
+#            12-1 skip-month horizon. Isolates HORIZON.
+#   momzero  components stay the champion's; the momentum pillar's WEIGHT goes
+#            to 0 and the remaining five split 1.0 evenly. Isolates EXPOSURE.
+#
+# An arm that changed both could not tell you which one earned the result —
+# and the two have genuinely different implications. If mom121 wins, momentum
+# belongs in the score and was simply measured over the wrong window. If
+# momzero wins, momentum does not belong in a one-year attractiveness score at
+# all, whatever window it is measured over. Those are different beliefs about
+# the strategy, not two strengths of one belief.
+#
+# momzero is cheap in a way mom121 is not: it needs no second factor-composite
+# computation, because ``attractiveness_from_factor_profiles`` already accepts
+# a ``pillar_weights`` vector. Same profiles, different weights.
+PILLAR_ORDER_FOR_WEIGHTS = (
+    "quality", "value", "momentum", "growth", "stewardship", "defensiveness",
+)
+
+MOMZERO_CUT_PREFIX = "attractiveness_momzero_top_"
+
+MOMZERO_PILLAR_WEIGHTS: dict[str, float] = {
+    "quality": 0.2,
+    "value": 0.2,
+    "momentum": 0.0,
+    "growth": 0.2,
+    "stewardship": 0.2,
+    "defensiveness": 0.2,
+}
+"""Zero, not merely reduced. A partial weight muddles the read — it produces a
+ranking that is neither the champion's nor a clean no-momentum counterfactual,
+so a small win or loss cannot be attributed. Zero answers the question being
+asked ("does momentum belong here at all?") and, if it wins, the follow-up
+experiment is a tuned weight somewhere in (0, 1/6) — which is only worth
+running once the sign is known."""
+
 _DEFAULT_BUCKET = "alpha-engine-research"
 
 
@@ -477,14 +518,16 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
     # -I6429). The two definitions differ only in the momentum pillar, so an
     # identical top-20 is the signature of the override having silently not
     # applied — precisely the failure this must not render as a tie.
-    for n in _CHALLENGER_CUT_NS:
-        challenger_cut = _cuts.get(f"{CHALLENGER_CUT_PREFIX}{n}")
+    for prefix, n in [
+        (p, n) for p in (CHALLENGER_CUT_PREFIX, MOMZERO_CUT_PREFIX) for n in _CHALLENGER_CUT_NS
+    ]:
+        challenger_cut = _cuts.get(f"{prefix}{n}")
         if challenger_cut is None:
             continue
         if challenger_cut["size"] != n:
             raise UniverseMembershipError(
                 f"universe membership {run_date}: count-match broken — "
-                f"{CHALLENGER_CUT_PREFIX}{n}.size={challenger_cut['size']}, "
+                f"{prefix}{n}.size={challenger_cut['size']}, "
                 f"must equal {n}. A short challenger table must not silently "
                 f"narrow the arm and turn a horizon comparison into a breadth one."
             )
@@ -492,7 +535,7 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
         if counterpart is not None and set(challenger_cut["tickers"]) == set(counterpart["tickers"]):
             raise UniverseMembershipError(
                 f"universe membership {run_date}: vacuous challenger — "
-                f"{CHALLENGER_CUT_PREFIX}{n} resolves to the same {n} names as "
+                f"{prefix}{n} resolves to the same {n} names as "
                 f"attractiveness_top_{n}. The two composites differ in the "
                 f"momentum pillar, so identical membership means the challenger "
                 f"definition did not apply. Scoring this would compare the "
@@ -569,6 +612,7 @@ def build_universe_membership(
     *,
     tech_scores: dict[str, float] | None = None,
     challenger_attractiveness: dict[str, float] | None = None,
+    momzero_attractiveness: dict[str, float] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
     prior: dict | None = None,
@@ -674,6 +718,24 @@ def build_universe_membership(
                 "source": (
                     f"scanner/factor_profiles_shadow/mom121/{run_date}/"
                     "profiles.json::attractiveness_score"
+                ),
+            }
+
+    # Zero-momentum arm (alpha-engine-config-I7574). Same champion factor
+    # profiles, same pillar scores — only the WEIGHT vector differs, so this
+    # arm and the champion cannot disagree about anything except how much the
+    # momentum pillar counted. Same absent-is-a-miss rule as above.
+    if momzero_attractiveness:
+        momzero_ranks = _rank_table(momzero_attractiveness)
+        for n in _CHALLENGER_CUT_NS:
+            tickers = _top_n(momzero_ranks, n)
+            cuts[f"{MOMZERO_CUT_PREFIX}{n}"] = {
+                "basis": "attractiveness_rank_momzero",
+                "size": len(tickers),
+                "tickers": tickers,
+                "source": (
+                    f"factors/profiles/{run_date}/by_ticker.json"
+                    "::attractiveness_score@momentum_weight=0"
                 ),
             }
 
@@ -836,6 +898,47 @@ def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
+def momzero_attractiveness_for_run(
+    run_date: str, *, bucket: str | None = None, s3_client: Any = None
+) -> dict[str, float] | None:
+    """``{ticker: attractiveness_score}`` with the momentum pillar weighted 0.
+
+    Reads the CHAMPION's factor profiles — not a shadow copy — because this arm
+    changes only the weight vector, not the pillar scores. Sharing the input
+    artifact is what guarantees the two arms cannot differ for any other
+    reason; recomputing profiles here would reintroduce a data-vintage
+    difference the experiment is trying to exclude.
+
+    Fail-soft: an observe-only arm must never red a Scanner run. Returns None
+    (not an empty dict, not a champion fallback) so the cuts are omitted and
+    recorded as a miss for this arm alone.
+    """
+    from scoring.universe_board import (
+        _read_factor_profiles,
+        attractiveness_from_factor_profiles,
+    )
+
+    try:
+        profiles = _read_factor_profiles(run_date, bucket, s3_client) or {}
+        if not profiles:
+            return None
+        scored = attractiveness_from_factor_profiles(
+            profiles, pillar_weights=MOMZERO_PILLAR_WEIGHTS
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only arm
+        logger.info(
+            "[universe_membership] momzero arm not computed (%s) — cuts omitted, "
+            "recorded as a miss for that arm (I7573)",
+            exc,
+        )
+        return None
+    return {
+        ticker: rec["attractiveness_score"]
+        for ticker, rec in scored.items()
+        if isinstance(rec, dict) and rec.get("attractiveness_score") is not None
+    }
+
+
 def challenger_attractiveness_for_run(
     run_date: str, *, bucket: str | None = None, s3_client: Any = None
 ) -> dict[str, float] | None:
@@ -915,6 +1018,9 @@ def compute_and_write_universe_membership(
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
         challenger_attractiveness=challenger_attractiveness_for_run(
+            run_date, bucket=bucket, s3_client=s3_client
+        ),
+        momzero_attractiveness=momzero_attractiveness_for_run(
             run_date, bucket=bucket, s3_client=s3_client
         ),
         prior=prior,
