@@ -29,7 +29,6 @@ from scoring.universe_membership import (  # noqa: E402
     build_universe_membership,
 )
 
-
 # ── The definition itself ────────────────────────────────────────────────────
 
 
