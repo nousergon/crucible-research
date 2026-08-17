@@ -32,6 +32,38 @@ def handler_mod():
     yield mod
 
 
+def _fresh_state(as_of: str = "2026-05-25") -> dict:
+    return {
+        "schema_version": 1,
+        "as_of": as_of,
+        "dates_present": [as_of],
+        "last_capture_date": as_of,
+        "days_since_last_capture": 0,
+        "producers_on_last_capture_date": ["replay-concordance"],
+        "max_age_days": 8,
+    }
+
+
+@pytest.fixture(autouse=True)
+def capture_stream_alive():
+    """Default the capture-stream verdict to FRESH for the aggregation tests.
+
+    These tests are about what the handler does with the aggregation window;
+    the capture-stream detector (config-I7407 D4) is a separate assertion with
+    its own tests below and in ``test_cost_capture_freshness.py``. Without
+    this, every one of them would fail on a stale-capture raise about a
+    stream the test never set up — which would test the fixture, not the
+    handler.
+    """
+    with patch(
+        "scripts.cost_capture_freshness.evaluate_and_publish",
+        side_effect=lambda s3, bucket, **kw: _fresh_state(
+            kw["as_of"].isoformat()
+        ),
+    ) as p:
+        yield p
+
+
 def _ok_summary() -> dict:
     return {
         "rows_in": 1234,
@@ -306,3 +338,87 @@ class TestFanInCoverage:
             result = handler_mod.handler({"date": "2026-05-25"}, context=None)
         assert result["status"] == "OK"
         assert "coverage" not in result["summary"]
+
+
+class TestCaptureStreamFreshness:
+    """config-I7407 deliverable 4 — a freshness detector on CAPTURE itself.
+
+    ``llm_cost_parquet`` watches the product of capture. These assert the
+    handler now also grades the stream that feeds it, on BOTH terminal
+    paths, and that a dead stream reaches the Step Function's Catch rather
+    than a green ``SKIPPED``.
+    """
+
+    def test_verdict_lands_on_the_ok_result(self, handler_mod):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=True),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler({"date": "2026-05-25"}, context=None)
+        assert result["status"] == "OK"
+        assert result["capture_stream"]["last_capture_date"] == "2026-05-25"
+        assert result["capture_stream"]["producers"] == ["replay-concordance"]
+
+    def test_the_quiet_window_is_graded_not_accepted(
+        self, handler_mod, capture_stream_alive
+    ):
+        """A window with nothing in it is the exact shape of a total capture
+        outage, so the SKIPPED path must assert the stream, not return."""
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=False),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler({"date": "2026-05-25"}, context=None)
+        assert result["status"] == "SKIPPED"
+        assert capture_stream_alive.called
+        assert result["capture_stream"]["days_since_last_capture"] == 0
+
+    def test_a_dead_stream_raises_out_of_the_skipped_path(
+        self, handler_mod, capture_stream_alive
+    ):
+        """The regression this exists to prevent: capture stops fleet-wide,
+        the aggregator honestly finds nothing, and the stage succeeds."""
+        from scripts.cost_capture_freshness import CostCaptureStaleError
+
+        capture_stream_alive.side_effect = CostCaptureStaleError("stream empty")
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=False),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            with pytest.raises(CostCaptureStaleError):
+                handler_mod.handler({"date": "2026-05-25"}, context=None)
+
+    def test_a_dead_stream_raises_out_of_the_ok_path_too(
+        self, handler_mod, capture_stream_alive
+    ):
+        """A parquet built from an old partition is still a live parquet.
+        The window fix (#634) means an OK status can sit on top of a stream
+        that stopped days ago, so OK is not an exemption."""
+        from scripts.cost_capture_freshness import CostCaptureStaleError
+
+        capture_stream_alive.side_effect = CostCaptureStaleError("stream stale")
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs._has_raw_rows", return_value=True),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            with pytest.raises(CostCaptureStaleError):
+                handler_mod.handler({"date": "2026-05-25"}, context=None)
+
+    def test_the_dry_shell_run_does_not_grade_the_stream(self, handler_mod):
+        """``dry_run_llm`` is the Friday-Preflight bootstrap smoke — it reads
+        and writes no S3, so it has no verdict to offer and must not raise
+        one."""
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = handler_mod.handler(
+                {"date": "2026-05-25", "dry_run_llm": True}, context=None
+            )
+        assert result == {"status": "OK", "dry_run": True}
