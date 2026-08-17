@@ -594,6 +594,25 @@ def _aggregate_costs_summary() -> dict:
 
 
 class TestAggregateCostsCoverage:
+    @pytest.fixture(autouse=True)
+    def capture_stream_alive(self):
+        """These assert the STAGE-COVERAGE verdict, not the capture-stream
+        one (config-I7407 D4, tested in test_cost_capture_freshness.py).
+        The handler now grades the capture stream on both terminal paths and
+        raises when it is dead; against a MagicMock S3 the stream reads as
+        empty, so without this every case here would fail on a finding about
+        a stream the test never set up."""
+        with patch(
+            "scripts.cost_capture_freshness.evaluate_and_publish",
+            side_effect=lambda s3, bucket, **kw: {
+                "as_of": kw["as_of"].isoformat(),
+                "last_capture_date": kw["as_of"].isoformat(),
+                "days_since_last_capture": 0,
+                "producers_on_last_capture_date": ["replay-concordance"],
+            },
+        ):
+            yield
+
     def test_verdict_lands_on_ok(self, aggregate_costs_mod, stub_stage_coverage):
         with (
             patch.object(aggregate_costs_mod, "_ensure_init"),

@@ -272,6 +272,12 @@ def _run(event, context):
             "date": date_str,
             "lookback_days": lookback,
         }
+        # Deliberately on the SKIPPED path too, and before the return.
+        # "Nothing to aggregate" is exactly the shape a total capture
+        # outage takes, so the path that reports it is the path that must
+        # carry the capture verdict (config-I7407 deliverable 4). Raising
+        # here reaches the SF's States.ALL Catch.
+        _publish_capture_freshness(s3_client, bucket, target_date, skipped_result)
         _attach_stage_coverage(skipped_result, run_date=date_str, window_start=_started)
         return skipped_result
 
@@ -301,8 +307,43 @@ def _run(event, context):
         summary["coverage"] = coverage_verdict
 
     result = {"status": "OK", "summary": summary, "date": date_str}
+    _publish_capture_freshness(s3_client, bucket, target_date, result)
     _attach_stage_coverage(result, run_date=date_str, window_start=_started)
     return result
+
+
+def _publish_capture_freshness(s3_client, bucket: str, target_date, result: dict):
+    """Publish the capture-stream sentinel and assert the stream is alive.
+
+    config-I7407 deliverable 4. ``llm_cost_parquet`` watches the PRODUCT of
+    capture; until this ran, nothing watched capture. The two absences are
+    not the same: an aggregator that dies stops writing a parquet and ages
+    into STALE, while producers that all stop emitting leave the aggregator
+    correctly reporting ``SKIPPED`` on a green Step Function — the exact
+    shape of I7179, where 812s of LLM calls produced zero rows and five
+    detectors described it as five other things.
+
+    Raises :exc:`CostCaptureStaleError` past the ceiling, which reaches the
+    Step Function's ``States.ALL`` Catch and its DEGRADED terminal. That is
+    on purpose and is the whole deliverable: ``principles.md`` §2.7 —
+    *no data* is never rendered as green. Deliberately NOT swallowed into
+    the returned status, because nothing downstream reads this state's
+    status (see ``_check_fan_in_coverage`` above for the same reasoning).
+
+    Runs after the parquet write on the OK path and after the coverage check
+    on both, so a raise here never costs the run its primary artifact. It
+    also runs on the SKIPPED path, because a window with nothing in it is
+    precisely the case this is here to grade rather than accept.
+    """
+    from scripts.cost_capture_freshness import evaluate_and_publish
+
+    state = evaluate_and_publish(s3_client, bucket, as_of=target_date)
+    result["capture_stream"] = {
+        "last_capture_date": state["last_capture_date"],
+        "days_since_last_capture": state["days_since_last_capture"],
+        "producers": state["producers_on_last_capture_date"],
+    }
+    return state
 
 
 def _check_fan_in_coverage(event, bucket: str, date_str: str):

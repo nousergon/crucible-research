@@ -176,6 +176,13 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # post-step in signals_envelope_handler.py; one PUT site.
     "scoring/morning_brief.py": 1,
     "scripts/aggregate_costs.py": 1,
+    # Capture-stream sentinel (decision_artifacts/_cost_raw/latest.json),
+    # config-I7407 deliverable 4. REGISTERED in ARTIFACT_REGISTRY.yaml as
+    # llm_cost_capture_stream, not grandfathered: the whole point of the
+    # object is that the fleet freshness monitor watches it, and an
+    # unregistered sentinel is a detector nobody reads. One PUT site
+    # (write_capture_sentinel).
+    "scripts/cost_capture_freshness.py": 1,
     # Distillation SFT-corpus stats artifact
     # (decision_artifacts/distillation/corpus_stats/{date}.json + latest.json).
     # SECONDARY observability built fail-soft as a non-fatal post-step of the
