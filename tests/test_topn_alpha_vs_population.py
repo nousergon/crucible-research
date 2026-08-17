@@ -25,13 +25,19 @@ from scoring.leaderboard_scoring import (  # noqa: E402
     LEADERBOARD_SLOTS,
     SpecDay,
     SpecHistory,
-    _population_return_by_date,
     _topn_alpha_vs_population_metric,
+    population_return_from_panel,
     score_leaderboard,
     slot_spec,
 )
 
 # The fixture the baseline literals below were captured against.
+POPULATION = {
+    "2026-08-03": (0.05 + 0.02 - 0.01 + 0.03 - 0.04) / 5,
+    "2026-08-04": (-0.02 + 0.06 + 0.00 - 0.03 + 0.08) / 5,
+    "2026-08-05": (0.01 - 0.05 + 0.04 + 0.07 + 0.02) / 5,
+}
+
 REALIZED = {
     "2026-08-03": {"AAA": 0.05, "BBB": 0.02, "CCC": -0.01, "DDD": 0.03,
                    "EEE": -0.04, "SPY": 0.01},
@@ -63,7 +69,8 @@ CHAL = _hist("chal", "challenger", {
 
 @pytest.fixture
 def scored():
-    return score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2, horizon_days=21)
+    return score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2, horizon_days=21,
+                             population_returns=POPULATION)
 
 
 def _row(board, name):
@@ -122,7 +129,7 @@ def test_population_excludes_the_benchmark():
     narrowed'."""
     ret = REALIZED["2026-08-04"]
     with_spy = sum(ret.values()) / len(ret)
-    without = _population_return_by_date(ret, "SPY")
+    without = population_return_from_panel(ret, "SPY")
     assert without == pytest.approx((-0.02 + 0.06 + 0.00 - 0.03 + 0.08) / 5)
     assert without != pytest.approx(with_spy)
 
@@ -135,7 +142,7 @@ def test_population_metric_is_the_arithmetic_it_claims():
         (0.06 + 0.00) / 2 - (-0.02 + 0.06 + 0.00 - 0.03 + 0.08) / 5,
         (0.04 + 0.07) / 2 - (0.01 - 0.05 + 0.04 + 0.07 + 0.02) / 5,
     ]
-    got = _topn_alpha_vs_population_metric(CHAMP, REALIZED, 2, "SPY")
+    got = _topn_alpha_vs_population_metric(CHAMP, REALIZED, 2, POPULATION)
     assert got["mean"] == pytest.approx(sum(per_date) / 3, abs=1e-6)
     assert got["n_dates"] == 3
 
@@ -150,7 +157,8 @@ def test_metric_needs_no_benchmark():
     """Available on any slot and any date the other metrics are — the
     population comes from the realized join itself, not a separate fetch."""
     board = score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2,
-                              benchmark_ticker=None)
+                              benchmark_ticker=None,
+                              population_returns=POPULATION)
     for row in board["specs"]:
         assert row["topn_alpha_vs_benchmark"] is None
         assert row["topn_alpha_vs_population"] is not None
@@ -162,7 +170,8 @@ def test_benchmark_and_population_can_disagree_in_sign():
     realized = {"2026-08-03": {"A": 0.01, "B": 0.01, "C": 0.09, "D": 0.09,
                                "SPY": -0.02}}
     arm = _hist("arm", "champion", {"2026-08-03": ["A", "B"]})
-    board = score_leaderboard(arm, [], realized, top_n=2)
+    board = score_leaderboard(arm, [], realized, top_n=2,
+                              population_returns={"2026-08-03": (0.01 + 0.01 + 0.09 + 0.09) / 4})
     row = _row(board, "arm")
     assert row["topn_alpha_vs_benchmark"]["mean"] > 0   # beat SPY
     assert row["topn_alpha_vs_population"]["mean"] < 0  # lost to the universe
@@ -203,7 +212,59 @@ def test_failed_row_carries_the_new_field_as_null():
         name="broken", kind="challenger",
         by_date={"2026-08-03": SpecDay(ranked=None)},
     )
-    board = score_leaderboard(CHAMP, [broken], REALIZED, top_n=2)
+    board = score_leaderboard(CHAMP, [broken], REALIZED, top_n=2,
+                              population_returns=POPULATION)
     row = _row(board, "broken")
     assert "error" in row
     assert row["topn_alpha_vs_population"] is None
+
+
+# ── The defect this contract exists to prevent ───────────────────────────────
+
+
+def test_metric_is_null_without_a_supplied_population():
+    """A narrowed closes panel must yield a MISSING metric, never a wrong one.
+
+    Every leaderboard producer used to narrow its read to `_picked_symbols()` —
+    the union of the arms' own picks. Deriving the baseline from that map
+    computes "excess over the other arms' picks": a plausible number, close to
+    zero, and not the quantity the metric names. Absent is recoverable; quietly
+    the wrong baseline is the defect this whole metric was added to fix,
+    reintroduced one level down.
+    """
+    board = score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2)
+    for row in board["specs"]:
+        assert row["topn_alpha_vs_population"] is None
+
+
+def test_supplied_population_is_not_the_realized_mean():
+    """The two must be able to differ, or the parameter is decorative. Here the
+    real population is wider than anything the arms picked."""
+    wide = dict.fromkeys(REALIZED, -0.5)
+    board = score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2,
+                              population_returns=wide)
+    champ = _row(board, "champ")["topn_alpha_vs_population"]["mean"]
+    narrow = _row(
+        score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2,
+                          population_returns=POPULATION), "champ",
+    )["topn_alpha_vs_population"]["mean"]
+    assert champ != pytest.approx(narrow)
+    assert champ > narrow
+
+
+def test_multi_horizon_passes_each_horizons_own_population():
+    """A single population map reused across horizons would compare a 252-day
+    cut return against a 21-day population return."""
+    from scoring.leaderboard_scoring import score_multi_horizon
+
+    board = score_multi_horizon(
+        CHAMP, [CHAL], {21: REALIZED, 126: REALIZED},
+        top_n=2, horizons_days=(21, 126),
+        population_by_horizon={21: POPULATION, 126: dict.fromkeys(REALIZED, -0.5)},
+    )
+    blocks = {b["horizon_days"]: b for b in board["horizons"]}
+    m21 = next(r for r in blocks[21]["specs"] if r["name"] == "champ")
+    m126 = next(r for r in blocks[126]["specs"] if r["name"] == "champ")
+    assert m21["topn_alpha_vs_population"]["mean"] != pytest.approx(
+        m126["topn_alpha_vs_population"]["mean"]
+    )
