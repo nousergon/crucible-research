@@ -213,7 +213,7 @@ _INCUMBENT_CUT_N = 20
 CHALLENGER_CUT_PREFIX = "attractiveness_mom121_top_"
 _CHALLENGER_CUT_NS = (20, ATTRACTIVENESS_FEED_TOP_N)
 
-# ── Challenger cut registry (alpha-engine-config-I7573) ─────────────────────
+# ── Challenger cut registry (alpha-engine-config-I7574) ─────────────────────
 # Each arm varies ONE thing about how the ~903-name universe is ranked, so the
 # leaderboard can attribute a win to that thing. Two variables are in play and
 # they are deliberately NOT combined into one arm:
@@ -721,7 +721,7 @@ def build_universe_membership(
                 ),
             }
 
-    # Zero-momentum arm (alpha-engine-config-I7573). Same champion factor
+    # Zero-momentum arm (alpha-engine-config-I7574). Same champion factor
     # profiles, same pillar scores — only the WEIGHT vector differs, so this
     # arm and the champion cannot disagree about anything except how much the
     # momentum pillar counted. Same absent-is-a-miss rule as above.
