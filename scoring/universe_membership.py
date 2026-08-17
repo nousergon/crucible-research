@@ -199,6 +199,20 @@ its head — see the funnel invariant in :func:`build_universe_membership`."""
 # breadth held constant.
 _INCUMBENT_CUT_N = 20
 
+# ── Momentum-horizon challenger cut (alpha-engine-config-I7538) ─────────────
+# The champion attractiveness composite's momentum pillar puts 40% of its
+# weight at horizons of one month or less — the short-term-REVERSAL window —
+# and carries no 12-1 skip-month term. This arm re-ranks the SAME universe
+# with `scoring.factor_scoring.challenger_composite_defs()`, which differs
+# from the champion in `momentum_score` ONLY.
+#
+# Emitted at BOTH champion widths (20 and 60) so champion-vs-challenger is a
+# selection-rule comparison with breadth held constant — an arm's win must
+# never be confounded between the rule and its width
+# (champion-challenger-policy.md §4).
+CHALLENGER_CUT_PREFIX = "attractiveness_mom121_top_"
+_CHALLENGER_CUT_NS = (20, ATTRACTIVENESS_FEED_TOP_N)
+
 _DEFAULT_BUCKET = "alpha-engine-research"
 
 
@@ -450,6 +464,43 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
             )
 
 
+    # Momentum-horizon challenger arm (alpha-engine-config-I7538): the same
+    # two guards the incumbent arm gets, for the same reasons.
+    #
+    # COUNT-MATCH — the arm exists to answer "which momentum horizon ranks
+    # better", and an arm compared at a different width answers a question
+    # about breadth instead (§4).
+    #
+    # VACUITY — if the challenger resolves to the SAME membership as the
+    # champion, every assertion still passes and the leaderboard reports a
+    # well-formed comparison of an arm against itself (§4, alpha-engine-config
+    # -I6429). The two definitions differ only in the momentum pillar, so an
+    # identical top-20 is the signature of the override having silently not
+    # applied — precisely the failure this must not render as a tie.
+    for n in _CHALLENGER_CUT_NS:
+        challenger_cut = _cuts.get(f"{CHALLENGER_CUT_PREFIX}{n}")
+        if challenger_cut is None:
+            continue
+        if challenger_cut["size"] != n:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: count-match broken — "
+                f"{CHALLENGER_CUT_PREFIX}{n}.size={challenger_cut['size']}, "
+                f"must equal {n}. A short challenger table must not silently "
+                f"narrow the arm and turn a horizon comparison into a breadth one."
+            )
+        counterpart = _cuts.get(f"attractiveness_top_{n}")
+        if counterpart is not None and set(challenger_cut["tickers"]) == set(counterpart["tickers"]):
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: vacuous challenger — "
+                f"{CHALLENGER_CUT_PREFIX}{n} resolves to the same {n} names as "
+                f"attractiveness_top_{n}. The two composites differ in the "
+                f"momentum pillar, so identical membership means the challenger "
+                f"definition did not apply. Scoring this would compare the "
+                f"champion against itself and report it as a tie "
+                f"(champion-challenger-policy.md §4)."
+            )
+
+
 def compute_turnover(current: dict, prior: dict | None) -> dict | None:
     """Per-cut membership delta of ``current`` against the PRIOR write, or None.
 
@@ -517,6 +568,7 @@ def build_universe_membership(
     attractiveness: dict[str, float],
     *,
     tech_scores: dict[str, float] | None = None,
+    challenger_attractiveness: dict[str, float] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
     prior: dict | None = None,
@@ -602,6 +654,28 @@ def build_universe_membership(
             "tickers": incumbent,
             "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score",
         }
+
+    # Momentum-horizon challenger arm (alpha-engine-config-I7538). Ranked over
+    # the SAME universe by the SAME machinery — only the momentum pillar's
+    # component definition differs. Omitted entirely rather than faked when the
+    # challenger profiles are unavailable: an absent arm is a recorded miss
+    # (champion-challenger-policy.md §3), whereas a cut silently falling back
+    # to champion scores would enter the leaderboard as a challenger that is
+    # actually the champion — the §4 vacuity case, and it would read as a
+    # legitimate tie forever.
+    if challenger_attractiveness:
+        challenger_ranks = _rank_table(challenger_attractiveness)
+        for n in _CHALLENGER_CUT_NS:
+            tickers = _top_n(challenger_ranks, n)
+            cuts[f"{CHALLENGER_CUT_PREFIX}{n}"] = {
+                "basis": "attractiveness_rank_mom121",
+                "size": len(tickers),
+                "tickers": tickers,
+                "source": (
+                    f"scanner/factor_profiles_shadow/mom121/{run_date}/"
+                    "profiles.json::attractiveness_score"
+                ),
+            }
 
     assert_cut_invariants({"cuts": cuts}, run_date)
 
@@ -762,6 +836,48 @@ def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
+def challenger_attractiveness_for_run(
+    run_date: str, *, bucket: str | None = None, s3_client: Any = None
+) -> dict[str, float] | None:
+    """``{ticker: attractiveness_score}`` under the mom121 challenger composite,
+    or ``None`` when the shadow profiles are unreadable.
+
+    Fail-soft, unlike :func:`attractiveness_for_run`. That one is load-bearing —
+    without it the predictor has no universe. This one feeds an OBSERVE-only
+    arm, so its absence must never red a Scanner run whose champion output is
+    fine. Returning ``None`` (rather than an empty dict or a champion fallback)
+    is what makes `build_universe_membership` omit the arm's cuts entirely,
+    which the leaderboard records as a miss for that arm
+    (champion-challenger-policy.md §3) instead of scoring the champion twice.
+    """
+    import boto3
+
+    from scoring.factor_scoring import CHALLENGER_PROFILE_PREFIX
+    from scoring.universe_board import attractiveness_from_factor_profiles
+
+    key = f"{CHALLENGER_PROFILE_PREFIX}/{run_date}/by_ticker.json"
+    try:
+        s3 = s3_client or boto3.client("s3")
+        obj = s3.get_object(Bucket=_bucket(bucket), Key=key)
+        profiles = json.loads(obj["Body"].read())
+    except Exception as exc:  # noqa: BLE001 — observe-only arm
+        logger.info(
+            "[universe_membership] mom121 challenger profiles unreadable at %s (%s) "
+            "— challenger cut omitted, recorded as a miss for that arm",
+            key,
+            exc,
+        )
+        return None
+    if not profiles:
+        return None
+    scored = attractiveness_from_factor_profiles(profiles)
+    return {
+        ticker: rec["attractiveness_score"]
+        for ticker, rec in scored.items()
+        if isinstance(rec, dict) and rec.get("attractiveness_score") is not None
+    }
+
+
 def compute_and_write_universe_membership(
     run_date: str,
     scanner_tickers: list[str],
@@ -798,6 +914,9 @@ def compute_and_write_universe_membership(
         scanner_tickers,
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
+        challenger_attractiveness=challenger_attractiveness_for_run(
+            run_date, bucket=bucket, s3_client=s3_client
+        ),
         prior=prior,
     )
     membership["cut_refresh_cadence"] = cadence
