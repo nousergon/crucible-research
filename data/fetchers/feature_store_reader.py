@@ -100,6 +100,13 @@ _TECHNICAL_COLS: tuple[str, ...] = (
 _FACTOR_TECHNICAL_COLS: tuple[str, ...] = (
     "atr_14_pct",
     "dist_from_52w_high",
+    # 12-1 skip-month momentum. Read for the I7538 momentum-horizon CHALLENGER
+    # composite, which the champion definitions do not reference. Safe to add
+    # to this (non-fail-soft) read: the column is long-shipped, is part of the
+    # ArcticDB universe descriptor, and measured 100% non-null over 901 names
+    # on the 2026-08-14 snapshot — unlike its sibling `residual_momentum_ratio`
+    # (I7539), which is present but identically 0.0 and must NOT be used.
+    "mom_12_1_pct",
     "momentum_20d",
     "momentum_5d",
     "realized_vol_20d",
