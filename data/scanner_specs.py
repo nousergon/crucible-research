@@ -19,6 +19,17 @@ both scored on realized outcomes, promotion manual + evidence-gated).
   neutralizes — i.e. the scanner SHOULD keep momentum even though the composite
   does not. Emitted to ``candidates_shadow/{spec}/{date}/candidates.json`` and
   scored forward; never touches the live pool until manually promoted.
+- **Challenger** (`mom_12_1_sleeve`): the HORIZON challenger. `momentum_sleeve`
+  established that the scanner should KEEP momentum; it did not establish at
+  which horizon to READ it, and every momentum input the scanner currently
+  uses — ``tech_score``'s ``momentum_20d`` term and `momentum_sleeve`'s
+  ``mean(z(momentum_20d), z(return_60d))`` — sits at 1 to 3 months. That is
+  the short-term-REVERSAL window (Jegadeesh 1990), not the 12-1 skip-month
+  window the Jegadeesh-Titman momentum premium is defined over, and the
+  scanner's objective is names attractive over ~1 year. This arm ranks on
+  ``z(mom_12_1_pct)`` alone, holding eligibility, width and clock constant,
+  so the leaderboard isolates the horizon question from the keep-momentum
+  question `momentum_sleeve` already answered (alpha-engine-config-I7541).
 
 A challenger reuses the live scanner's own gate decisions (the per-ticker
 ``_last_eval_log`` stashed by ``run_quant_filter``) — so the hard gates
@@ -68,6 +79,67 @@ def _rank_momentum_sleeve(
     return [t for t, _ in scored[:top_n]]
 
 
+def _rank_mom_12_1_sleeve(
+    eval_log: list[dict],
+    factor_loadings: dict[str, dict[str, float]] | None,
+    params: dict,
+) -> list[str]:
+    """Rank the liquidity-eligible universe by z(mom_12_1_pct) and return the
+    top-N tickers (count-matched to the live scanner's ``momentum_top_n``).
+
+    The horizon challenger to ``momentum_sleeve``. That arm ranks on
+    mean(z(momentum_20d), z(return_60d)) — 1-month and 3-month returns. Both
+    sit inside the window where cross-sectional momentum REVERSES rather than
+    persists (Jegadeesh 1990); neither is the 12-1 skip-month horizon the
+    Jegadeesh-Titman momentum premium is defined over. This arm holds
+    everything else constant (same eligibility, same width, same clock) and
+    varies ONLY the momentum horizon, so the leaderboard answers exactly one
+    question: at which horizon should the scanner read momentum?
+
+    That the two arms genuinely differ is measured, not assumed — on the
+    2026-08-14 snapshot over 901 names, ``mom_12_1_pct`` is Spearman -0.14
+    against ``momentum_20d`` and -0.03 against ``return_60d``. The vacuity
+    guard (champion-challenger-policy.md §4) would fire if they resolved to
+    the same membership; they do not come close.
+
+    Eligibility mirrors ``_rank_momentum_sleeve`` exactly — ``liquidity_pass
+    == 1``, no re-gate on ``tech_score`` (that IS the champion's ranking
+    signal, held out of the comparison). Names without the loading are
+    dropped rather than imputed: a name whose 12-1 momentum is unknown has no
+    place in a ranking BY 12-1 momentum, and a neutral fill would quietly
+    seed the middle of the cut with names that were never scored.
+    """
+    top_n = params.get("momentum_top_n") or 60
+    if not factor_loadings:
+        return []
+    eligible = [r["ticker"] for r in eval_log if r.get("liquidity_pass") == 1]
+    scored: list[tuple[str, float]] = []
+    for ticker in eligible:
+        fl = factor_loadings.get(ticker)
+        if not fl:
+            continue
+        z = fl.get("mom_12_1_pct_zscore")
+        if z is None:
+            continue
+        scored.append((ticker, z))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:top_n]]
+
+
+# Factor-loading columns the SHADOW substrate reads. Deliberately a superset
+# of the reader's default tuple (which serves the live, non-fail-soft
+# attractiveness path): a column only the challenger arms need is requested
+# only where a missing column is survivable. Adding an arm that reads a new
+# loading means adding it here, not widening the reader's default.
+SHADOW_FACTOR_LOADING_COLS: tuple[str, ...] = (
+    "momentum_20d_zscore",
+    "return_60d_zscore",
+    "mom_12_1_pct_zscore",
+    "beta_60d_zscore",
+    "size_zscore",
+)
+
+
 @dataclass(frozen=True)
 class ScannerSpec:
     """A named candidate-generation build. ``rank`` is ``None`` for the champion
@@ -98,6 +170,15 @@ SCANNER_SPECS: dict[str, ScannerSpec] = {
         description="z(momentum_20d)+z(return_60d) over the liquidity-eligible "
         "universe, count-matched top-N (config#1186)",
         rank=_rank_momentum_sleeve,
+    ),
+    "mom_12_1_sleeve": ScannerSpec(
+        name="mom_12_1_sleeve",
+        kind="challenger",
+        version="v1",
+        description="z(mom_12_1_pct) — 12-1 skip-month momentum — over the "
+        "liquidity-eligible universe, count-matched top-N. Horizon "
+        "challenger to momentum_sleeve (alpha-engine-config-I7541)",
+        rank=_rank_mom_12_1_sleeve,
     ),
 }
 
