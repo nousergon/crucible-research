@@ -318,9 +318,6 @@ rm -f "/tmp/research-config-${RUN_ID}.tgz"
 # ── SSM dispatch primitive (lib chokepoint) ──────────────────────────────────
 # Thin wrapper around `python -m krepis.ssm_dispatcher run` (invoked directly
 # via krepis per config#1649); failure-only substrate, preserves inner exit.
-# --resource-limit names the instance-types this launcher chose (sf-pipeline-
-# policy §3 obligation 3): the dispatcher knows its own executionTimeout, but
-# only the launcher knows which instance types the stage was allowed to use.
 run_ssm() {
     local description="$1" timeout_s="${2:-3600}"
     "$LIB_PYTHON" -m krepis.ssm_dispatcher run \
@@ -332,7 +329,6 @@ run_ssm() {
         --region "$AWS_REGION" \
         --diagnostics-bucket "$S3_BUCKET" \
         --diagnostics-prefix "_spot_diagnostics/ae-research" \
-        --resource-limit "instance-types=${INSTANCE_TYPES}" \
         --script-stdin
 }
 
