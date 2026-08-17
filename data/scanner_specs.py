@@ -29,7 +29,7 @@ both scored on realized outcomes, promotion manual + evidence-gated).
   scanner's objective is names attractive over ~1 year. This arm ranks on
   ``z(mom_12_1_pct)`` alone, holding eligibility, width and clock constant,
   so the leaderboard isolates the horizon question from the keep-momentum
-  question `momentum_sleeve` already answered (alpha-engine-config-I7541).
+  question `momentum_sleeve` already answered (alpha-engine-config-I7544).
 
 A challenger reuses the live scanner's own gate decisions (the per-ticker
 ``_last_eval_log`` stashed by ``run_quant_filter``) — so the hard gates
@@ -177,7 +177,7 @@ SCANNER_SPECS: dict[str, ScannerSpec] = {
         version="v1",
         description="z(mom_12_1_pct) — 12-1 skip-month momentum — over the "
         "liquidity-eligible universe, count-matched top-N. Horizon "
-        "challenger to momentum_sleeve (alpha-engine-config-I7541)",
+        "challenger to momentum_sleeve (alpha-engine-config-I7544)",
         rank=_rank_mom_12_1_sleeve,
     ),
 }
