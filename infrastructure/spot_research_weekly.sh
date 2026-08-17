@@ -64,6 +64,10 @@ ALPHA_ENGINE_EXPERIMENT_ID="${ALPHA_ENGINE_EXPERIMENT_ID:-reference}"
 # Order = preference; the lib CLI tries each until one launches.
 INSTANCE_TYPES="${INSTANCE_TYPES:-c5.large,m5.large,c6i.large,c5a.large}"
 INSTANCE_TYPE=""
+# Stage slug for krepis.spot_evidence (evidence prefix + sweep) and for the
+# ssm_log_capture --slug already used below — kept as one name so a failure's
+# S3 paths and its evidence copy live under the same key.
+SPOT_STAGE_NAME="research-weekly"
 AMI_ID="ami-0c421724a94bba6d6"      # Amazon Linux 2023 x86_64
 # Weekly Research runs ~15 min primary (874s on 2026-07-03) + RAG/held-name
 # tail; 90 min with headroom covers that plus pip install + preflight.
@@ -158,14 +162,55 @@ fi
 INSTANCE_ID=""
 S3_STAGING=""
 
+# ── Failure-evidence teardown (alpha-engine-config-I7442) ───────────────────
+# WHY: run_ssm's --output-key-prefix points OutputS3KeyPrefix (below) at
+# ${S3_STAGING_PREFIX}/ssm-output -- the SSM agent's own upload of the FULL
+# remote stdout/stderr, the only copy not subject to GetCommandInvocation's
+# 24KB inline cap. The unguarded `aws s3 rm "$S3_STAGING" --recursive` this
+# replaced destroyed that upload on every failure exit, in the same breath
+# that printed a path pointing at it -- the 2026-08-15 PredictorBacktest
+# failure (a sibling launcher) is now permanently unrecoverable because of
+# it. Route through the shared chokepoint instead of reimplementing
+# retain-then-sweep in bash here: `krepis.spot_evidence teardown` (krepis
+# branch fix/i7442-resource-kill-classifier) copies the prefix to
+# `_spot_evidence/<slug>/<date>/<run-id>/` FIRST and deletes staging only if
+# that copy succeeded; on a successful run it deletes with nothing retained.
+# Reference: crucible-backtester#675's `_spot_common.sh::
+# spot_common_teardown_staging` -- mirrored here inline because this repo has
+# no shared `_spot_common.sh` to source (policy-shared-code: a second,
+# divergent bash reimplementation of the same 55-line retain/sweep logic is
+# exactly what the chokepoint exists to prevent).
+_teardown_staging() {
+    local _exit_code="$1"
+    if [ -z "$S3_STAGING" ]; then
+        return 0
+    fi
+    if "$LIB_PYTHON" -m krepis.spot_evidence teardown \
+            --staging "$S3_STAGING" \
+            --slug "$SPOT_STAGE_NAME" \
+            --exit-code "$_exit_code"; then
+        return 0
+    fi
+    # FAIL-SAFE DIRECTION IS LOAD-BEARING: an unreachable chokepoint (a box
+    # whose krepis pin predates the release carrying spot_evidence) must
+    # RETAIN the staging prefix, never fall back to `aws s3 rm` -- that
+    # fallback is the exact defect alpha-engine-config-I7442 removes, and
+    # this is what makes the merge order safe before every box's krepis pin
+    # is bumped. Must not change the trap's exit status: always return 0.
+    echo "  spot_evidence: chokepoint unavailable via $LIB_PYTHON — S3 staging RETAINED at $S3_STAGING/ (not deleted)" >&2
+    echo "    Full stage stdout/stderr: $S3_STAGING/ssm-output/" >&2
+    return 0
+}
+
 cleanup() {
+    local exit_code="${1:-0}"
     if [ -n "$INSTANCE_ID" ]; then
         echo ""
         echo "==> Terminating spot instance $INSTANCE_ID..."
         aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$AWS_REGION" --output text > /dev/null 2>&1 || true
     fi
-    [ -n "$S3_STAGING" ] && aws s3 rm "$S3_STAGING" --recursive --quiet 2>/dev/null || true
-    [ -n "$INSTANCE_ID" ] && echo "  Instance terminated; S3 staging cleaned."
+    _teardown_staging "$exit_code"
+    [ -n "$INSTANCE_ID" ] && echo "  Instance terminated; S3 staging routed through krepis.spot_evidence teardown."
     return 0
 }
 
@@ -206,7 +251,7 @@ on_exit() {
     if [ "$rc" -ne 0 ]; then
         reason="$(_spot_failure_reason "$rc")" || reason=""
     fi
-    cleanup
+    cleanup "$rc"
     if [ "$rc" -ne 0 ] && [ -n "$reason" ] && [ "$SPOT_ATTEMPT" -lt "$MAX_SPOT_ATTEMPTS" ]; then
         aws cloudwatch put-metric-data \
             --namespace "AlphaEngine" \
@@ -273,6 +318,9 @@ rm -f "/tmp/research-config-${RUN_ID}.tgz"
 # ── SSM dispatch primitive (lib chokepoint) ──────────────────────────────────
 # Thin wrapper around `python -m krepis.ssm_dispatcher run` (invoked directly
 # via krepis per config#1649); failure-only substrate, preserves inner exit.
+# --resource-limit names the instance-types this launcher chose (sf-pipeline-
+# policy §3 obligation 3): the dispatcher knows its own executionTimeout, but
+# only the launcher knows which instance types the stage was allowed to use.
 run_ssm() {
     local description="$1" timeout_s="${2:-3600}"
     "$LIB_PYTHON" -m krepis.ssm_dispatcher run \
@@ -284,6 +332,7 @@ run_ssm() {
         --region "$AWS_REGION" \
         --diagnostics-bucket "$S3_BUCKET" \
         --diagnostics-prefix "_spot_diagnostics/ae-research" \
+        --resource-limit "instance-types=${INSTANCE_TYPES}" \
         --script-stdin
 }
 
