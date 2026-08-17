@@ -432,6 +432,32 @@ def _run(event, context):
         )
         leaderboard_status = {"status": "error", "error": str(exc)}
 
+    # ── Funnel-cut leaderboard (alpha-engine-config-I7584) ───────────────────
+    # Scores attractiveness_top_60, attractiveness_top_20 and the gate baseline
+    # against the population each narrowed. Runs immediately after the scanner
+    # leaderboard and INSIDE the same invocation deliberately: both now need the
+    # full-universe closes panel (config-I7587), and the in-process panel cache
+    # in leaderboard_producers means the second build reuses the first's read
+    # rather than paying for a second ~904-symbol ArcticDB slice. Same
+    # observe-only, fail-soft contract; the live candidates.json is already
+    # written and can never be downgraded by anything here.
+    cuts_leaderboard_status: dict = {}
+    try:
+        from scoring.leaderboard_producers import build_cuts_leaderboard
+
+        cuts_leaderboard_status = build_cuts_leaderboard(s3_client, bucket, run_date)
+        logger.info(
+            "[scanner_handler] cuts leaderboard status=%s key=%s",
+            cuts_leaderboard_status.get("status"),
+            cuts_leaderboard_status.get("key"),
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only, live unaffected
+        logger.warning(
+            "[scanner_handler] cuts leaderboard build failed (non-fatal, live unaffected): %s",
+            exc,
+        )
+        cuts_leaderboard_status = {"status": "error", "error": str(exc)}
+
     summary = {
         "s3_key": s3_key,
         "scanner_tickers": len(artifact["scanner_tickers"]),
@@ -445,6 +471,10 @@ def _run(event, context):
         "leaderboard": {
             "status": leaderboard_status.get("status"),
             "key": leaderboard_status.get("key"),
+        },
+        "cuts_leaderboard": {
+            "status": cuts_leaderboard_status.get("status"),
+            "key": cuts_leaderboard_status.get("key"),
         },
         "universe_board": {
             "status": "OK" if universe_board_key else "error",

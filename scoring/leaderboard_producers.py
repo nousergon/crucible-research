@@ -118,6 +118,17 @@ _BENCHMARK_TICKER = "SPY"
 _SCANNER_OUTPUT = "scanner/leaderboard/{date}.json"
 _PRODUCER_OUTPUT = "research/producer_leaderboard/{date}.json"
 
+_CUTS_OUTPUT = "research/cuts_leaderboard/{date}.json"
+_MEMBERSHIP = "universe_membership/{date}/membership.json"
+
+# Within-invocation closes-panel dedup (alpha-engine-config-I7584). Three
+# leaderboards now run in one Scanner invocation and, since config-I7587, each
+# needs the FULL universe panel rather than its own arms' picks. Without this
+# that is three identical ~904-symbol ArcticDB reads sized to 252 sessions —
+# the dominant cost of the whole observe path, paid three times for one answer.
+# Not a cross-run cache: see the key construction in _load_closes_panel.
+_PANEL_CACHE: dict[tuple, dict[str, dict[str, float]]] = {}
+
 _CANDIDATES_SHADOW = "candidates_shadow/{spec}/{date}/candidates.json"
 _CANDIDATES_LIVE = "candidates/{date}/candidates.json"
 _SIGNALS_SHADOW = "signals_shadow/{producer}/{date}/signals.json"
@@ -347,7 +358,29 @@ def _load_closes_panel(
     exactly what hid I5195 for a month.
     """
     loader = closes_panel_loader or _closes_panel_from_arcticdb
+    cache_key = (
+        bucket,
+        tuple(sorted(set(entry_dates))),
+        horizon_days,
+        None if symbols is None else tuple(sorted(symbols)),
+        id(loader),
+    )
+    cached = _PANEL_CACHE.get(cache_key)
+    if cached is not None:
+        logger.info(
+            "[leaderboard] reusing the in-process closes panel (%d dates, %s)",
+            len(cached), "full universe" if symbols is None else f"{len(symbols)} symbols",
+        )
+        return cached
     panel = loader(bucket, entry_dates, horizon_days, symbols)
+    if panel:
+        # Keyed on every input that changes the panel's CONTENT, entry dates
+        # included, so a warm Lambda crossing a trading day cannot serve
+        # yesterday's panel. Bounded to one entry: the leaderboards in a single
+        # invocation ask for the same panel, which is the whole point — this is
+        # a within-invocation dedup, not a cross-run store.
+        _PANEL_CACHE.clear()
+        _PANEL_CACHE[cache_key] = panel
     if not panel:
         raise LeaderboardUnmeasurableError(
             "closes panel is empty — no realized returns can be computed for "
@@ -1019,6 +1052,159 @@ def build_scanner_leaderboard(
             ),
             source="research:scanner_leaderboard",
             dedup_key=f"scanner_leaderboard_build_error:{date_str}",
+        )
+        return {"status": "error", "error": str(exc)}
+
+
+def _load_cut_specs(
+    s3: Any, bucket: str, dates: list[str],
+) -> tuple[list[SpecHistory], dict[str, int]]:
+    """The funnel's cuts as SpecHistories, plus each arm's natural width.
+
+    Reads ``universe_membership/{date}/membership.json::cuts`` — the SSoT for
+    which names were in which cut on a cycle — rather than re-deriving
+    membership from the board or the rank table, which is the multi-writer
+    drift the membership artifact exists to end.
+
+    Cut NAMES come from the membership module's constants, never as literals:
+    ``crucible-research-PR648`` renamed the gate cut, and a literal here would
+    have silently stopped matching.
+
+    A cut carries no per-ticker score, so the rank order IS the signal — same
+    contract as :func:`_load_scanner_specs`. Membership stores tickers sorted
+    alphabetically for the gate cut (set semantics), so its rank-IC is
+    meaningless and only its population-relative excess is interpretable; that
+    is a property of the source artifact, recorded here rather than hidden.
+    """
+    from scoring.universe_membership import (
+        FEED_CUT_NAME,
+        GATE_BASELINE_CUT,
+        PREDICTOR_UNIVERSE_CUT,
+    )
+
+    wanted = (FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, GATE_BASELINE_CUT)
+    hists = {name: SpecHistory(name=name, kind="challenger") for name in wanted}
+    widths: dict[str, int] = {}
+    for d in dates:
+        doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d))
+        cuts = (doc or {}).get("cuts") or {}
+        for name in wanted:
+            block = cuts.get(name)
+            tickers = (block or {}).get("tickers")
+            if not tickers:
+                continue
+            hists[name].by_date[d] = SpecDay(ranked=list(tickers))
+            widths[name] = max(widths.get(name, 0), len(tickers))
+    return [h for h in hists.values() if h.by_date], widths
+
+
+def build_cuts_leaderboard(
+    s3: Any,
+    bucket: str,
+    date_str: str,
+    *,
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    horizons_days: list[int] | None = None,
+    write: bool = True,
+    closes_panel_loader: Any = None,
+) -> dict:
+    """Score the funnel's own cuts against the population they narrowed
+    (alpha-engine-config-I7584), writing ``research/cuts_leaderboard/{date}.json``.
+
+    Separate from the scanner leaderboard ON PURPOSE. That slot count-matches
+    every arm at 50 because its arms are competing candidate-generation rules
+    and a win must not be confounded between rule and breadth (§4). These arms
+    are the funnel's own stages, which differ in breadth BY DEFINITION —
+    ``attractiveness_top_20`` is the HEAD of ``attractiveness_top_60``, so
+    asking which beats the other is incoherent, and truncating both to a common
+    width would measure an artifact nobody consumes. Each is scored at its own
+    width against the population, which is the only comparison that means
+    anything for a funnel stage.
+
+    Every arm is ``kind="challenger"`` with no champion: they are not competing.
+    ``topn_alpha_vs_champion`` is therefore null throughout, by construction and
+    not by failure.
+
+    OBSERVE-ONLY + FAIL-SOFT, same contract as the sibling producers.
+    """
+    try:
+        slot = slot_spec("cuts")
+        horizons = _resolve_horizons(horizons_days, horizon_days, slot.horizons_days)
+        dates = _cohort_dates(s3, bucket, "universe_membership/", depth=0)
+        # `universe_membership/` also holds `latest.json`; only dated prefixes
+        # are cohort dates.
+        dates = [d for d in dates if len(d) == 10 and d[4] == "-"]
+        arms, widths = _load_cut_specs(s3, bucket, dates)
+        if not arms:
+            return {"status": "unmeasurable", "reason": "no membership cuts readable"}
+        try:
+            realized_by_horizon, horizon_notes, population_by_horizon = (
+                _resolve_realized_returns_by_horizon(
+                    bucket, dates, horizons, symbols=None,
+                    closes_panel_loader=closes_panel_loader,
+                )
+            )
+        except LeaderboardUnmeasurableError as exc:
+            return _unmeasurable_result(
+                s3, bucket, date_str, leaderboard_id="cuts",
+                output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
+                reason=str(exc), write=write,
+            )
+
+        # Each arm is scored in its OWN single-arm pass at its OWN width, then
+        # the rows are merged. score_multi_horizon takes one `top_n` for the
+        # whole call, so a single call could not give three arms three widths
+        # without silently truncating two of them.
+        merged: dict | None = None
+        for arm in arms:
+            width = widths.get(arm.name) or 0
+            if width <= 0:
+                continue
+            scored = score_multi_horizon(
+                None, [arm], realized_by_horizon,
+                top_n=width, horizons_days=horizons,
+                min_dates_for_inference=slot.min_dates_for_inference,
+                horizon_notes=horizon_notes,
+                population_by_horizon=population_by_horizon,
+            )
+            for row in scored.get("specs", []):
+                row["top_n"] = width
+            for block in scored.get("horizons", []):
+                for row in block.get("specs", []):
+                    row["top_n"] = width
+            if merged is None:
+                merged = scored
+                continue
+            merged["specs"].extend(scored.get("specs", []))
+            by_h = {b["horizon_days"]: b for b in merged.get("horizons", [])}
+            for block in scored.get("horizons", []):
+                target = by_h.get(block["horizon_days"])
+                if target is not None:
+                    target["specs"].extend(block.get("specs", []))
+
+        if merged is None:
+            return {"status": "unmeasurable", "reason": "no cut had a usable width"}
+        _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
+        merged["leaderboard_id"] = "cuts"
+        merged["date"] = date_str
+        # The slot-level top_n is meaningless here and must not be read as one.
+        merged["top_n"] = None
+        merged["per_arm_width"] = True
+        merged["widths"] = widths
+        key = _write_leaderboard(s3, bucket, _CUTS_OUTPUT.format(date=date_str), merged) if write else None
+        return {"status": "ok", "key": key, "leaderboard": merged}
+    except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
+        logger.warning(
+            "[leaderboard] cuts leaderboard build failed (non-fatal, observe-only): %s", exc,
+        )
+        publish_observe_alert(
+            message=(
+                f"[leaderboard] cuts leaderboard build FAILED on {date_str} "
+                f"(observe-only, non-fatal): {exc}. "
+                f"{_CUTS_OUTPUT.format(date=date_str)} NOT written to S3."
+            ),
+            source="research:cuts_leaderboard",
+            dedup_key=f"cuts_leaderboard_build_error:{date_str}",
         )
         return {"status": "error", "error": str(exc)}
 
