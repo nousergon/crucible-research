@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring import universe_membership as um  # noqa: E402
 
-EQUAL = {p: 1 / 6 for p in um.PILLAR_ORDER_FOR_WEIGHTS}
+EQUAL = dict.fromkeys(um.PILLAR_ORDER_FOR_WEIGHTS, 1 / 6)
 MOM_ZERO = dict(um.MOMZERO_PILLAR_WEIGHTS)
 
 
