@@ -110,7 +110,12 @@ class TestTheSinkStaysAnEnvironmentFact:
         import re
 
         req = (_REPO_ROOT / "requirements.txt").read_text()
-        m = re.search(r"^krepis>=(\d+)\.(\d+)\.(\d+)", req, re.MULTILINE)
+        # Accepts `>=` and `==` (alpha-engine-config-I7629). The property is
+        # "the krepis this image resolves is at or above X", and an EXACT pin
+        # establishes it more strongly than a floor — it IS the resolved
+        # version. Reading only `>=` made this guard fail closed on the correct
+        # fix, reporting the requirement ABSENT when the line became a pin.
+        m = re.search(r"^krepis\s*(?:>=|==)\s*(\d+)\.(\d+)\.(\d+)", req, re.MULTILINE)
         assert m, "requirements.txt declares no krepis floor at all"
         floor = tuple(int(g) for g in m.groups())
         assert floor >= (0, 57, 0), (

@@ -269,7 +269,25 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # lambda/ now calls in a `finally`. 0.59.7 emits the four cost-contract
 # columns and has no way to WRITE them — a frozen Lambda container never
 # runs the atexit hook the sink otherwise relies on.
-krepis>=0.59.8  # floor raised for the cost-record contract columns + the flush
+# EXACT PIN, not a floor (alpha-engine-config-I7629). The rule is already
+# written down at crucible-predictor/requirements.txt:80 — "first-party/
+# fast-moving deps are pinned, never floored" — and predictor is the one
+# LLM-adjacent repo the 2026-08-18 incident did not touch.
+#
+# krepis 0.59.15/0.59.16 (krepis#95, merged 2026-08-18 17:52) added a
+# fail-closed in-process DLP scan to LLMClient. This image carries no gitleaks
+# binary, so every evals/judge.py call would raise `DLP scan blocked outbound
+# request: gitleaks binary not found on PATH — failing closed`. Confirmed
+# broken in crucible-evaluator, which had the identical floor-pin + no-gitleaks
+# shape; this repo is the second consumer of the same client.
+#
+# 0.59.14 is the last release before the hook, and is what this floor resolved
+# to yesterday. Adopting the hook properly — bundling the binary and its config
+# so the scan actually RUNS — is tracked on config-I7629.
+#
+# Original floor note, preserved: raised for the cost-record contract columns
+# + the flush.
+krepis==0.59.14
 # (alpha-engine-config-I7393): schema_version / run_id / agent_id / model_name
 # first ship in 0.59.7 (krepis-PR154). nousergon-lib's transparency_inventory
 # `cost_telemetry` row asserts all four present, and this repo is the ONLY

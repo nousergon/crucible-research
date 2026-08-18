@@ -93,7 +93,10 @@ def test_no_module_on_the_llm_path_constructs_the_openai_sdk_directly():
 
 def _krepis_floor() -> tuple[int, int, int]:
     text = (_REPO_ROOT / "requirements.txt").read_text()
-    match = re.search(r"^krepis\s*>=\s*(\d+)\.(\d+)\.(\d+)", text, re.MULTILINE)
+    # Accepts `>=` and `==` (alpha-engine-config-I7629) — see
+    # test_cost_sink_deploy_wiring.py for why an exact pin satisfies a
+    # floor-shaped requirement at least as strongly.
+    match = re.search(r"^krepis\s*(?:>=|==)\s*(\d+)\.(\d+)\.(\d+)", text, re.MULTILINE)
     assert match, "requirements.txt must pin a krepis floor"
     return tuple(int(g) for g in match.groups())  # type: ignore[return-value]
 
