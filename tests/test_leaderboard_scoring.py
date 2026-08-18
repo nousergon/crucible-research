@@ -255,7 +255,20 @@ class TestScannerLeaderboardProducer:
 
         # live champion candidates + one shadow challenger for one cohort date.
         entry = "2026-06-01"
-        _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": ["A", "B", "C", "D"]})
+        # `scanner_tickers` is the quant filter's EMISSION order, not a ranking
+        # (alpha-engine-config-I7645) — the champion's ranking is `tech_score`,
+        # carried per ticker in `scanner_eval_log`, and here it is deliberately
+        # the reverse of emission order so a producer reading the list as a
+        # ranking cannot pass.
+        _put_json(s3, f"candidates/{entry}/candidates.json", {
+            "scanner_tickers": ["D", "C", "B", "A"],
+            "scanner_eval_log": [
+                {"ticker": "A", "tech_score": 0.9},
+                {"ticker": "B", "tech_score": 0.7},
+                {"ticker": "C", "tech_score": 0.5},
+                {"ticker": "D", "tech_score": 0.3},
+            ],
+        })
         _put_json(
             s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json", {"scanner_tickers": ["D", "C", "B", "A"]}
         )
@@ -282,9 +295,36 @@ class TestScannerLeaderboardProducer:
         assert got["champion"] == "tech_score_momentum"
         names = {s["name"]: s for s in got["specs"]}
         assert "tech_score_momentum" in names and "momentum_sleeve" in names
-        # champion rank order matches realized returns → IC = 1.0 on the one date.
+        # champion tech_score order matches realized returns → IC = 1.0 on the
+        # one date, and it is the SCORE order that produces it: emission order
+        # here is the exact reverse.
         assert names["tech_score_momentum"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
         assert got["n_dates"] == 1
+
+    def test_champion_without_an_eval_log_reports_no_rank_ic(self, s3):
+        """The pre-2026-07 `candidates.json` objects carry no `scanner_eval_log`.
+        A missing ranking must produce a missing rank-IC, never one computed
+        over the quant filter's emission order (alpha-engine-config-I7645)."""
+        from scoring.leaderboard_producers import build_scanner_leaderboard
+
+        entry = "2026-06-01"
+        _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": ["A", "B", "C", "D"]})
+        _put_json(
+            s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
+            {"scanner_tickers": ["D", "C", "B", "A"]},
+        )
+        panel = _Panel().put(entry, {"A": 100, "B": 100, "C": 100, "D": 100})
+        for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
+            panel.put(d, {"A": 110, "B": 105, "C": 100, "D": 95})
+
+        res = build_scanner_leaderboard(
+            s3, _BUCKET, "2026-06-27", top_n=2, closes_panel_loader=panel.loader(),
+        )
+        got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
+        names = {s["name"]: s for s in got["specs"]}
+        assert names["tech_score_momentum"]["realized_rank_ic"] is None
+        # The other metrics read the picked SET and are unaffected.
+        assert names["tech_score_momentum"]["n_dates_scored"] == 1
 
     def test_fresh_date_ships_null_metrics(self, s3):
         from scoring.leaderboard_producers import build_scanner_leaderboard

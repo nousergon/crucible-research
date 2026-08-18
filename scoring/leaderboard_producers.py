@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import date as _date
 from typing import Any
 
@@ -575,7 +576,7 @@ def _load_scanner_specs(s3: Any, bucket: str, dates: list[str]) -> tuple[SpecHis
     for d in dates:
         doc = _get_json(s3, bucket, _CANDIDATES_LIVE.format(date=d))
         if doc and doc.get("scanner_tickers"):
-            champion.by_date[d] = SpecDay(ranked=list(doc["scanner_tickers"]))
+            champion.by_date[d] = _champion_scanner_day(doc)
 
     challengers: list[SpecHistory] = []
     for spec in challenger_specs():
@@ -583,9 +584,46 @@ def _load_scanner_specs(s3: Any, bucket: str, dates: list[str]) -> tuple[SpecHis
         for d in dates:
             doc = _get_json(s3, bucket, _CANDIDATES_SHADOW.format(spec=spec.name, date=d))
             if doc and doc.get("scanner_tickers"):
+                # Challenger lists ARE rankings: every `ScannerSpec.rank`
+                # (`data/scanner_specs._rank_*`) sorts by its own score
+                # descending and slices the top N, so list position is the
+                # arm's own ranking by construction.
                 hist.by_date[d] = SpecDay(ranked=list(doc["scanner_tickers"]))
         challengers.append(hist)
     return champion, challengers
+
+
+def _champion_scanner_day(doc: dict) -> SpecDay:
+    """The live scanner cut as a RANKED day, ordered by the ``tech_score`` that
+    is the champion's actual ranking signal.
+
+    ``candidates.json::scanner_tickers`` is the quant filter's emission order,
+    NOT a ranking: measured against the live artifact, Spearman(list position,
+    ``tech_score``) is +0.27 on 2026-08-18 and −0.04 on 2026-07-30, where a
+    descending rank would be −1.00 (alpha-engine-config-I7645). Reading it as
+    one made the champion's ``realized_rank_ic`` a correlation against
+    arbitrary order, and its count-matched top-50 an arbitrary 50 of its 60 —
+    while every challenger's list IS its own ranking. The comparison was
+    asymmetric in the champion's disfavour, on the board that judges it.
+
+    ``scanner_eval_log`` carries ``tech_score`` per ticker over the whole
+    universe; ``universe_membership._tech_score_rank_table`` already derives the
+    same ranking from it, so this is the existing convention, not a new one. An
+    artifact without that log (the pre-2026-07 objects) yields an UNRANKED day:
+    a missing rank-IC, never one over emission order.
+    """
+    tickers = list(doc["scanner_tickers"])
+    scores = {
+        row["ticker"]: float(row["tech_score"])
+        for row in (doc.get("scanner_eval_log") or [])
+        if isinstance(row, dict)
+        and row.get("ticker") in set(tickers)
+        and isinstance(row.get("tech_score"), (int, float))
+    }
+    if len(scores) < len(tickers):
+        return SpecDay(ranked=tickers, rank_ordered=False)
+    ranked = sorted(tickers, key=lambda t: (-scores[t], t))
+    return SpecDay(ranked=ranked, scores=scores)
 
 
 def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
@@ -1079,23 +1117,64 @@ def _load_cut_specs(
     from scoring.universe_membership import (
         FEED_CUT_NAME,
         GATE_BASELINE_CUT,
+        GATE_LEGACY_CUT,
         PREDICTOR_UNIVERSE_CUT,
     )
 
-    wanted = (FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, GATE_BASELINE_CUT)
-    hists = {name: SpecHistory(name=name, kind="challenger") for name in wanted}
+    # Each arm, and the membership keys it may appear under, newest name first.
+    # The gate cut was renamed by crucible-research-PR648; every artifact
+    # written before it carries the SAME arm under the legacy key, and reading
+    # only the new name discards that history while reporting the baseline as
+    # `insufficient` (alpha-engine-config-I7631: 20 of 21 cohort dates lost on
+    # the board's first live artifact). One arm, two spellings — never two arms.
+    aliases: dict[str, tuple[str, ...]] = {
+        FEED_CUT_NAME: (FEED_CUT_NAME,),
+        PREDICTOR_UNIVERSE_CUT: (PREDICTOR_UNIVERSE_CUT,),
+        GATE_BASELINE_CUT: (GATE_BASELINE_CUT, GATE_LEGACY_CUT),
+    }
+    # Where each arm's RANK order lives in the membership artifact. The cut's
+    # own `tickers` list is alphabetical for every cut, so it is never it.
+    rank_source: dict[str, tuple[str, str]] = {
+        FEED_CUT_NAME: ("ranks", "attractiveness_rank"),
+        PREDICTOR_UNIVERSE_CUT: ("ranks", "attractiveness_rank"),
+        GATE_BASELINE_CUT: ("scanner_ranks", "tech_score_rank"),
+    }
+    hists = {name: SpecHistory(name=name, kind="challenger") for name in aliases}
     widths: dict[str, int] = {}
     for d in dates:
-        doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d))
-        cuts = (doc or {}).get("cuts") or {}
-        for name in wanted:
-            block = cuts.get(name)
-            tickers = (block or {}).get("tickers")
+        doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d)) or {}
+        cuts = doc.get("cuts") or {}
+        for name, keys in aliases.items():
+            tickers = next(
+                (t for t in ((cuts.get(k) or {}).get("tickers") for k in keys) if t),
+                None,
+            )
             if not tickers:
                 continue
-            hists[name].by_date[d] = SpecDay(ranked=list(tickers))
+            table_key, rank_field = rank_source[name]
+            ranked, rank_ordered = _rank_order(
+                list(tickers), doc.get(table_key) or {}, rank_field,
+            )
+            hists[name].by_date[d] = SpecDay(ranked=ranked, rank_ordered=rank_ordered)
             widths[name] = max(widths.get(name, 0), len(tickers))
     return [h for h in hists.values() if h.by_date], widths
+
+
+def _rank_order(
+    tickers: list[str], table: Mapping[str, Any], rank_field: str,
+) -> tuple[list[str], bool]:
+    """``(ordered_tickers, rank_ordered)`` — the cut in RANK order, best first.
+
+    Returns ``rank_ordered=False`` (and the input order untouched) when the
+    table cannot rank every name, which the scorer turns into a MISSING
+    rank-IC. `scanner_ranks` did not exist before 2026-07-29, so this is a live
+    historical case, not a defensive branch — and the alternative is a Spearman
+    correlation against alphabetical order reported as a result.
+    """
+    ranks = {t: (table.get(t) or {}).get(rank_field) for t in tickers}
+    if any(not isinstance(r, (int, float)) for r in ranks.values()):
+        return list(tickers), False
+    return sorted(tickers, key=lambda t: (ranks[t], t)), True
 
 
 def build_cuts_leaderboard(
@@ -1167,15 +1246,16 @@ def build_cuts_leaderboard(
                 horizon_notes=horizon_notes,
                 population_by_horizon=population_by_horizon,
             )
-            for row in scored.get("specs", []):
-                row["top_n"] = width
             for block in scored.get("horizons", []):
                 for row in block.get("specs", []):
                     row["top_n"] = width
             if merged is None:
                 merged = scored
                 continue
-            merged["specs"].extend(scored.get("specs", []))
+            # Merge into the per-horizon BLOCKS only. The top-level spread is
+            # rebuilt from the primary block once, below: extending both
+            # surfaces here is what put every arm after the first into the
+            # 21-day block twice (alpha-engine-config-I7631).
             by_h = {b["horizon_days"]: b for b in merged.get("horizons", [])}
             for block in scored.get("horizons", []):
                 target = by_h.get(block["horizon_days"])
@@ -1184,6 +1264,21 @@ def build_cuts_leaderboard(
 
         if merged is None:
             return {"status": "unmeasurable", "reason": "no cut had a usable width"}
+        # Continuity (champion-challenger-policy.md §3): the top level carries
+        # the primary horizon's rows. Same row dicts, distinct list.
+        primary_block = merged["horizons"][0]
+        merged["specs"] = list(primary_block["specs"])
+        # `n_dates` per block is the count of cohort dates ANY arm scored at
+        # that horizon. Scoring one arm per pass makes the first arm's count
+        # the whole board's, which understates a board whose arms have
+        # different histories — and the gate arm's history is 20 dates longer
+        # than the champion cut's.
+        for block in merged["horizons"]:
+            realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
+            block["n_dates"] = len({
+                d for arm in arms for d in arm.by_date if realized_h.get(d)
+            })
+        merged["n_dates"] = primary_block["n_dates"]
         _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
         merged["leaderboard_id"] = "cuts"
         merged["date"] = date_str
