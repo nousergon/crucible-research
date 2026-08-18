@@ -14,9 +14,11 @@ prevents resurrection: any future PR that re-introduces a literal JSON
 schema in a prompt body will fail here, forcing the contributor to
 re-affirm + extend the Pydantic schema instead.
 
-Search paths mirror ``agents.prompt_loader._resolve_prompt_path``: sibling
-clone, then ``$GITHUB_WORKSPACE`` (CI), then the Lambda-staged
-``<repo>/config/prompts/`` directory.
+Search path resolution is delegated to
+``agents.prompt_loader._resolve_prompt_path`` directly (see
+``_config_prompts_dir`` below) rather than re-derived here, so this file
+cannot drift out of sync with the loader's actual candidate order again
+(alpha-engine-config-I7619).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from agents import prompt_loader
 from agents.prompt_loader import load_prompt
 
 # The 10 production prompts shipped with the research repo. Mirrors the
@@ -71,37 +74,33 @@ _ON_CI = os.environ.get("CI", "").lower() in {"1", "true", "yes"}
 def _config_prompts_dir() -> Path | None:
     """Resolve the production prompts directory if available in this env.
 
-    Returns ``None`` when neither the sibling-clone, the
-    ``$GITHUB_WORKSPACE`` checkout, nor the Lambda-staged directory has the
-    prompts (e.g. a contributor running pytest without staging the config
-    repo). ``prompts_dir`` then ``pytest.skip``s on a dev laptop, or
-    hard-fails on CI (``_ON_CI``) rather than reporting a false green.
+    Delegates to ``prompt_loader._resolve_prompt_path`` (resolved against
+    the always-present ``macro_agent`` prompt) instead of re-deriving the
+    search candidates here. This file's own hand-rolled resolver had gone
+    stale relative to the real loader: the loader gained an
+    experiment-ID-aware search path (``experiments/<ALPHA_ENGINE_EXPERIMENT_
+    ID>/research/prompts/``, default ``"reference"`` — HARNESS_EXPERIMENT_
+    CLASSIFICATION.md §3) when alpha-engine-config reorganized its prompts
+    out of the bare ``research/prompts/`` layout, and this file's duplicate
+    logic was never updated to match — despite its own docstring (above)
+    claiming to mirror the loader. Effect: this whole test module hard-
+    failed on CI as of alpha-engine-config-I7619's CI run (the sibling
+    checkout that CI provisions is real; it just isn't at the bare
+    ``research/prompts/`` path this resolver was still hardcoded to), which
+    it had *never* found before either — it silently ``pytest.skip()``'d
+    forever, so the F1/F2/F3 audit-finding locks below have never once run
+    against real prompt content in CI. Delegating removes the duplicate
+    logic so the two can no longer drift apart again.
 
-    ``repo_root.parent`` covers the dev-laptop sibling-checkout convention
-    (``~/Development/<repo>``) without hardcoding ``Path.home()`` — it
-    derives the sibling root from where this repo actually sits, so it
-    works regardless of what the parent directory is named. A prior
-    ``Path.home() / "alpha-engine-config"`` candidate assumed the config
-    repo lived directly under ``$HOME`` rather than under
-    ``~/Development/``; it never matched this fleet's actual layout and
-    was dead code, so it has been removed rather than "fixed" to hardcode
-    ``Development`` — ``repo_root.parent`` already gets there without a
-    hardcoded literal.
+    Returns ``None`` when the loader can't resolve any prompt in this env
+    (e.g. a contributor running pytest without staging the config repo).
+    ``prompts_dir`` then ``pytest.skip``s on a dev laptop, or hard-fails on
+    CI (``_ON_CI``) rather than reporting a false green.
     """
-    repo_root = Path(__file__).resolve().parent.parent
-    candidates = [
-        repo_root.parent / "alpha-engine-config" / "research" / "prompts",
-    ]
-    ws = os.environ.get("GITHUB_WORKSPACE")
-    if ws:
-        candidates.append(
-            Path(ws) / "alpha-engine-config" / "research" / "prompts"
-        )
-    candidates.append(repo_root / "config" / "prompts")
-    for c in candidates:
-        if c.exists() and any(c.glob("*.txt")):
-            return c
-    return None
+    try:
+        return prompt_loader._resolve_prompt_path("macro_agent").parent
+    except FileNotFoundError:
+        return None
 
 
 @pytest.fixture(scope="module")
