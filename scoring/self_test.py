@@ -62,13 +62,15 @@ reported in **three mutually incompatible ways**:
 ===================================================  ==========  ==============
 Function                                             Degenerate  Reports
 ===================================================  ==========  ==============
-``nousergon_lib.quant.attractiveness._zscore``       std <= 0    ``0.0``
+``nousergon_lib.quant.attractiveness._zscore``       std <= 0    ``None``
 ``scoring/attractiveness_trajectory.py::_zmap``      sd == 0     ``0.0``
 ``scoring/factor_scoring.py`` composite              all-NaN     ``NaN``
 ``scoring/leaderboard_scoring.py::_pearson``         zero var    ``None``
 ===================================================  ==========  ==============
 
-Only the last is safe. A z-score of exactly ``0.0`` is also what a genuinely
+As of the ``v0.124.70`` pin, all three z-score sites report ``None``; the
+``factor_scoring`` composite's ``NaN`` is a distinct, separately-tracked shape.
+A z-score of exactly ``0.0`` is also what a genuinely
 at-the-mean name produces, so "this pillar had no cross-sectional spread" and
 "this name sits exactly at the median" are indistinguishable to every consumer —
 and the blend then treats a *measured nothing* as a *measured average*. This is
@@ -86,21 +88,23 @@ consumer in ``build_trajectory`` (the z-scores, the orthogonalized residual,
 the percentile cut, both rank orders, the final sort) was audited to drop or
 skip ``None`` rather than treat it as a fabricated 0.0. See config-I7272.
 
-One case remains a pinned, NOT-corrected known gap:
-``attractiveness_zero_variance_degenerate`` pins
-``nousergon_lib.quant.attractiveness._zscore``. Brian ruled on 2026-08-13 to
-fix it, and it IS fixed at source — that was the last of the three sites, and
-it lives in a DIFFERENT repo (nousergon-lib). What remains pinned here is not
-the defect but the **pin**: this repo installs ``nousergon-lib@v0.124.3``,
-which predates the fix, so the fabricated ``0.0`` is still what THIS image
-computes. A library fix reaches a consumer only when its pin moves, and until
-then a green row upstream is not a green row here — which is exactly the
-distinction these two cases exist to keep visible. Their PASS means "still
-behaves as INSTALLED", never "this is correct", and the artifact says so in
-words so no reader has to infer it from a green row.
-``undefined_representation_divergence_convention`` remains ``known_gap`` too —
-it now counts the pin gap and pins the as-installed 2-of-3 state. Both move in
-the pin-bump change, together, or that change is not done.
+The last of the three, ``nousergon_lib.quant.attractiveness._zscore``, is now
+FIXED **here** as well. It was fixed at source in a DIFFERENT repo
+(nousergon-lib) on Brian's 2026-08-13 ruling, but a library fix reaches a
+consumer only when its pin moves, and this repo installed
+``nousergon-lib@v0.124.3`` — which predates it. That pin now reads
+``v0.124.70``, so this image computes the corrected value, and both cases
+(``attractiveness_zero_variance_degenerate``,
+``undefined_representation_divergence_convention``) moved from ``known_gap``
+to plain assertions in the SAME change that moved the pin. That coupling was
+the whole point of pinning rather than fixing: neither the fix nor the pin
+could land silently, and had the bump not actually delivered the fix, those
+cases would have gone red instead of the number quietly staying wrong.
+
+**No known gaps remain in this battery.** ``n_known_gaps`` of ``0`` is the
+published, asserted state — not an absence of anybody looking. If a future
+finding is pinned rather than fixed, it re-enters through ``known_gap`` and
+the count moves off zero.
 
 CONTRACT
 --------
@@ -729,23 +733,21 @@ def build_cases() -> list[Case]:
         Case(
             name="attractiveness_zero_variance_degenerate",
             description=(
-                "KNOWN GAP (alpha-engine-config-I7272), PINNED NOT FIXED. "
-                "nousergon_lib.quant.attractiveness._zscore returns a finite 0.0 "
-                "when a pillar has ZERO cross-sectional spread, where the z-score "
-                "is UNDEFINED. 0.0 is also exactly what a genuinely at-the-mean "
-                "name produces, so 'this pillar had no spread' and 'this name is "
-                "average' are indistinguishable to every consumer — and the blend "
-                "treats a measured NOTHING as a measured AVERAGE. This is the "
-                "I7237 class at the signal layer, at the chokepoint every name "
-                "passes through. Expected 0.0 records the MEASURED behaviour so "
-                "further drift goes red; a PASS means 'unchanged', NOT 'correct'"
+                "FIXED (alpha-engine-config-I7272), delivered here by the "
+                "nousergon-lib v0.124.3 → v0.124.70 pin bump. "
+                "nousergon_lib.quant.attractiveness._zscore on a pillar with ZERO "
+                "cross-sectional spread now reports UNDEFINED (None) rather than a "
+                "finite 0.0, the leg is DROPPED from the blend and the surviving "
+                "weights renormalize, and a name with no surviving leg carries "
+                "attractiveness_raw None. 0.0 is also exactly what a genuinely "
+                "at-the-mean name produces, so the two were indistinguishable to "
+                "every consumer and the blend treated a measured NOTHING as a "
+                "measured AVERAGE. 1.0 iff undefined"
             ),
-            inputs={"pillar_values": [4.0] * 6, "correct_behaviour": "None",
-                    "measured_behaviour": 0.0, "units": "z-score"},
-            expected=0.0,
-            compute=_zero_variance_attractiveness,
-            known_gap=True,
-            gap_issue="alpha-engine-config-I7272",
+            inputs={"pillar_values": [4.0] * 6, "units": "boolean-encoded contract"},
+            expected=1.0,
+            compute=lambda: _is_undefined(_zero_variance_attractiveness()),
+            tolerance=0.0,
         ),
         Case(
             name="trajectory_zmap_zero_variance_degenerate",
@@ -916,15 +918,13 @@ def build_cases() -> list[Case]:
             inputs={"sites": ["leaderboard_scoring._pearson",
                               "attractiveness._zscore",
                               "attractiveness_trajectory._zmap"],
-                    "measured_safe_count": 2, "total_sites": 3,
+                    "measured_safe_count": 3, "total_sites": 3,
                     "sites_fixed_at_source": 3,
-                    "blocked_on": "nousergon-lib pin bump (currently v0.124.3)",
+                    "installed_lib_pin": "v0.124.70",
                     "units": "count of sites reporting undefined honestly"},
-            expected=2.0,
+            expected=3.0,
             compute=_undefined_representation_count,
             tolerance=0.0,
-            known_gap=True,
-            gap_issue="alpha-engine-config-I7272",
         ),
     ]
 
@@ -1024,12 +1024,19 @@ def _composite_missing_is_flagged() -> float:
     return 1.0 if (out["final_score"] is None and out["score_failed"] is True) else 0.0
 
 
-def _zero_variance_attractiveness() -> float:
+def _zero_variance_attractiveness() -> float | None:
+    """The blend of a single zero-spread pillar — ``None`` once I7272 is installed.
+
+    Deliberately NOT coerced with ``float()``: the corrected library returns
+    ``None`` here, and coercing would turn the very signal this case measures
+    into a TypeError, i.e. UNKNOWN (could not run) instead of the PASS/FAIL the
+    case exists to produce. ``_is_undefined`` is the caller's encoder.
+    """
     from nousergon_lib.quant.attractiveness import compute_cross_sectional_attractiveness
 
     flat = {f"T{i}": {"quality": 4.0} for i in range(6)}
     out = compute_cross_sectional_attractiveness(flat, {"quality": 1.0})
-    return float(out["T0"]["attractiveness_raw"])
+    return out["T0"]["attractiveness_raw"]
 
 
 def _undefined_representation_count() -> float:
