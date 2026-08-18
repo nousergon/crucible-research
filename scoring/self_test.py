@@ -145,14 +145,22 @@ from nousergon_lib.quant.selftest import (
     CASE_TIMEOUT_SECONDS,
     FAIL,
     PASS,
-    UNKNOWN,
     Case,
-    SelfTestTimeout as _CaseTimeout,
-    _call_with_timeout,
+)
+from nousergon_lib.quant.selftest import (
+    UNKNOWN as UNKNOWN,  # noqa: PLC0414 — re-exported for callers (st.UNKNOWN)
+)
+from nousergon_lib.quant.selftest import (
     code_sha as _lib_code_sha,
+)
+from nousergon_lib.quant.selftest import (
     resolved_library_versions as _lib_resolved_library_versions,
+)
+from nousergon_lib.quant.selftest import (
     run_self_test as _lib_run_self_test,
-    verdict_is_pass,
+)
+from nousergon_lib.quant.selftest import (
+    verdict_is_pass as verdict_is_pass,  # noqa: PLC0414 — re-exported for callers (st.verdict_is_pass)
 )
 
 logger = logging.getLogger(__name__)
@@ -180,8 +188,6 @@ _TRACKED_DISTRIBUTIONS = (
     "krepis",
     "boto3",
 )
-
-CASE_TIMEOUT_SECONDS = 30.0
 
 #: 1e-9 absolute, per `alpha-engine-config-I7262`. Not tuned to make the battery
 #: pass — observed agreement is ~1e-16 on every unrounded case.
