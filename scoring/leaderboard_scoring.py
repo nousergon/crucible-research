@@ -324,10 +324,23 @@ def date_clustered_stats(per_date: Sequence[float]) -> dict | None:
 
 @dataclass(frozen=True)
 class SpecDay:
-    """One spec's picks for one date."""
+    """One spec's picks for one date.
+
+    ``rank_ordered`` declares whether ``ranked`` IS a ranking. It defaults to
+    True — every producer that reads an ordered candidate list is unaffected —
+    and exists because the membership artifact stores each cut's tickers
+    ALPHABETICALLY (``universe_membership._top_n`` returns ``sorted(...)``: set
+    semantics, with rank order carried separately in the ``ranks`` table). A
+    day built from such a list has no order to correlate, and
+    :func:`_rank_ic_metric` must then emit a MISSING rank-IC rather than a
+    Spearman correlation against the alphabet, which is noise wearing the
+    shape of a result (alpha-engine-config-I7631). Explicit ``scores`` override
+    it: a scored day carries its own ranking regardless of list order.
+    """
 
     ranked: list[str]
     scores: dict[str, float] | None = None
+    rank_ordered: bool = True
 
 
 @dataclass(frozen=True)
@@ -359,6 +372,11 @@ def _rank_ic_metric(
     for date_str, day in spec.by_date.items():
         ret = realized.get(date_str)
         if not ret:
+            continue
+        if not day.rank_ordered and not day.scores:
+            # No ranking exists for this day — see SpecDay.rank_ordered. The
+            # other metrics are unaffected (they read the picked SET), so the
+            # row stays scored with rank_ic absent rather than being dropped.
             continue
         sig = _signal_for_ic(day)
         paired = [(s, ret[t]) for t, s in sig.items() if t in ret]
@@ -729,6 +747,15 @@ def score_multi_horizon(
 
     assert primary is not None  # noqa: S101 — horizons_days is non-empty above
     out = dict(primary)
+    # `dict(primary)` is SHALLOW, so `out["specs"]` would be the SAME list
+    # object as `blocks[0]["specs"]`. A caller that appends to one surface then
+    # appends to the other — which is exactly what a per-arm producer must do
+    # (`build_cuts_leaderboard`) — writes twice into one list, and the primary
+    # horizon's block silently double-counts every arm after the first.
+    # Measured live on `research/cuts_leaderboard/2026-08-18.json`: 5 rows for
+    # 3 arms (alpha-engine-config-I7631). The rows are shared dicts on purpose
+    # — the two surfaces are the same rows — but the LISTS are not.
+    out["specs"] = list(primary["specs"])
     out["horizons_days"] = list(horizons_days)
     out["min_dates_for_inference"] = min_dates_for_inference
     out["horizons"] = blocks

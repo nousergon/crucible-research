@@ -33,6 +33,7 @@ from scoring.leaderboard_scoring import LEADERBOARD_SLOTS, slot_spec  # noqa: E4
 from scoring.universe_membership import (  # noqa: E402
     FEED_CUT_NAME,
     GATE_BASELINE_CUT,
+    GATE_LEGACY_CUT,
     PREDICTOR_UNIVERSE_CUT,
 )
 
@@ -278,3 +279,140 @@ def test_panel_cache_does_not_serve_a_narrowed_panel_as_a_full_one():
     lp._load_closes_panel("b", DATES, 252, {"AAA"}, _loader)
     lp._load_closes_panel("b", DATES, 252, None, _loader)
     assert len(calls) == 2
+
+
+# ── The live artifact's three defects (alpha-engine-config-I7631) ────────────
+#
+# Measured on `research/cuts_leaderboard/2026-08-18.json`, the board's FIRST
+# live artifact: 5 rows in the 21-day block for 3 arms (the two arms after the
+# first appear twice), a `realized_rank_ic` for every cut computed over an
+# ALPHABETICAL ticker list, and the gate baseline reporting `insufficient`
+# while 20 cohort dates of its history sit in S3 under its documented alias.
+
+
+class _RankedS3(_S3):
+    """Membership as the writer actually emits it: cut tickers SORTED (set
+    semantics, `universe_membership._top_n`), with the rank order carried
+    separately in the `ranks` / `scanner_ranks` tables.
+
+    The rank tables are DELIBERATELY the reverse of alphabetical order, so a
+    consumer reading `tickers` as a ranking is distinguishable from one reading
+    the rank table.
+    """
+
+    #: dates on which the gate cut exists ONLY under its pre-PR648 name
+    LEGACY_DATES = (DATES[0],)
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            date_str = Key.split("/")[1]
+            gate_name = (
+                GATE_LEGACY_CUT if date_str in self.LEGACY_DATES else GATE_BASELINE_CUT
+            )
+            body = json.dumps({
+                "cuts": {
+                    FEED_CUT_NAME: {"tickers": sorted(FEED)},
+                    PREDICTOR_UNIVERSE_CUT: {"tickers": sorted(CHAMP)},
+                    gate_name: {"tickers": sorted(GATE)},
+                },
+                "ranks": {
+                    t: {"attractiveness_rank": i + 1}
+                    for i, t in enumerate(sorted(FEED, reverse=True))
+                },
+                "scanner_ranks": {
+                    t: {"tech_score_rank": i + 1}
+                    for i, t in enumerate(sorted(GATE, reverse=True))
+                },
+            }).encode()
+            return {"Body": _Body(body)}
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+
+def test_cut_order_comes_from_the_rank_table_not_the_ticker_list():
+    """`universe_membership._top_n` returns `sorted(...)` — EVERY cut's
+    `tickers` is alphabetical, not rank order. Reading it as a ranking makes
+    `realized_rank_ic` a Spearman correlation against the alphabet."""
+    arms, _ = _load_cut_specs(_RankedS3(), "b", DATES)
+    feed = next(a for a in arms if a.name == FEED_CUT_NAME)
+    day = feed.by_date[DATES[-1]]
+    assert day.ranked == sorted(FEED, reverse=True)
+    assert day.rank_ordered is True
+
+
+def test_a_cut_with_no_rank_source_is_not_passed_off_as_ranked():
+    """Absent a rank table the order is unknown, and an unknown order must
+    produce a MISSING rank-IC, never one computed over the alphabet."""
+    arms, _ = _load_cut_specs(_S3(), "b", DATES)  # no `ranks` block at all
+    for arm in arms:
+        for day in arm.by_date.values():
+            assert day.rank_ordered is False
+
+
+def test_rank_ic_is_null_when_the_days_order_is_not_a_ranking():
+    from scoring.leaderboard_scoring import SpecDay, SpecHistory, score_leaderboard
+
+    hist = SpecHistory(name="x", kind="challenger", by_date={
+        d: SpecDay(ranked=sorted(FEED), rank_ordered=False) for d in DATES
+    })
+    realized = {d: dict.fromkeys(FEED, 0.01) for d in DATES}
+    row = score_leaderboard(None, [hist], realized, top_n=60)["specs"][0]
+    assert row["realized_rank_ic"] is None
+    assert row["n_dates_scored"] == len(DATES)
+
+
+def test_gate_history_under_the_legacy_alias_is_the_same_arm():
+    """PR648 renamed the gate cut; every membership artifact written before it
+    carries the incumbent baseline under `scanner_candidates`. Reading only the
+    new name discards that history and reports `insufficient` for a baseline
+    whose evidence is sitting in S3."""
+    arms, widths = _load_cut_specs(_RankedS3(), "b", DATES)
+    gate = next(a for a in arms if a.name == GATE_BASELINE_CUT)
+    assert set(gate.by_date) == set(DATES)
+    assert widths[GATE_BASELINE_CUT] == 60
+    assert GATE_LEGACY_CUT not in {a.name for a in arms}
+
+
+@pytest.fixture
+def built_ranked():
+    s3 = _RankedS3()
+    realized = {d: dict.fromkeys(FEED + GATE, 0.01) | {"SPY": 0.005} for d in DATES}
+    population = dict.fromkeys(DATES, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: realized, 252: realized},
+            {},
+            {21: population, 126: population, 252: population},
+        ),
+    ):
+        out = build_cuts_leaderboard(s3, "b", "2026-07-03")
+    return out, s3
+
+
+def test_no_arm_is_scored_twice_in_any_horizon_block(built_ranked):
+    """Live 2026-08-18: the 21-day block carried 5 rows for 3 arms. A reader
+    averaging or counting that table gets a double-weighted answer."""
+    lb = out_lb(built_ranked)
+    for block in lb["horizons"]:
+        names = [r["name"] for r in block["specs"]]
+        assert len(names) == len(set(names)), (block["horizon_days"], names)
+
+
+def test_top_level_spread_matches_the_primary_block_exactly(built_ranked):
+    """The top level is the primary horizon's block spread for continuity —
+    it must carry the same rows, not the same LIST OBJECT."""
+    lb = out_lb(built_ranked)
+    primary = next(b for b in lb["horizons"] if b["horizon_days"] == 21)
+    assert lb["specs"] is not primary["specs"]
+    assert [r["name"] for r in lb["specs"]] == [r["name"] for r in primary["specs"]]
+
+
+def test_block_n_dates_counts_every_arms_cohort_not_the_first_arms(built_ranked):
+    """Each arm is scored in its own pass, so the first arm's `n_dates` is not
+    the board's. An arm whose history starts later must not shrink the count,
+    and an arm with more history must not be hidden behind the first one's."""
+    lb = out_lb(built_ranked)
+    for block in lb["horizons"]:
+        assert block["n_dates"] == len(DATES), block["horizon_days"]
