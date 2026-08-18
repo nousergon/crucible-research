@@ -126,7 +126,8 @@ _MEMBERSHIP = "universe_membership/{date}/membership.json"
 # needs the FULL universe panel rather than its own arms' picks. Without this
 # that is three identical ~904-symbol ArcticDB reads sized to 252 sessions —
 # the dominant cost of the whole observe path, paid three times for one answer.
-# Not a cross-run cache: see the key construction in _load_closes_panel.
+# Not a cross-run cache: see the key construction in _load_closes_panel —
+# and note that the key holds the loader OBJECT, never its ``id()``.
 _PANEL_CACHE: dict[tuple, dict[str, dict[str, float]]] = {}
 
 _CANDIDATES_SHADOW = "candidates_shadow/{spec}/{date}/candidates.json"
@@ -358,12 +359,21 @@ def _load_closes_panel(
     exactly what hid I5195 for a month.
     """
     loader = closes_panel_loader or _closes_panel_from_arcticdb
+    # The LOADER OBJECT itself, never ``id(loader)`` (alpha-engine-config —
+    # panel-cache identity defect). ``id()`` is unique only among objects alive
+    # AT THE SAME MOMENT: CPython re-uses the address of a freed object, so a
+    # loader created after an earlier one was collected routinely lands on the
+    # same integer. Every other key component is identical between two callers
+    # asking for the same bucket/dates/horizon/universe, so the address was the
+    # ONLY thing separating two different panels — and it silently stopped
+    # separating them. Holding the object keeps it alive, which makes the
+    # collision impossible by construction rather than unlikely.
     cache_key = (
         bucket,
         tuple(sorted(set(entry_dates))),
         horizon_days,
         None if symbols is None else tuple(sorted(symbols)),
-        id(loader),
+        loader,
     )
     cached = _PANEL_CACHE.get(cache_key)
     if cached is not None:
@@ -378,7 +388,8 @@ def _load_closes_panel(
         # included, so a warm Lambda crossing a trading day cannot serve
         # yesterday's panel. Bounded to one entry: the leaderboards in a single
         # invocation ask for the same panel, which is the whole point — this is
-        # a within-invocation dedup, not a cross-run store.
+        # a within-invocation dedup, not a cross-run store. The single entry is
+        # also what bounds the loader reference the key now holds.
         _PANEL_CACHE.clear()
         _PANEL_CACHE[cache_key] = panel
     if not panel:
