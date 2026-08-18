@@ -219,6 +219,15 @@ def test_build_never_raises_into_the_live_path():
 
 
 # ── The panel cache (alpha-engine-config-I7584) ──────────────────────────────
+#
+# No manual ``lp._PANEL_CACHE.clear()`` before each test (removed,
+# alpha-engine-config-I7643): every fresh ``_loader`` below is a distinct
+# object, the cache key now holds the loader OBJECT (PR657), and
+# ``_load_closes_panel`` unconditionally clears+repopulates the (size-bounded-
+# to-1) cache on every miss — so a leftover entry from a prior test can never
+# match a new test's key and is always overwritten on first use. A cache that
+# still needed manual clearing here would be the workaround this class
+# accumulated, not a fix.
 
 
 def test_panel_is_read_once_across_leaderboards_in_one_invocation():
@@ -228,7 +237,6 @@ def test_panel_is_read_once_across_leaderboards_in_one_invocation():
     for one answer."""
     import scoring.leaderboard_producers as lp
 
-    lp._PANEL_CACHE.clear()
     calls = []
 
     def _loader(bucket, entry_dates, horizon_days, symbols):
@@ -245,7 +253,6 @@ def test_panel_cache_does_not_serve_a_different_cohort():
     panel."""
     import scoring.leaderboard_producers as lp
 
-    lp._PANEL_CACHE.clear()
     calls = []
 
     def _loader(bucket, entry_dates, horizon_days, symbols):
@@ -262,7 +269,6 @@ def test_panel_cache_does_not_serve_a_narrowed_panel_as_a_full_one():
     (config-I7587); a cache collision here would resurrect that defect."""
     import scoring.leaderboard_producers as lp
 
-    lp._PANEL_CACHE.clear()
     calls = []
 
     def _loader(bucket, entry_dates, horizon_days, symbols):
