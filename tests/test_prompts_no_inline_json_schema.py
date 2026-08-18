@@ -59,17 +59,37 @@ _INLINE_JSON_PATTERNS = (
 )
 
 
+# alpha-engine-config-I7605 / I7619: CI provisions the sibling checkout
+# itself (ci.yml "Checkout alpha-engine-config (branch-aware)" clones it to
+# $GITHUB_WORKSPACE/alpha-engine-config, or the dependabot-fallback artifact
+# path unzips to the same place) — so on CI, "not found" means the checkout
+# step broke, not that the layout is legitimately absent. _ON_CI turns that
+# case into a hard fail instead of a silent skip that would report green.
+_ON_CI = os.environ.get("CI", "").lower() in {"1", "true", "yes"}
+
+
 def _config_prompts_dir() -> Path | None:
     """Resolve the production prompts directory if available in this env.
 
-    Returns ``None`` when neither the sibling-clone nor the
-    ``$GITHUB_WORKSPACE`` checkout nor the Lambda-staged directory has the
+    Returns ``None`` when neither the sibling-clone, the
+    ``$GITHUB_WORKSPACE`` checkout, nor the Lambda-staged directory has the
     prompts (e.g. a contributor running pytest without staging the config
-    repo). Test then ``pytest.skip``s rather than false-failing.
+    repo). ``prompts_dir`` then ``pytest.skip``s on a dev laptop, or
+    hard-fails on CI (``_ON_CI``) rather than reporting a false green.
+
+    ``repo_root.parent`` covers the dev-laptop sibling-checkout convention
+    (``~/Development/<repo>``) without hardcoding ``Path.home()`` — it
+    derives the sibling root from where this repo actually sits, so it
+    works regardless of what the parent directory is named. A prior
+    ``Path.home() / "alpha-engine-config"`` candidate assumed the config
+    repo lived directly under ``$HOME`` rather than under
+    ``~/Development/``; it never matched this fleet's actual layout and
+    was dead code, so it has been removed rather than "fixed" to hardcode
+    ``Development`` — ``repo_root.parent`` already gets there without a
+    hardcoded literal.
     """
     repo_root = Path(__file__).resolve().parent.parent
     candidates = [
-        Path.home() / "alpha-engine-config" / "research" / "prompts",
         repo_root.parent / "alpha-engine-config" / "research" / "prompts",
     ]
     ws = os.environ.get("GITHUB_WORKSPACE")
@@ -88,10 +108,21 @@ def _config_prompts_dir() -> Path | None:
 def prompts_dir() -> Path:
     p = _config_prompts_dir()
     if p is None:
-        pytest.skip(
+        message = (
             "alpha-engine-config prompts not staged (no sibling clone, "
-            "GITHUB_WORKSPACE, or Lambda staging). Skipping production-"
-            "prompt content lock."
+            "GITHUB_WORKSPACE, or Lambda staging)."
+        )
+        if _ON_CI:
+            pytest.fail(
+                f"{message} On CI this is a broken guard, not an absent "
+                f"layout — ci.yml's 'Checkout alpha-engine-config' step "
+                f"should have provisioned $GITHUB_WORKSPACE/alpha-engine-"
+                f"config before tests ran."
+            )
+        pytest.skip(
+            f"{message} Skipping production-prompt content lock on a dev "
+            f"laptop without the config repo checked out as a sibling of "
+            f"this one."
         )
     return p
 
