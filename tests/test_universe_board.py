@@ -292,13 +292,37 @@ def test_attractiveness_monotonic_in_blend():
 
 
 def test_pillar_contributions_sum_to_raw():
+    """The additive w_p·z_p/Σw terms must reconstruct the signed blend exactly,
+    over the pillars that SURVIVED — coverage reallocation plus the
+    config-I7272 undefined-leg drop.
+
+    Two distinct reasons a pillar is absent here, and both must be:
+
+      * ``growth`` / ``stewardship`` — only AAPL carries them, so the
+        cross-section is a single observation and its standard deviation is
+        zero. There is no z-score against a one-name cohort.
+      * ``defensiveness`` — present for BOTH names at the identical 60.0, so
+        the cross-sectional spread is exactly zero.
+
+    Before the nousergon-lib v0.124.70 pin these three legs each voted a
+    fabricated ``0.0`` into the blend — a number nobody measured, diluting
+    every measured pillar toward neutral, and indistinguishable from a name
+    genuinely sitting at its cohort mean. They are now DROPPED and the
+    surviving weights renormalize, which is why every contribution below is
+    ±1/3 rather than ±1/6.
+    """
     b = _by_ticker(_build())
     for tkr in ("AAPL", "LIN"):
         contribs = b[tkr]["pillar_contributions"]
         assert contribs, tkr
         assert round(sum(contribs.values()), 3) == round(b[tkr]["attractiveness_raw"], 3)
-    # LIN only blends its 4 available pillars (coverage reallocation).
-    assert set(b["LIN"]["pillar_contributions"]) == {"quality", "value", "momentum", "defensiveness"}
+    # Only the three pillars with real cross-sectional dispersion survive.
+    for tkr in ("AAPL", "LIN"):
+        assert set(b[tkr]["pillar_contributions"]) == {"quality", "value", "momentum"}, tkr
+    # ...and the drop is a DROP, not a zero: a fabricated 0.0 would still be a key.
+    assert "defensiveness" not in b["AAPL"]["pillar_contributions"]
+    assert b["AAPL"]["pillars"]["defensiveness"] == b["LIN"]["pillars"]["defensiveness"] == 60.0
+    # LIN never had growth at all — the pre-existing coverage path, unchanged.
     assert b["LIN"]["pillars"]["growth"] is None
 
 

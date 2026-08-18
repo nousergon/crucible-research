@@ -173,36 +173,55 @@ def test_every_case_publishes_enough_to_re_derive_it(body):
 
 def test_known_gap_cases_say_so_in_words(body):
     """A pinned-wrong case must never read as an endorsement. The artifact has to
-    carry that in words, not leave a reader to infer it from a green row."""
+    carry that in words, not leave a reader to infer it from a green row.
+
+    config-I7272 closed the last of them: _zmap and _pearson were already
+    honest, and the nousergon-lib v0.124.3 → v0.124.70 pin bump delivered
+    ``attractiveness._zscore``'s fix to this image. So the battery carries ZERO
+    known gaps today, and ``n_known_gaps == 0`` is asserted rather than assumed
+    — a count nobody checks is not a zero, it is an unread field. The per-case
+    shape contract below still binds the moment a gap is re-introduced."""
     gaps = [c for c in body["cases"] if c.get("known_gap")]
-    # config-I7272: two of the four regime/attractiveness-trajectory known
-    # gaps (trajectory_zmap_zero_variance_degenerate,
-    # trajectory_zmap_single_observation_degenerate) were FIXED — _zmap now
-    # reports undefined honestly. attractiveness_zero_variance_degenerate
-    # (nousergon_lib, a different repo) and
-    # undefined_representation_divergence_convention remain pinned.
-    assert len(gaps) == body["n_known_gaps"] >= 2
-    for case in gaps:
+    assert len(gaps) == body["n_known_gaps"] == 0, gaps
+    for case in gaps:  # pragma: no cover — binds only once a gap returns
         assert case["gap_issue"].startswith("alpha-engine-config-I")
         assert "NOT" in case["known_gap_note"]
         assert "PINNED NOT FIXED" in case["description"] or "I7272" in case["description"]
 
 
-def test_the_undefined_representation_finding_is_pinned_at_measured(body):
-    """alpha-engine-config-I7272. Three degenerate sites; this repo's own
-    attractiveness_trajectory._zmap was FIXED to report undefined honestly,
-    moving the count from 1 to 2 of 3. The remaining site
-    (nousergon_lib.quant.attractiveness._zscore) lives in a different repo
-    and is out of scope for this change — still pinned. Pinned at 2.0 so the
-    day that third site is aligned too, THIS case fails and must be updated
-    in the same change — the fix cannot land silently, which is the whole
-    point of pinning rather than fixing."""
+def test_the_undefined_representation_finding_is_fixed_at_all_three_sites(body):
+    """alpha-engine-config-I7272, ARRIVED. Three degenerate sites, all three now
+    reporting undefined honestly ON THIS IMAGE:
+    ``leaderboard_scoring._pearson`` (always was),
+    ``attractiveness_trajectory._zmap`` (crucible-research#628), and
+    ``nousergon_lib.quant.attractiveness._zscore`` — the last of the three,
+    fixed at source in another repo and delivered here only now, by the
+    nousergon-lib v0.124.3 → v0.124.70 pin bump in this same change.
+
+    This case was deliberately pinned at 2.0 so that the day the pin moved it
+    would go red and force this update in the SAME change. It did exactly that:
+    the assertion below is what replaces it, and 3.0 is now the value that
+    breaks if a future bump regresses any of the three."""
     case = next(c for c in body["cases"]
                 if c["case"] == "undefined_representation_divergence_convention")
-    assert case["expected"] == 2.0
-    assert case["actual"] == 2.0
+    assert case["expected"] == 3.0
+    assert case["actual"] == 3.0
     assert case["inputs"]["total_sites"] == 3
-    assert case["known_gap"] is True
+    assert case.get("known_gap") is None
+
+
+def test_the_zero_variance_attractiveness_leg_is_dropped_not_fabricated(body):
+    """The scoring half of I7272 arriving: a pillar with zero cross-sectional
+    spread is UNDEFINED, so its leg is dropped and the surviving weights
+    renormalize. A name whose only pillar is degenerate has no measured position
+    at all and carries ``attractiveness_raw`` None — where the old lib returned
+    a fabricated 0.0 that then VOTED in the blend."""
+    case = next(c for c in body["cases"]
+                if c["case"] == "attractiveness_zero_variance_degenerate")
+    assert case["expected"] == 1.0
+    assert case["actual"] == 1.0
+    assert case.get("known_gap") is None
+    assert st._zero_variance_attractiveness() is None
 
 
 def test_the_artifact_is_strict_json(body):
