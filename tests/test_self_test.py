@@ -22,6 +22,7 @@ import json
 import math
 
 import pytest
+from nousergon_lib.quant.selftest_perturbation import assert_perturbation_caught
 
 from scoring import self_test as st
 
@@ -318,37 +319,36 @@ def test_a_perturbed_winsorization_clip_is_caught(monkeypatch):
     edit — and asserts the battery goes FAIL. This fleet has shipped several
     detectors that could not fail; this is the standing guard against adding
     another.
-    """
-    from nousergon_lib.quant import attractiveness as attr
 
-    monkeypatch.setattr(attr, "_ZSCORE_CLIP", 3.0001)
-    out = st.run_self_test(run_date="2026-08-15")
-    assert out["verdict"] == st.FAIL, (
-        "perturbing _ZSCORE_CLIP did not fail the battery — the self-test "
-        "cannot detect the thing it exists to detect"
+    Delegates to the LIFTED helper (alpha-engine-config-I7238/I7262) — the same
+    monkeypatch/rerun/assert-FAIL shape crucible-predictor's test suite carries
+    independently; both now import one proven-correct implementation from
+    ``nousergon_lib.quant.selftest_perturbation`` instead of each keeping its
+    own copy.
+    """
+    assert_perturbation_caught(
+        monkeypatch, module_path="nousergon_lib.quant.attractiveness",
+        attr="_ZSCORE_CLIP", perturbed=3.0001,
+        run=lambda: st.run_self_test(run_date="2026-08-15"),
+        case_name="zscore_clip_convention",
     )
-    failed = {c["case"] for c in out["cases"] if c["verdict"] == st.FAIL}
-    assert "zscore_clip_convention" in failed
 
 
 def test_a_perturbed_composite_weight_is_caught(monkeypatch):
-    from scoring import composite as comp
-
-    monkeypatch.setattr(comp, "DEFAULT_W_QUANT", 0.5001)
-    out = st.run_self_test(run_date="2026-08-15")
-    assert out["verdict"] == st.FAIL
-    failed = {c["case"] for c in out["cases"] if c["verdict"] == st.FAIL}
-    assert "composite_weights_convention" in failed
+    assert_perturbation_caught(
+        monkeypatch, module_path="scoring.composite", attr="DEFAULT_W_QUANT",
+        perturbed=0.5001, run=lambda: st.run_self_test(run_date="2026-08-15"),
+        case_name="composite_weights_convention",
+    )
 
 
 def test_a_perturbed_horizon_is_caught(monkeypatch):
-    from scoring import leaderboard_scoring as lead
-
-    monkeypatch.setattr(lead, "DEFAULT_HORIZON_DAYS", 22)
-    out = st.run_self_test(run_date="2026-08-15")
-    assert out["verdict"] == st.FAIL
-    failed = {c["case"] for c in out["cases"] if c["verdict"] == st.FAIL}
-    assert "horizon_days_convention" in failed
+    assert_perturbation_caught(
+        monkeypatch, module_path="scoring.leaderboard_scoring",
+        attr="DEFAULT_HORIZON_DAYS", perturbed=22,
+        run=lambda: st.run_self_test(run_date="2026-08-15"),
+        case_name="horizon_days_convention",
+    )
 
 
 def test_perturbing_the_clustered_se_denominator_is_caught(monkeypatch):
@@ -360,8 +360,6 @@ def test_perturbing_the_clustered_se_denominator_is_caught(monkeypatch):
     are both needed and neither substitutes for the other.
     """
     import math as _math
-
-    from scoring import leaderboard_scoring as lead
 
     def population_se(per_date):
         vals = [float(v) for v in per_date]
@@ -376,11 +374,13 @@ def test_perturbing_the_clustered_se_denominator_is_caught(monkeypatch):
         return {"mean": round(mean, 6), "se": round(se, 6),
                 "t_stat": round(mean / se, 4) if se > 0 else None, "n_dates": n}
 
-    monkeypatch.setattr(lead, "date_clustered_stats", population_se)
-    out = st.run_self_test(run_date="2026-08-15")
-    assert out["verdict"] == st.FAIL
+    out = assert_perturbation_caught(
+        monkeypatch, module_path="scoring.leaderboard_scoring",
+        attr="date_clustered_stats", perturbed=population_se,
+        run=lambda: st.run_self_test(run_date="2026-08-15"),
+        case_name="date_clustered_se_closed_form",
+    )
     failed = {c["case"] for c in out["cases"] if c["verdict"] == st.FAIL}
-    assert "date_clustered_se_closed_form" in failed
     assert "date_clustered_ddof_convention" in failed
     assert not any(n.endswith("_metamorphic") for n in failed)
 
@@ -400,11 +400,12 @@ def test_perturbing_the_rank_tie_rule_is_caught(monkeypatch):
         for r in results.values():
             r["cross_sectional_rank"] = remap[r["cross_sectional_rank"]]
 
-    monkeypatch.setattr(aggregator, "assign_cross_sectional_ranks", dense)
-    out = st.run_self_test(run_date="2026-08-15")
-    assert out["verdict"] == st.FAIL
-    failed = {c["case"] for c in out["cases"] if c["verdict"] == st.FAIL}
-    assert "cross_sectional_rank_closed_form" in failed
+    assert_perturbation_caught(
+        monkeypatch, module_path="scoring.aggregator",
+        attr="assign_cross_sectional_ranks", perturbed=dense,
+        run=lambda: st.run_self_test(run_date="2026-08-15"),
+        case_name="cross_sectional_rank_closed_form",
+    )
 
 
 # ── the console surface ─────────────────────────────────────────────────────

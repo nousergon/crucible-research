@@ -118,33 +118,55 @@ never UNKNOWN**.
 This module introduces no hard-fail path, no new SF state and no topology change.
 An accuracy instrument that can take down the pipeline is a worse defect than the
 one it detects.
+
+LIFTED RUNNER (alpha-engine-config-I7238)
+------------------------------------------
+The outcome taxonomy, ``Case`` shape (including ``known_gap``/``gap_issue``,
+which this module uses), the SIGALRM budget and the provenance helpers below
+are imported from ``nousergon_lib.quant.selftest`` — the fourth adoption of
+this scaffolding triggered the lift per ``shared-code-policy``. This module
+keeps the domain-specific fixtures, ``build_cases()``, the artifact key,
+``write_self_test`` and the console-envelope publishing helpers (the latter
+deliberately NOT migrated to the lib's own ``fleet_check_result`` yet, mirroring
+the predictor's own staged-migration precedent — see
+``inference/self_test.py``).
 """
 
 from __future__ import annotations
 
 import logging
 import math
-import os
-import platform
-import signal
-import threading
-import time
 from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
+
+from nousergon_lib.quant.selftest import (
+    CASE_TIMEOUT_SECONDS,
+    FAIL,
+    PASS,
+    Case,
+)
+from nousergon_lib.quant.selftest import (
+    UNKNOWN as UNKNOWN,  # noqa: PLC0414 — re-exported for callers (st.UNKNOWN)
+)
+from nousergon_lib.quant.selftest import (
+    code_sha as _lib_code_sha,
+)
+from nousergon_lib.quant.selftest import (
+    resolved_library_versions as _lib_resolved_library_versions,
+)
+from nousergon_lib.quant.selftest import (
+    run_self_test as _lib_run_self_test,
+)
+from nousergon_lib.quant.selftest import (
+    verdict_is_pass as verdict_is_pass,  # noqa: PLC0414 — re-exported for callers (st.verdict_is_pass)
+)
 
 logger = logging.getLogger(__name__)
 
 SCHEMA = "research_self_test-1.0.0"
 COMPONENT = "research"
-
-# The fleet verdict vocabulary, shared with grading/attestation and the console
-# so a reader never translates between dialects. (S105 reads "PASS" as a possible
-# credential; it is a verdict constant.)
-PASS = "PASS"  # noqa: S105
-FAIL = "FAIL"
-UNKNOWN = "UNKNOWN"
 
 #: ``research/{run_date}/self_test.json`` — beside the run's signals.
 _KEY_TEMPLATE = "research/{run_date}/self_test.json"
@@ -166,8 +188,6 @@ _TRACKED_DISTRIBUTIONS = (
     "krepis",
     "boto3",
 )
-
-CASE_TIMEOUT_SECONDS = 30.0
 
 #: 1e-9 absolute, per `alpha-engine-config-I7262`. Not tuned to make the battery
 #: pass — observed agreement is ~1e-16 on every unrounded case.
@@ -203,34 +223,6 @@ _PER_DATE_IC = (0.04, 0.02, -0.01, 0.05, 0.03)
 #: Affine transform for metamorphic invariance. Both non-trivial.
 _AFFINE_SCALE = 7.0
 _AFFINE_SHIFT = -13.0
-
-
-class _CaseTimeout(Exception):
-    """Raised when a case exceeds :data:`CASE_TIMEOUT_SECONDS`."""
-
-
-class Case(NamedTuple):
-    """One known-answer, metamorphic, degenerate or convention check.
-
-    ``expected`` is derived by hand from the function's definition; ``compute``
-    drives the production code and returns the comparable observed number. They
-    are kept apart — rather than ``compute`` returning a bool — so the artifact
-    carries both numbers and a later divergence is diagnosable from the artifact
-    alone. ``inputs`` is published verbatim: a reader must be able to re-derive
-    ``expected`` on paper without opening this file.
-
-    ``known_gap`` marks a case pinning behaviour believed WRONG, so a reader never
-    mistakes its PASS for an endorsement. See the module docstring.
-    """
-
-    name: str
-    description: str
-    inputs: dict
-    expected: float
-    compute: Callable[[], float]
-    tolerance: float = TOLERANCE
-    known_gap: bool = False
-    gap_issue: str | None = None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1055,7 +1047,7 @@ def _undefined_representation_count() -> float:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Provenance header — the reason this is an INSTRUMENT check, not a code check
+# Provenance + runner — thin wrappers over nousergon_lib.quant.selftest
 # ════════════════════════════════════════════════════════════════════════════
 
 def resolved_library_versions(
@@ -1063,104 +1055,19 @@ def resolved_library_versions(
 ) -> dict[str, str]:
     """The installed version of every numeric distribution loaded at runtime.
 
-    ``importlib.metadata.version`` reads the DISTRIBUTION metadata pip actually
-    resolved into this image — the thing that moves between the CI runner and the
-    deployed Lambda. A missing distribution is recorded explicitly, never
-    omitted: an absent key and a missing library must not look the same.
+    Thin wrapper binding this repo's tracked distribution tuple to the lifted
+    lib implementation (alpha-engine-config-I7238).
     """
-    from importlib.metadata import PackageNotFoundError, version
-
-    resolved: dict[str, str] = {}
-    for dist in distributions:
-        try:
-            resolved[dist] = version(dist)
-        except PackageNotFoundError:
-            resolved[dist] = "<not installed>"
-        except Exception as exc:  # noqa: BLE001 — a version probe never blocks
-            resolved[dist] = f"<unavailable: {type(exc).__name__}>"
-    return resolved
+    return _lib_resolved_library_versions(distributions)
 
 
 def code_sha() -> str:
     """The SHA of the code that ran, without shelling out.
 
-    Deploy-time stamps first (``GIT_SHA`` env, then ``/var/task/GIT_SHA.txt`` —
-    the fleet's Lambda-image convention), then the checkout's own ``.git`` refs
-    for a local run. ``unknown`` is a legitimate answer and is recorded as one — a
-    fabricated SHA is worse than an absent one.
+    Thin wrapper binding this repo's checkout root to the lifted lib
+    implementation (alpha-engine-config-I7238).
     """
-    for env_key in ("GIT_SHA", "CODE_SHA", "GITHUB_SHA"):
-        stamped = os.environ.get(env_key)
-        if stamped:
-            return stamped.strip()
-    try:
-        lambda_stamp = Path("/var/task/GIT_SHA.txt")
-        if lambda_stamp.is_file():
-            stamped = lambda_stamp.read_text().strip()
-            if stamped:
-                return stamped
-    except Exception:  # noqa: BLE001,S110 — provenance never blocks the battery
-        # Deliberately silent: this is the OPTIONAL Lambda stamp probe, and its
-        # absence is the normal case off-Lambda. The failure mode swallowed is
-        # "no deploy-time SHA stamp here"; the recording surface is the returned
-        # `code_sha`, which falls through to the .git lookup and finally to the
-        # literal "unknown" — a value the artifact carries honestly.
-        pass
-    try:
-        git_dir = Path(__file__).resolve().parents[1] / ".git"
-        head = (git_dir / "HEAD").read_text().strip()
-        if not head.startswith("ref: "):
-            return head
-        ref = head[5:].strip()
-        ref_path = git_dir / ref
-        if ref_path.is_file():
-            return ref_path.read_text().strip()
-        for line in (git_dir / "packed-refs").read_text().splitlines():
-            if line.endswith(" " + ref):
-                return line.split(" ", 1)[0].strip()
-        return "unknown"
-    except Exception:  # noqa: BLE001 — provenance never blocks the battery
-        return "unknown"
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Runner
-# ════════════════════════════════════════════════════════════════════════════
-
-def _call_with_timeout(fn: Callable[[], float], seconds: float) -> float:
-    """Run ``fn`` under a wall-clock budget.
-
-    A SIGALRM budget is installed when this is the main thread of a platform that
-    has one (a Lambda handler thread qualifies). Where it is not available the
-    elapsed time is checked after the call instead — that cannot interrupt a hang,
-    but it does catch an overrun, and the caller distinguishes neither: both FAIL.
-    """
-    can_interrupt = (
-        hasattr(signal, "SIGALRM")
-        and hasattr(signal, "setitimer")
-        and threading.current_thread() is threading.main_thread()
-    )
-    if not can_interrupt:
-        started = time.monotonic()
-        value = fn()
-        elapsed = time.monotonic() - started
-        if elapsed > seconds:
-            raise _CaseTimeout(
-                f"case exceeded its {seconds:g}s budget "
-                f"({elapsed:.1f}s, detected after the fact)"
-            )
-        return value
-
-    def _fire(_signum, _frame):
-        raise _CaseTimeout(f"case exceeded its {seconds:g}s budget")
-
-    previous = signal.signal(signal.SIGALRM, _fire)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        return fn()
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
-        signal.signal(signal.SIGALRM, previous)
+    return _lib_code_sha(Path(__file__).resolve().parents[1])
 
 
 def run_self_test(
@@ -1173,155 +1080,21 @@ def run_self_test(
 ) -> dict[str, Any]:
     """Run the known-answer battery on the DEPLOYED instrument and return the body.
 
-    Never raises — see the module docstring's CONTRACT section.
+    Never raises — see the module docstring's CONTRACT section. Delegates the
+    outcome taxonomy, provenance header and timeout handling to
+    ``nousergon_lib.quant.selftest.run_self_test`` (alpha-engine-config-I7238);
+    this wrapper supplies only this repo's identity (``component``/``schema``),
+    default battery (``build_cases``), and resolved provenance.
     """
-    started = time.monotonic()
-    header = {
-        "schema": schema,
-        "component": component,
-        "run_date": run_date,
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "code_sha": code_sha(),
-        "libraries": resolved_library_versions(),
-        "case_timeout_seconds": case_timeout_seconds,
-    }
-
-    provider = case_provider or build_cases
-    try:
-        # Materialised inside the try: a provider returning a lazy or broken
-        # iterable would otherwise raise at the FOR loop below, outside every
-        # handler, and take down the stage this must never be able to fail.
-        cases = list(provider())
-    except Exception as exc:  # noqa: BLE001 — see CONTRACT: this becomes UNKNOWN
-        logger.error(
-            "self-test: the battery could not be constructed (%s: %s) — verdict "
-            "UNKNOWN. No correctness guarantee is granted this cycle.",
-            type(exc).__name__, exc, exc_info=True,
-        )
-        return {**header, "status": "error", "verdict": UNKNOWN, "cases": [],
-                "n_cases": 0, "n_failed": 0, "n_errored": 0, "n_known_gaps": 0,
-                "error_class": type(exc).__name__, "error_msg": str(exc)[:500],
-                "wall_clock_seconds": round(time.monotonic() - started, 3)}
-
-    records: list[dict] = []
-    for index, case in enumerate(cases):
-        try:
-            record: dict[str, Any] = {
-                "case": case.name,
-                "description": case.description,
-                "inputs": case.inputs,
-                "expected": case.expected,
-                "actual": None,
-                "abs_error": None,
-                "tolerance": case.tolerance,
-                "verdict": UNKNOWN,
-            }
-        except Exception as exc:  # noqa: BLE001 — see CONTRACT: never raises
-            # A provider that returned a well-formed LIST of malformed items gets
-            # past the materialisation guard above and would otherwise raise here,
-            # outside every handler — taking down the stage this module must never
-            # be able to fail. Recorded as UNKNOWN, never as a pass.
-            logger.error(
-                "self-test: case %d is not a Case (%s: %s) => UNKNOWN",
-                index, type(exc).__name__, exc,
-            )
-            records.append({
-                "case": f"<malformed case {index}>",
-                "description": "the case provider returned a non-Case object",
-                "inputs": {"units": "n/a"},
-                "expected": None, "actual": None, "abs_error": None,
-                "tolerance": None, "verdict": UNKNOWN, "errored": True,
-                "error_class": type(exc).__name__, "error_msg": str(exc)[:500],
-                "wall_clock_seconds": 0.0,
-            })
-            continue
-
-        if case.known_gap:
-            # Stated in the artifact, in words, so a reader never reads this
-            # row's PASS as an endorsement of the behaviour it pins.
-            record["known_gap"] = True
-            record["gap_issue"] = case.gap_issue
-            record["known_gap_note"] = (
-                "This case PINS behaviour believed incorrect at its MEASURED "
-                "value so further drift goes red. PASS means 'unchanged since "
-                f"recorded', NOT 'this is correct'. Tracked in {case.gap_issue}."
-            )
-        case_started = time.monotonic()
-        try:
-            actual = float(_call_with_timeout(case.compute, case_timeout_seconds))
-            error = abs(actual - case.expected)
-            record["actual"] = actual
-            record["abs_error"] = error
-            record["verdict"] = PASS if error <= case.tolerance else FAIL
-            if record["verdict"] == FAIL:
-                logger.error(
-                    "self-test case FAILED: %s expected=%r actual=%r abs_error=%r "
-                    "tolerance=%r", case.name, case.expected, actual, error,
-                    case.tolerance,
-                )
-        except _CaseTimeout as exc:
-            # Brian ruling 2026-08-13: a timeout is FAIL, never UNKNOWN.
-            record["verdict"] = FAIL
-            record["timed_out"] = True
-            record["error_class"] = type(exc).__name__
-            record["error_msg"] = str(exc)[:500]
-            logger.error("self-test case TIMED OUT (=> FAIL): %s (%s)", case.name, exc)
-        except Exception as exc:  # noqa: BLE001 — a case that could not RUN is UNKNOWN
-            record["verdict"] = UNKNOWN
-            record["errored"] = True
-            record["error_class"] = type(exc).__name__
-            record["error_msg"] = str(exc)[:500]
-            logger.error(
-                "self-test case ERRORED (=> UNKNOWN): %s (%s: %s)",
-                case.name, type(exc).__name__, exc, exc_info=True,
-            )
-        record["wall_clock_seconds"] = round(time.monotonic() - case_started, 3)
-        records.append(record)
-
-    n_failed = sum(1 for r in records if r["verdict"] == FAIL)
-    n_errored = sum(1 for r in records if r["verdict"] == UNKNOWN)
-    n_known_gaps = sum(1 for r in records if r.get("known_gap"))
-    if n_failed:
-        verdict = FAIL
-    elif n_errored or not records:
-        verdict = UNKNOWN
-    else:
-        verdict = PASS
-
-    body = {**header, "status": "ok", "verdict": verdict, "cases": records,
-            "n_cases": len(records), "n_failed": n_failed, "n_errored": n_errored,
-            "n_known_gaps": n_known_gaps,
-            "wall_clock_seconds": round(time.monotonic() - started, 3)}
-
-    if verdict == PASS:
-        logger.info(
-            "self-test PASS — %d/%d known-answer cases agreed on %s (%s); "
-            "%d of them PIN a known gap rather than endorse it",
-            len(records), len(records), header["python"],
-            ", ".join(f"{k} {v}" for k, v in header["libraries"].items()),
-            n_known_gaps,
-        )
-    elif verdict == UNKNOWN:
-        logger.error(
-            "self-test UNKNOWN — %d/%d cases could not run. The correctness "
-            "guarantee is WITHHELD this cycle (never granted by default).",
-            n_errored, len(records),
-        )
-    else:
-        logger.error(
-            "self-test FAIL — %d/%d known-answer cases DISAGREE with their "
-            "hand-derived expectation on the DEPLOYED libraries (%s). THIS "
-            "CYCLE'S SIGNAL SET IS NOT TRUSTWORTHY.",
-            n_failed, len(records),
-            ", ".join(f"{k} {v}" for k, v in header["libraries"].items()),
-        )
-    return body
-
-
-def verdict_is_pass(verdict: str | None) -> bool:
-    """True only for an explicit PASS — ``None`` and ``"ok"`` withhold the guarantee."""
-    return verdict == PASS
+    return _lib_run_self_test(
+        run_date,
+        case_provider=case_provider or build_cases,
+        component=component,
+        schema=schema,
+        resolved_libraries=resolved_library_versions(),
+        code_sha_value=code_sha(),
+        case_timeout_seconds=case_timeout_seconds,
+    )
 
 
 def self_test_key(run_date: str) -> str:
