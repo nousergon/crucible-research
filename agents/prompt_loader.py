@@ -7,11 +7,17 @@ as a drop-in replacement for ``str.format`` — ``LoadedPrompt`` exposes the
 same method.
 
 Search order mirrors ``config.py::_find_config`` so prompts and YAML configs
-resolve through the same private-config-repo discovery logic:
+resolve through the same private-config-repo discovery logic. Each sibling-
+checkout candidate is tried experiment-scoped first, then at the legacy
+bare path (HARNESS_EXPERIMENT_CLASSIFICATION.md §3; ``ALPHA_ENGINE_
+EXPERIMENT_ID``, default ``"reference"``) — see ``_resolve_prompt_path``:
 
-  1. ~/alpha-engine-config/research/prompts/<name>.txt        (local dev, sibling)
-  2. <repo>/../alpha-engine-config/research/prompts/<name>.txt (local dev, parent)
-  3. $GITHUB_WORKSPACE/alpha-engine-config/research/prompts/<name>.txt (CI)
+  1. ~/alpha-engine-config/experiments/<EXPERIMENT_ID>/research/prompts/<name>.txt (local dev, sibling)
+  1b. ~/alpha-engine-config/research/prompts/<name>.txt                            (local dev, sibling, legacy)
+  2. <repo>/../alpha-engine-config/experiments/<EXPERIMENT_ID>/research/prompts/<name>.txt (local dev, parent)
+  2b. <repo>/../alpha-engine-config/research/prompts/<name>.txt                    (local dev, parent, legacy)
+  3. $GITHUB_WORKSPACE/alpha-engine-config/experiments/<EXPERIMENT_ID>/research/prompts/<name>.txt (CI)
+  3b. $GITHUB_WORKSPACE/alpha-engine-config/research/prompts/<name>.txt            (CI, legacy)
   4. <repo>/config/prompts/<name>.txt                         (Lambda image —
      deploy.sh stages from the config repo into this directory)
 
