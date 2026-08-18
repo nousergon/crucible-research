@@ -7,6 +7,34 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # after the lib-public flip (PR #103/#105) failed at the lib-install
 # step. ``microdnf`` is the AL2023 minimal package manager; ``-y``
 # auto-confirms. Image-size impact: ~25MB for git + git-core deps.
+# krepis>=0.59.15 (krepis-PR95, nous-ergon-ops-I738) added an in-process
+# DLP scan hook to LLMClient (session_dlp.py) that shells out to gitleaks
+# on every call and fails CLOSED (raises LLMError) when the binary is
+# missing from PATH or the config directory is absent. This image's
+# handler.py/thinktank_handler.py/eval_judge_*_handler.py/
+# perturbation_battery_handler.py all make LIVE Anthropic/OpenRouter calls
+# through evals/judge.py, producers/single_agent.py and thinktank/client.py
+# (each constructs krepis.llm.LLMClient directly) — a real production
+# path, not a test double. requirements.txt pins `krepis>=0.43.0` with no
+# ceiling, so a fresh build resolves the DLP-hook version. Pinned version
+# + sha256 mirror krepis's own working CI step (test.yml) — do not
+# re-derive. No `sudo` needed: Docker RUN executes as root by default (no
+# USER directive in this image). `/opt/llm-routing` is session_dlp.py's
+# first standard-path fallback (before its final Lambda-bundled-package
+# fallback), so no `KREPIS_GITLEAKS_DIR` override is needed.
+RUN set -euo pipefail && \
+    GITLEAKS_VERSION="8.30.1" && \
+    GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" && \
+    curl -sSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" && \
+    echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks && \
+    chmod +x /tmp/gitleaks && \
+    mv /tmp/gitleaks /usr/local/bin/gitleaks && \
+    rm -f /tmp/gitleaks.tar.gz && \
+    gitleaks version && \
+    mkdir -p /opt/llm-routing && \
+    printf '[extend]\nuseDefault = true\n' > /opt/llm-routing/gitleaks-egress.toml
+
 RUN microdnf install -y git && microdnf clean all
 
 # Bake the source commit SHA into the image so the decision-capture provenance
