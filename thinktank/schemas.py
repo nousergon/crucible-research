@@ -398,6 +398,23 @@ class TierUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    #: ``{rung: call_count}`` over ``krepis.llm``'s structured-output
+    #: degradation ladder (``native`` / ``tool_emulation`` / ``prompt_only``,
+    #: plus ``unknown`` when the transport reported none).
+    #:
+    #: krepis populates ``structured_output_rung`` on EVERY structured result,
+    #: degraded or not, expressly so a degraded call is visible in the
+    #: consumer's artifact — and this consumer read it nowhere
+    #: (alpha-engine-config-I7658). Measured live 2026-08-18 against the `low`
+    #: group: the deployment answers `400 This response_format type is
+    #: unavailable now`, krepis descends native -> prompt_only and records the
+    #: drop, and the run manifest said nothing. Every `sweep` and `triage`
+    #: call in the daily run has been running one rung down since the ladder
+    #: shipped, invisibly.
+    #:
+    #: Counts are published for the undegraded rung too: a tier that emits
+    #: nothing here is unobserved, not healthy.
+    structured_output_rungs: dict[str, int] = Field(default_factory=dict)
 
 
 class RunManifest(_Artifact):

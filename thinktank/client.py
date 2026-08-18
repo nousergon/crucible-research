@@ -333,6 +333,7 @@ class ThinktankClient:
             sft_meta=sft_meta,
             served_model=result.model or "",
             provider_cost_usd=usage.provider_cost_usd,
+            structured_output_rung=getattr(result, "structured_output_rung", None),
         )
         return LLMCallResult(
             parsed=result.parsed,
@@ -420,6 +421,7 @@ class ThinktankClient:
         sft_meta: dict[str, Any] | None = None,
         served_model: str = "",
         provider_cost_usd: float | None = None,
+        structured_output_rung: str | None = None,
     ) -> float:
         cost = self._cost_for(
             tier,
@@ -433,6 +435,13 @@ class ThinktankClient:
         bucket_usage.input_tokens += input_tokens
         bucket_usage.output_tokens += output_tokens
         bucket_usage.cost_usd += cost
+        # "unknown" rather than skipping: a call whose rung the transport did
+        # not report is a call whose structured-output path is unobserved, and
+        # an absent key would read as "no degradation happened".
+        rung = structured_output_rung or "unknown"
+        bucket_usage.structured_output_rungs[rung] = (
+            bucket_usage.structured_output_rungs.get(rung, 0) + 1
+        )
 
         self._call_seq += 1
         self._sft_rows.setdefault(agent_id, []).append(
