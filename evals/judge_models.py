@@ -119,7 +119,19 @@ OPENROUTER_SHADOW = JudgeModelSpec(
         "key, is read by nothing in the escalation/RationaleClustering/"
         "ReplayConcordance/Director path until the perturbation-suite "
         "validation (config#2575 item 6) passes. See "
-        "`evals/perturbation_openrouter_smoke.py` for the validation run."
+        "`evals/perturbation_openrouter_smoke.py` for the validation run. "
+        "alpha-engine-config-I6559 (2026-08-19, off-direct-OpenRouter "
+        "migration, I6367): SURVIVES, router-group-resolved (`low` group "
+        "via krepis.router, see evals/judge.py::_call_openrouter_judge_llm) "
+        "rather than a direct OpenRouter link. Champion-challenger note: "
+        "the 'different serving path' premise that originally justified "
+        "this shadow tier was already eliminated by alpha-engine-config-"
+        "I2997 (2026-07-19) — since then this constant's request_model has "
+        "been physically identical to the sync primary path's. I6559 does "
+        "not change that; it only changes the transport both paths share. "
+        "Whether OPENROUTER_SHADOW should be retired now that it is not a "
+        "genuinely distinct second opinion is a separate, tracked "
+        "policy-champion-challenger governance decision."
     ),
 )
 

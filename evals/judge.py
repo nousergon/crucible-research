@@ -47,6 +47,21 @@ used as its shadow tier (config#2575) — see both functions' docstrings for
 the full rationale, including why the Haiku/Sonnet ``judge_model`` logical
 keys are PRESERVED (S3 path / CloudWatch dimension / rolling-mean identity)
 even though both tiers now physically call the SAME OpenRouter model.
+
+**alpha-engine-config-I6559 (2026-08-19):** both ``evaluate_artifact`` and
+``evaluate_artifact_openrouter`` no longer link directly to OpenRouter
+(Brian's ruling, I6367) — the shared ``_call_openrouter_judge_llm`` core now
+resolves its ``LLMClient`` via ``krepis.router.resolve_group_spec`` against
+the ``low`` model group through the krepis router edge
+(``router.nousergon.ai:8443``), the same pattern already live on
+``producers/single_agent.py::assess_candidates`` and ``thinktank/client.py``.
+Model, endpoint and credential are now a registry decision; this module
+names only the capability tier (``low``) and exec context (``lambda``). Per
+the I6559 champion-challenger review: the two call sites already shared the
+identical ``request_model`` and the identical call core since I2997 above —
+routing both through the router preserves that (pre-existing, not new)
+convergence rather than causing it; see ``evaluate_artifact_openrouter``'s
+docstring for the full decision.
 """
 
 from __future__ import annotations
@@ -54,7 +69,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -76,7 +91,7 @@ from nousergon_lib.eval_artifacts import (
 )
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
-from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
+from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
 from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
 from graph.state_schemas import (
     RubricEvalArtifact,
@@ -885,28 +900,65 @@ module's own leak-guard gate (``check_openai_tool_response_for_leak``),
 not a langchain correction turn. Caps worst-case latency at 3 full model
 calls."""
 
+JUDGE_MODEL_GROUP = "low"
+"""Router model group both judge call sites resolve through
+(alpha-engine-config-I6559 — no agent may be directly linked to
+OpenRouter, I6367 ruling). Matches ``LLM_CALLSITE_REGISTRY.yaml`` rows
+``evaljudge-sync`` and ``evaljudge-shadow``, both declared
+``model_group: low``, ``transport: krepis_llm``."""
 
-def _openrouter_judge_model_spec(*, request_model: str, max_tokens: int) -> ModelSpec:
-    """Build the ``ModelSpec`` for an OpenRouter judge call.
+JUDGE_EXEC_CONTEXT = "lambda"
+"""Both judge call sites run as Lambda invocations: ``evaluate_artifact``
+from the batch Process Lambda's Sonnet-escalation tail (plus ad-hoc
+replay / ``judge_only`` smoke, which run off-laptop against the same
+Lambda-shaped environment) and ``evaluate_artifact_openrouter`` from
+``lambda/openrouter_shadow_handler.py``. A future non-Lambda caller
+should pass its own declared context rather than assume this one
+(model-router-policy R28/R29 — a fact, never a routing preference)."""
 
-    ``reasoning={"exclude": True}`` is NOT the default here — live
-    validation (config#2575, 2026-07-18) confirmed a reasoning-capable
+
+def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
+    """Resolve the router group spec for a judge call
+    (alpha-engine-config-I6559).
+
+    The registry decides model, endpoint and credential for the ``low``
+    group; this module decides only which capability tier it wants and
+    where it runs — same division of labor as the already-migrated sibling
+    call sites (``producers/single_agent.py::assess_candidates``,
+    ``thinktank/client.py``).
+
+    ``resolve_group_spec`` has no reasoning-control parameter, so
+    ``reasoning={"exclude": True}`` is re-applied on top of the resolved
+    (frozen) ``ModelSpec`` via ``dataclasses.replace``. Still required:
+    live validation (config#2575, 2026-07-18) confirmed a reasoning-capable
     OpenRouter model can burn its entire budget on chain-of-thought before
     ever emitting the forced tool call (``finish_reason="length"``, no
     ``tool_calls`` — see ``krepis.judge.check_openai_tool_response_for_leak``
     and its docstring for the live-reproduced failure shape). Excluding
     reasoning avoids paying for tokens that never reach the scored output
     and, per the same live check, reliably avoids the truncation failure
-    mode for the pinned model. A future judge-tier model that specifically
-    benefits from visible reasoning could override this — kept as an
-    explicit, documented default rather than silently omitted.
+    mode for the group's currently-resolved model.
+
+    Local import (not module-level) so the test-suite's autouse router
+    stub (``conftest.py::_router_resolution_is_stubbed_unless_a_test_says_otherwise``)
+    intercepts it the same way it does for
+    ``producers/single_agent.py::assess_candidates`` — a module-level
+    ``from krepis.router import resolve_group_spec`` binds the name before
+    any per-test monkeypatch runs and would not be interceptable there.
     """
-    return ModelSpec(
-        provider="openrouter",
-        model=request_model,
+    from krepis.router import resolve_group_spec
+
+    spec, route = resolve_group_spec(
+        JUDGE_MODEL_GROUP,
+        exec_context=JUDGE_EXEC_CONTEXT,
+        # This call builds an LLMClient on the openai transport (forced
+        # tool_choice below, in `_call_openrouter_judge_llm`). Asking for
+        # the anthropic wire could hand it a URL its transport cannot speak.
+        wire="openai",
         max_tokens=max_tokens,
-        reasoning={"exclude": True},
+        structured_outputs=False,
     )
+    return replace(spec, reasoning={"exclude": True}), route
 
 
 @dataclass
@@ -932,12 +984,22 @@ def _call_openrouter_judge_llm(
     system_prompt: str = "",
     callsite_id: str = "evaljudge-sync",
 ) -> _OpenRouterJudgeCallResult:
-    """Shared OpenRouter judge-call core: forced-tool-call request + leak
-    guard + bounded retry loop. Used by BOTH ``evaluate_artifact`` (sync
-    primary path, alpha-engine-config-I2997) and
+    """Shared router-resolved judge-call core: forced-tool-call request +
+    leak guard + bounded retry loop. Used by BOTH ``evaluate_artifact``
+    (sync primary path, alpha-engine-config-I2997) and
     ``evaluate_artifact_openrouter`` (shadow tier, config#2575) — the only
     difference between the two callers is which ``request_model`` /
-    ``judge_model`` identity they persist onto the result.
+    ``judge_model`` identity they persist onto the result and their
+    ``callsite_id`` (``evaljudge-sync`` vs ``evaljudge-shadow``).
+
+    **alpha-engine-config-I6559:** ``request_model`` is no longer handed to
+    the transport as a literal — the ``low`` router group resolves model,
+    endpoint and credential (see ``_judge_router_spec_and_route``).
+    ``request_model`` stays a parameter: both callers still compute and
+    persist it (``judge_request_model`` on the returned artifact) as the
+    caller's own declared identity for that judge tier, and it still
+    appears in this function's logging/error messages for diagnosis — it
+    just no longer selects which physical model answers the call.
 
     **Cache-aware system prompt (I4930).** When ``system_prompt`` is
     non-empty (the rubric's static criteria, split from the volatile
@@ -962,17 +1024,26 @@ def _call_openrouter_judge_llm(
     Raises ``RuntimeError`` if all ``max_retries`` attempts fail (leak
     guard trip or schema validation failure).
     """
-    spec = _openrouter_judge_model_spec(request_model=request_model, max_tokens=max_tokens)
+    spec, route = _judge_router_spec_and_route(max_tokens=max_tokens)
     llm_client = LLMClient(
         spec,
         callsite_id=callsite_id,
-        api_key=_resolve_openrouter_api_key(api_key),
+        # Router-resolved credential (alpha-engine-config-I6559): `spec`
+        # names the credential by env var / secret name and krepis resolves
+        # it BY NAME at call time — no key is read here. `api_key` stays a
+        # parameter as a test seam only; production callers leave it None.
+        api_key=api_key,
         timeout=180.0,
         max_retries=0,
         # Process-scoped sink — see ``_judge_cost_sink``. Without this the
         # judge's per-call spend is invisible to AggregateCosts
         # (alpha-engine-config-I5206).
         cost_sink=_judge_cost_sink(),
+    )
+    logger.info(
+        "%s:%s callsite=%s group=%s route=%s deployment=%s request_model=%s",
+        log_prefix, agent_id, callsite_id, JUDGE_MODEL_GROUP,
+        route.get("route"), spec.model, request_model,
     )
 
     tool_schema = _build_rubric_tool_spec()
@@ -1151,6 +1222,27 @@ def evaluate_artifact_openrouter(
     invocable shadow-tier entry point (``evals/openrouter_shadow.py``,
     the agreement-metric computation) unaffected by that migration.
 
+    **Champion-challenger survival call (alpha-engine-config-I6559,
+    2026-08-19):** SURVIVES, unchanged in kind, as a router-group-resolved
+    shadow. This is not a judgment call this migration makes new — it is a
+    measured fact carried forward: the "different serving path" premise
+    that originally justified this shadow tier was already eliminated by
+    I2997 above (2026-07-19), a full month before this ticket. Since then,
+    ``evaluate_artifact`` and this function have shared the identical
+    ``request_model`` (``OPENROUTER_SHADOW.request_model`` /
+    ``request_model_for("openrouter-shadow")`` are the same string) through
+    the identical ``_call_openrouter_judge_llm`` core — see that function's
+    module-level comment. Moving both onto the ``low`` router group here
+    does not further collapse anything; it preserves that exact, pre-
+    existing convergence while satisfying the I6367 off-OpenRouter ruling.
+    Retiring ``OPENROUTER_SHADOW`` outright — because it no longer serves a
+    genuinely distinct second opinion — is a real ``policy-champion-
+    challenger`` governance question, but it predates and is out of scope
+    for I6559 (a transport migration, not an architecture review); tracked
+    separately as a follow-up so the decision gets its own deliberate
+    review rather than riding in on a migration ticket. See
+    ``evals/judge_models.py::OPENROUTER_SHADOW`` for the registry-side note.
+
     Raises:
       - ``ValueError`` if no rubric is mapped for the artifact's
         agent_id (same as ``evaluate_artifact``).
@@ -1234,27 +1326,6 @@ def evaluate_artifact_openrouter(
         dimension_scores=call_result.llm_output.dimension_scores,
         overall_reasoning=call_result.llm_output.overall_reasoning,
     )
-
-
-def _resolve_openrouter_api_key(api_key: str | None) -> str:
-    """Resolve the OpenRouter API key: explicit ``api_key`` arg wins,
-    else ``config.OPENROUTER_API_KEY`` (SSM-first with env fallback via
-    ``nousergon_lib.secrets.get_secret`` — the fleet's standard secret-
-    resolution convention). Shared by ``evaluate_artifact`` (sync primary
-    path, alpha-engine-config-I2997) and ``evaluate_artifact_openrouter``
-    (shadow tier, config#2575) via ``_call_openrouter_judge_llm``. Raises
-    loudly rather than letting the OpenAI SDK client construction fail
-    with a less diagnosable error.
-    """
-    key = api_key or OPENROUTER_API_KEY
-    if not key:
-        raise RuntimeError(
-            "the OpenRouter judge call requires an OpenRouter API key: "
-            "pass api_key= explicitly, or ensure config.OPENROUTER_API_KEY "
-            "resolves (SSM parameter /alpha-engine/OPENROUTER_API_KEY, or "
-            "the OPENROUTER_API_KEY environment variable as a fallback)."
-        )
-    return key
 
 
 # ── Persistence ───────────────────────────────────────────────────────────
