@@ -22,6 +22,24 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # USER directive in this image). `/opt/llm-routing` is session_dlp.py's
 # first standard-path fallback (before its final Lambda-bundled-package
 # fallback), so no `KREPIS_GITLEAKS_DIR` override is needed.
+# alpha-engine-config-I7744 — `tar` and `gzip` are NOT in
+# public.ecr.aws/lambda/python:3.12, and the gitleaks step below untars a
+# .tar.gz. It ran BEFORE the only microdnf install in this file, so it exited
+# 127 (command not found) and the whole Docker build failed. MEASURED: every
+# Deploy run on `main` since 2026-08-18T20:26 failed here — six consecutive — so
+# alpha-engine-research-runner had not been redeployed for a day and nothing
+# said so, the deploy workflow's own red being its only surface.
+#
+# MEASURED in the base image, which is why this installs two packages and not
+# three: `curl` and `sha256sum` are present (/usr/bin/curl, /usr/bin/sha256sum);
+# `tar` and `gzip` are not. Do NOT add `curl` here — the image ships
+# `curl-minimal`, and the full `curl` package CONFLICTS with it, which fails the
+# build in a second, more confusing way.
+#
+# Installed as its own layer rather than folded into the `microdnf install -y
+# git` below, because that one runs after the step that needs these.
+RUN microdnf install -y tar gzip && microdnf clean all
+
 RUN set -euo pipefail && \
     GITLEAKS_VERSION="8.30.1" && \
     GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" && \
