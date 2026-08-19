@@ -639,6 +639,26 @@ def _run(event, context):
     # was reachable only as a side effect of something else.
     if event.get("mode") == "self_test":
         run_date = _resolve_self_test_date(event)
+        # `dry_run` mirrors the RunScope convention already used in this graph
+        # (config-I7620): the Friday-PM shell run exercises the full path and
+        # WRITES NOTHING. That is load-bearing here, not cosmetic — a shell run
+        # that published research/{friday}/self_test.json would leave a fresh,
+        # genuine verdict sitting in the bucket, and the freshness monitor would
+        # read it as the week's artifact. Saturday's real run could then fail to
+        # produce one and nothing would say so. A rehearsal must not be able to
+        # satisfy the check that watches the performance.
+        if event.get("dry_run"):
+            logger.info(
+                "self-test dry run for %s — battery exercised, no artifact and "
+                "no console row written (config-I7726)", run_date,
+            )
+            from scoring.self_test import run_self_test
+
+            result = run_self_test(run_date=run_date)
+            return {
+                "status": "OK", "mode": "self_test", "date": run_date,
+                "dry_run": True, "verdict": result.get("verdict"),
+            }
         _maybe_emit_self_test(datetime.date.fromisoformat(run_date))
         # The battery never raises and never fails the caller: its verdict is
         # carried in the artifact, the console row and the logs. The SF state is

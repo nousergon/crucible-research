@@ -40,6 +40,18 @@ def _import_handler():
     return mod
 
 
+def _fake_self_test_module():
+    """`scoring.self_test` is imported INSIDE the dry-run branch, so patching the
+    real module is not enough on a machine where its transitive deps are absent
+    — the import itself must resolve."""
+    import types
+    from unittest.mock import MagicMock
+
+    mod = types.ModuleType("scoring.self_test")
+    mod.run_self_test = MagicMock(return_value={"verdict": "PASS"})
+    return mod
+
+
 def test_self_test_mode_reaches_the_emitter():
     """The regression itself: the mode must call the thing that writes."""
     mod = _import_handler()
@@ -108,3 +120,32 @@ def test_the_battery_never_fails_the_caller():
     # rather than add a second swallow — two layers of silence is how a verdict
     # stage becomes unobservable. The SF state's Catch is what keeps the run
     # alive, and that is the right layer for it.
+
+
+def test_a_dry_run_exercises_the_battery_but_writes_nothing():
+    """Load-bearing, not cosmetic. The Friday-PM shell run exercises this path;
+    if it PUBLISHED research/{friday}/self_test.json, the freshness monitor
+    would read that genuine-but-rehearsal verdict as the week's artifact, and
+    Saturday's real run could then fail to produce one with nothing saying so.
+    A rehearsal must not be able to satisfy the check that watches the
+    performance."""
+    mod = _import_handler()
+    with patch.object(mod, "_ensure_init"), \
+         patch.object(mod, "_resolve_self_test_date", return_value="2026-08-14"), \
+         patch.object(mod, "_maybe_emit_self_test") as emit, \
+         patch.dict(sys.modules, {"scoring.self_test": _fake_self_test_module()}):
+        battery = sys.modules["scoring.self_test"].run_self_test
+        out = mod._run({"mode": "self_test", "dry_run": True}, None)
+    emit.assert_not_called()          # nothing written, no console row
+    battery.assert_called_once()      # ...but the path IS exercised
+    assert out["dry_run"] is True and out["verdict"] == "PASS"
+
+
+def test_a_normal_run_still_writes():
+    mod = _import_handler()
+    with patch.object(mod, "_ensure_init"), \
+         patch.object(mod, "_resolve_self_test_date", return_value="2026-08-14"), \
+         patch.object(mod, "_maybe_emit_self_test") as emit:
+        out = mod._run({"mode": "self_test", "dry_run": False}, None)
+    emit.assert_called_once()
+    assert "dry_run" not in out
