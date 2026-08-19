@@ -397,6 +397,22 @@ def _is_scheduled_run_time() -> bool:
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
 
+def _resolve_self_test_date(event: dict) -> str:
+    """Trading day for a `mode: self_test` invocation.
+
+    Normalised through the same fleet chokepoint `_run_challengers_only` uses
+    (`nousergon_lib.dates.resolve_trading_day`) and for the identical reason
+    recorded there under alpha-engine-config-I7419: the weekly SF passes the
+    EXECUTION's calendar date, and the weekly run is a Saturday — never itself a
+    session. Keying the artifact on Saturday would write it to a date no
+    consumer looks up, which is a different way of never producing it.
+    """
+    from nousergon_lib.dates import resolve_trading_day
+
+    raw = event.get("date") or datetime.date.today().isoformat()
+    return str(resolve_trading_day(raw))
+
+
 def _run_challengers_only(event: dict) -> dict:
     """Operator recovery mode (config#1683): re-emit the challenger producers'
     shadow cohort for the MOST RECENT weekly run without re-running the
@@ -601,6 +617,34 @@ def _run(event, context):
 
     if event.get("mode") == "challengers_only":
         return _run_challengers_only(event)
+
+    # alpha-engine-config-I7726 — the self-test needs a reachable entry point.
+    #
+    # `_maybe_emit_self_test` lives at the end of the weekly_run branch below,
+    # but MEASURED 2026-08-19: the weekly SF's ONLY invocation of this Lambda is
+    # the ChallengerShadow state, payload {"mode": "challengers_only"}, which
+    # returns immediately above — and the documented fallback trigger, the
+    # EventBridge rule `alpha-research-weekly` cron(0 6 ? * SAT *), is DISABLED.
+    # So the call site was structurally unreachable and
+    # `research/{date}/self_test.json` had ZERO instances in the bucket, ever,
+    # since the row was registered on 2026-08-13. A §2.3a CORRECTNESS VERDICT
+    # whose absence must never read as a pass had never once been emitted.
+    #
+    # Its own mode rather than a graft onto ChallengerShadow: `run_self_test` is
+    # a known-answer battery over the DEPLOYED instrument (scoring/self_test.py
+    # -> nousergon_lib.quant.selftest), so it does not depend on the champion
+    # graph having run and must not inherit a shadow-cohort stage's contract or
+    # its failure modes. One stage, one contract, one registry row, one honest
+    # `produced_by` — which is what the registry could not be given while this
+    # was reachable only as a side effect of something else.
+    if event.get("mode") == "self_test":
+        run_date = _resolve_self_test_date(event)
+        _maybe_emit_self_test(datetime.date.fromisoformat(run_date))
+        # The battery never raises and never fails the caller: its verdict is
+        # carried in the artifact, the console row and the logs. The SF state is
+        # non-blocking for the same reason — a verdict stage that dies must not
+        # kill the stages that do not depend on it.
+        return {"status": "OK", "mode": "self_test", "date": run_date}
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
