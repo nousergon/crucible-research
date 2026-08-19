@@ -77,7 +77,12 @@ from nousergon_lib.eval_artifacts import (
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, OPENROUTER_API_KEY, S3_BUCKET
-from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
+from evals.judge_models import (
+    OPENROUTER_SHADOW,
+    TAG_BY_LOGICAL,
+    request_model_for,
+    sync_request_model_for,
+)
 from graph.state_schemas import (
     RubricEvalArtifact,
     RubricEvalLLMOutput,
@@ -700,20 +705,15 @@ def evaluate_artifact(
     PRESERVED as the persisted logical key — it is the STABLE identity for
     the S3 eval-artifact path / CloudWatch dimension / rolling-mean time
     series (see ``evals/judge_models.py``'s docstring); changing it would
-    reset those series for a non-semantic reason. Per Brian's ruling
-    ("model per [evaluate_artifact_openrouter]'s existing default — it
-    already uses DeepSeek, keep consistent"), BOTH the Haiku and Sonnet
-    tiers now physically call the SAME OpenRouter model
-    (``evals.judge_models.OPENROUTER_SHADOW.request_model`` —
-    ``deepseek/deepseek-v4-flash``) rather than gaining a new bespoke
-    Flash/Pro split; this collapses the two tiers' PHYSICAL distinction
-    (their ``judge_model`` identity, S3 path, and CloudWatch dimension stay
-    separate) — flagged prominently in the alpha-engine-config-I2997 PR
-    body as a real behavior change worth Brian's explicit awareness. The
-    ``judge_resolved_model``/re-anchor mechanism (see judge_models.py) is
-    exactly the protocol this system already has for "same logical key,
-    new backing model" — this is that mechanism engaging as designed, not
-    a workaround.
+    reset those series for a non-semantic reason. The sync path routes
+    through OpenRouter via ``sync_request_model_for()`` per config#4775
+    (2026-08-03): Haiku tier → DeepSeek V4 Flash, Sonnet tier → DeepSeek
+    V4 Pro — restoring a genuine two-tier physical split post-I2997, so
+    the Sonnet escalation invokes a genuinely more capable model rather
+    than a lateral re-roll. The ``judge_resolved_model``/re-anchor
+    mechanism (see judge_models.py) is exactly the protocol this system
+    already has for "same logical key, new backing model" — this is that
+    mechanism engaging as designed, not a workaround.
 
     The ``request_model_for(judge_model)`` Anthropic-snapshot-pinning
     indirection is UNCHANGED and still used by the Batches path
@@ -815,10 +815,12 @@ def evaluate_artifact(
     system_part, user_part = _split_rubric_for_caching(rendered)
 
     # ``judge_model`` stays the stable logical key (persisted + dimension —
-    # see docstring). The ACTUAL request model is the OpenRouter default
-    # ``evaluate_artifact_openrouter`` already uses — deliberately the SAME
-    # for both Haiku and Sonnet tiers per Brian's ruling (see docstring).
-    request_model = OPENROUTER_SHADOW.request_model
+    # see docstring). The sync path routes through OpenRouter per
+    # ``sync_request_model_for()``: Haiku tier → DeepSeek V4 Flash,
+    # Sonnet tier → DeepSeek V4 Pro — a genuine two-tier physical split
+    # restored per config#4775 (2026-08-03), replacing the post-I2997
+    # collapsed single-model routing.
+    request_model = sync_request_model_for(judge_model)
     call_result = _call_openrouter_judge_llm(
         user_part or rendered,
         system_prompt=system_part,
