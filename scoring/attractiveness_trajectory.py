@@ -29,6 +29,8 @@ import math
 import os
 from typing import Any
 
+from krepis.console import DEFAULT_CONSOLE_BASE_URL
+
 logger = logging.getLogger(__name__)
 
 TRAJECTORY_SCHEMA_VERSION = 1
@@ -54,7 +56,12 @@ _SECTOR_ETF = {
 }
 SECTOR_ETFS = sorted(set(_SECTOR_ETF.values()))
 
-CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", "https://dashboard.nousergon.ai")
+# Fallback default sourced from krepis.console (alpha-engine-config-I6140's
+# chokepoint) rather than a second hardcoded literal here — that constant is
+# the fleet's single home for the console host, and duplicating it is exactly
+# how alpha-engine-config-I7158 found a stale copy (this file previously
+# carried its own literal "https://console.nousergon.ai").
+CONSOLE_BASE_URL = os.environ.get("CONSOLE_BASE_URL", DEFAULT_CONSOLE_BASE_URL)
 
 
 # ── pure numeric helpers ─────────────────────────────────────────────────────
