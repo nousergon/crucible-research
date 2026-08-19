@@ -92,9 +92,19 @@ def test_no_module_on_the_llm_path_constructs_the_openai_sdk_directly():
 
 
 def _krepis_floor() -> tuple[int, int, int]:
+    """Parse the resolved krepis version out of requirements.txt.
+
+    Accepts either `krepis>=X.Y.Z` (a floor) or `krepis==X.Y.Z` (an exact
+    pin, per §139 — first-party/fast-moving deps are pinned, never
+    floored). The property under test is "the krepis this image resolves
+    is at or above X" — an exact pin establishes that property MORE
+    strongly than a floor (it IS the resolved version, not a lower bound
+    on it), so the comparator itself is not what matters here
+    (alpha-engine-config-I7635).
+    """
     text = (_REPO_ROOT / "requirements.txt").read_text()
-    match = re.search(r"^krepis\s*>=\s*(\d+)\.(\d+)\.(\d+)", text, re.MULTILINE)
-    assert match, "requirements.txt must pin a krepis floor"
+    match = re.search(r"^krepis\s*(?:>=|==)\s*(\d+)\.(\d+)\.(\d+)", text, re.MULTILINE)
+    assert match, "requirements.txt must pin a krepis floor or exact pin"
     return tuple(int(g) for g in match.groups())  # type: ignore[return-value]
 
 
@@ -112,6 +122,18 @@ def test_krepis_floor_is_at_or_above_the_superset_release():
         "(krepis#93: null-choices guard at all five choices[0] reads, plus "
         "backoff between body-level retries)."
     )
+
+
+def test_krepis_floor_regex_parses_both_floor_and_exact_pin_forms():
+    """Regression guard for the exact defect I7635 fixed: converting the
+    floor to an exact pin must not make this guard report the requirement
+    as ABSENT."""
+    pattern = re.compile(r"^krepis\s*(?:>=|==)\s*(\d+)\.(\d+)\.(\d+)", re.MULTILINE)
+    floor_match = pattern.search("krepis >= 0.59.16")
+    exact_match = pattern.search("krepis==0.59.16")
+    assert floor_match is not None
+    assert exact_match is not None
+    assert floor_match.groups() == exact_match.groups() == ("0", "59", "16")
 
 
 @pytest.mark.parametrize("package", _LLM_PATH_PACKAGES)

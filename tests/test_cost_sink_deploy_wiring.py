@@ -98,20 +98,27 @@ class TestTheSinkStaysAnEnvironmentFact:
     the next call site, which is how this started."""
 
     def test_the_krepis_floor_is_pinned(self):
-        """The floor must be AT LEAST 0.57.0 — asserted as a version
-        comparison, not as a literal string.
+        """The resolved version must be AT LEAST 0.57.0 — asserted as a
+        version comparison, not as a literal string.
 
         A literal `"krepis>=0.57.0" in req` passes only while the floor is
         exactly that value, so the next legitimate raise (0.59.7 shipped the
         cost-record contract columns, config-I7393) fails a guard that has
         nothing to say about the raise. A guard keyed on a constant it does
         not own reports every correct change as a defect.
+
+        Accepts either `krepis>=X.Y.Z` (a floor) or `krepis==X.Y.Z` (an
+        exact pin, per §139 — first-party/fast-moving deps are pinned, never
+        floored). The property under test is "the krepis this image
+        resolves is at or above X" — an exact pin establishes that property
+        MORE strongly than a floor, so the comparator is not what matters
+        here (alpha-engine-config-I7635).
         """
         import re
 
         req = (_REPO_ROOT / "requirements.txt").read_text()
-        m = re.search(r"^krepis>=(\d+)\.(\d+)\.(\d+)", req, re.MULTILINE)
-        assert m, "requirements.txt declares no krepis floor at all"
+        m = re.search(r"^krepis(?:>=|==)(\d+)\.(\d+)\.(\d+)", req, re.MULTILINE)
+        assert m, "requirements.txt declares no krepis floor or exact pin at all"
         floor = tuple(int(g) for g in m.groups())
         assert floor >= (0, 57, 0), (
             f"krepis floor is {'.'.join(map(str, floor))}; below 0.57.0 there "
@@ -119,3 +126,16 @@ class TestTheSinkStaysAnEnvironmentFact:
             "subcommand — the deploy would fail loudly, which is right, but "
             "the floor is what says so"
         )
+
+    def test_krepis_pin_regex_parses_both_floor_and_exact_forms(self):
+        """Regression guard for the exact defect I7635 fixed: converting
+        the floor to an exact pin must not make this guard report the
+        requirement as ABSENT."""
+        import re
+
+        pattern = re.compile(r"^krepis(?:>=|==)(\d+)\.(\d+)\.(\d+)", re.MULTILINE)
+        floor_match = pattern.search("krepis>=0.59.16")
+        exact_match = pattern.search("krepis==0.59.16")
+        assert floor_match is not None
+        assert exact_match is not None
+        assert floor_match.groups() == exact_match.groups() == ("0", "59", "16")
