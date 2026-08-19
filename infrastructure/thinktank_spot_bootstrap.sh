@@ -137,6 +137,39 @@ done
 [ -n "$PROMPT_DIR" ] || fail "think-tank prompts not found under $CONFIG_DIR (deploy.sh parity check) — refusing to run against sample prompts"
 log "prompts resolved: $PROMPT_DIR"
 
+# ── DLP scan prerequisite (krepis>=0.59.15, krepis-PR95, nous-ergon-ops-I738) ─
+# LLMClient shells out to gitleaks on every call and fails CLOSED when the
+# binary or config dir is absent (session_dlp.py). requirements.txt pins
+# krepis>=0.59.8 with no ceiling, so a fresh install here resolves the DLP-hook
+# version same as everywhere else. The Lambda image (Dockerfile) and the
+# groom/alert_drain/sf_watch spot bootstraps in alpha-engine-config already
+# carry this step; this box never did, so every DLP-gated LLM call it makes
+# raises "gitleaks binary not found on PATH" and the run dies with rc=1
+# (alpha-engine-config-I<TBD>). Mirrors the Dockerfile's install exactly:
+# /opt/llm-routing is session_dlp.py's first standard-path fallback, so no
+# KREPIS_GITLEAKS_DIR override is needed.
+if ! command -v gitleaks >/dev/null 2>&1; then
+    GITLEAKS_VERSION=8.30.1
+    GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    case "$(uname -m)" in
+        aarch64|arm64) GITLEAKS_ARCH=arm64 ;;
+        *) GITLEAKS_ARCH=x64 ;;
+    esac
+    log "installing gitleaks ${GITLEAKS_VERSION} (${GITLEAKS_ARCH})"
+    curl -fsSL -o /tmp/gitleaks.tar.gz \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" \
+        || fail "gitleaks download failed"
+    if [ "$GITLEAKS_ARCH" = "x64" ]; then
+        echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - || fail "gitleaks checksum mismatch"
+    fi
+    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks || fail "gitleaks extract failed"
+    install /tmp/gitleaks /usr/local/bin/gitleaks || fail "gitleaks install failed"
+    rm -f /tmp/gitleaks.tar.gz
+fi
+command -v gitleaks >/dev/null 2>&1 || fail "gitleaks binary unavailable after install (fail-closed)"
+mkdir -p /opt/llm-routing
+printf '[extend]\nuseDefault = true\n' > /opt/llm-routing/gitleaks-egress.toml
+
 # ── Runtime ─────────────────────────────────────────────────────────────────
 log "building venv"
 python3.12 -m venv .venv || fail "venv creation failed"
