@@ -514,7 +514,10 @@ class TestHandler:
 class TestBoardsLegibilityRollup:
     """alpha-engine-config-I7841 D3: the returned summary's ``boards`` field
     must make an in-invocation partial (one post-membership stage errored,
-    or was never reached) legible without reading CloudWatch. These pin the
+    or was never reached) legible without reading CloudWatch. Two stages since
+    alpha-engine-config-I7813 moved ``scanner_leaderboard`` out of this
+    invocation into its own weekly-SF leaf state — see
+    ``TestScannerLeaderboardLeafMode``. These pin the
     ``attempted``/``completed``/``errored``/``not_attempted`` classification
     directly against each stage's real status vocabulary (``ok`` /
     ``unmeasurable`` / ``error``), not a fixture that assumes it.
@@ -527,10 +530,6 @@ class TestBoardsLegibilityRollup:
 
     def _patched(self, **overrides):
         base = {
-            "leaderboard": patch(
-                "scoring.leaderboard_producers.build_scanner_leaderboard",
-                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
-            ),
             "cuts": patch(
                 "scoring.leaderboard_producers.build_cuts_leaderboard",
                 return_value={"status": "ok", "key": "research/cuts_leaderboard/2026-05-29.json"},
@@ -543,7 +542,7 @@ class TestBoardsLegibilityRollup:
         base.update(overrides)
         return base
 
-    def test_all_three_boards_complete_clean(self, handler_mod):
+    def test_both_boards_complete_clean(self, handler_mod):
         patches = self._patched()
         with (
             patch.object(handler_mod, "_ensure_init"),
@@ -557,14 +556,13 @@ class TestBoardsLegibilityRollup:
                 return_value="scanner/universe/2026-05-29/universe.json",
             ),
             patch("boto3.client", return_value=MagicMock()),
-            patches["leaderboard"],
             patches["cuts"],
             patches["promotion"],
         ):
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         boards = result["summary"]["boards"]
-        assert sorted(boards["completed"]) == ["cut_promotion", "cuts_leaderboard", "scanner_leaderboard"]
+        assert sorted(boards["completed"]) == ["cut_promotion", "cuts_leaderboard"]
         assert boards["attempted"] == boards["completed"]  # nothing errored or was skipped
         assert boards["errored"] == []
         assert boards["not_attempted"] == []
@@ -574,7 +572,7 @@ class TestBoardsLegibilityRollup:
         # raised (caught by the handler's own fail-soft try/except) rather
         # than the invocation being killed outright. The rollup must show it
         # attempted (the block ran) and errored (it did not complete), while
-        # its two siblings stay clean — never let one failed board's status
+        # its sibling stays clean — never let one failed board's status
         # bleed into another's.
         patches = self._patched(
             cuts=patch(
@@ -594,7 +592,6 @@ class TestBoardsLegibilityRollup:
                 return_value="scanner/universe/2026-05-29/universe.json",
             ),
             patch("boto3.client", return_value=MagicMock()),
-            patches["leaderboard"],
             patches["cuts"],
             patches["promotion"],
         ):
@@ -605,8 +602,15 @@ class TestBoardsLegibilityRollup:
         assert boards["errored"] == ["cuts_leaderboard"]
         assert "cuts_leaderboard" in boards["attempted"]
         assert "cuts_leaderboard" not in boards["completed"]
-        assert "scanner_leaderboard" in boards["completed"]
+        assert "cut_promotion" in boards["completed"]
         assert result["summary"]["cuts_leaderboard"]["status"] == "error"
+        # I7813: the scanner board is no longer this invocation's business at
+        # all — not "completed", not "errored", ABSENT. A stage that moved out
+        # must stop appearing in the rollup, or the next reader counts a board
+        # this Lambda did not build.
+        assert "scanner_leaderboard" not in result["summary"]
+        for bucket in boards.values():
+            assert "scanner_leaderboard" not in bucket
 
     def test_unmeasurable_cohort_counts_as_completed_not_errored(self, handler_mod):
         # A fresh date with no matured 21d outcome ships n_dates=0 /
@@ -631,7 +635,6 @@ class TestBoardsLegibilityRollup:
                 return_value="scanner/universe/2026-05-29/universe.json",
             ),
             patch("boto3.client", return_value=MagicMock()),
-            patches["leaderboard"],
             patches["cuts"],
             patches["promotion"],
         ):
@@ -639,3 +642,130 @@ class TestBoardsLegibilityRollup:
         boards = result["summary"]["boards"]
         assert "cuts_leaderboard" in boards["completed"]
         assert boards["errored"] == []
+
+
+class TestScannerLeaderboardLeafMode:
+    """alpha-engine-config-I7813 — ``mode`` splits the observe-only scanner
+    board out of the live scan so it can be its own weekly-SF leaf state.
+
+    The three properties that matter, and each is a real failure this pins:
+
+    1. The default (``scan``) path must NOT build the scanner board any more.
+       If it still does, the leaf is pure duplicated cost and the "moved"
+       claim in the issue is false while every test still passes.
+    2. The leaf must NOT run the scan. If it does, a state placed after the
+       Report Card re-runs the universe scan and overwrites the day's
+       ``candidates.json`` from a stage nobody thinks writes one.
+    3. A board that did not get written must FAIL the task. ``build_scanner_
+       leaderboard`` never raises — it returns a status dict — so without the
+       wrapper's raise the SF task ends green having written nothing, which is
+       the exact shape sf-pipeline-policy.md §2.3 forbids.
+    """
+
+    def _scan_patches(self, handler_mod):
+        return (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_cuts_leaderboard",
+                return_value={"status": "ok", "key": "research/cuts_leaderboard/2026-05-29.json"},
+            ),
+            patch(
+                "scoring.cut_promotion.run_cut_promotion",
+                return_value={"decision": "hold", "champion": "tech_score_top_60", "reason_code": "cooldown"},
+            ),
+        )
+
+    def test_default_scan_mode_does_not_build_the_scanner_board(self, handler_mod):
+        import contextlib
+
+        with contextlib.ExitStack() as stack:
+            for cm in self._scan_patches(handler_mod):
+                stack.enter_context(cm)
+            build = stack.enter_context(
+                patch("scoring.leaderboard_producers.build_scanner_leaderboard")
+            )
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        build.assert_not_called()
+
+    def test_leaf_mode_builds_only_the_board(self, handler_mod):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch("data.scanner_orchestrator.build_candidates_artifact") as scan,
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ) as build,
+        ):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        scan.assert_not_called()
+        build.assert_called_once()
+        # The board keys on the TRADING day, not the Saturday calendar date the
+        # SF passes — same normalization the scan path applies.
+        assert build.call_args[0][2] == "2026-05-29"
+        assert result["status"] == "OK"
+        assert result["mode"] == "scanner_leaderboard"
+        assert result["summary"]["leaderboard"]["key"] == "scanner/leaderboard/2026-05-29.json"
+
+    def test_leaf_mode_raises_when_the_board_was_not_written(self, handler_mod):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "error", "error": "closes panel empty"},
+            ),
+            pytest.raises(Exception) as exc,
+        ):
+            handler_mod.handler({"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None)
+        assert "closes panel empty" in str(exc.value)
+        assert type(exc.value).__name__ == "ScannerLeaderboardBuildError"
+
+    def test_leaf_mode_treats_unmeasurable_as_a_written_outcome(self, handler_mod):
+        # An immature cohort is a DECISION the producer records in the artifact
+        # it writes, not a failure. Raising here would page every week until the
+        # first cohort matures.
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={
+                    "status": "unmeasurable",
+                    "key": "scanner/leaderboard/2026-05-29.json",
+                    "reason": "no cohort has matured",
+                },
+            ),
+        ):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        assert result["summary"]["leaderboard"]["status"] == "unmeasurable"
+        assert result["summary"]["leaderboard"]["reason"] == "no cohort has matured"
+
+    def test_unknown_mode_is_an_error_not_a_silent_scan(self, handler_mod):
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch("data.scanner_orchestrator.build_candidates_artifact") as scan,
+        ):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30", "mode": "leaderboards"}, context=None
+            )
+        assert result["status"] == "ERROR"
+        assert "unknown mode" in result["error"]
+        scan.assert_not_called()

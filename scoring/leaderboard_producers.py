@@ -1308,6 +1308,7 @@ def _load_cut_specs(
     is a property of the source artifact, recorded here rather than hidden.
     """
     from scoring.universe_membership import (
+        CHAMPION_CUT,
         FEED_CUT_NAME,
         GATE_BASELINE_CUT,
         GATE_LEGACY_CUT,
@@ -1315,22 +1316,26 @@ def _load_cut_specs(
     )
 
     # Each arm, and the membership keys it may appear under, newest name first.
-    # The gate cut was renamed by crucible-research-PR648; every artifact
-    # written before it carries the SAME arm under the legacy key, and reading
-    # only the new name discards that history while reporting the baseline as
+    # The gate cut was renamed by crucible-research-PR648, then again by
+    # alpha-engine-config-I7818; every artifact written before a given rename
+    # carries the SAME arm under the older key, and reading only the newest
+    # name discards that history while reporting the baseline as
     # `insufficient` (alpha-engine-config-I7631: 20 of 21 cohort dates lost on
-    # the board's first live artifact). One arm, two spellings — never two arms.
+    # the board's first live artifact). One arm, three spellings — never two
+    # arms. ``GATE_LEGACY_CUT`` is retired as an emitted key (see its
+    # docstring in ``universe_membership.py``) but its artifacts are still on
+    # S3, so it stays in the tuple.
     aliases: dict[str, tuple[str, ...]] = {
         FEED_CUT_NAME: (FEED_CUT_NAME,),
         PREDICTOR_UNIVERSE_CUT: (PREDICTOR_UNIVERSE_CUT,),
-        GATE_BASELINE_CUT: (GATE_BASELINE_CUT, GATE_LEGACY_CUT),
+        CHAMPION_CUT: (CHAMPION_CUT, GATE_BASELINE_CUT, GATE_LEGACY_CUT),
     }
     # Where each arm's RANK order lives in the membership artifact. The cut's
     # own `tickers` list is alphabetical for every cut, so it is never it.
     rank_source: dict[str, tuple[str, str]] = {
         FEED_CUT_NAME: ("ranks", "attractiveness_rank"),
         PREDICTOR_UNIVERSE_CUT: ("ranks", "attractiveness_rank"),
-        GATE_BASELINE_CUT: ("scanner_ranks", "tech_score_rank"),
+        CHAMPION_CUT: ("scanner_ranks", "tech_score_rank"),
     }
     hists = {name: SpecHistory(name=name, kind="challenger") for name in aliases}
     widths: dict[str, int] = {}

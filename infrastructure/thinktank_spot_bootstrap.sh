@@ -115,7 +115,8 @@ cd "$REPO_DIR" || fail "repo not found at $REPO_DIR (dispatcher prelude clone fa
 
 # ── Private config (prompts) ────────────────────────────────────────────────
 # Package-first with legacy top-level fallback — mirrors deploy.sh's resolution
-# and spot_research_weekly.sh's staging step. prompt_loader/config.py search
+# (the retired spot_research_weekly.sh staged prompts the same way).
+# prompt_loader/config.py search
 # path #1 is the HOME-sibling checkout, which is exactly where we clone it.
 log "cloning private config for prompts (experiment=${ALPHA_ENGINE_EXPERIMENT_ID})"
 PAT=$(aws ssm get-parameter --name "$CONFIG_PAT_SSM" --with-decryption \
