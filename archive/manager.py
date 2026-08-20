@@ -343,6 +343,13 @@ class ArchiveManager:
         run_time as a column name across multiple tables).
         """
         payload = {"date": trading_date, "run_date": generated_at, **signals}
+        # Write-site refusals before ANY put — see scoring/promotion_guards.py.
+        # alpha-engine-config-I7856: the stub-quarantine guard lost its only
+        # importer when the research graph was deleted, and this write site
+        # never had one.
+        from scoring.promotion_guards import assert_promotable
+
+        assert_promotable(payload, surface=f"signals/{trading_date}/signals.json")
         body = json.dumps(payload, indent=2, default=str)
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
@@ -380,8 +387,14 @@ class ArchiveManager:
         :meth:`write_signals_json` so a leaderboard can read champion + every
         shadow uniformly. Returns the S3 key."""
         payload = {"date": trading_date, "run_date": generated_at, **signals}
-        body = json.dumps(payload, indent=2, default=str)
         key = f"signals_shadow/{producer_name}/{trading_date}/signals.json"
+        # The shadow key is where the LIVE LLM-backed challengers (Think Tank)
+        # land, so it is the write site most exposed to a synthetic marker —
+        # guarded identically to the champion key (alpha-engine-config-I7856).
+        from scoring.promotion_guards import assert_promotable
+
+        assert_promotable(payload, surface=key)
+        body = json.dumps(payload, indent=2, default=str)
         self._s3_put(key, body)
         return key
 

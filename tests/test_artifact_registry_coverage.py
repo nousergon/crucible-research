@@ -125,9 +125,6 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # freshness-SLA artifacts with a daily consumer — so no ARTIFACT_REGISTRY
     # row, just this per-file PUT pin.
     "graph/llm_cost_tracker.py": 2,
-    # Single PUT site: dated data_manifest/{module}/{date}.json. Health
-    # enrichment writes moved to nousergon_lib.health (config#1727 Phase C).
-    "data_manifest.py": 1,
     "local/sync_db.py": 1,
     # 3 since the daily-scanner cutover: by_ticker.json, the latest.json
     # sidecar, and provenance.json (registered as factor_profiles_provenance
@@ -200,14 +197,20 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "scripts/cost_capture_freshness.py": 1,
     # Distillation SFT-corpus stats artifact
     # (decision_artifacts/distillation/corpus_stats/{date}.json + latest.json).
-    # SECONDARY observability built fail-soft as a non-fatal post-step of the
-    # research run (WARNs, never fails the run; signals.json is primary). Reads
-    # the whole _sft_raw corpus and rewrites a rebuildable summary; the console
-    # Distillation-Corpus panel consumer graceful-degrades when absent → absence
-    # is NOT a silent failure and needs no daily freshness-SLA alarm. Per-file
-    # PUT pin only; ARTIFACT_REGISTRY row deferred until first Saturday
-    # production (register-with-or-after-producer — config#1544). One PUT site
-    # (loop over dated + latest keys in compute_corpus_stats).
+    # SECONDARY observability, fail-soft. Its invoker moved with
+    # alpha-engine-config-I7856: the research graph's champion pass owned it
+    # until crucible-research-PR685 deleted that pass, leaving the artifact
+    # frozen at 2026-07-01 with NO invoker anywhere in the fleet. Now a
+    # non-fatal post-step of the weekly AggregateCosts stage
+    # (lambda/aggregate_costs_handler.py::_refresh_corpus_stats) — same weekly
+    # cadence, and compute_corpus_stats reads the WHOLE cumulative corpus on
+    # every call, so regular beats frequent.
+    # ARTIFACT_REGISTRY row still deferred, deliberately: config#1544's
+    # register-with-or-after-producer rule means the row goes in once the
+    # repointed producer has written once (first weekly SF after this merges),
+    # not before — a row over a prefix whose writer has not yet run is the
+    # alpha-engine-config-I7838 defect. Tracked on I7856.
+    # One PUT site (loop over dated + latest keys in compute_corpus_stats).
     "scripts/corpus_stats.py": 1,
     # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
     # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site
