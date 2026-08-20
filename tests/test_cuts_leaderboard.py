@@ -416,3 +416,97 @@ def test_block_n_dates_counts_every_arms_cohort_not_the_first_arms(built_ranked)
     lb = out_lb(built_ranked)
     for block in lb["horizons"]:
         assert block["n_dates"] == len(DATES), block["horizon_days"]
+
+
+# ── Arm-level measurement gaps hidden under a board-level "ok"
+# (alpha-engine-config-I7819) ─────────────────────────────────────────────────
+#
+# `block["n_dates"]` is a UNION across arms: one arm with real history reads
+# the whole block as `status: ok` while co-arms sit at `confidence:
+# insufficient` and contribute nothing. Measured live on
+# `research/cuts_leaderboard/2026-08-19.json`: n_dates=8, board reads
+# "measured", and 2 of 3 arms individually scored 0 dates.
+
+_GAP_GATE_DATE = "2026-05-01"  # old enough to have matured by 07-03 — a
+# missing score here is a DEFECT (overdue), not a young cohort.
+_GAP_PREDICTOR_DATE = "2026-07-02"  # one trading day before as-of — too
+# recent to have matured; a missing score here is honest immaturity.
+_GAP_FEED_DATES = ("2026-06-01", "2026-06-02")
+_GAP_AS_OF = "2026-07-03"
+_GAP_DATES = (_GAP_GATE_DATE, *_GAP_FEED_DATES, _GAP_PREDICTOR_DATE)
+
+
+class _GapS3(_S3):
+    """Three arms, three DIFFERENT measurement states on the same board:
+    FEED scores normally, GATE's one cohort date is old enough to have
+    matured but the realized-return join never produced it (simulated
+    defect), PREDICTOR's one cohort date is too recent to have matured yet
+    (honest immaturity)."""
+
+    _CUTS_BY_DATE = {
+        _GAP_GATE_DATE: {GATE_BASELINE_CUT: {"tickers": GATE}},
+        _GAP_FEED_DATES[0]: {FEED_CUT_NAME: {"tickers": FEED}},
+        _GAP_FEED_DATES[1]: {FEED_CUT_NAME: {"tickers": FEED}},
+        _GAP_PREDICTOR_DATE: {PREDICTOR_UNIVERSE_CUT: {"tickers": CHAMP}},
+    }
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            date_str = Key.split("/")[1]
+            body = json.dumps({"cuts": self._CUTS_BY_DATE[date_str]}).encode()
+            return {"Body": _Body(body)}
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+    def get_paginator(self, _op):
+        class _P:
+            def paginate(self, Bucket, Prefix):  # noqa: N803
+                yield {"Contents": [
+                    {"Key": f"{Prefix}{d}/membership.json"} for d in _GAP_DATES
+                ] + [{"Key": f"{Prefix}latest.json"}]}
+
+        return _P()
+
+
+@pytest.fixture
+def built_with_gap():
+    s3 = _GapS3()
+    realized = {d: dict.fromkeys(FEED, 0.01) | {"SPY": 0.005} for d in _GAP_FEED_DATES}
+    population = dict.fromkeys(_GAP_FEED_DATES, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: realized, 252: realized},
+            {},
+            {21: population, 126: population, 252: population},
+        ),
+    ), patch("scoring.leaderboard_producers.publish_observe_alert") as alert:
+        out = build_cuts_leaderboard(s3, "b", _GAP_AS_OF)
+    return out, s3, alert
+
+
+def test_block_names_which_arms_it_scored_nothing_for(built_with_gap):
+    """The board must not rely on a reader diffing every row's `confidence`
+    against every other row's — the gap is named on the block directly."""
+    out, _, _ = built_with_gap
+    lb = out["leaderboard"]
+    block21 = next(b for b in lb["horizons"] if b["horizon_days"] == 21)
+    assert block21["status"] == "ok"  # FEED's history keeps the block itself "ok"
+    assert block21["n_dates"] > 0  # exactly the "looks measured" state
+    assert block21["arms_total"] == 3
+    assert block21["arms_unmeasured"] == sorted(
+        [GATE_BASELINE_CUT, PREDICTOR_UNIVERSE_CUT],
+    )
+    assert FEED_CUT_NAME not in block21["arms_unmeasured"]
+
+
+def test_an_overdue_arm_alerts_but_an_immature_arm_does_not(built_with_gap):
+    """GATE's only cohort date is a month old — it should have matured, and
+    scoring zero for it is a defect, alerted once. PREDICTOR's only cohort
+    date is one trading day old — scoring zero for it is expected and must
+    stay silent, or every genuinely new arm pages on day one."""
+    _, _, alert = built_with_gap
+    messages = [call.kwargs.get("message", "") for call in alert.call_args_list]
+    assert any(GATE_BASELINE_CUT in m for m in messages)
+    assert not any(PREDICTOR_UNIVERSE_CUT in m for m in messages)
