@@ -509,3 +509,133 @@ class TestHandler:
         assert result["status"] == "ERROR"
         assert "universe membership failed" in result["error"]
         assert "no factor profiles readable" in result["error"]
+
+
+class TestBoardsLegibilityRollup:
+    """alpha-engine-config-I7841 D3: the returned summary's ``boards`` field
+    must make an in-invocation partial (one post-membership stage errored,
+    or was never reached) legible without reading CloudWatch. These pin the
+    ``attempted``/``completed``/``errored``/``not_attempted`` classification
+    directly against each stage's real status vocabulary (``ok`` /
+    ``unmeasurable`` / ``error``), not a fixture that assumes it.
+
+    A Lambda TIMEOUT (the 2026-08-20 incident this issue exists for) still
+    produces no summary at all — that failure mode is covered by the
+    external freshness detector on ``research/cuts_leaderboard/{trading_day}
+    .json`` (I7841 D1), not by anything testable here.
+    """
+
+    def _patched(self, **overrides):
+        base = {
+            "leaderboard": patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ),
+            "cuts": patch(
+                "scoring.leaderboard_producers.build_cuts_leaderboard",
+                return_value={"status": "ok", "key": "research/cuts_leaderboard/2026-05-29.json"},
+            ),
+            "promotion": patch(
+                "scoring.cut_promotion.run_cut_promotion",
+                return_value={"decision": "hold", "champion": "tech_score_top_60", "reason_code": "cooldown"},
+            ),
+        }
+        base.update(overrides)
+        return base
+
+    def test_all_three_boards_complete_clean(self, handler_mod):
+        patches = self._patched()
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+            patches["leaderboard"],
+            patches["cuts"],
+            patches["promotion"],
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        boards = result["summary"]["boards"]
+        assert sorted(boards["completed"]) == ["cut_promotion", "cuts_leaderboard", "scanner_leaderboard"]
+        assert boards["attempted"] == boards["completed"]  # nothing errored or was skipped
+        assert boards["errored"] == []
+        assert boards["not_attempted"] == []
+
+    def test_cuts_leaderboard_error_is_attempted_but_not_completed(self, handler_mod):
+        # This is the shape of a NON-timeout partial: build_cuts_leaderboard
+        # raised (caught by the handler's own fail-soft try/except) rather
+        # than the invocation being killed outright. The rollup must show it
+        # attempted (the block ran) and errored (it did not complete), while
+        # its two siblings stay clean — never let one failed board's status
+        # bleed into another's.
+        patches = self._patched(
+            cuts=patch(
+                "scoring.leaderboard_producers.build_cuts_leaderboard",
+                side_effect=RuntimeError("panel read timed out"),
+            ),
+        )
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+            patches["leaderboard"],
+            patches["cuts"],
+            patches["promotion"],
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        # Live path never downgrades — this stays the primary deliverable's contract.
+        assert result["status"] == "OK"
+        boards = result["summary"]["boards"]
+        assert boards["errored"] == ["cuts_leaderboard"]
+        assert "cuts_leaderboard" in boards["attempted"]
+        assert "cuts_leaderboard" not in boards["completed"]
+        assert "scanner_leaderboard" in boards["completed"]
+        assert result["summary"]["cuts_leaderboard"]["status"] == "error"
+
+    def test_unmeasurable_cohort_counts_as_completed_not_errored(self, handler_mod):
+        # A fresh date with no matured 21d outcome ships n_dates=0 /
+        # status=unmeasurable — a correct, non-error outcome
+        # (leaderboard_producers.py's documented cohort-gate contract). The
+        # rollup must not conflate "nothing has matured yet" with a failure.
+        patches = self._patched(
+            cuts=patch(
+                "scoring.leaderboard_producers.build_cuts_leaderboard",
+                return_value={"status": "unmeasurable", "reason": "no cut had a usable width"},
+            ),
+        )
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-29/candidates.json",
+            ),
+            patch(
+                "data.scanner_orchestrator.write_universe_board_for_scanner_run",
+                return_value="scanner/universe/2026-05-29/universe.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+            patches["leaderboard"],
+            patches["cuts"],
+            patches["promotion"],
+        ):
+            result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
+        boards = result["summary"]["boards"]
+        assert "cuts_leaderboard" in boards["completed"]
+        assert boards["errored"] == []
