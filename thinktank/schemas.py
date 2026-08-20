@@ -263,6 +263,15 @@ class ThemeThesis(_Artifact):
     theme: ThemeThesisLLM
     weekly_anchor_date: str | None = None  # signals.json date this theme is reconciled to
     divergence_from_weekly: str | None = None
+    #: Non-fresh upstream verdicts (``freshness.FreshnessVerdict.as_record()``)
+    #: that were in force when this theme was written — alpha-engine-config-I2638.
+    #: A theme reconciled against a five-month-old macro report is not the same
+    #: artifact as one reconciled against last Saturday's, and a downstream
+    #: reader (or the producer leaderboard scoring this arm) cannot tell them
+    #: apart unless the theme itself says so. Empty list = every dated input was
+    #: within tolerance; it is written on EVERY theme, not only degraded ones,
+    #: so silence here means "checked and fresh", never "not checked".
+    stale_inputs: list[dict] = Field(default_factory=list)
     model: str = ""
     tier: str = ""
     prompt_version: str = ""
@@ -440,6 +449,15 @@ class RunManifest(_Artifact):
     themes_reconciled: bool = False
     theme_updates_written: int = 0
     context_sources_present: dict[str, bool] = Field(default_factory=dict)
+    #: ``{source: FreshnessVerdict.as_record()}`` for every context source with
+    #: a checkable as-of timestamp — fresh ones included. Presence was already
+    #: recorded above; presence is not freshness (alpha-engine-config-I2638).
+    context_source_freshness: dict[str, dict] = Field(default_factory=dict)
+    #: Source names whose freshness verdict was ``stale`` or ``undated`` on this
+    #: run. Non-empty ⇒ this run is DEGRADED: it completed, but at least one
+    #: conclusion is anchored to an out-of-date input. Named separately from the
+    #: full record so a console/scorer can filter on one field.
+    degraded_inputs: list[str] = Field(default_factory=list)
     coverage_gap: dict | None = Field(
         default=None,
         description="Coverage gap vs the DECLARED coverage window: pct covered, "
