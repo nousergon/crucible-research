@@ -548,9 +548,13 @@ def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
                    api_key: str | None) -> dict[str, int]:
     """Live-judge adapter: score an artifact → {dimension: score}.
 
-    ``api_key`` is an OpenRouter key since alpha-engine-config-I2997
-    (2026-07-19) — ``evaluate_artifact`` migrated off direct Anthropic;
-    see its docstring."""
+    ``api_key`` since alpha-engine-config-I6559 (2026-08-19) is a TEST
+    SEAM ONLY — ``evaluate_artifact`` resolves its judge model via
+    ``krepis.router.resolve_group_spec``, which resolves the credential
+    by name; a non-None ``api_key`` here OVERRIDES that resolution
+    (``krepis.llm.LLMClient._resolve_api_key`` prefers a truthy explicit
+    argument). Production callers, including this smoke harness, leave
+    it ``None``. See ``evaluate_artifact``'s docstring."""
     ev = evaluate_artifact(artifact, judge_model=judge_model, api_key=api_key)
     return {d.dimension: d.score for d in ev.dimension_scores}
 
