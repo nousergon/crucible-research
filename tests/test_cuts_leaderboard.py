@@ -31,6 +31,7 @@ from scoring.leaderboard_producers import (  # noqa: E402
 )
 from scoring.leaderboard_scoring import LEADERBOARD_SLOTS, slot_spec  # noqa: E402
 from scoring.universe_membership import (  # noqa: E402
+    CHAMPION_CUT,
     FEED_CUT_NAME,
     GATE_BASELINE_CUT,
     GATE_LEGACY_CUT,
@@ -55,7 +56,7 @@ class _S3:
                 "cuts": {
                     FEED_CUT_NAME: {"tickers": FEED},
                     PREDICTOR_UNIVERSE_CUT: {"tickers": CHAMP},
-                    GATE_BASELINE_CUT: {"tickers": GATE},
+                    CHAMPION_CUT: {"tickers": GATE},
                 }
             }).encode()
             return {"Body": _Body(body)}
@@ -113,24 +114,26 @@ def test_competing_slots_keep_count_matching():
 def test_loader_reads_all_three_cuts_with_their_widths():
     arms, widths = _load_cut_specs(_S3(), "b", DATES)
     assert {a.name for a in arms} == {
-        FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, GATE_BASELINE_CUT,
+        FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, CHAMPION_CUT,
     }
     assert widths[FEED_CUT_NAME] == 60
     assert widths[PREDICTOR_UNIVERSE_CUT] == 20
-    assert widths[GATE_BASELINE_CUT] == 60
+    assert widths[CHAMPION_CUT] == 60
 
 
 def test_loader_takes_cut_names_from_constants_not_literals():
-    """PR648 renamed the gate cut. A literal in the loader would have stopped
-    matching silently, and the arm would have vanished from the board with no
-    error anywhere."""
+    """PR648 renamed the gate cut, then alpha-engine-config-I7818 renamed it
+    again. A literal in the loader would have stopped matching silently, and
+    the arm would have vanished from the board with no error anywhere."""
     import inspect
 
     import scoring.leaderboard_producers as lp
 
     src = inspect.getsource(lp._load_cut_specs)
     assert "scanner_candidates" not in src
-    assert "GATE_BASELINE_CUT" in src
+    assert "scanner_gate_baseline_60" not in src
+    assert "scanner_champion_60" not in src
+    assert "CHAMPION_CUT" in src
 
 
 # ── The artifact ─────────────────────────────────────────────────────────────
@@ -184,7 +187,7 @@ def test_all_three_arms_present_at_every_horizon(built):
     lb = out_lb(built)
     for block in lb["horizons"]:
         names = {r["name"] for r in block["specs"]}
-        assert names == {FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, GATE_BASELINE_CUT}
+        assert names == {FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, CHAMPION_CUT}
 
 
 def test_no_champion_so_vs_champion_is_null_by_construction(built):
@@ -301,14 +304,22 @@ class _RankedS3(_S3):
     """
 
     #: dates on which the gate cut exists ONLY under its pre-PR648 name
+    #: (``scanner_candidates``) — the oldest of the three spellings.
     LEGACY_DATES = (DATES[0],)
+    #: dates on which the gate cut exists ONLY under its PR648-through-I7818
+    #: name (``scanner_gate_baseline_60``) — the middle spelling, current
+    #: dates use the newest, :data:`CHAMPION_CUT`.
+    BASELINE_DATES: tuple[str, ...] = ()
 
     def get_object(self, Bucket, Key):  # noqa: N803
         if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
             date_str = Key.split("/")[1]
-            gate_name = (
-                GATE_LEGACY_CUT if date_str in self.LEGACY_DATES else GATE_BASELINE_CUT
-            )
+            if date_str in self.LEGACY_DATES:
+                gate_name = GATE_LEGACY_CUT
+            elif date_str in self.BASELINE_DATES:
+                gate_name = GATE_BASELINE_CUT
+            else:
+                gate_name = CHAMPION_CUT
             body = json.dumps({
                 "cuts": {
                     FEED_CUT_NAME: {"tickers": sorted(FEED)},
@@ -365,13 +376,27 @@ def test_rank_ic_is_null_when_the_days_order_is_not_a_ranking():
 def test_gate_history_under_the_legacy_alias_is_the_same_arm():
     """PR648 renamed the gate cut; every membership artifact written before it
     carries the incumbent baseline under `scanner_candidates`. Reading only the
-    new name discards that history and reports `insufficient` for a baseline
-    whose evidence is sitting in S3."""
+    newest name discards that history and reports `insufficient` for a
+    baseline whose evidence is sitting in S3."""
     arms, widths = _load_cut_specs(_RankedS3(), "b", DATES)
-    gate = next(a for a in arms if a.name == GATE_BASELINE_CUT)
+    gate = next(a for a in arms if a.name == CHAMPION_CUT)
     assert set(gate.by_date) == set(DATES)
-    assert widths[GATE_BASELINE_CUT] == 60
+    assert widths[CHAMPION_CUT] == 60
     assert GATE_LEGACY_CUT not in {a.name for a in arms}
+    assert GATE_BASELINE_CUT not in {a.name for a in arms}
+
+
+def test_gate_history_spans_all_three_spellings():
+    """alpha-engine-config-I7818 added a third spelling in four weeks
+    (``scanner_candidates`` -> ``scanner_gate_baseline_60`` ->
+    ``scanner_champion_60``). Reading only the newest two would still discard
+    the oldest artifacts' history the same way I7631 did for two."""
+    s3 = _RankedS3()
+    s3.BASELINE_DATES = (DATES[1],)  # DATES[0] stays LEGACY_DATES (oldest)
+    arms, widths = _load_cut_specs(s3, "b", DATES)
+    gate = next(a for a in arms if a.name == CHAMPION_CUT)
+    assert set(gate.by_date) == set(DATES)
+    assert widths[CHAMPION_CUT] == 60
 
 
 @pytest.fixture
@@ -444,7 +469,7 @@ class _GapS3(_S3):
     (honest immaturity)."""
 
     _CUTS_BY_DATE = {
-        _GAP_GATE_DATE: {GATE_BASELINE_CUT: {"tickers": GATE}},
+        _GAP_GATE_DATE: {CHAMPION_CUT: {"tickers": GATE}},
         _GAP_FEED_DATES[0]: {FEED_CUT_NAME: {"tickers": FEED}},
         _GAP_FEED_DATES[1]: {FEED_CUT_NAME: {"tickers": FEED}},
         _GAP_PREDICTOR_DATE: {PREDICTOR_UNIVERSE_CUT: {"tickers": CHAMP}},
@@ -496,7 +521,7 @@ def test_block_names_which_arms_it_scored_nothing_for(built_with_gap):
     assert block21["n_dates"] > 0  # exactly the "looks measured" state
     assert block21["arms_total"] == 3
     assert block21["arms_unmeasured"] == sorted(
-        [GATE_BASELINE_CUT, PREDICTOR_UNIVERSE_CUT],
+        [CHAMPION_CUT, PREDICTOR_UNIVERSE_CUT],
     )
     assert FEED_CUT_NAME not in block21["arms_unmeasured"]
 
@@ -508,5 +533,5 @@ def test_an_overdue_arm_alerts_but_an_immature_arm_does_not(built_with_gap):
     stay silent, or every genuinely new arm pages on day one."""
     _, _, alert = built_with_gap
     messages = [call.kwargs.get("message", "") for call in alert.call_args_list]
-    assert any(GATE_BASELINE_CUT in m for m in messages)
+    assert any(CHAMPION_CUT in m for m in messages)
     assert not any(PREDICTOR_UNIVERSE_CUT in m for m in messages)

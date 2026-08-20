@@ -31,7 +31,7 @@ from the sibling universe-board write, which is dashboard-only and fail-soft.
 
 Cuts emitted (each carries ``basis`` = how membership was decided):
 
-  ``scanner_gate_baseline_60``
+  ``scanner_champion_60``
                              The scanner's live candidate cut,
                              ``candidates.json::scanner_tickers`` verbatim,
                              basis=``scanner_champion_rank``. This is the
@@ -40,18 +40,19 @@ Cuts emitted (each carries ``basis`` = how membership was decided):
                              NOT the predictor universe, NOT the RAG corpus
                              scope, NOT Think Tank's coverage window. Group B
                              of SCANNER_CONTRACT.md §1.
-                             It is NOT a ``tech_score`` ranking, and this
-                             docstring said it was until 2026-08-20: the live
-                             ranking has been the scanner slot's champion arm
-                             since the 2026-07-22 config#1186 cutover
-                             (alpha-engine-config-I7808). The name predates
-                             that and is retained rather than changed a second
-                             time in one month; ``basis`` and ``role`` carry
-                             the truth, and the rename is bundled with the
-                             I7578 alias removal.
-                             Was ``scanner_candidates``; that key is still
-                             emitted as a deprecated alias
-                             (alpha-engine-config-I7578).
+                             Renamed from ``scanner_gate_baseline_60``
+                             (alpha-engine-config-I7818): that name read as a
+                             ``tech_score`` gate and has not been one since the
+                             2026-07-22 config#1186 cutover
+                             (alpha-engine-config-I7808) — the live ranking is
+                             the scanner slot's champion arm. ``basis`` and
+                             ``role`` always carried the truth; the key now
+                             does too. ``scanner_gate_baseline_60`` is still
+                             emitted as a deprecated alias for one window
+                             (I7818 follow-up tracks its removal).
+                             ``scanner_candidates`` — the alias this replaced
+                             (alpha-engine-config-I7578) — is retired outright
+                             as of this change and is no longer emitted.
   ``tech_score_top_60``      The DISPLACED INCUMBENT baseline, basis=
                              ``tech_score_rank``: top 60 by ``tech_score``
                              over every row the momentum path admitted
@@ -226,20 +227,44 @@ PRODUCER = "crucible-research/scoring/universe_membership.py"
 PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
 
 # ── The gate cut's name (alpha-engine-config-I7578, Brian ruling 2026-08-17) ──
-# Two 60-wide cuts exist and only one is the funnel — and until this rename, the
-# one that is NOT the funnel was the one whose name said "scanner". It was read
-# backwards three times, each caught by hand rather than by a check. Measured
-# 2026-08-17: the two 60s overlap on 12 of 60, and the champion 20 overlaps the
-# gate cut on 3 of 20. They are near-disjoint sets and only one advances.
+# Two 60-wide cuts exist and only one is the funnel — and until the I7578
+# rename, the one that is NOT the funnel was the one whose name said "scanner".
+# It was read backwards three times, each caught by hand rather than by a
+# check. Measured 2026-08-17: the two 60s overlap on 12 of 60, and the champion
+# 20 overlaps the gate cut on 3 of 20. They are near-disjoint sets and only one
+# advances.
 #
 # The funnel INVARIANT was already enforced (I6630, ``assert_cut_invariants``).
 # What was unguarded is the NAMING: nothing stopped a reader, an agent, or a new
 # consumer from resolving "the scanner's top 60" to the gate cut and scoping to
 # a set that feeds nothing. The word "baseline" is load-bearing — reading this
 # name as the funnel now requires ignoring it.
+#
+# alpha-engine-config-I7818: ``scanner_gate_baseline_60`` itself read as a
+# ``tech_score`` gate, which it stopped being at the 2026-07-22 config#1186
+# cutover — see the module docstring's cut table. ``scanner_champion_60`` is
+# the primary name; it states the actual basis (the scanner slot's champion
+# arm) rather than a mechanism the key hasn't described in a month.
+CHAMPION_CUT = "scanner_champion_60"
+"""Primary name for the scanner's live candidate cut (alpha-engine-config-I7818).
+States what the cut actually is — the champion arm's ranking — rather than
+"gate" or "baseline", neither of which has been true since config#1186."""
+
 GATE_BASELINE_CUT = "scanner_gate_baseline_60"
+"""Deprecated alias for :data:`CHAMPION_CUT`, emitted for one window
+(alpha-engine-config-I7818 follow-up tracks its removal). Same rationale as
+the alias mechanism below: a consumer pinned on this name keeps working
+through the window rather than reading a missing key as an empty cut."""
+
 GATE_LEGACY_CUT = "scanner_candidates"
-"""Deprecated alias, emitted alongside the new name for one window."""
+"""RETIRED as an emitted alias (alpha-engine-config-I7818) — the I7578
+deprecation window is closed and this key is no longer written to new
+artifacts; do not resurrect it as a third live name for this cut. Kept as a
+named constant, not a literal, ONLY because artifacts written before I7578
+carry the arm under this spelling and ``scoring/leaderboard_producers.py``
+reads across that boundary for historical-series continuity
+(``_load_cut_specs``'s ``aliases`` table). Any new code resolving the
+LIVE cut must use :data:`CHAMPION_CUT`, never this one."""
 
 TECH_SCORE_CUT_PREFIX = "tech_score_top_"
 """The displaced-incumbent baseline cut (alpha-engine-config-I7809).
@@ -1008,7 +1033,7 @@ def assert_gate_cut_feeds_nothing_live(membership: dict, run_date: str) -> None:
     of the fields checked here.
     """
     live_fields = ("predictor_universe_cut", "feed_cut")
-    gate_names = {GATE_BASELINE_CUT, GATE_LEGACY_CUT}
+    gate_names = {CHAMPION_CUT, GATE_BASELINE_CUT}
     for field in live_fields:
         named = membership.get(field)
         if named in gate_names:
@@ -1430,16 +1455,21 @@ def build_universe_membership(
         ),
     }
     cuts: dict[str, dict] = {
-        GATE_BASELINE_CUT: dict(_gate_block),
-        # Deprecated alias (alpha-engine-config-I7578). Emitted so a consumer
-        # pinned on the old name keeps working through the deprecation window
-        # rather than reading a missing key as an empty cut — silently trading
-        # a rename for a zero-size universe is the worse failure. Known live
-        # reader: crucible-dashboard/loaders/universe_churn.py.
-        GATE_LEGACY_CUT: {
+        CHAMPION_CUT: dict(_gate_block),
+        # Deprecated alias (alpha-engine-config-I7818, successor to I7578).
+        # Emitted so a consumer pinned on the old name keeps working through
+        # the deprecation window rather than reading a missing key as an empty
+        # cut — silently trading a rename for a zero-size universe is the
+        # worse failure. Known live reader:
+        # crucible-dashboard/loaders/universe_churn.py (migrating to
+        # CHAMPION_CUT in the same change — see I7818).
+        #
+        # ``scanner_candidates`` (the I7578 alias) is NOT re-emitted here: its
+        # own deprecation window is closed and I7818 retires it outright.
+        GATE_BASELINE_CUT: {
             **_gate_block,
-            "deprecated_alias_for": GATE_BASELINE_CUT,
-            "removal_tracked_by": "alpha-engine-config-I7578 follow-up",
+            "deprecated_alias_for": CHAMPION_CUT,
+            "removal_tracked_by": "alpha-engine-config-I7818 follow-up",
         },
     }
     for n in _RANK_CUTS:
@@ -1594,7 +1624,7 @@ def build_universe_membership(
                 "rag_corpus_scope": FEED_CUT_NAME,
                 "thinktank_coverage_window": FEED_CUT_NAME,
             },
-            "feeds_nothing_live": [GATE_BASELINE_CUT, GATE_LEGACY_CUT],
+            "feeds_nothing_live": [CHAMPION_CUT, GATE_BASELINE_CUT],
         },
         # alpha-engine-config-I6666 — a freshly built artifact is by definition
         # re-cut today; ``carry_forward_cuts`` overwrites this when the run
