@@ -192,7 +192,27 @@ def test_tech_score_cut_is_the_universe_not_the_champions_cut():
 def test_live_cut_names_the_arm_that_ranked_it():
     cut = _membership()["cuts"]["scanner_gate_baseline_60"]
     assert cut["ranked_by"] == LIVE_CHAMPION
-    assert cut["feeds"] == ["sector_teams"]
+    # It feeds nothing: the sector teams read the champion CUT, not this
+    # candidate-generation arm's artifact (alpha-engine-config-I7823).
+    assert cut["feeds"] == []
+
+
+def test_the_feed_cut_declares_its_consumers():
+    cuts = _membership()["cuts"]
+    assert cuts["attractiveness_top_60"]["feeds"] == [
+        "sector_teams", "rag_corpus_scope", "thinktank_window",
+    ]
+    assert cuts["attractiveness_top_20"]["feeds"] == ["predictor_universe"]
+
+
+def test_only_count_matched_arms_may_hold_the_feed():
+    """The pointer is writable by an automated promotion engine, so the set of
+    values it may take is closed and both members are 60 wide."""
+    from scoring.universe_membership import DEFAULT_CUT_CHAMPION, PROMOTABLE_CUTS
+
+    assert DEFAULT_CUT_CHAMPION in PROMOTABLE_CUTS
+    assert set(PROMOTABLE_CUTS) == {"attractiveness_top_60", "tech_score_top_60"}
+    assert all(name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}") for name in PROMOTABLE_CUTS)
 
 
 def test_tech_score_cut_flags_when_it_equals_the_live_cut():
