@@ -929,15 +929,34 @@ def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
 
     ``resolve_group_spec`` has no reasoning-control parameter, so
     ``reasoning={"exclude": True}`` is re-applied on top of the resolved
-    (frozen) ``ModelSpec`` via ``dataclasses.replace``. Still required:
-    live validation (config#2575, 2026-07-18) confirmed a reasoning-capable
-    OpenRouter model can burn its entire budget on chain-of-thought before
-    ever emitting the forced tool call (``finish_reason="length"``, no
-    ``tool_calls`` — see ``krepis.judge.check_openai_tool_response_for_leak``
-    and its docstring for the live-reproduced failure shape). Excluding
-    reasoning avoids paying for tokens that never reach the scored output
-    and, per the same live check, reliably avoids the truncation failure
-    mode for the group's currently-resolved model.
+    (frozen) ``ModelSpec`` via ``dataclasses.replace``. Kept, because it is
+    still load-bearing where it works: live validation (config#2575,
+    2026-07-18) confirmed a reasoning-capable **OpenRouter** model can burn
+    its entire budget on chain-of-thought before ever emitting the forced
+    tool call (``finish_reason="length"``, no ``tool_calls`` — see
+    ``krepis.judge.check_openai_tool_response_for_leak`` and its docstring
+    for the live-reproduced failure shape).
+
+    **It is a no-op on the direct provider routes, and that is not this
+    module's to fix** (alpha-engine-config-I7897). ``ModelSpec.reasoning``
+    is OpenRouter's unified reasoning-control object, and krepis forwards it
+    verbatim into ``extra_body["reasoning"]`` for whatever provider sits
+    behind the route. Measured 2026-08-20 through the egress proxy: both
+    ``api.deepseek.com`` and ``api.z.ai`` discard it silently — the reasoning
+    trace comes back regardless, and DeepSeek then refuses the forced
+    ``tool_choice`` outright with ``400 Thinking mode does not support this
+    tool_choice``. The knobs those providers honour are
+    ``thinking={"type": "disabled"}`` / ``reasoning_effort="none"``.
+
+    A caller on the ``litellm_proxy`` route CANNOT correct for this: the
+    chain is walked server-side and this process does not know which upstream
+    will serve the request, so any provider-native parameter set here would
+    be a vendor name hard-coded into a consumer. Thinking control on that
+    route belongs to the registry entry and the generated deployment config.
+    What this module is entitled to require is that the group it resolves can
+    accept a forced tool call at all — now asserted by
+    ``LLM_CALLSITE_REGISTRY.yaml``'s ``requires_forced_tool_call`` on both
+    ``evaljudge`` rows and ``validate_llm_model_registry.py`` invariant 19.
 
     Local import (not module-level) so the test-suite's autouse router
     stub (``conftest.py::_router_resolution_is_stubbed_unless_a_test_says_otherwise``)
