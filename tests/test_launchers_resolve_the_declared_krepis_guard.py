@@ -41,10 +41,20 @@ GUARD = "/opt/nousergon/bin/lib-python"
 #: The pre-I7343 default. Its reappearance anywhere executable is the regression.
 CO_TENANT = "/home/ec2-user/alpha-engine-dashboard/.venv/bin/python"
 
-#: Launcher scripts this repo is known to own. A rename must update this list;
-#: a DELETION must not silently drop coverage, which is what the membership
-#: assertion below catches. Filenames only — never line numbers.
-KNOWN_LAUNCHERS = {'spot_research_weekly.sh'}
+#: Launcher scripts this repo is known to own. **Empty since 2026-08-20**
+#: (`alpha-engine-config-I7856`): `spot_research_weekly.sh` was this repo's only
+#: spot launcher and it was deleted with the retired research graph it drove.
+#: `infrastructure/thinktank_spot_bootstrap.sh` is NOT a replacement — it is the
+#: ON-BOX entrypoint the thinktank dispatcher Lambda runs over SSM *after* the
+#: instance is already up; it never calls `krepis.ec2_spot` and never resolves
+#: an interpreter, so it has no LIB_PYTHON to assert on.
+#:
+#: An empty set is the honest declaration, not a disabled test — see
+#: `test_the_launcher_surface_is_exactly_what_is_declared` below, which is
+#: bidirectional precisely so this emptiness cannot absorb a NEW launcher
+#: silently. A rename must update this set; a deletion must be a reviewed diff.
+#: Filenames only — never line numbers.
+KNOWN_LAUNCHERS: set[str] = set()
 
 _ASSIGN = re.compile(r'^([ \t]*)LIB_PYTHON=(.*)$', re.M)
 _DEFAULTED = re.compile(r'^[ \t]*LIB_PYTHON="\$\{LIB_PYTHON:-([^}]*)\}"[ \t]*$')
@@ -87,17 +97,46 @@ def _executable_lines(path: Path) -> list[str]:
     ]
 
 
-def test_every_known_launcher_still_declares_its_interpreter():
-    """A launcher that stops assigning LIB_PYTHON has not become safe — it has
-    become one that inherits whatever the caller's environment happens to hold,
-    which is the pre-guard behaviour with no line to grep for."""
-    found = _assignment_sites()
-    missing = KNOWN_LAUNCHERS - set(found)
-    assert not missing, (
-        f"launchers with no LIB_PYTHON assignment: {sorted(missing)}. If one was "
-        "renamed, update KNOWN_LAUNCHERS; if one was deleted, this test's coverage "
-        "shrank and that must be a deliberate, reviewed diff."
+def test_the_launcher_surface_is_exactly_what_is_declared():
+    """BIDIRECTIONAL, and that is the whole point.
+
+    Forward: a declared launcher that stops assigning LIB_PYTHON has not become
+    safe — it has become one that inherits whatever the caller's environment
+    happens to hold, which is the pre-guard behaviour with no line to grep for.
+
+    Reverse: every OTHER assertion in this file is derived — it loops over
+    ``_assignment_sites()`` and passes vacuously when that is empty, which it
+    now is. Without this direction, adding a launcher back would add it
+    UNGUARDED and the whole file would stay green. So the surface itself is the
+    subject: the set of spot launchers found must equal the set declared, and a
+    new one fails here until someone reviews it into ``KNOWN_LAUNCHERS``.
+    """
+    found = set(_assignment_sites())
+    assert found == KNOWN_LAUNCHERS, (
+        f"spot-launcher surface drifted: found {sorted(found)}, declared "
+        f"{sorted(KNOWN_LAUNCHERS)}. A launcher present but undeclared is one "
+        "nobody reviewed against alpha-engine-config-I6931; a launcher declared "
+        "but absent means this file's derived assertions have gone vacuous. "
+        "Either way, update KNOWN_LAUNCHERS in a deliberate, reviewed diff."
     )
+
+
+def test_the_derived_assertions_are_vacuous_only_while_the_surface_is_empty():
+    """Names the vacuity out loud rather than letting it hide.
+
+    Four of the five assertions in this file iterate a derived collection. When
+    this repo owns no launcher they assert nothing, and a green file that
+    asserts nothing is exactly the failure mode alpha-engine-config-I7856 was
+    filed about one layer up. This test makes the empty state a DECLARED state:
+    it passes today because the surface is empty and the declaration says so,
+    and the moment either changes without the other, the test above fires.
+    """
+    if not KNOWN_LAUNCHERS:
+        assert _shell_scripts() == [] or not _assignment_sites(), (
+            "KNOWN_LAUNCHERS is empty but spot-launcher scripts assigning "
+            "LIB_PYTHON exist — the derived assertions below are running "
+            "against undeclared subjects."
+        )
 
 
 def test_every_launcher_defaults_to_the_ops_owned_guard():
