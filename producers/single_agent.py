@@ -102,7 +102,7 @@ def build_single_agent_signals(
 ) -> dict:
     """Build a conforming signals.json from the single agent's qual assessments
     + deterministic quant. Pure function (no I/O / no LLM) → unit-testable."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     pop_tickers = {p["ticker"] for p in population}
     assess_by_ticker = {a["ticker"]: a for a in assessments}
