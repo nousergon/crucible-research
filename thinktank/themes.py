@@ -100,11 +100,43 @@ class ThemeKeeper:
         if daily_developments.strip() and macro is not None:
             self._daily_update_macro(macro, daily_developments)
 
+    def _macro_report_block(self) -> str:
+        """The weekly macro report as handed to the model — prefixed with an
+        explicit staleness banner when it is out of date.
+
+        alpha-engine-config-I2638: the report's producer lost its call site
+        when the multi-agent graph retired, so the object froze at 2026-03-16
+        and this prompt kept presenting it as "the weekly macro report". The
+        model was reconciling to a five-month-old backdrop with nothing in the
+        prompt saying so. The banner is the in-band half of the fix; the
+        ``stale_inputs`` field on every written theme is the out-of-band half.
+        """
+        body = (self._ctx.macro_report_md or "(weekly macro report unavailable)")[:12000]
+        verdict = self._ctx.freshness.get("macro_report")
+        if verdict is None or verdict.is_fresh:
+            return body
+        return (
+            f"{verdict.banner()}\n"
+            "Treat the report below as a DATED reference, not as current "
+            "conditions: prefer the market regime and intraweek developments "
+            "you were given, and say so in change_summary if the two conflict.\n\n"
+            f"{body}"
+        )
+
     def macro_summary(self) -> str:
         theme = load_theme(self._store, "macro", "macro")
         if theme is None:
             return "No macro theme available."
-        return f"[macro v{theme.version}, stance={theme.theme.stance}] {theme.theme.narrative}"
+        stale = (
+            f" [DEGRADED: {len(theme.stale_inputs)} stale upstream input(s) — "
+            f"{', '.join(sorted(r.get('artifact', '?') for r in theme.stale_inputs))}]"
+            if theme.stale_inputs
+            else ""
+        )
+        return (
+            f"[macro v{theme.version}, stance={theme.theme.stance}]{stale} "
+            f"{theme.theme.narrative}"
+        )
 
     def sector_summary(self, sector: str | None) -> str:
         if not sector:
@@ -131,7 +163,7 @@ class ThemeKeeper:
         rendered = prompt.format(
             mode="seed",
             market_regime=self._ctx.market_regime(),
-            macro_report=(self._ctx.macro_report_md or "(weekly macro report unavailable)")[:12000],
+            macro_report=self._macro_report_block(),
             prior_theme="(none — first seed)",
             developments="(none)",
         )
@@ -193,7 +225,7 @@ class ThemeKeeper:
         rendered = prompt.format(
             mode="reconcile",
             market_regime=self._ctx.market_regime(),
-            macro_report=(self._ctx.macro_report_md or "(weekly macro report unavailable)")[:12000],
+            macro_report=self._macro_report_block(),
             prior_theme=macro.theme.model_dump_json(),
             developments="(reconcile to the new weekly analysis; note any divergence "
             "between your intraweek view and the weekly report)",
@@ -307,6 +339,10 @@ class ThemeKeeper:
             theme=llm.parsed,
             weekly_anchor_date=weekly_anchor,
             divergence_from_weekly=divergence,
+            # Written unconditionally (empty ⇒ checked and fresh), so a reader
+            # of a theme — or the producer leaderboard scoring this arm — can
+            # never mistake a degraded run for a healthy one.
+            stale_inputs=self._ctx.stale_input_records(),
             model=llm.model,
             tier=llm.tier,
             cost_usd=llm.cost_usd,

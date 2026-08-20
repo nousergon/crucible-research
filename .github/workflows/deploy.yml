@@ -17,6 +17,7 @@ on:
       - 'emailer/**'
       - 'evals/**'
       - 'flow-doctor.yaml'
+      - 'freshness.py'
       - 'graph/**'
       - 'lambda/**'
       - 'memory/**'

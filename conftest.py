@@ -215,3 +215,43 @@ def _router_resolution_is_stubbed_unless_a_test_says_otherwise(monkeypatch, requ
 
     monkeypatch.setattr(krepis_router, "resolve_group_spec", _stub_resolve, raising=True)
     yield
+
+
+@pytest.fixture
+def live_freshness_alerts():
+    """Opt OUT of the autouse alert stub below.
+
+    Requested by the one test whose subject IS the publish path — it fakes
+    ``ops_alerts`` to raise and asserts the transport failure is swallowed
+    without losing the detection. Still hermetic: nothing leaves the process.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def freshness_alerts(monkeypatch, request):
+    """No unit test publishes a REAL upstream-staleness alert.
+
+    ``freshness.assert_upstream_fresh`` notifies through
+    ``ops_alerts.publish_ops_alert`` → ``krepis.alerts.publish`` (SNS) +
+    flow-doctor (Telegram). Consumers call it on every load, so leaving it
+    live would page the operator from the test suite and make hermeticity
+    depend on which credentials happen to be absent.
+
+    The seam replaced is ``freshness._publish``, i.e. the transport only —
+    the detection, the ERROR log, the raise/degrade decision and the verdict
+    a consumer persists are all still exercised for real. Yields the list of
+    ``{"verdict", "source", "severity"}`` records so a test can assert that
+    staleness DID alert.
+    """
+    published: list[dict] = []
+    if "live_freshness_alerts" in request.fixturenames:
+        return published
+
+    def _record(verdict, *, source, severity):
+        published.append({"verdict": verdict, "source": source, "severity": severity})
+
+    import freshness
+
+    monkeypatch.setattr(freshness, "_publish", _record)
+    return published
