@@ -60,9 +60,11 @@ def build_no_agent_signals(
     Pure function (no I/O) so it is unit-testable without S3/SQLite. Reuses the
     live ``_build_signals_payload`` for the actual assembly.
     """
-    # Imported lazily: graph.research_graph pulls the LangGraph stack at import,
-    # which the no-agent producer otherwise has no need for.
-    from graph.research_graph import _build_signals_payload
+    # Imported here (not at module top) to keep this module's own import
+    # graph lean; scoring.signals_payload has no LangGraph dependency itself
+    # (alpha-engine-config-I7827 lift), but keeping the import local matches
+    # this module's existing style.
+    from scoring.signals_payload import _build_signals_payload
 
     pop_tickers = {p["ticker"] for p in population}
 
