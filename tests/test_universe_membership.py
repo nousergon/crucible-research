@@ -84,7 +84,11 @@ def test_envelope_shape_and_schema_version():
 
 def test_every_cut_carries_basis_size_and_provenance():
     for name, cut in _membership()["cuts"].items():
-        assert cut["basis"] in ("scanner_gate", "attractiveness_rank"), name
+        assert cut["basis"] in (
+            "scanner_champion_rank",
+            "attractiveness_rank",
+            "tech_score_rank",
+        ), name
         assert cut["size"] == len(cut["tickers"]), name
         assert cut["source"], name
 
@@ -127,7 +131,10 @@ def test_unrankable_names_are_absent_not_zeroed():
 def test_scanner_cut_passes_through_verbatim():
     m = _membership()
     assert m["cuts"]["scanner_candidates"]["tickers"] == sorted(_scanner_cut())
-    assert m["cuts"]["scanner_candidates"]["basis"] == "scanner_gate"
+    # NOT "scanner_gate": the live cut is ranked by the scanner slot's champion
+    # arm, not by the gate's tech_score, and has been since the 2026-07-22
+    # cutover (alpha-engine-config-I7808).
+    assert m["cuts"]["scanner_candidates"]["basis"] == "scanner_champion_rank"
 
 
 def test_scanner_cut_is_deduped():

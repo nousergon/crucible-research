@@ -54,10 +54,21 @@ def test_gate_cut_name_contains_baseline():
 
 def test_gate_cut_is_emitted_under_the_new_name(membership):
     cut = membership["cuts"][GATE_BASELINE_CUT]
-    assert cut["basis"] == "scanner_gate"
+    # NOT "scanner_gate". The live cut is ranked by the scanner slot's champion
+    # arm and has been since the 2026-07-22 cutover; the old basis, together
+    # with a docstring calling this cut a tech_score ranking, is what let three
+    # separate labels outlive the ranking they named
+    # (alpha-engine-config-I7808, SCANNER_CONTRACT.md §2).
+    assert cut["basis"] == "scanner_champion_rank"
     assert cut["size"] == 60
-    assert cut["feeds"] == []
-    assert "feeds nothing live" in cut["role"].lower()
+    # It feeds the SECTOR TEAMS — via candidates.json rather than via this
+    # artifact — and none of the attractiveness consumers. "Feeds nothing" was
+    # true only of the predictor/RAG/Think Tank family, and reading it as
+    # "feeds nothing at all" is the misreading this spells out.
+    assert cut["feeds"] == ["sector_teams"]
+    role = cut["role"].lower()
+    assert "sector teams" in role
+    assert "not the predictor universe" in role
 
 
 def test_legacy_key_still_emitted_and_marked_deprecated(membership):

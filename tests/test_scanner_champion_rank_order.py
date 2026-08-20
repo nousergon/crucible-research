@@ -1,16 +1,27 @@
-"""The scanner leaderboard's champion is ranked by the score it ranks on
-(alpha-engine-config-I7645).
+"""The scanner leaderboard's champion is ranked by its OWN arm's order
+(alpha-engine-config-I7645 → I7808).
 
-`candidates.json::scanner_tickers` is the quant filter's emission order, not a
-ranking — measured against the live artifact, Spearman(list position,
-tech_score) is +0.27 on 2026-08-18 and -0.04 on 2026-07-30 where a descending
-rank would be -1.00. Every CHALLENGER list is a true ranking by construction
-(`data/scanner_specs._rank_*` sorts by its own score and slices the top N), so
-reading the champion's emission order as a ranking made the board asymmetric in
-the champion's disfavour on two separate metrics: its `realized_rank_ic`, and
-which 50 of its 60 names the count-matched top-50 selected.
+`candidates.json::scanner_tickers` IS the champion's ranking: the live path
+applies `SCANNER_SPECS[LIVE_CHAMPION].rank`, and every `ScannerSpec.rank` sorts
+by its own score descending and slices the top N, so list position is the
+champion's ranking by construction — the same property every challenger's
+shadow list has (SCANNER_CONTRACT.md §4).
 
-RED on ed3fb223: `_load_scanner_specs` passed `scanner_tickers` straight in.
+**This file previously asserted the opposite, and the reversal is the point.**
+I7645 measured Spearman(list position, `tech_score`) at +0.27 on 2026-08-18 and
+-0.04 on 2026-07-30, where a descending `tech_score` order would be -1.00, and
+concluded the emission order was arbitrary. It was not arbitrary — it was the
+momentum sleeve's ranking, which the live path had adopted on 2026-07-22 while
+the spec register still named `tech_score` as the champion's signal. Both
+measured dates fall after that cutover, so the correlation was showing that the
+champion had stopped ranking on `tech_score`, not that its list was unordered.
+Sorting the champion's cut by a signal it does not rank on made its
+`realized_rank_ic` a correlation against a RIVAL ARM's ordering, on the board
+that judges it — the same asymmetry I7645 set out to remove, pointed the other
+way.
+
+`tech_score` is now the ranking signal of the `tech_score_gate` challenger,
+where it is scored on its own terms.
 """
 
 from __future__ import annotations
@@ -22,54 +33,56 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.leaderboard_producers import _champion_scanner_day  # noqa: E402
 
-# Emission order is deliberately NOT tech_score order.
+# The champion's own descending ranking. `tech_score` is seeded as its exact
+# reverse, so any re-sort by the challenger's signal is visible immediately.
 EMITTED = ["AAA", "BBB", "CCC"]
-SCORES = {"AAA": 0.1, "BBB": 0.9, "CCC": 0.5}
+TECH_SCORES = {"AAA": 0.1, "BBB": 0.5, "CCC": 0.9}
 
 
-def _doc(*, with_log: bool = True, drop: str | None = None) -> dict:
-    log = [
-        {"ticker": t, "tech_score": s}
-        for t, s in SCORES.items()
-        if t != drop
-    ]
-    doc: dict = {"scanner_tickers": list(EMITTED)}
+def _doc(*, with_log: bool = True, tickers: list[str] | None = None) -> dict:
+    doc: dict = {"scanner_tickers": list(EMITTED if tickers is None else tickers)}
     if with_log:
-        doc["scanner_eval_log"] = log
+        doc["scanner_eval_log"] = [{"ticker": t, "tech_score": s} for t, s in TECH_SCORES.items()]
     return doc
 
 
-def test_champion_day_is_ordered_by_tech_score_not_emission_order():
+def test_champion_day_keeps_its_own_order_and_ignores_tech_score():
     day = _champion_scanner_day(_doc())
-    assert day.ranked == ["BBB", "CCC", "AAA"]
+    assert day.ranked == EMITTED
     assert day.rank_ordered is True
 
 
-def test_champion_day_carries_the_scores_the_rank_ic_should_use():
-    """With explicit scores the rank-IC uses the real signal spacing rather
-    than reconstructing a monotone stand-in from list position."""
+def test_champion_day_is_not_re_sorted_by_a_rival_arms_signal():
+    """RED on the I7645 implementation, which returned the tech_score order."""
     day = _champion_scanner_day(_doc())
-    assert day.scores == SCORES
+    assert day.ranked != ["CCC", "BBB", "AAA"]
 
 
-def test_a_candidates_artifact_without_the_eval_log_is_not_passed_off_as_ranked():
-    """The pre-2026-07 objects carry no `scanner_eval_log`. An unknown order
-    must produce a MISSING rank-IC, never one over emission order."""
+def test_champion_day_carries_no_borrowed_scores():
+    """`tech_score` belongs to the `tech_score_gate` arm. Attaching it to the
+    champion's day would make the rank-IC use another arm's signal spacing."""
+    day = _champion_scanner_day(_doc())
+    assert day.scores is None
+
+
+def test_an_artifact_without_the_eval_log_is_still_ranked():
+    """The pre-2026-07 objects carry no `scanner_eval_log`. Their list is still
+    the live cut in its producer's order, so the rank-IC is measurable — under
+    I7645 these dates silently reported no rank-IC at all."""
     day = _champion_scanner_day(_doc(with_log=False))
     assert day.ranked == EMITTED
+    assert day.rank_ordered is True
+
+
+def test_an_empty_cut_is_unranked():
+    """The only cut with no ranking is an empty one."""
+    day = _champion_scanner_day(_doc(tickers=[]))
+    assert day.ranked == []
     assert day.rank_ordered is False
 
 
-def test_a_partially_scored_cut_is_not_partially_ranked():
-    """Ranking 2 of 3 names would silently drop the unscored one to the tail
-    and report the result as a ranking."""
-    day = _champion_scanner_day(_doc(drop="CCC"))
-    assert day.rank_ordered is False
-
-
-def test_loader_gives_the_champion_a_ranked_day_end_to_end():
-    """The behavioural assertion that is RED on ed3fb223: the loader itself,
-    not only the helper this change extracted."""
+def test_loader_gives_the_champion_its_own_ranked_day_end_to_end():
+    """The behavioural assertion, at the loader rather than the helper."""
     import json
 
     from scoring.leaderboard_producers import _load_scanner_specs
@@ -90,4 +103,5 @@ def test_loader_gives_the_champion_a_ranked_day_end_to_end():
             raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
 
     champion, _ = _load_scanner_specs(_S3(), "b", ["2026-07-01"])
-    assert champion.by_date["2026-07-01"].ranked == ["BBB", "CCC", "AAA"]
+    assert champion.name == "momentum_sleeve"
+    assert champion.by_date["2026-07-01"].ranked == EMITTED

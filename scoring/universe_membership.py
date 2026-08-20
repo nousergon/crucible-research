@@ -32,17 +32,36 @@ from the sibling universe-board write, which is dashboard-only and fail-soft.
 Cuts emitted (each carries ``basis`` = how membership was decided):
 
   ``scanner_gate_baseline_60``
-                             FEEDS NOTHING LIVE. A recorded baseline: the
-                             scanner's own gate cut, ``candidates.json::
-                             scanner_tickers`` verbatim, basis=``scanner_gate``.
-                             A ``tech_score`` momentum ranking, NOT an alpha
-                             ranking — near-disjoint from the attractiveness
-                             rank the champion is drawn from (12 of 60 overlap,
-                             measured 2026-08-17). Retained as the incumbent
-                             challenger arm and the churn baseline.
+                             The scanner's live candidate cut,
+                             ``candidates.json::scanner_tickers`` verbatim,
+                             basis=``scanner_champion_rank``. This is the
+                             sector teams' input set (via candidates.json —
+                             ``graph.research_graph._resolve_agent_input_set``),
+                             NOT the predictor universe, NOT the RAG corpus
+                             scope, NOT Think Tank's coverage window. Group B
+                             of SCANNER_CONTRACT.md §1.
+                             It is NOT a ``tech_score`` ranking, and this
+                             docstring said it was until 2026-08-20: the live
+                             ranking has been the scanner slot's champion arm
+                             since the 2026-07-22 config#1186 cutover
+                             (alpha-engine-config-I7808). The name predates
+                             that and is retained rather than changed a second
+                             time in one month; ``basis`` and ``role`` carry
+                             the truth, and the rename is bundled with the
+                             I7578 alias removal.
                              Was ``scanner_candidates``; that key is still
                              emitted as a deprecated alias
                              (alpha-engine-config-I7578).
+  ``tech_score_top_60``      The DISPLACED INCUMBENT baseline, basis=
+                             ``tech_score_rank``: top 60 by ``tech_score``
+                             over every row the momentum path admitted
+                             (``scan_path == "momentum"``), i.e. what the live
+                             cut was before 2026-07-22. Feeds nothing. Emitted
+                             so the cutover stays measurable and so "the
+                             tech_score top 60" names something real —
+                             ``scanner_top_20`` is scoped WITHIN the champion's
+                             cut and does not answer that question
+                             (alpha-engine-config-I7809).
   ``attractiveness_top_20``  top 20 by cross-sectional attractiveness rank.
                              **This is the cut the predictor resolves from**
                              (alpha-engine-config-I4983) — see
@@ -189,6 +208,15 @@ PREDICTOR_UNIVERSE_CUT = "attractiveness_top_20"
 GATE_BASELINE_CUT = "scanner_gate_baseline_60"
 GATE_LEGACY_CUT = "scanner_candidates"
 """Deprecated alias, emitted alongside the new name for one window."""
+
+TECH_SCORE_CUT_PREFIX = "tech_score_top_"
+"""The displaced-incumbent baseline cut (alpha-engine-config-I7809).
+
+Distinct from ``scanner_top_{N}``, which ranks by ``tech_score`` WITHIN the
+champion's 60. This one ranks over every momentum-path-eligible row in the
+scanned universe, so it answers "what is the universe's tech_score top 60?" —
+the question Brian asked on 2026-08-20 and which no emitted cut answered.
+"""
 
 # Attractiveness-rank cuts emitted every cycle. 60 is count-matched to the
 # scanner's ``momentum_top_n`` so scanner-cut-vs-rank-cut is an apples-to-apples
@@ -665,12 +693,31 @@ def compute_turnover(current: dict, prior: dict | None) -> dict | None:
     }
 
 
+def _live_champion_name() -> str:
+    """The scanner arm the live cut is ranked by, from the register.
+
+    Read rather than hardcoded so a future promotion updates this artifact's
+    ``ranked_by`` automatically — the drift this whole change exists to close
+    was a hardcoded ranking name surviving a cutover
+    (alpha-engine-config-I7808). Falls back to a literal ``"unknown"`` rather
+    than to a guess: an unreadable register must not be able to make the
+    artifact ASSERT a ranking.
+    """
+    try:
+        from data.scanner_specs import live_champion_spec
+
+        return live_champion_spec().name
+    except Exception:  # noqa: BLE001 — naming metadata, never load-bearing
+        return "unknown"
+
+
 def build_universe_membership(
     run_date: str,
     scanner_tickers: list[str],
     attractiveness: dict[str, float],
     *,
     tech_scores: dict[str, float] | None = None,
+    gate_eligible_tech_scores: dict[str, float] | None = None,
     challenger_attractiveness: dict[str, float] | None = None,
     momzero_attractiveness: dict[str, float] | None = None,
     generated_at: str | None = None,
@@ -697,6 +744,12 @@ def build_universe_membership(
         champion (partial eval logs that would emit n≠20). Optional so
         historical backfills, whose inputs may predate the eval-log field,
         still build — they omit the incumbent arm rather than fabricating one.
+    gate_eligible_tech_scores : ``{ticker: tech_score}`` restricted to
+        ``scan_path == "momentum"`` rows (:func:`momentum_path_tech_scores`).
+        When supplied, emits the ``tech_score_top_60`` displaced-incumbent
+        baseline. Kept separate from ``tech_scores`` rather than derived from
+        it because the two answer different questions and applying the wrong
+        one silently produces a cut over names the incumbent rule rejected.
     prior : the previous membership artifact, when one was readable. Used only
         to compute the ``turnover`` block; passing None yields ``turnover:
         null`` rather than a fabricated zero-churn record. Kept a parameter
@@ -727,15 +780,27 @@ def build_universe_membership(
 
     ranks = _rank_table(attractiveness)
     _gate_block = {
-        "basis": "scanner_gate",
+        # NOT "scanner_gate", and not "tech_score_rank" either. The live cut is
+        # ranked by the scanner slot's CHAMPION arm, which has been the momentum
+        # sleeve since the 2026-07-22 config#1186 cutover; this basis said
+        # "scanner_gate" while the docstring above said "a tech_score momentum
+        # ranking", and both were read as tech_score by consumers and by
+        # humans (alpha-engine-config-I7808). The champion's identity is
+        # resolved from the register rather than hardcoded, so a future
+        # promotion cannot leave this string behind the way the last one did.
+        "basis": "scanner_champion_rank",
+        "ranked_by": _live_champion_name(),
         "size": len(set(scanner_tickers)),
         "tickers": sorted(set(scanner_tickers)),
         "source": f"candidates/{run_date}/candidates.json::scanner_tickers",
-        "feeds": [],
+        "feeds": ["sector_teams"],
         "role": (
-            "recorded baseline and incumbent challenger arm. Feeds NOTHING "
-            "live — not the predictor universe, not the RAG corpus scope, not "
-            "Think Tank's coverage window. See the funnel block."
+            "Group B of SCANNER_CONTRACT.md §1 — the technical candidate cut. "
+            "Feeds the SECTOR TEAMS, via candidates.json rather than via this "
+            "artifact (graph.research_graph._resolve_agent_input_set). Feeds "
+            "NONE of the attractiveness consumers: not the predictor universe, "
+            "not the RAG corpus scope, not Think Tank's coverage window. See "
+            "the funnel block."
         ),
     }
     cuts: dict[str, dict] = {
@@ -775,6 +840,41 @@ def build_universe_membership(
             "tickers": incumbent,
             "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score",
         }
+
+    # Displaced-incumbent baseline (alpha-engine-config-I7809). The universe's
+    # tech_score top-N over the rows the momentum path admitted — what the live
+    # cut WAS before the 2026-07-22 cutover. Emitted unconditionally when the
+    # projection is non-empty rather than gated on a config flag: its whole
+    # purpose is that the cutover stays measurable, and a baseline that can be
+    # switched off is a baseline that is off on the cycle you needed it.
+    if gate_eligible_tech_scores:
+        _ts_ranks = _rank_table(gate_eligible_tech_scores)
+        for n in (ATTRACTIVENESS_FEED_TOP_N,):
+            tickers = _top_n(_ts_ranks, n)
+            cuts[f"{TECH_SCORE_CUT_PREFIX}{n}"] = {
+                "basis": "tech_score_rank",
+                "size": len(tickers),
+                "tickers": tickers,
+                "source": (
+                    f"candidates/{run_date}/candidates.json::scanner_eval_log"
+                    "::tech_score@scan_path=momentum"
+                ),
+                "feeds": [],
+                "role": (
+                    "recorded baseline — the incumbent ranking the 2026-07-22 "
+                    "config#1186 cutover displaced, at the champion's width. "
+                    "Feeds nothing live."
+                ),
+                # Annotated, NOT raised on. Identity here means the live cut
+                # fell back to the incumbent ordering — which is the DOCUMENTED
+                # degrade when factor loadings are unavailable
+                # (SCANNER_CONTRACT.md §5), so reding the Scanner run for it
+                # would turn a graceful degradation into an outage. It still
+                # has to be visible: a cycle where the champion silently did
+                # not apply is a cycle whose leaderboard row is about a
+                # different arm than its label claims.
+                "equals_live_cut": set(tickers) == set(scanner_tickers),
+            }
 
     # Momentum-horizon challenger arm (alpha-engine-config-I7538). Ranked over
     # the SAME universe by the SAME machinery — only the momentum pillar's
@@ -996,6 +1096,33 @@ def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
+def momentum_path_tech_scores(eval_log: list[dict] | None) -> dict[str, float]:
+    """``{ticker: tech_score}`` restricted to rows the MOMENTUM PATH admitted.
+
+    ``scan_path == "momentum"`` is set by ``data.scanner.run_quant_filter``
+    only for rows that cleared the liquidity floor, the price floor,
+    ``tech_score_min``, the MA200 floor and the momentum-path volatility
+    ceiling. Ranking this set by ``tech_score`` reproduces the pre-2026-07-22
+    live cut exactly, which is what makes ``tech_score_top_N`` a baseline
+    rather than an approximation of one.
+
+    Distinct from :func:`tech_scores_from_eval_log`, which projects EVERY
+    scored row: that one exists to rank names already inside the champion's
+    cut, where the gates are a given. Ranking the universe needs the gates
+    applied, and using the wider projection here would admit names the
+    incumbent rule would have rejected outright.
+    """
+    out: dict[str, float] = {}
+    for row in eval_log or []:
+        if row.get("scan_path") != "momentum":
+            continue
+        ticker = row.get("ticker")
+        score = row.get("tech_score")
+        if ticker and isinstance(score, (int, float)):
+            out[str(ticker).upper()] = float(score)
+    return out
+
+
 def champion_momentum_weight(
     bucket: str | None = None, s3_client: Any = None
 ) -> float:
@@ -1190,6 +1317,7 @@ def compute_and_write_universe_membership(
         scanner_tickers,
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
+        gate_eligible_tech_scores=momentum_path_tech_scores(scanner_eval_log),
         challenger_attractiveness=challenger_attractiveness_for_run(
             run_date, bucket=bucket, s3_client=s3_client
         ),
