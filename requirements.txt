@@ -301,7 +301,7 @@ python-dotenv~=1.2.2
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.48
+edgartools~=5.51
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9
