@@ -6,8 +6,8 @@ entries:
   - path: .github/workflows/judge-perturbation-smoke.yml
     pattern: env_key
     reason: >-
-      CI gate injects secrets.OPENROUTER_API_KEY and its header comment describes calling the judge via OpenRouter directly, but alpha-engine-config-I6559 (crucible-research-PR666, 2026-08-19) migrated evaluate_artifact onto krepis.router.resolve_group_spec — this workflow was never updated to match and needs its live-CI-reachability question resolved.
-    expires: "2026-09-19"
+      Fixed by alpha-engine-config-I7880: the secrets.OPENROUTER_API_KEY injection into the smoke step's env was removed (evaluate_artifact resolves its judge model via krepis.router, not this key). The remaining literal is historical prose in header comments explaining the migration and pointing at the still-open CI-router-reachability question (alpha-engine-config-I7853) — not a live call site.
+    expires: "2026-11-18"
     tracking: alpha-engine-config-I7880
   - path: agents/langchain_utils.py
     pattern: base_url
@@ -66,26 +66,20 @@ entries:
   - path: scripts/live_validate_openrouter_judge.py
     pattern: base_url
     reason: >-
-      Same as above (env_key entry) — imports config.OPENROUTER_API_KEY and the module docstring still describes the pre-I6559 direct-OpenRouter transport.
-    expires: "2026-09-19"
-    tracking: alpha-engine-config-I7880
-  - path: scripts/live_validate_openrouter_judge.py
-    pattern: env_key
-    reason: >-
-      Ad-hoc operator validator reading OPENROUTER_API_KEY directly against evaluate_artifact_openrouter, which no longer talks to OpenRouter directly since I6559 — genuinely unmigrated tooling.
-    expires: "2026-09-19"
+      Fixed by alpha-engine-config-I7880: the script no longer constructs an openai.OpenAI client against https://openrouter.ai/api/v1 — it resolves through krepis.router.resolve_group_spec's low group like production judge call sites. The remaining literal is historical prose in the module docstring naming the removed direct-linkage pattern for context, not a live call site.
+    expires: "2026-11-18"
     tracking: alpha-engine-config-I7880
   - path: tests/live_smoke/judge_perturbation_smoke.py
     pattern: env_key
     reason: >-
-      Gates main() on OPENROUTER_API_KEY presence against a judge call path (evaluate_artifact) that no longer uses that key since I6559 — genuinely unmigrated tooling, not historical prose.
-    expires: "2026-09-19"
+      Fixed by alpha-engine-config-I7880: main() no longer gates on OPENROUTER_API_KEY presence or passes it into run_perturbation_battery (the judge call resolves its credential via krepis.router; passing a real key would have overridden that resolution). The remaining literal is historical prose in the module docstring and comments explaining the migration — not a live call site.
+    expires: "2026-11-18"
     tracking: alpha-engine-config-I7880
   - path: tests/live_smoke/judge_perturbation_smoke_openrouter.py
     pattern: env_key
     reason: >-
-      Ad-hoc smoke validating evaluate_artifact_openrouter via a direct OPENROUTER_API_KEY read; that call path also migrated to the router under I6559 and this script was never updated. Not CI-wired today (manual/ad-hoc only per its own docstring), lower urgency.
-    expires: "2026-09-19"
+      Fixed by alpha-engine-config-I7880: main() no longer gates on OPENROUTER_API_KEY presence or passes it through to evaluate_artifact_openrouter, and now catches a router-unreachable ValueError as a SKIP the same way its sync-primary sibling does. The remaining literal is historical prose in the module docstring — not a live call site. Not CI-wired today (manual/ad-hoc only per its own docstring).
+    expires: "2026-11-18"
     tracking: alpha-engine-config-I7880
   - path: tests/test_agent_llm_factory.py
     pattern: base_url

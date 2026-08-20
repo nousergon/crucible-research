@@ -16,11 +16,12 @@ quality), NOT on stock outcomes.
 
 Runs:
   * CI on PRs touching evals/judge.py, evals/perturbation.py, or the
-    rubric prompts — gated on OPENROUTER_API_KEY (alpha-engine-config-I2997,
-    2026-07-19: evaluate_artifact migrated off direct Anthropic to
-    OpenRouter/DeepSeek V4 Flash) + the alpha-engine-config checkout (the
-    rubric prompts are gitignored). Forks without the secret get a clean
-    skip (exit 0), not a failure.
+    rubric prompts — needs the alpha-engine-config checkout (the rubric
+    prompts are gitignored) and a reachable router (see below); no
+    provider API key is read by this script (alpha-engine-config-I7880:
+    the judge call it exercises stopped needing OPENROUTER_API_KEY when
+    I6559 moved it onto the router, and this script's gate is now a
+    router-reachability outcome, not a key-presence check).
   * Locally: .venv/bin/python tests/live_smoke/judge_perturbation_smoke.py
 
 alpha-engine-config-I6559 (2026-08-19, crucible-research#666) moved the
@@ -107,12 +108,11 @@ def _emit_github_signals(*, outcome: str, judged_count: int, title: str, summary
 
     principles.md §2.7: "a component emitting nothing is not healthy, it is
     unobserved; no data is never rendered as green." Every exit path from
-    main() calls this exactly once (including the two paths that already
-    predate this function — OPENROUTER_API_KEY missing, and the eventual
-    PASS/FAIL), so GITHUB_OUTPUT/GITHUB_STEP_SUMMARY always carry an
-    outcome and a judged_count, not only the paths a first pass happened to
-    remember. A local run (no GITHUB_OUTPUT/GITHUB_STEP_SUMMARY env vars)
-    is a silent no-op here — these are CI-only signals.
+    main() calls this exactly once, so GITHUB_OUTPUT/GITHUB_STEP_SUMMARY
+    always carry an outcome and a judged_count, not only the paths a first
+    pass happened to remember. A local run (no GITHUB_OUTPUT/
+    GITHUB_STEP_SUMMARY env vars) is a silent no-op here — these are
+    CI-only signals.
     """
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
@@ -126,28 +126,14 @@ def _emit_github_signals(*, outcome: str, judged_count: int, title: str, summary
 
 
 def main() -> int:
-    # alpha-engine-config-I2997 (2026-07-19): evaluate_artifact migrated
-    # off direct Anthropic to OpenRouter/DeepSeek V4 Flash — this smoke
-    # exercises that same sync judge path via _default_judge, so it now
-    # needs an OpenRouter key, not an Anthropic one.
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        print(
-            "judge_perturbation_smoke: OPENROUTER_API_KEY not set; skipping. "
-            "(Expected on fork PRs without the secret; not a failure.)",
-            file=sys.stderr,
-        )
-        _emit_github_signals(
-            outcome="skip_no_key",
-            judged_count=0,
-            title="judge_perturbation_smoke: SKIP (no OPENROUTER_API_KEY)",
-            summary=(
-                "OPENROUTER_API_KEY was not set — expected on fork PRs, "
-                "which never receive secrets. 0 perturbations judged."
-            ),
-        )
-        return 0
-
+    # alpha-engine-config-I6559 (2026-08-19): evaluate_artifact resolves
+    # its judge model via krepis.router.resolve_group_spec — no provider
+    # API key is read or required here (alpha-engine-config-I7880: the
+    # OPENROUTER_API_KEY gate this main() used to run pre-migration is
+    # gone; router-reachability is the only gate now, and it is enforced
+    # below by the ValueError/_ROUTER_UNREACHABLE_MARKER branch, not by
+    # a key-presence check up front — a fork PR with no secrets and a
+    # reachable router would otherwise be skipped for the wrong reason).
     try:
         from evals.perturbation import (
             CORRUPTIONS,
@@ -177,7 +163,14 @@ def main() -> int:
         return 1
 
     try:
-        report = run_perturbation_battery(corruptions=subset, api_key=api_key)
+        # api_key intentionally omitted: production callers of the
+        # router-resolved judge core leave it None so krepis resolves the
+        # credential by name (evals/judge.py::_call_openrouter_judge_llm
+        # docstring — passing a real key here would OVERRIDE that
+        # resolution rather than merely gate on presence, krepis.llm.
+        # LLMClient._resolve_api_key prefers a truthy `api_key` argument
+        # over the registry-resolved one).
+        report = run_perturbation_battery(corruptions=subset)
     except ValueError as exc:
         # Narrow, named swallow (fail-loud default, ~/Development/CLAUDE.md):
         # (a) failure mode swallowed: krepis.router found no reachable
