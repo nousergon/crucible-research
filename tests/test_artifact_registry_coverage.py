@@ -153,6 +153,21 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # after-producer). Single PUT site (loop over dated + latest keys in
     # write_universe_membership_to_s3).
     "scoring/universe_membership.py": 1,
+    # Scanner-cut promotion decision (alpha-engine-config-I7826). 1 PUT site
+    # (the loop over the dated audit key, the latest.json mirror and the live
+    # pointer config/scanner_cut_champion.json). LOAD-BEARING: the pointer is
+    # what universe_membership.resolve_feed_cut resolves the sector teams'
+    # input set from, and the record is written on EVERY evaluation — promote
+    # or hold — precisely so a dead engine is distinguishable from an engine
+    # that decided to hold (champion-challenger-policy.md §3; the config#2054
+    # lesson, whose fix on the sibling producer-champion slot is the
+    # config_apply_audit_producer_champion registry row). ARTIFACT_REGISTRY.yaml
+    # rows for config_scanner_cut_champion + config_apply_audit_scanner_cut_
+    # champion (liveness_via the audit latest.json, cadence = the scanner run)
+    # are filed as alpha-engine-config-I7833 — three docs PRs were already open
+    # against that repo's private-docs on 2026-08-20, and opening a fourth
+    # against work in flight is what the engagement protocol forbids.
+    "scoring/cut_promotion.py": 1,
     # One-time historical backfill of the membership artifact. Writes the DATED
     # key only (never the latest pointer the predictor resolves from) — an
     # operator-invoked reconstruction script, not a pipeline producer, hence no

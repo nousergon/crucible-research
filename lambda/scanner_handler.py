@@ -458,6 +458,66 @@ def _run(event, context):
         )
         cuts_leaderboard_status = {"status": "error", "error": str(exc)}
 
+    # ── Weekly cut-promotion decision (alpha-engine-config-I7826) ───────────
+    # Decides which of the two count-matched 60s holds the sector-team feed and
+    # WRITES that decision, promote or hold, to config/scanner_cut_champion.json
+    # plus an immutable dated audit record. Runs here because this is the moment
+    # the board it reads exists — and the freshly built leaderboard is handed in
+    # directly rather than re-fetched, so the decision reads the exact artifact
+    # this run produced.
+    #
+    # CADENCE-AGNOSTIC on purpose. Its hysteresis is measured in CALENDAR days
+    # (cooldown_days), not in invocations, so it behaves identically whether the
+    # scanner runs every weekday (today) or weekly (after nousergon-data#1464) —
+    # nothing here waits on that track. A re-evaluation that reaches the same
+    # conclusion rewrites the same hold and raises the liveness resolution of the
+    # audit record; it can never flip the feed twice inside one cooldown.
+    #
+    # FAIL-SOFT + LOUD, matching the two blocks above: the live candidates.json
+    # and the membership artifact are already written and must never be
+    # downgraded by a decision step, and a promotion failure is SAFE — the
+    # pointer keeps naming the standing champion. It is never SILENT: the engine
+    # raises on a defective board, and that raise lands here as an ERROR log, an
+    # ops alert and an explicit status in the summary.
+    promotion_status: dict = {}
+    try:
+        from scoring.cut_promotion import run_cut_promotion
+
+        promotion_status = run_cut_promotion(
+            run_date,
+            bucket=bucket,
+            s3_client=s3_client,
+            leaderboard=(cuts_leaderboard_status or {}).get("leaderboard"),
+        )
+        logger.info(
+            "[scanner_handler] cut promotion decision=%s champion=%s reason_code=%s",
+            promotion_status.get("decision"),
+            promotion_status.get("champion"),
+            promotion_status.get("reason_code"),
+        )
+    except Exception as exc:  # noqa: BLE001 — live path already delivered; never silent
+        logger.exception(
+            "[scanner_handler] cut promotion FAILED on %s — the champion pointer "
+            "keeps naming the standing champion", run_date,
+        )
+        promotion_status = {"status": "error", "error": str(exc)}
+        try:
+            from observe_alerts import publish_observe_alert
+
+            publish_observe_alert(
+                message=(
+                    f"[cut_promotion] the scanner-cut promotion engine FAILED on "
+                    f"{run_date}: {exc}. The feed still resolves from the standing "
+                    "champion, so this is not a live outage — but no decision was "
+                    "recorded for this cycle (alpha-engine-config-I7826)."
+                ),
+                source="research:cut_promotion",
+                dedup_key=f"cut_promotion_error:{run_date}",
+                severity="ERROR",
+            )
+        except Exception:  # noqa: BLE001 — alerting is secondary, never fatal
+            logger.warning("[scanner_handler] cut promotion alert publish failed")
+
     summary = {
         "s3_key": s3_key,
         "scanner_tickers": len(artifact["scanner_tickers"]),
@@ -475,6 +535,13 @@ def _run(event, context):
         "cuts_leaderboard": {
             "status": cuts_leaderboard_status.get("status"),
             "key": cuts_leaderboard_status.get("key"),
+        },
+        "cut_promotion": {
+            "status": promotion_status.get("status", "ok"),
+            "decision": promotion_status.get("decision"),
+            "champion": promotion_status.get("champion"),
+            "reason_code": promotion_status.get("reason_code"),
+            "error": promotion_status.get("error"),
         },
         "universe_board": {
             "status": "OK" if universe_board_key else "error",
