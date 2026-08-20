@@ -53,6 +53,14 @@ class ProducerSpec:
     # still champion/challenger. Additive field (config-I2993) — defaults to
     # None so every pre-existing spec is unaffected.
     retired_date: str | None = None
+    # The first-party modules that IMPLEMENTED this arm, recorded when it is
+    # retired (alpha-engine-config-I7827). champion-challenger-policy.md §6
+    # requires the code to be DELETED rather than left dormant, and this field
+    # is what makes that enforceable instead of a matter of memory:
+    # `tests/test_retired_producer_not_reachable.py` asserts every name here is
+    # absent from the tree AND unreachable from any Lambda handler's import
+    # graph. Empty for a live arm.
+    retired_modules: tuple[str, ...] = ()
 
 
 RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
@@ -63,7 +71,12 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         description="RETIRED six-team + macro economist + CIO LangGraph "
         "orchestration — the live ne-weekly-freshness-pipeline SF no longer "
         "invokes this graph (config#1580 ruling); SignalsEnvelope "
-        "(config-I2515 Phase B) is the live signals.json producer now.",
+        "(config-I2515 Phase B) is the live signals.json producer now. Its "
+        "CODE (graph/research_graph.py, graph/reducers.py, the handler's "
+        "champion pass, local/run.py) was DELETED on 2026-08-20 under "
+        "champion-challenger-policy.md §6 — alpha-engine-config-I7827. This "
+        "row stays forever as the historical record; §6 deletes the code, not "
+        "the registry entry.",
         build=None,
         # Derivation (config-I2993): research.db team_candidates/cio_evaluations
         # MAX date is trading_day 2026-07-10, i.e. the graph's last production
@@ -74,6 +87,14 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         # ``cutover_date`` convention (e.g. neutralization_live_forward_ic,
         # cutover 2026-06-22).
         retired_date="2026-07-12",
+        # Deleted 2026-08-20 under §6 — alpha-engine-config-I7827. The guard
+        # in tests/ fails if any of these comes back or becomes reachable.
+        retired_modules=(
+            "graph.research_graph",
+            "graph.reducers",
+            "local.run",
+            "local.offline_stubs",
+        ),
     ),
     "no_agent_quant": ProducerSpec(
         name="no_agent_quant",

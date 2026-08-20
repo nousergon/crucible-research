@@ -306,7 +306,7 @@ def _run(event, context):
     # ── Ported secondary artifacts (config-I3290) ─────────────────────────
     # research_consolidated_morning + scanner_universe_trajectory used to be
     # written from inside the old multi-agent archive_writer node
-    # (graph/research_graph.py), which config#2515 removed from the weekly
+    # (the retired research graph), which config#2515 removed from the weekly
     # SF entirely. Both artifacts still have live consumers (dashboard
     # Research Briefing Archive / Attractiveness Trends views, the
     # backtester's attractiveness_eval IC grading) so they are ported here

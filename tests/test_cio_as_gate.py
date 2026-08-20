@@ -39,7 +39,7 @@ def test_unadvanced_buy_does_not_emit_signal():
     """A team rec with rating=BUY that the CIO did NOT advance and
     that is NOT in the population must produce no signal — the previous
     bypass branch let these leak through as ENTER."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -63,7 +63,7 @@ def test_unadvanced_buy_does_not_emit_signal():
 
 def test_advanced_buy_emits_enter():
     """A team rec with rating=BUY that the CIO DID advance must emit ENTER."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -86,7 +86,7 @@ def test_advanced_buy_emits_enter():
 def test_held_buy_emits_enter_reaffirm():
     """A held BUY-rated name that was NOT advanced this week (but is already
     in population) must still emit ENTER as a reaffirm."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -108,7 +108,7 @@ def test_held_buy_emits_enter_reaffirm():
 
 def test_held_non_buy_emits_hold():
     """A held name with rating != BUY must emit HOLD."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -338,7 +338,7 @@ def test_replay_2026_04_24_no_cio_advances():
     """If the CIO advanced 0 of the 27 candidates this Saturday, ENTER count
     must equal only the held BUY-rated reaffirmations — under the old code
     all 27 would still ENTER via the bypass branch."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = _state_from_fixture(advanced_tickers=[])
     payload = _build_signals_payload(state)
@@ -357,7 +357,7 @@ def test_replay_2026_04_24_no_cio_advances():
 def test_replay_2026_04_24_all_advanced():
     """Sanity: if the CIO advanced all 27 candidates, all 27 BUYs ENTER —
     proves the new code still emits ENTER on the CIO-approved path."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = _state_from_fixture(advanced_tickers=[])
     # Advance every BUY-rated ticker
@@ -379,7 +379,7 @@ def test_replay_2026_04_24_top3_advanced_caps_below_baseline():
     """Tightly capped advance: CIO advances only top 3 net-new BUYs.
     The total ENTER count must drop below the 27-ENTER baseline that the
     bypass branch would have produced when none of those 3 are reaffirms."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = _state_from_fixture(advanced_tickers=[])
     pop_tickers = {p["ticker"] for p in state["new_population"]}

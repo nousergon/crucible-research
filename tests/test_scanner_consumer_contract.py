@@ -156,8 +156,7 @@ def test_scanner_liquidity_pass_count_is_high_on_raw_consumer():
         "liquidity gate. The consumer is reading the normalized "
         "avg_volume_20d column (~1.0) instead of avg_volume_20d_raw "
         "(raw shares). Check data/scanner_orchestrator.py "
-        "_build_technical_scores_from_feature_store and "
-        "graph/research_graph.py::fetch_data_node."
+        "_build_technical_scores_from_feature_store."
     )
 
 
@@ -216,27 +215,35 @@ def test_scanner_fails_loud_when_raw_column_missing():
     )
 
 
-def test_research_graph_consumer_slot_uses_raw_column():
-    """Source-level invariant: the indicators dict built in
-    ``fetch_data_node`` must source ``avg_volume_20d`` from
-    ``fs_row.get("avg_volume_20d_raw")``.
+def test_live_consumer_slot_uses_raw_column():
+    """Source-level invariant: the indicators dict the LIVE scanner builds must
+    source ``avg_volume_20d`` from ``fs_row.get("avg_volume_20d_raw")``.
 
-    A grep-style check. Cheap, catches a revert PR even if the test above
-    is somehow not exercising the exact code path.
+    A grep-style check. Cheap, catches a revert PR even if the test above is
+    somehow not exercising the exact code path.
+
+    Re-pointed 2026-08-20 (alpha-engine-config-I7827): this used to grep
+    ``graph/research_graph.py::fetch_data_node``, a RETIRED consumer whose file
+    has been deleted. The live consumer is
+    ``data/scanner_orchestrator.py::_build_technical_scores_from_feature_store``
+    — the guard follows the consumer rather than dying with the old one, since
+    the defect it catches (901/903 tickers silently failing the liquidity gate
+    for months, because a normalized ratio was consumed as raw shares) is a
+    property of the COLUMN contract, not of any one reader.
     """
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    graph_path = os.path.join(repo_root, "graph", "research_graph.py")
-    with open(graph_path, encoding="utf-8") as f:
+    consumer_path = os.path.join(repo_root, "data", "scanner_orchestrator.py")
+    with open(consumer_path, encoding="utf-8") as f:
         src = f.read()
     assert 'fs_row.get("avg_volume_20d_raw")' in src, (
-        "graph/research_graph.py no longer reads avg_volume_20d_raw from "
+        "data/scanner_orchestrator.py no longer reads avg_volume_20d_raw from "
         "the feature store. The Research scanner's liquidity gate will "
         "regress to silent zero-output. See SCHEMA.md."
     )
     # And the wrong-form must not appear in an indicators dict.
     bad_pattern = '"avg_volume_20d": fs_row.get("avg_volume_20d")'
     assert bad_pattern not in src, (
-        "graph/research_graph.py contains a feature-store read that "
+        "data/scanner_orchestrator.py contains a feature-store read that "
         "pulls the normalized avg_volume_20d into the scanner's "
         f"indicators slot ({bad_pattern!r}). This is the regression "
         "this contract test is meant to catch."

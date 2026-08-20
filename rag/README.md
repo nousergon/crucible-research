@@ -33,7 +33,6 @@ The lib's `retrieve()` API supports three methods (since v0.6.0):
 | Caller | Imports |
 |---|---|
 | `agents/sector_teams/qual_tools.py` | `from alpha_engine_lib.rag import retrieve` (qual analyst's `query_filings` tool, hybrid mode) |
-| `graph/research_graph.py` | `from alpha_engine_lib.rag import is_available` (gates RAG access at graph startup) |
 
 The lib re-exports `retrieve`, `ingest_document`, `document_exists`, `embed_texts`, `get_connection`, and `is_available`. Schema is shipped as package data (`alpha_engine_lib.rag/schema.sql`); the `0001_content_tsv.sql` migration is shipped at `alpha_engine_lib.rag/migrations/`.
 

@@ -5,12 +5,12 @@ composite score is below SECTOR_COHERENCE_UW_MIN_SCORE. Existing HOLDs and
 EXITs are unaffected — gate only filters ENTER signals at buy_candidates
 construction.
 
-Wired into ``_build_signals_payload`` in graph/research_graph.py. Threshold
+Wired into ``_build_signals_payload`` in scoring/signals_payload.py. Threshold
 lives in alpha-engine-config/research/scoring.yaml under
 ``aggregator.macro_sector_coherence_gate``.
 """
 
-from graph.research_graph import _build_signals_payload
+from scoring.signals_payload import _build_signals_payload
 
 
 def _make_thesis(ticker, rating, score, sector="Technology"):

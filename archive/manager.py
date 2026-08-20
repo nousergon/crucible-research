@@ -388,7 +388,7 @@ class ArchiveManager:
     # ── Per-sector-team run persistence (resumability) ────────────────────────
     #
     # The Research Lambda runs the LangGraph stateless (no checkpointer —
-    # see graph/research_graph.py build_graph()). A re-invocation
+    # see the retired research graph's build_graph()). A re-invocation
     # (e.g. an SF retry after a 429) would re-dispatch all 6 sector
     # teams via Send() and re-pay every Haiku call. To make a re-run
     # reuse teams that already succeeded, each team's full output is

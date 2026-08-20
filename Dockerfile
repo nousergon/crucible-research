@@ -58,9 +58,9 @@ RUN microdnf install -y git && microdnf clean all
 # Bake the source commit SHA into the image so the decision-capture provenance
 # stamp (``DecisionArtifact.code_sha``, L4567 sub-item 1b / #781) records the
 # exact deployed code that produced each decision — the SOTA run=code+data
-# reproducibility contract. ``graph/research_graph.py`` reads this at capture
-# time via ``os.environ.get("ALPHA_ENGINE_CODE_SHA")``; without it the stamp is
-# permanently ``None`` in prod. Passed by ``infrastructure/deploy.sh`` via
+# reproducibility contract. ``producers/experiment_record.py`` reads this at
+# capture time via ``os.environ.get("ALPHA_ENGINE_CODE_SHA")``; without it the
+# stamp is permanently ``None`` in prod. Passed by ``infrastructure/deploy.sh`` via
 # ``--build-arg GIT_SHA=<sha>`` (CI uses ``$GITHUB_SHA``; local dev falls back
 # to ``git rev-parse HEAD``). The build-arg default is left empty so a raw
 # ``docker build`` that forgets to pass it stamps a falsy value (env-var-absent
@@ -88,7 +88,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.70" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.75" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt

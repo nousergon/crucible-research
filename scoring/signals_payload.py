@@ -1,21 +1,25 @@
-"""Signals payload builder — lifted from graph/research_graph.py (alpha-engine-config-I7827).
+"""Signals payload builder — the assembly chokepoint every producer routes
+its ``signals.json`` through (alpha-engine-config-I7827).
 
 PURE MOTION: this is `_build_signals_payload`, moved verbatim out of the
-retired ``research_graph`` module into a home the live producers
-(``producers/no_agent.py``, ``producers/single_agent.py``) own directly,
-without importing anything from the (still-reachable-in-production, but
-retired-for-new-work) LangGraph module. `graph/research_graph.py` re-exports
-this symbol so its own call site keeps working byte-identically.
+retired ``graph/research_graph.py`` into a home the live producers
+(``producers/no_agent.py``, ``producers/single_agent.py``) own directly. The
+graph re-exported it for one PR so its own call site kept working
+byte-identically; that graph was deleted 2026-08-20 and this is now the only
+definition.
 
-Zero behaviour change: same body, same config dependencies, same logger
-name convention. ``ResearchState`` is imported only under ``TYPE_CHECKING``
-to avoid a circular import (research_graph now imports this module).
+Zero behaviour change from the lift: same body, same config dependencies,
+same logger name convention.
+
+``state`` is a plain ``dict`` shaped like what the producers assemble — it was
+annotated ``ResearchState`` (a ``TypedDict`` that lived in the deleted graph);
+the function only ever uses ``.get()``, so the annotation is now the honest
+``dict``.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from config import (
     FACTOR_QUALITY_FLOOR_ENABLED,
@@ -26,13 +30,10 @@ from config import (
 )
 from scoring.composite import normalize_conviction
 
-if TYPE_CHECKING:
-    from graph.research_graph import ResearchState
-
 logger = logging.getLogger(__name__)
 
 
-def _build_signals_payload(state: ResearchState) -> dict:
+def _build_signals_payload(state: dict) -> dict:
     """Build backward-compatible signals.json payload.
 
     Includes both v2 keys (signals, population) and v1 keys (universe, buy_candidates)

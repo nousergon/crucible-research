@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-# ── Reference trajectory from graph/research_graph.py ────────────────────────
+# ── Reference trajectory from the retired research graph ────────────────────────
 
 REQUIRED_NODES = [
     "fetch_data",
@@ -52,7 +52,7 @@ EXPECTED_SECTOR_TEAM_COUNT = 6
 
 # ── Final-state structural evidence (config#2263) ────────────────────────────
 #
-# Checkpoint-resumed runs (see graph/research_graph.py's sector_team_node /
+# Checkpoint-resumed runs (see the retired research graph's sector_team_node /
 # macro_economist_node / cio_node resume short-circuits) can finish fast
 # enough to race LangSmith's async span flush — a resumed run that
 # short-circuits most/all checkpointable work has far fewer/shorter spans

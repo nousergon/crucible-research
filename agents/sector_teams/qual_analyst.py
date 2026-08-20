@@ -229,7 +229,7 @@ def run_qual_analyst(
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
         # accumulates into the active ``track_llm_cost`` frame opened
-        # by the outer ``sector_team_node`` in research_graph.py.
+        # by the outer ``sector_team_node`` in the retired research graph.
         result = invoke_react_with_recovery(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},

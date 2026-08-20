@@ -1,7 +1,7 @@
 """
 backfill_orphan_theses.py — One-shot backfill for the population/investment_thesis sync bug.
 
-Until the 2026-04-25 atomic-thesis-write fix, archive_writer in research_graph.py
+Until the 2026-04-25 atomic-thesis-write fix, archive_writer in the retired research graph
 saved population without writing the corresponding investment_thesis row.
 Result: every population member added since 2026-03-16 (last clean batch) is
 an "orphan" — held in the executor, no thesis in research.db.

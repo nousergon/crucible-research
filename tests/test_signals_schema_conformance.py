@@ -21,7 +21,7 @@ contracts = pytest.importorskip(
 )
 
 # Imported after the importorskip guard above.
-from graph.research_graph import _build_signals_payload  # noqa: E402
+from scoring.signals_payload import _build_signals_payload  # noqa: E402
 from tests.test_signals_producer_contract import _synthetic_state  # noqa: E402
 
 

@@ -183,7 +183,7 @@ def test_held_stock_thesis_update_no_prior_marks_score_failed():
 
 def test_build_signals_downgrades_buy_when_final_score_none():
     """If a thesis has rating=BUY but final_score=None, emit HOLD not ENTER."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -218,7 +218,7 @@ def test_build_signals_downgrades_buy_when_final_score_none():
 
 def test_build_signals_allows_scored_buy_through():
     """A BUY with a real final_score must still be emitted as ENTER."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
