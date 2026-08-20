@@ -23,6 +23,22 @@ Runs:
     skip (exit 0), not a failure.
   * Locally: .venv/bin/python tests/live_smoke/judge_perturbation_smoke.py
 
+alpha-engine-config-I6559 (2026-08-19, crucible-research#666) moved the
+judge call this smoke exercises off direct OpenRouter and onto the krepis
+model router (``evals.judge.JUDGE_MODEL_GROUP``), per the no-direct-
+OpenRouter ruling (alpha-engine-config-I6367). The GitHub-hosted CI runner
+this workflow runs on has never been provisioned with a router-edge
+credential (model-router-policy.md §3.4a — reaching the router off-host
+needs `KREPIS_LITELLM_PROXY_URL` + `KREPIS_ROUTER_CREDENTIAL_SECRET`,
+neither of which this workflow sets; tracked at
+alpha-engine-config-I7853), so today's CI environment structurally
+cannot reach any model in the group. That is an infrastructure-provisioning
+gap, not a judge regression, so `main()` treats "router resolution found
+nothing reachable" as a distinct, loud SKIP rather than folding it into
+the same FAIL path as a real caught-rate regression (see
+`_ROUTER_UNREACHABLE_MARKER` below). Once the credential is wired this
+condition stops firing and the smoke resumes making real judge calls.
+
 Tolerant by design: LLM scores vary run-to-run, so the gate is a
 caught-RATE threshold over a curated high-signal subset, not a per-case
 exact assertion. A regressed/insensitive judge still fails it.
@@ -60,6 +76,18 @@ _SUBSET_NAMES = {
 # the gate, while a broadly insensitive judge (catches <= 2) fails.
 _MIN_CAUGHT_RATE = 0.75
 
+# krepis.router.resolve_group_spec (called via evals.judge._default_judge)
+# raises a bare ValueError with this exact prefix when no entry in the
+# group — including the litellm_proxy route itself — is reachable from the
+# declared execution context. It is not a distinguishable exception class
+# (see krepis/src/krepis/router.py::resolve_group_structured), so the
+# message text is the only signal available to tell "the environment
+# cannot reach any model" apart from "the judge is broken". Matched as a
+# prefix, not a substring, so a wording change that drops the prefix fails
+# loud (NameError/AttributeError on the missing marker) rather than
+# silently stopping matching.
+_ROUTER_UNREACHABLE_MARKER = "No model in group "
+
 
 def main() -> int:
     # alpha-engine-config-I2997 (2026-07-19): evaluate_artifact migrated
@@ -93,6 +121,35 @@ def main() -> int:
 
     try:
         report = run_perturbation_battery(corruptions=subset, api_key=api_key)
+    except ValueError as exc:
+        # Narrow, named swallow (fail-loud default, ~/Development/CLAUDE.md):
+        # (a) failure mode swallowed: krepis.router found no reachable
+        #     entry for the judge model group from this CI runner's
+        #     execution context — a provisioning gap (missing router-edge
+        #     credential wiring, alpha-engine-config-I7853), not a signal
+        #     about judge quality. Every other ValueError still falls
+        #     through to the loud FAIL below.
+        # (b) why the primary deliverable survives: this smoke's job is to
+        #     catch a REGRESSED judge; an environment that cannot place any
+        #     call has made no claim about the judge at all, so treating it
+        #     as a pass-by-default FAIL trains reviewers to ignore a check
+        #     that is permanently red for a reason unrelated to their PR.
+        # (c) recording surface: this stderr line, on every affected run,
+        #     naming the tracked issue — never silent.
+        if str(exc).startswith(_ROUTER_UNREACHABLE_MARKER):
+            print(
+                f"judge_perturbation_smoke: SKIP — router resolution found "
+                f"no reachable model from this CI runner's execution "
+                f"context ({exc}). This is an infrastructure-provisioning "
+                f"gap (missing router-edge credential wiring for this "
+                f"consumer, alpha-engine-config-I7853), not a judge "
+                f"regression — the battery never placed a call, so it has "
+                f"nothing to say about judge quality. Not a failure.",
+                file=sys.stderr,
+            )
+            return 0
+        print(f"judge_perturbation_smoke: battery raised — {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 — surface loudly, fail the gate
         print(f"judge_perturbation_smoke: battery raised — {exc}", file=sys.stderr)
         return 1
