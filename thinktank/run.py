@@ -204,6 +204,18 @@ def run_daily(
 
     ctx = load_context(store)
     manifest.context_sources_present = dict(ctx.sources_present)
+    # Durable record of the freshness decision for every dated input
+    # (alpha-engine-config-I2638). Written BEFORE any work so it survives an
+    # aborted run too — the failure path writes the same telemetry as the
+    # success path (observability-policy §3.1).
+    manifest.context_source_freshness = ctx.freshness_records()
+    manifest.degraded_inputs = ctx.stale_sources()
+    if manifest.degraded_inputs:
+        logger.error(
+            "think tank run %s is DEGRADED — stale/undated inputs: %s",
+            run_id,
+            ", ".join(manifest.degraded_inputs),
+        )
     if ctx.board is None:
         raise RuntimeError(
             "universe board (scanner/universe/latest.json) is missing — the "

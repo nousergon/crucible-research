@@ -136,6 +136,7 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # instance of the #340 packaging class (config#1683). The packaging guard
 # (tests/test_dockerfile_packaging.py) now walks the transitive import graph
 # so any new root module/package missing a COPY fails CI.
+COPY freshness.py ${LAMBDA_TASK_ROOT}/
 COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
 COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
 

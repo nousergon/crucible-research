@@ -34,6 +34,24 @@ Pipeline:
   6. Persist per-agent analysis output to
      ``decision_artifacts/_analysis/{agent_id}/{YYYY-WW}.json``.
 
+Corpus freshness (alpha-engine-config-I2638):
+
+  The window is a trailing one, so a corpus that STOPPED being written keeps
+  producing output — with a smaller and smaller sample — until it silently
+  falls out of the window entirely. Measured 2026-08-15: every
+  ``sector_quant`` capture was frozen at 2026-07-11 (the multi-agent graph
+  retired), and this module still wrote a freshly-dated
+  ``_analysis/sector_quant/2026-W33.json`` and stamped a CloudWatch datapoint
+  at today's timestamp. A template-concentration figure computed over a dead
+  corpus is a claim about July presented as a claim about this week.
+
+  Every agent's corpus is therefore checked through
+  ``freshness.assert_upstream_fresh`` before its analysis is written. The
+  verdict rides on the persisted payload (``upstream_freshness``), on the
+  summary (``agents_stale_corpus``), and on its own CloudWatch metric
+  (``..._corpus_age_days``) so the dashboard can see the anchor age next to
+  the value it explains.
+
 Composes with:
 
   - ``reasoning_complexity`` rubric dim (per-call complexity score).
@@ -63,6 +81,8 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as _BotoConfig
+
+from freshness import FreshnessVerdict, assert_upstream_fresh
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +134,27 @@ templates that share a few common words don't merge, loose enough
 that minor wording variation within a template (one extra adjective,
 slight reordering) still merges. Calibrate against real corpus once
 4+ weeks accumulated; v1 default."""
+
+#: Captures are produced by the Saturday weekly run, so a live agent's newest
+#: capture is at most ~7 days old. ``weekly`` tolerance (10d) absorbs one
+#: skipped Saturday; anything beyond it is a frozen producer, not a hiccup.
+CORPUS_CADENCE = "weekly"
+
+#: Why this DEGRADES rather than raises: this module runs as one stage of the
+#: weekly SF over ALL agent corpora at once. A retired agent's frozen captures
+#: are an expected, permanent condition, and raising on them would fail the
+#: stage for every live agent alongside it — trading one silent defect for a
+#: loud outage on unrelated work. The failure mode accepted is "an analysis
+#: artifact is written from a corpus that stopped moving"; the surfaces that
+#: record it are the ops alert from the primitive, the ``upstream_freshness``
+#: block on the persisted artifact itself, the ``agents_stale_corpus`` entry in
+#: the SF summary, and the ``_corpus_age_days`` CloudWatch metric.
+_CORPUS_DEGRADED_REASON = (
+    "weekly SF stage spans every agent corpus; a retired agent's frozen "
+    "captures must not fail the stage for live agents. Recorded on the "
+    "persisted _analysis payload (upstream_freshness), the SF summary "
+    "(agents_stale_corpus), a CloudWatch corpus-age metric, and an ops alert."
+)
 
 MIN_RATIONALES_FOR_CLUSTERING = 5
 """Below this count, clustering output is statistically meaningless —
@@ -463,6 +504,50 @@ def _agent_id_from_key(key: str) -> str | None:
     return parts[-2]
 
 
+def _capture_date_from_key(key: str) -> datetime | None:
+    """Extract the capture date from
+    ``{prefix}/{Y}/{M}/{D}/{agent_id}/{run_id}.json``. Returns None on an
+    unexpected layout — which becomes an ``undated`` freshness verdict, never
+    a silently-fresh one."""
+    parts = key.split("/")
+    if len(parts) < 5:
+        return None
+    year, month, day = parts[-5], parts[-4], parts[-3]
+    try:
+        return datetime(int(year), int(month), int(day), tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _newest_capture_date(keys: list[str]) -> datetime | None:
+    """Newest parseable capture date across ``keys``; None when there are no
+    keys or none parse."""
+    dates = [d for d in (_capture_date_from_key(k) for k in keys) if d is not None]
+    return max(dates) if dates else None
+
+
+def _corpus_freshness(
+    artifact: str, keys: list[str], *, checked_at: datetime, alert: bool = True
+) -> FreshnessVerdict:
+    """Freshness of one capture corpus, from its newest key's date.
+
+    ``alert=False`` for the whole-corpus rollup whenever per-agent verdicts
+    exist: the per-agent artifact is the causal key (one frozen producer, one
+    notification), and alerting on both would page twice for one cause
+    (observability-policy §7.2a).
+    """
+    return assert_upstream_fresh(
+        artifact,
+        as_of=_newest_capture_date(keys),
+        cadence=CORPUS_CADENCE,
+        checked_at=checked_at,
+        on_stale="degrade",
+        degraded_reason=_CORPUS_DEGRADED_REASON,
+        source="crucible-research.evals.rationale_clustering",
+        alert=alert,
+    )
+
+
 def _load_artifact(s3: Any, *, bucket: str, key: str) -> dict[str, Any]:
     """Load and JSON-parse one captured artifact. Returns the raw dict
     rather than the typed ``DecisionArtifact`` model — we only need
@@ -484,6 +569,7 @@ def _build_per_agent_output(
     *,
     window_start: datetime,
     window_end: datetime,
+    freshness: FreshnessVerdict | None = None,
     representatives_per_cluster: int = 3,
 ) -> dict[str, Any]:
     """Render the persisted per-agent analysis JSON. Includes cluster
@@ -516,6 +602,12 @@ def _build_per_agent_output(
         "top3_concentration": concentration,
         "clusters": cluster_summaries,
         "computed_at": datetime.now(UTC).isoformat(),
+        # The artifact is dated ``computed_at``; its INPUT may be much older.
+        # Without this block the two are indistinguishable to any reader.
+        # ``None`` only when the caller passed no verdict at all, which is
+        # itself an unobserved state and reads as such.
+        "upstream_freshness": freshness.as_record() if freshness is not None else None,
+        "degraded": bool(freshness is not None and not freshness.is_fresh),
     }
 
 
@@ -550,6 +642,7 @@ def _emit_concentration_metric(
     concentration: float,
     n_rationales: int,
     timestamp: datetime,
+    freshness: FreshnessVerdict | None = None,
 ) -> None:
     """One datapoint per agent_id. Dimensioned by ``judged_agent_id``
     to match ``agent_quality_score`` so the dashboard can join on the
@@ -576,6 +669,30 @@ def _emit_concentration_metric(
                 "Unit": "Count",
                 "Timestamp": timestamp,
             },
+            # Age of the corpus the concentration figure was computed over, on
+            # the same dimension and in the same call as the figure it
+            # explains. An undated corpus publishes the sentinel -1 rather than
+            # nothing: a metric that goes silent renders as "no data", and no
+            # data is never green (observability-policy §8.3).
+            *(
+                [
+                    {
+                        "MetricName": f"{metric_name}_corpus_age_days",
+                        "Dimensions": [
+                            {"Name": "judged_agent_id", "Value": agent_id}
+                        ],
+                        "Value": float(
+                            freshness.age_days
+                            if freshness is not None and freshness.age_days is not None
+                            else -1.0
+                        ),
+                        "Unit": "Count",
+                        "Timestamp": timestamp,
+                    }
+                ]
+                if freshness is not None
+                else []
+            ),
         ],
     )
 
@@ -632,6 +749,21 @@ def compute_and_emit(
         len(keys), window_start.isoformat(), end.isoformat(),
     )
 
+    # Whole-corpus freshness. An EMPTY window yields an ``undated`` verdict —
+    # the case where per-agent checks below would say nothing at all, because
+    # there are no agents left to iterate. Zero artifacts is the loudest form
+    # of a frozen upstream, and it previously produced a summary that looked
+    # like a clean run with nothing to do.
+    corpus_verdict = _corpus_freshness(
+        f"{capture_prefix}/ (all agents)",
+        keys,
+        checked_at=end,
+        # Alert here only when there are no keys at all — with keys present the
+        # per-agent verdicts below carry the notification, one per frozen
+        # producer. With none, nothing downstream would speak.
+        alert=not keys,
+    )
+
     # Group keys by agent_id, chronologically. Keys embed zero-padded
     # Y/M/D so a lexicographic sort IS date order (same-day ordering is
     # immaterial). Chronological order matters twice: the key-level cap
@@ -654,6 +786,18 @@ def compute_and_emit(
     # near-saturated; that cap still applies afterwards because one
     # artifact can yield MANY rationales. Cap firings are logged AND
     # reported in the summary (no silent caps).
+    # Per-agent corpus freshness, computed from the DISCOVERED keys (before
+    # any cap): the cap changes what is clustered, never how old the corpus is.
+    agent_freshness: dict[str, FreshnessVerdict] = {
+        agent_id: _corpus_freshness(
+            f"{capture_prefix}/*/{agent_id}", agent_keys, checked_at=end
+        )
+        for agent_id, agent_keys in sorted(keys_by_agent.items())
+    }
+    agents_stale_corpus = [
+        v.as_record() for _, v in sorted(agent_freshness.items()) if not v.is_fresh
+    ]
+
     agents_key_capped: list[dict[str, Any]] = []
     fetch_list: list[tuple[str, str]] = []
     for agent_id in sorted(keys_by_agent):
@@ -751,9 +895,11 @@ def compute_and_emit(
             )
             continue
 
+        verdict = agent_freshness.get(agent_id)
         payload = _build_per_agent_output(
             agent_id, rationales, clusters, concentration,
             window_start=window_start, window_end=end,
+            freshness=verdict,
         )
 
         try:
@@ -785,6 +931,7 @@ def compute_and_emit(
                     concentration=concentration,
                     n_rationales=len(rationales),
                     timestamp=end,
+                    freshness=verdict,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Metric emission is observability of observability —
@@ -808,6 +955,12 @@ def compute_and_emit(
                 "n_clusters": len(clusters),
                 "top3_concentration": concentration,
                 "analysis_key": analysis_key,
+                "corpus_age_days": (
+                    round(verdict.age_days, 2)
+                    if verdict is not None and verdict.age_days is not None
+                    else None
+                ),
+                "corpus_freshness": verdict.status if verdict is not None else "undated",
             }
         )
 
@@ -828,15 +981,19 @@ def compute_and_emit(
         "agents_key_capped": agents_key_capped,
         "artifacts_fetched": len(fetch_list),
         "max_rationales_per_agent": max_rationales_per_agent,
+        "corpus_freshness": corpus_verdict.as_record(),
+        "agents_stale_corpus": agents_stale_corpus,
         "per_agent": per_agent_summary,
     }
 
     logger.info(
-        "[rationale_clustering] done agents=%d skipped=%d load_fail=%d cluster_fail=%d",
+        "[rationale_clustering] done agents=%d skipped=%d load_fail=%d "
+        "cluster_fail=%d stale_corpora=%d",
         len(per_agent_summary),
         len(skipped_thin),
         len(load_failures),
         len(cluster_failures),
+        len(agents_stale_corpus),
     )
 
     return summary

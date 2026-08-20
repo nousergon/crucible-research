@@ -15,6 +15,16 @@ plus institutional substrate feeds (Brian, 2026-07-13):
 Missing sources degrade the CONTEXT, never silently: each bundle records
 which sources were present (surfaced in thesis ``sources_used`` and the run
 manifest's ``context_sources_present``), and a WARN is logged per miss.
+
+PRESENCE IS NOT FRESHNESS (alpha-engine-config-I2638). Absence was handled
+from the start; staleness was not. ``archive/macro/macro_report.md`` last
+changed 2026-03-16 — its producer (``ArchiveManager.save_macro_report``) lost
+its only call site when the multi-agent graph retired — and this module read
+it happily every day since, so Think Tank reconciled its themes to a
+five-month-old macro backdrop while its output looked current. Every dated
+context source is now checked through ``freshness.assert_upstream_fresh``
+and every non-fresh verdict is recorded on ``ContextBundle.freshness``, which
+the run manifest and the theme artifacts both carry.
 """
 
 from __future__ import annotations
@@ -23,11 +33,35 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from freshness import FreshnessVerdict, assert_upstream_fresh
+
 logger = logging.getLogger(__name__)
 
 UNIVERSE_BOARD_KEY = "scanner/universe/latest.json"
 SIGNALS_LATEST_KEY = "signals/latest.json"
 MACRO_REPORT_KEY = "archive/macro/macro_report.md"
+
+#: The macro report is a weekly-SF artifact, so a healthy one is at most 7
+#: days old; ``weekly`` tolerance (10d) leaves room for one skipped run.
+MACRO_REPORT_CADENCE = "weekly"
+
+#: Why Think Tank DEGRADES rather than raises on a stale macro report: the
+#: daily shadow run's contract with the trading day is explicitly
+#: non-blocking, so a hard stop here would take the challenger arm offline
+#: over an input whose replacement is an unratified design fork
+#: (alpha-engine-config-I2638 — "TT self-anchoring on RegimeSubstrate + news
+#: aggregates" proposed, never ruled). The failure mode accepted is therefore
+#: "themes reconciled against an out-of-date macro backdrop"; the surfaces
+#: that record it are the ops alert raised by the primitive, the run
+#: manifest's ``context_source_freshness``, and ``ThemeThesis.stale_inputs``
+#: on every theme written — plus the banner injected into the macro prompt so
+#: the model itself is told how old the report is.
+_MACRO_DEGRADED_REASON = (
+    "think tank's daily shadow run is non-blocking by contract; a stale macro "
+    "anchor degrades the themes it must not halt the run. Recorded on the run "
+    "manifest (context_source_freshness), on every ThemeThesis (stale_inputs), "
+    "and alerted via ops_alerts."
+)
 
 _NEWS_COLS = [
     "ticker",
@@ -88,6 +122,27 @@ class ContextBundle:
     inst_ownership_by_ticker: dict[str, dict] = field(default_factory=dict)
     rag_available: bool = False
     sources_present: dict[str, bool] = field(default_factory=dict)
+    #: ``{source_name: FreshnessVerdict}`` for every source with a checkable
+    #: as-of timestamp — the fresh ones too. A source that emits no freshness
+    #: verdict is unobserved, not healthy (observability-policy §3.4/§8.3).
+    freshness: dict[str, FreshnessVerdict] = field(default_factory=dict)
+
+    def stale_sources(self) -> list[str]:
+        return sorted(n for n, v in self.freshness.items() if not v.is_fresh)
+
+    def freshness_records(self) -> dict[str, dict]:
+        """JSON-safe, for the run manifest."""
+        return {n: v.as_record() for n, v in self.freshness.items()}
+
+    def staleness_banners(self) -> list[str]:
+        return [v.banner() for n, v in sorted(self.freshness.items()) if not v.is_fresh]
+
+    def stale_input_records(self) -> list[dict]:
+        """The non-fresh verdicts only — stamped onto Think Tank's own output
+        so a downstream reader of a theme can see what anchored it."""
+        return [
+            v.as_record() for _, v in sorted(self.freshness.items()) if not v.is_fresh
+        ]
 
     def weekly_signals_date(self) -> str | None:
         return (self.signals or {}).get("date")
@@ -106,6 +161,18 @@ def load_context(store: Any) -> ContextBundle:
     bundle.board = store.get_json(UNIVERSE_BOARD_KEY)
     bundle.signals = store.get_json(SIGNALS_LATEST_KEY)
     bundle.macro_report_md = store.get_text(MACRO_REPORT_KEY)
+
+    # The macro report carries no in-band date, so object metadata is the only
+    # as-of signal. A missing/unreadable LastModified yields an ``undated``
+    # verdict, which is loud — never silently fresh.
+    bundle.freshness["macro_report"] = assert_upstream_fresh(
+        MACRO_REPORT_KEY,
+        as_of=_macro_report_as_of(store),
+        cadence=MACRO_REPORT_CADENCE,
+        on_stale="degrade",
+        degraded_reason=_MACRO_DEGRADED_REASON,
+        source="crucible-research.thinktank.context",
+    )
 
     for name, present in (
         ("universe_board", bundle.board is not None),
@@ -156,6 +223,23 @@ def load_context(store: Any) -> ContextBundle:
     bundle.sources_present["rag_filings"] = bundle.rag_available
 
     return bundle
+
+
+def _macro_report_as_of(store: Any) -> Any | None:
+    """LastModified of the macro report, or None when it cannot be read.
+
+    ``None`` is NOT an absence of a problem — it produces an ``undated``
+    verdict, which the primitive treats as not-fresh and alerts on.
+    """
+    getter = getattr(store, "last_modified", None)
+    if getter is None:
+        logger.error(
+            "thinktank context: store %s exposes no last_modified() — macro "
+            "report freshness is UNCHECKABLE, recording as undated",
+            type(store).__name__,
+        )
+        return None
+    return getter(MACRO_REPORT_KEY)
 
 
 def _load_news(store: Any) -> dict[str, dict]:
