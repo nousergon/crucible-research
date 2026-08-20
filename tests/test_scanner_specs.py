@@ -22,7 +22,7 @@ from data.scanner_specs import (  # noqa: E402
 
 def _eval_log():
     # A/B/D liquidity-eligible; C failed liquidity; E eligible but has no loading.
-    # `scan_path` / `tech_score` are what the `tech_score_gate` arm ranks on —
+    # `scan_path` / `tech_score` are what the `momentum_sleeve` arm ranks on —
     # it is the incumbent rule GATES INCLUDED, so it reads the momentum path's
     # own verdict rather than the wider liquidity_pass the sleeve arms use.
     return [
@@ -147,15 +147,15 @@ def _live_artifact():
 def test_build_shadow_artifacts_schema_and_isolation():
     shadows, errors = build_shadow_artifacts(_live_artifact(), _eval_log(), _loadings(), {"momentum_top_n": 2})
     assert errors == {}, errors
-    assert "tech_score_gate" in shadows, shadows
-    a = shadows["tech_score_gate"]
+    assert "momentum_sleeve" in shadows, shadows
+    a = shadows["momentum_sleeve"]
     # Parallel-to-live schema so a leaderboard can read live + shadows uniformly.
     assert a["run_date"] == "2026-05-29"
-    assert a["scanner_version"] == "tech_score_gate-v1"
+    assert a["scanner_version"] == "momentum_sleeve-v1"
     assert a["spec"] == {
-        "name": "tech_score_gate",
+        "name": "momentum_sleeve",
         "kind": "challenger",
-        "ranking": scanner_specs.SCANNER_SPECS["tech_score_gate"].description,
+        "ranking": scanner_specs.SCANNER_SPECS["momentum_sleeve"].description,
     }
     assert a["scanner_tickers"] == ["A", "B"]
     # population carried from live; agent_input = population ∪ picks[:50].
@@ -178,11 +178,11 @@ def test_build_shadow_artifacts_is_failsoft_per_spec(monkeypatch):
     # The broken spec is swallowed (logged WARN); the healthy one still emits.
     shadows, errors = build_shadow_artifacts(_live_artifact(), _eval_log(), _loadings(), {"momentum_top_n": 2})
     assert "broken" not in shadows
-    assert "tech_score_gate" in shadows
+    assert "momentum_sleeve" in shadows
     # config#6428: the failed spec is recorded as a MISS in `errors`, not
     # merely omitted from `shadows` — champion-challenger-policy.md §3.
     assert errors == {"broken": "synthetic spec failure"}, errors
-    assert "tech_score_gate" not in errors
+    assert "momentum_sleeve" not in errors
 
 
 def test_registry_has_one_champion_and_challengers():
@@ -210,21 +210,21 @@ def test_registry_has_one_champion_and_challengers():
 
 
 def test_build_shadow_status_record_success_shape():
-    spec = scanner_specs.SCANNER_SPECS["tech_score_gate"]
+    spec = scanner_specs.SCANNER_SPECS["momentum_sleeve"]
     record = build_shadow_status_record(
         spec,
         "2026-08-04",
-        shadow_candidates_key="candidates_shadow/tech_score_gate/2026-08-04/candidates.json",
+        shadow_candidates_key="candidates_shadow/momentum_sleeve/2026-08-04/candidates.json",
     )
     assert record["status"] == "complete"
-    assert record["spec"] == "tech_score_gate"
+    assert record["spec"] == "momentum_sleeve"
     assert record["kind"] == "challenger"
     assert record["run_date"] == "2026-08-04"
     assert record["artifacts"] == [
         {
             "name": "shadow_candidates",
             "status": "emitted",
-            "key": "candidates_shadow/tech_score_gate/2026-08-04/candidates.json",
+            "key": "candidates_shadow/momentum_sleeve/2026-08-04/candidates.json",
         }
     ]
 
@@ -259,12 +259,12 @@ def test_forced_momentum_sleeve_failure_produces_explicit_miss_end_to_end(monkey
     omitting the date from candidates_shadow/."""
 
     def _boom(eval_log, factor_loadings, params):
-        raise RuntimeError("tech_score_gate forced failure")
+        raise RuntimeError("momentum_sleeve forced failure")
 
-    original = scanner_specs.SCANNER_SPECS["tech_score_gate"]
+    original = scanner_specs.SCANNER_SPECS["momentum_sleeve"]
     monkeypatch.setitem(
         scanner_specs.SCANNER_SPECS,
-        "tech_score_gate",
+        "momentum_sleeve",
         ScannerSpec(
             name=original.name,
             kind=original.kind,
@@ -278,20 +278,20 @@ def test_forced_momentum_sleeve_failure_produces_explicit_miss_end_to_end(monkey
 
     # (a) the artifact is genuinely absent this cycle (unchanged fail-soft
     # contract — the live champion path must never be jeopardized).
-    assert "tech_score_gate" not in shadows
+    assert "momentum_sleeve" not in shadows
     # (b) but it is NOT merely omitted — it is a recorded miss.
-    assert "tech_score_gate" in errors
-    assert "tech_score_gate forced failure" in errors["tech_score_gate"]
+    assert "momentum_sleeve" in errors
+    assert "momentum_sleeve forced failure" in errors["momentum_sleeve"]
 
     record = build_shadow_status_record(
-        scanner_specs.SCANNER_SPECS["tech_score_gate"],
+        scanner_specs.SCANNER_SPECS["momentum_sleeve"],
         "2026-08-04",
-        shadow_candidates_key=shadows.get("tech_score_gate"),
-        error=errors.get("tech_score_gate"),
+        shadow_candidates_key=shadows.get("momentum_sleeve"),
+        error=errors.get("momentum_sleeve"),
     )
     assert record["status"] == "failed"
     assert record["artifacts"][0]["status"] == "absent"
-    assert "tech_score_gate forced failure" in record["artifacts"][0]["reason"]
+    assert "momentum_sleeve forced failure" in record["artifacts"][0]["reason"]
 
 
 class TestShadowLoadingReadFallback:
@@ -353,10 +353,10 @@ class TestShadowLoadingReadFallback:
 
         assert calls["n"] == 2, "the wide read must be retried with default columns"
         # The established arm still produced a cut — its evidence was NOT lost.
-        # (`tech_score_gate` ranks off the eval log, so the arm that proves the
+        # (`momentum_sleeve` ranks off the eval log, so the arm that proves the
         # retry actually delivered usable loadings is the champion's own
         # ranking, exercised via factor_loadings_for_run below.)
-        assert "tech_score_gate" in artifacts, (artifacts, errors)
+        assert "momentum_sleeve" in artifacts, (artifacts, errors)
         # The 12-1 arm has no loading to rank on, so it emits an EMPTY cut —
         # recorded with spec_scored == 0, not silently omitted. Policy §3:
         # silent absence and a genuine zero must not render identically, and

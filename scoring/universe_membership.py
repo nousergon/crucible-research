@@ -865,14 +865,16 @@ def build_universe_membership(
                     "config#1186 cutover displaced, at the champion's width. "
                     "Feeds nothing live."
                 ),
-                # Annotated, NOT raised on. Identity here means the live cut
-                # fell back to the incumbent ordering — which is the DOCUMENTED
+                # Annotated, NOT raised on, and its MEANING depends on which
+                # arm is champion. While `tech_score_gate` is champion this cut
+                # IS the live cut and the flag reads True by construction; if a
+                # sleeve arm is ever promoted again, a True here means the live
+                # cut fell back to the incumbent ordering — the documented
                 # degrade when factor loadings are unavailable
-                # (SCANNER_CONTRACT.md §5), so reding the Scanner run for it
-                # would turn a graceful degradation into an outage. It still
-                # has to be visible: a cycle where the champion silently did
-                # not apply is a cycle whose leaderboard row is about a
-                # different arm than its label claims.
+                # (SCANNER_CONTRACT.md §5). Reding the Scanner run for either
+                # would turn a correct state or a graceful degradation into an
+                # outage; the flag exists so the difference is READABLE rather
+                # than inferred from which arm happens to be live.
                 "equals_live_cut": set(tickers) == set(scanner_tickers),
             }
 

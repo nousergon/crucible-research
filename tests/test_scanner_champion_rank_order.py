@@ -103,5 +103,5 @@ def test_loader_gives_the_champion_its_own_ranked_day_end_to_end():
             raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
 
     champion, _ = _load_scanner_specs(_S3(), "b", ["2026-07-01"])
-    assert champion.name == "momentum_sleeve"
+    assert champion.name == "tech_score_gate"
     assert champion.by_date["2026-07-01"].ranked == EMITTED

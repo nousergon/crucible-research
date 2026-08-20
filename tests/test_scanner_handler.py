@@ -356,7 +356,7 @@ class TestHandler:
             ),
             patch(
                 "data.scanner_orchestrator.build_shadow_candidate_artifacts",
-                return_value=({}, {"tech_score_gate": "synthetic forced failure"}),
+                return_value=({}, {"momentum_sleeve": "synthetic forced failure"}),
             ),
             patch("data.scanner_orchestrator.write_shadow_status_record", side_effect=fake_write_status),
             patch("boto3.client", return_value=MagicMock()),
@@ -366,7 +366,7 @@ class TestHandler:
         assert result["status"] == "OK"
         expected_specs = {spec.name for spec in challenger_specs()}
         assert set(written_records) == expected_specs
-        record = written_records["tech_score_gate"]
+        record = written_records["momentum_sleeve"]
         assert record["status"] == "failed"
         assert record["artifacts"][0]["status"] == "absent"
         assert "synthetic forced failure" in record["artifacts"][0]["reason"]

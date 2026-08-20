@@ -272,7 +272,7 @@ class TestScannerLeaderboardProducer:
             ],
         })
         _put_json(
-            s3, f"candidates_shadow/tech_score_gate/{entry}/candidates.json", {"scanner_tickers": ["D", "C", "B", "A"]}
+            s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json", {"scanner_tickers": ["D", "C", "B", "A"]}
         )
 
         # daily_closes: entry-date closes + a matured horizon close 21 sessions on.
@@ -294,13 +294,13 @@ class TestScannerLeaderboardProducer:
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
         assert got["leaderboard_id"] == "scanner"
         assert got["date"] == "2026-06-27"
-        assert got["champion"] == "momentum_sleeve"
+        assert got["champion"] == "tech_score_gate"
         names = {s["name"]: s for s in got["specs"]}
-        assert "momentum_sleeve" in names and "tech_score_gate" in names
+        assert "tech_score_gate" in names and "momentum_sleeve" in names
         # The champion's own list order matches realized returns → IC = 1.0 on
         # the one date. `tech_score` here is its exact reverse, so a producer
         # ranking the champion by the challenger's signal would score -1.0.
-        assert names["momentum_sleeve"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
+        assert names["tech_score_gate"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
         assert got["n_dates"] == 1
 
     def test_champion_with_an_empty_cut_reports_no_rank_ic(self, s3):
@@ -320,7 +320,7 @@ class TestScannerLeaderboardProducer:
         entry = "2026-06-01"
         _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": []})
         _put_json(
-            s3, f"candidates_shadow/tech_score_gate/{entry}/candidates.json",
+            s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json",
             {"scanner_tickers": ["D", "C", "B", "A"]},
         )
         panel = _Panel().put(entry, {"A": 100, "B": 100, "C": 100, "D": 100})
@@ -334,15 +334,15 @@ class TestScannerLeaderboardProducer:
         names = {s["name"]: s for s in got["specs"]}
         # The champion contributed no scorable day at all; the challenger still
         # scores, which is the point of the fail-soft substrate.
-        assert names.get("momentum_sleeve", {}).get("realized_rank_ic") is None
-        assert names["tech_score_gate"]["n_dates_scored"] == 1
+        assert names.get("tech_score_gate", {}).get("realized_rank_ic") is None
+        assert names["momentum_sleeve"]["n_dates_scored"] == 1
 
     def test_fresh_date_ships_null_metrics(self, s3):
         from scoring.leaderboard_producers import build_scanner_leaderboard
 
         entry = "2026-06-20"
         _put_json(s3, f"candidates/{entry}/candidates.json", {"scanner_tickers": ["A", "B"]})
-        _put_json(s3, f"candidates_shadow/tech_score_gate/{entry}/candidates.json", {"scanner_tickers": ["B", "A"]})
+        _put_json(s3, f"candidates_shadow/momentum_sleeve/{entry}/candidates.json", {"scanner_tickers": ["B", "A"]})
         # A CAPABLE source (ArcticDB holds years) in which THIS cohort simply
         # has not matured: 5 sessions after entry, horizon 21. That is the
         # honest "fresh date" state and must stay `ok` — distinct from an
@@ -365,7 +365,7 @@ class TestScannerLeaderboardProducer:
         got = res["leaderboard"]
         assert got["n_dates"] == 0
         names = {s["name"]: s for s in got["specs"]}
-        assert names["momentum_sleeve"]["realized_rank_ic"] is None
+        assert names["tech_score_gate"]["realized_rank_ic"] is None
 
     def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):
         import scoring.leaderboard_producers as lp

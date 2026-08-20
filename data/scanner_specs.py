@@ -8,32 +8,39 @@ model-zoo uses for the M slot, and the standing pattern for every
 refinement-target module (champion serves live, >=1 challenger runs in shadow,
 both scored on realized outcomes, promotion manual + evidence-gated).
 
-- **Champion** (`momentum_sleeve`): the LIVE candidate ranking —
-  ``mean(z(momentum_20d), z(return_60d))`` over the liquidity-eligible
-  universe, count-matched to ``momentum_top_n``. Live since the 2026-07-22
-  ``config#1186`` Option A cutover, which promoted it over the ``tech_score``
-  gate on measured lift (+0.080, p=0.013, date-clustered) on the scanner's own
-  long-only objective. Its candidates are emitted by the live path
-  (``candidates/{date}/candidates.json``), which applies
+- **Champion** (`tech_score_gate`): the LIVE candidate ranking — ``tech_score``
+  (RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted) over the rows
+  the momentum path admitted, count-matched to ``momentum_top_n``. This is
+  **Group B of SCANNER_CONTRACT.md §1**: the momentum-INCLUSIVE technical cut
+  that feeds the sector teams, alongside the momentum-FREE
+  ``attractiveness_top_60`` that feeds the predictor and the evidence layers.
+  Restored as champion by Brian's ruling 2026-08-20
+  (``alpha-engine-config-I7821``): the 2026-07-22 ``config#1186`` cutover had
+  replaced it with ``momentum_sleeve``, the two cuts share **zero of 60** names
+  on every date measured, and nothing in the system said so — the sector teams
+  spent four weeks researching a cut nobody had asked for. Emitted by the live
+  path (``candidates/{date}/candidates.json``), which applies
   ``SCANNER_SPECS[LIVE_CHAMPION].rank`` — this registry entry IS the live
   ranking, not a description of one (alpha-engine-config-I7808).
-- **Challenger** (`tech_score_gate`): the DISPLACED INCUMBENT — ``tech_score``
-  (RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted) over the
-  rows the momentum path admitted, count-matched. This is what the live
-  scanner ranked on before 2026-07-22. It is registered as a scored arm so
-  that promotion stays MEASURED forward rather than resting on a single
-  backtest run under a benchmark convention that has since been corrected.
-- **Challenger** (`mom_12_1_sleeve`): the HORIZON challenger. The champion
-  established that the scanner should KEEP momentum; it did not establish at
-  which horizon to READ it, and every momentum input the scanner currently
-  uses — ``tech_score``'s ``momentum_20d`` term and the champion's
-  ``mean(z(momentum_20d), z(return_60d))`` — sits at 1 to 3 months. That is
+- **Challenger** (`momentum_sleeve`): ``mean(z(momentum_20d), z(return_60d))``
+  over the liquidity-eligible universe, count-matched. The live ranking from
+  2026-07-22 to 2026-08-20, promoted then on measured lift over ``tech_score``
+  (+0.080, p=0.013, date-clustered) on the scanner's own long-only objective.
+  **Demoted, not deleted:** that evidence predates the corrected
+  ``topn_alpha_vs_population`` benchmark (``alpha-engine-config-I7576`` — every
+  arm had been graded against SPY, which trailed the population it selected
+  from by 140bp @21d, so wins and losses inverted). It is therefore neither
+  trustworthy enough to hold the live slot nor discredited enough to discard.
+  Scored forward in shadow, where a real result can settle it.
+- **Challenger** (`mom_12_1_sleeve`): the HORIZON challenger. Both the
+  champion's ``momentum_20d`` term and ``momentum_sleeve``'s
+  ``mean(z(momentum_20d), z(return_60d))`` sit at 1 to 3 months. That is
   the short-term-REVERSAL window (Jegadeesh 1990), not the 12-1 skip-month
   window the Jegadeesh-Titman momentum premium is defined over, and the
   scanner's objective is names attractive over ~1 year. This arm ranks on
   ``z(mom_12_1_pct)`` alone, holding eligibility, width and clock constant,
   so the leaderboard isolates the horizon question from the keep-momentum
-  question the champion already answered (alpha-engine-config-I7544).
+  question (alpha-engine-config-I7544).
 
 **The champion is never also a challenger.** Between 2026-07-22 and
 2026-08-20 this registry declared a champion named ``tech_score_momentum``
@@ -216,28 +223,31 @@ class ScannerSpec:
 # cannot drift apart (alpha-engine-config-I7808, SCANNER_CONTRACT.md §3). Add
 # new candidate-gen builds here as challengers; they are scored forever in
 # shadow with no further plumbing (config#1221).
-LIVE_CHAMPION = "momentum_sleeve"
+LIVE_CHAMPION = "tech_score_gate"
 
 SCANNER_SPECS: dict[str, ScannerSpec] = {
-    "momentum_sleeve": ScannerSpec(
-        name="momentum_sleeve",
-        kind="champion",
-        version="v1",
-        description="LIVE candidate ranking: z(momentum_20d)+z(return_60d) over "
-        "the liquidity-eligible universe, count-matched top-N. Promoted from "
-        "challenger to champion by the 2026-07-22 config#1186 cutover; the "
-        "registry caught up 2026-08-20 (alpha-engine-config-I7808)",
-        rank=_rank_momentum_sleeve,
-    ),
     "tech_score_gate": ScannerSpec(
         name="tech_score_gate",
+        kind="champion",
+        version="v1",
+        description="LIVE candidate ranking: tech_score (RSI/MACD/MA50/MA200/"
+        "momentum_20d, equally weighted) over the momentum-path-eligible rows, "
+        "count-matched top-N. Restored as champion by Brian's ruling "
+        "2026-08-20 (alpha-engine-config-I7821): Group B of the scanner's two "
+        "cuts is the tech_score top-60, and the 2026-07-22 config#1186 cutover "
+        "silently made it something else",
+        rank=_rank_tech_score,
+    ),
+    "momentum_sleeve": ScannerSpec(
+        name="momentum_sleeve",
         kind="challenger",
         version="v1",
-        description="tech_score (RSI/MACD/MA50/MA200/momentum_20d, equally "
-        "weighted) over the momentum-path-eligible rows, count-matched top-N. "
-        "The incumbent the 2026-07-22 cutover displaced, restored as a scored "
-        "arm (alpha-engine-config-I7808)",
-        rank=_rank_tech_score,
+        description="z(momentum_20d)+z(return_60d) over the liquidity-eligible "
+        "universe, count-matched top-N. Live from the 2026-07-22 config#1186 "
+        "cutover until 2026-08-20; demoted to a scored shadow arm rather than "
+        "deleted, so the cutover's claim stays measurable in both directions "
+        "(alpha-engine-config-I7821)",
+        rank=_rank_momentum_sleeve,
     ),
     "mom_12_1_sleeve": ScannerSpec(
         name="mom_12_1_sleeve",

@@ -27,8 +27,8 @@ they answer different questions and feed different consumers.
 |---|---|---|
 | cut name | `attractiveness_top_60` | `scanner_gate_baseline_60` |
 | ranks over | the full scored universe | the momentum-path-eligible universe |
-| ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | the scanner slot's **live champion arm** (§3) |
-| momentum | **excluded.** The momentum pillar's weight is set by `s3://{bucket}/config/factor_attractiveness_weights.json` and is currently zero, per Brian's ruling 2026-08-17 (`alpha-engine-config-I7580`): the top-60 must capture ~1-year attractive names, not short-term movers. | **included, and it is the whole signal.** Every arm registered in this group ranks on some definition of price momentum. |
+| ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | `tech_score` — RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted. The scanner slot's live champion arm (§3) |
+| momentum | **excluded.** The momentum pillar's weight is set by `s3://{bucket}/config/factor_attractiveness_weights.json` and is currently zero, per Brian's ruling 2026-08-17 (`alpha-engine-config-I7580`): the top-60 must capture ~1-year attractive names, not short-term movers. | **included.** `momentum_20d` is one of the five equally-weighted `tech_score` terms, and every challenger arm in this group varies how momentum is read. |
 | horizon it serves | ~1 year | weeks to months |
 | consumers | RAG corpus scope, Think Tank coverage window; its head `attractiveness_top_20` is the predictor's daily scoring universe (`PREDICTOR_UNIVERSE_CUT`) | the sector teams' input set (`graph/research_graph.py::_resolve_agent_input_set`, via `candidates.json::scanner_tickers`) |
 | produced by | `scoring/universe_membership.py` from `scanner/universe/{date}/universe.json` | `data/scanner_orchestrator.py` §4b from the live champion arm |
@@ -59,7 +59,7 @@ holds it to that.
 | `attractiveness_top_25` | 25 | `attractiveness_rank` | same | historical series continuity |
 | `attractiveness_top_60` | 60 | `attractiveness_rank` | same | RAG corpus scope, Think Tank window |
 | `scanner_gate_baseline_60` | 60 | `scanner_champion_rank` | the live champion arm, verbatim from `candidates.json::scanner_tickers` | sector teams |
-| `tech_score_top_60` | 60 | `tech_score_rank` | `_rank_tech_score` over `scan_path == "momentum"` rows | nothing live — the displaced-incumbent baseline (§3) |
+| `tech_score_top_60` | 60 | `tech_score_rank` | `_rank_tech_score` over `scan_path == "momentum"` rows | nothing live — it is the SAME SET as `scanner_gate_baseline_60` while `tech_score_gate` is champion, and stays emitted so a future cutover cannot silently take the name with it |
 | `scanner_top_20` | 20 | `tech_score_rank_within_cut` | top 20 by `tech_score` **of the champion's 60** | nothing live — churn diagnostics |
 | `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | nothing — observe-only arm |
 | `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | nothing — observe-only arm |
@@ -93,9 +93,11 @@ disagreement.
 
 | arm | kind | ranks on |
 |---|---|---|
-| `momentum_sleeve` | **champion** | `mean(z(momentum_20d), z(return_60d))` over the liquidity-eligible universe. Live since the 2026-07-22 `config#1186` cutover, promoted on measured lift over the displaced incumbent. |
-| `tech_score_gate` | challenger | `tech_score` (RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted) over `scan_path == "momentum"` rows. **The displaced incumbent**, restored as a scored arm so the 2026-07-22 promotion stays measurable instead of being asserted from a one-off backtest. |
+| `tech_score_gate` | **champion** | `tech_score` (RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted) over `scan_path == "momentum"` rows. Restored as champion by Brian's ruling 2026-08-20 (`alpha-engine-config-I7821`). |
+| `momentum_sleeve` | challenger | `mean(z(momentum_20d), z(return_60d))` over the liquidity-eligible universe. Live from the 2026-07-22 `config#1186` cutover to 2026-08-20; demoted, not deleted. |
 | `mom_12_1_sleeve` | challenger | `z(mom_12_1_pct)` — 12-1 skip-month momentum. Isolates the horizon question (`alpha-engine-config-I7544`). |
+
+**Why the 2026-07-22 cutover was reversed.** It promoted `momentum_sleeve` on measured lift (+0.080, p=0.013, date-clustered), but that measurement was taken under the benchmark convention `alpha-engine-config-I7576` later corrected: every arm was graded against SPY, which trailed the population it selected from by 140bp @21d, so wins and losses could invert. More importantly the cutover changed **what the sector teams research** — the two cuts share **zero of 60** names on 2026-07-30, 2026-08-19 and 2026-08-20 — and no artifact, label or alert said so for four weeks. The arm is demoted rather than deleted because the evidence for it is untrustworthy, not refuted; the leaderboard now settles it forward.
 
 Every arm holds eligibility, width and clock constant and varies only the
 ranking signal. Widths are count-matched to `momentum_top_n`.
