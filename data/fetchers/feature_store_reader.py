@@ -335,9 +335,19 @@ def _use_arctic(tickers: list[str] | None, *, what: str) -> bool:
 
     Raising there instead would break the ``challengers_only`` graph runner
     for no benefit; falling through to S3 silently would be worse, so the
-    fallthrough is WARN-level and names the consequence. The live champion
-    path (``scanner_orchestrator``) always passes its constituent list, so
-    it can never reach the weekly surface by accident.
+    fallthrough is WARN-level and names the consequence.
+
+    **"The live champion path always passes its constituent list" was false
+    when this docstring first claimed it** (corrected 2026-08-20,
+    alpha-engine-config-I7808). ``scanner_orchestrator``'s live re-rank called
+    this reader with no tickers from the 2026-07-22 cutover until 2026-08-20,
+    so the live candidate cut was ranked on the WEEKLY Saturday snapshot while
+    every shadow arm ranked on today's ArcticDB values — the arms were being
+    compared across different data vintages, and the live cut did not move
+    with the data between Saturdays. The live path now routes through
+    ``scanner_orchestrator.factor_loadings_for_run``, which always passes the
+    eval log's tickers, so the claim holds going forward. The WARN above is
+    what a repeat looks like.
     """
     if _source() == "s3":
         logger.warning(

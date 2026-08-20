@@ -157,7 +157,16 @@ def test_collision_is_recorded_on_the_leaderboard_artifact():
 
     assert res["status"] == "ok"
     collisions = res["leaderboard"]["vacuous_membership_collisions"]
-    assert collisions == [{"challenger": "colliding_challenger", "date": _COHORT_DATE, "n_tickers": 3}]
+    assert collisions == [
+            {
+                "challenger": "colliding_challenger",
+                "date": _COHORT_DATE,
+                "n_tickers": 3,
+                "n_shared": 3,
+                "overlap": 1.0,
+                "identical": True,
+            }
+        ]
 
 
 def test_no_collision_is_an_empty_list_not_absent():
@@ -204,7 +213,16 @@ def test_unit_helper_flags_collisions_by_challenger_and_date():
 
     champion, challengers = _identical_specs()
     collisions = _vacuous_membership_collisions(champion, challengers)
-    assert collisions == [{"challenger": "colliding_challenger", "date": _COHORT_DATE, "n_tickers": 3}]
+    assert collisions == [
+            {
+                "challenger": "colliding_challenger",
+                "date": _COHORT_DATE,
+                "n_tickers": 3,
+                "n_shared": 3,
+                "overlap": 1.0,
+                "identical": True,
+            }
+        ]
 
 
 def test_unit_helper_ignores_empty_membership():

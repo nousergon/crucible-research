@@ -605,36 +605,37 @@ def _load_scanner_specs(s3: Any, bucket: str, dates: list[str]) -> tuple[SpecHis
 
 
 def _champion_scanner_day(doc: dict) -> SpecDay:
-    """The live scanner cut as a RANKED day, ordered by the ``tech_score`` that
-    is the champion's actual ranking signal.
+    """The live scanner cut as a RANKED day, in the artifact's own list order.
 
-    ``candidates.json::scanner_tickers`` is the quant filter's emission order,
-    NOT a ranking: measured against the live artifact, Spearman(list position,
-    ``tech_score``) is +0.27 on 2026-08-18 and −0.04 on 2026-07-30, where a
-    descending rank would be −1.00 (alpha-engine-config-I7645). Reading it as
-    one made the champion's ``realized_rank_ic`` a correlation against
-    arbitrary order, and its count-matched top-50 an arbitrary 50 of its 60 —
-    while every challenger's list IS its own ranking. The comparison was
-    asymmetric in the champion's disfavour, on the board that judges it.
+    ``candidates.json::scanner_tickers`` IS the champion's ranking: the live
+    path applies ``SCANNER_SPECS[LIVE_CHAMPION].rank``, and every
+    ``ScannerSpec.rank`` sorts by its own score descending and slices the
+    top-N, so list position is the champion's ranking by construction — the
+    same property every challenger's shadow list has
+    (SCANNER_CONTRACT.md §4).
 
-    ``scanner_eval_log`` carries ``tech_score`` per ticker over the whole
-    universe; ``universe_membership._tech_score_rank_table`` already derives the
-    same ranking from it, so this is the existing convention, not a new one. An
-    artifact without that log (the pre-2026-07 objects) yields an UNRANKED day:
-    a missing rank-IC, never one over emission order.
+    **This replaces a re-sort by ``tech_score`` and corrects its premise
+    (alpha-engine-config-I7645 → I7808).** I7645 measured Spearman(list
+    position, ``tech_score``) at +0.27 on 2026-08-18 and -0.04 on 2026-07-30,
+    where a descending ``tech_score`` order would be -1.00, and concluded the
+    emission order was arbitrary. It was not arbitrary — it was the momentum
+    sleeve's ranking, which the live path had adopted on 2026-07-22 while the
+    spec register still named ``tech_score`` as the champion's signal. Both
+    measured dates fall after that cutover, so what the correlation actually
+    showed is that the champion had stopped ranking on ``tech_score``. Sorting
+    the champion's cut by a signal it does not rank on made its
+    ``realized_rank_ic`` a correlation against a rival arm's ordering, on the
+    board that judges it.
+
+    ``tech_score`` remains available per ticker in ``scanner_eval_log`` and is
+    the ranking signal of the ``tech_score_gate`` challenger arm, where it is
+    now scored on its own terms.
+
+    A cut with no tickers yields an UNRANKED day rather than an empty ranking.
     """
-    tickers = list(doc["scanner_tickers"])
-    scores = {
-        row["ticker"]: float(row["tech_score"])
-        for row in (doc.get("scanner_eval_log") or [])
-        if isinstance(row, dict)
-        and row.get("ticker") in set(tickers)
-        and isinstance(row.get("tech_score"), (int, float))
-    }
-    if len(scores) < len(tickers):
-        return SpecDay(ranked=tickers, rank_ordered=False)
-    ranked = sorted(tickers, key=lambda t: (-scores[t], t))
-    return SpecDay(ranked=ranked, scores=scores)
+    tickers = list(doc.get("scanner_tickers") or [])
+    return SpecDay(ranked=tickers, rank_ordered=bool(tickers))
+
 
 
 def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
@@ -871,15 +872,37 @@ def _overdue_zero_cohort_reason(dates: list[str], horizon_days: int, as_of: str)
     )
 
 
+_VACUITY_OVERLAP_THRESHOLD = 0.95
+"""Overlap at or above which two count-matched arms are treated as the same arm.
+
+At the standard slot width of 60 this is 57 of 60 shared names — an arm that
+disagrees with the champion about three names is not testing a different
+hypothesis, it is the champion plus read noise.
+"""
+
+
+def _membership_overlap(champ: set[str], other: set[str]) -> float:
+    """Shared fraction of two picked-ticker sets, over the WIDER of the two.
+
+    Dividing by the wider set rather than by the intersection's own size means
+    a short arm cannot look identical to a full one by being a subset of it —
+    a 30-name arm fully contained in the champion's 60 scores 0.5, not 1.0,
+    and is correctly read as a different (narrower) arm rather than a clone.
+    """
+    if not champ or not other:
+        return 0.0
+    return len(champ & other) / max(len(champ), len(other))
+
+
 def _vacuous_membership_collisions(
     champion: SpecHistory | None,
     challengers: list[SpecHistory],
 ) -> list[dict]:
-    """Cohort dates where a challenger resolved to EXACTLY the champion's
-    picked-ticker set — champion-challenger-policy.md §4: "if two arms
-    resolve to the same membership, the comparison is worthless while every
-    other assertion still passes. Assert that competing arms actually
-    differ."
+    """Cohort dates where a challenger resolved to the champion's picked-ticker
+    set, or to within ``_VACUITY_OVERLAP_THRESHOLD`` of it —
+    champion-challenger-policy.md §4: "if two arms resolve to the same
+    membership, the comparison is worthless while every other assertion still
+    passes. Assert that competing arms actually differ."
 
     Before this, a guard existed ONLY as a fixture-based unit test
     (``tests/test_universe_membership.py::
@@ -888,17 +911,31 @@ def _vacuous_membership_collisions(
     a live cycle ever compared the champion's ACTUAL resolved picks against a
     challenger's (alpha-engine-config#6429).
 
-    Exact-set-equality, deliberately not a fuzzy/near-identical threshold: no
-    fuzzy-match convention exists anywhere else in this codebase for a
-    membership comparison of this kind, and policy §4's count-matching
-    already holds every arm in a slot to the same width — a near-miss under
-    count-matching is itself the finding, not noise to smooth over.
+    **Near-identity counts, and this reverses an explicit earlier decision.**
+    The original guard tested exact set equality on the argument that
+    count-matching already holds every arm to one width, so a near-miss is the
+    finding rather than noise. Measured against live artifacts on 2026-08-20,
+    that argument had it backwards: the scanner's champion and its
+    ``momentum_sleeve`` challenger were the SAME RANKING FUNCTION applied
+    twice, and they still disagreed about two of sixty names because the two
+    call sites read the factor store separately. The guard reported eight
+    collision dates and stayed silent on the rest of a four-week window in
+    which every single date was a clone. Exact equality does not detect a
+    clone; it detects a clone whose inputs happened to be stable
+    (alpha-engine-config-I7808). The read is now shared — see
+    ``data.scanner_orchestrator.factor_loadings_for_run`` — so this threshold
+    is the backstop for the next such coupling, not a substitute for it.
+
+    An arm sharing the champion's ranking CALLABLE is not reported here: that
+    is structurally inapplicable rather than empirically vacuous, and it is
+    refused at import by ``data.scanner_specs.assert_registry_coherent``.
 
     Checked against every cohort date both specs cover, not only the current
     run date: a collision on any historical date is exactly as vacuous as one
     today, and shadow artifacts back-fill.
 
-    Returns one entry per ``(challenger, date)`` collision — empty when every
+    Returns one entry per ``(challenger, date)`` collision, each carrying the
+    measured ``overlap`` and whether it was ``identical`` — empty when every
     arm differs everywhere, which is the expected, healthy state.
     """
     if champion is None:
@@ -908,8 +945,20 @@ def _vacuous_membership_collisions(
         for d in sorted(set(champion.by_date) & set(ch.by_date)):
             champ_set = set(champion.by_date[d].ranked)
             ch_set = set(ch.by_date[d].ranked)
-            if champ_set and champ_set == ch_set:
-                collisions.append({"challenger": ch.name, "date": d, "n_tickers": len(champ_set)})
+            if not champ_set:
+                continue
+            overlap = _membership_overlap(champ_set, ch_set)
+            if overlap >= _VACUITY_OVERLAP_THRESHOLD:
+                collisions.append(
+                    {
+                        "challenger": ch.name,
+                        "date": d,
+                        "n_tickers": len(champ_set),
+                        "n_shared": len(champ_set & ch_set),
+                        "overlap": round(overlap, 4),
+                        "identical": champ_set == ch_set,
+                    }
+                )
     return collisions
 
 
@@ -929,11 +978,16 @@ def _alert_vacuous_collisions(
     by_challenger: dict[str, list[str]] = {}
     for c in collisions:
         by_challenger.setdefault(c["challenger"], []).append(c["date"])
+    worst = {
+        name: min(c["overlap"] for c in collisions if c["challenger"] == name) for name in by_challenger
+    }
     detail = "; ".join(
-        f"{name} on {len(dates)} date(s) ({', '.join(sorted(dates))})" for name, dates in sorted(by_challenger.items())
+        f"{name} on {len(dates)} date(s) ({', '.join(sorted(dates))}), "
+        f"overlap >= {worst[name]:.0%} of the cut"
+        for name, dates in sorted(by_challenger.items())
     )
     logger.error(
-        "[leaderboard] %s VACUOUS comparison: champion %r resolved identical membership to %s",
+        "[leaderboard] %s VACUOUS comparison: champion %r resolved the same membership as %s",
         leaderboard_id,
         champion_name,
         detail,
@@ -941,10 +995,12 @@ def _alert_vacuous_collisions(
     publish_observe_alert(
         message=(
             f"[leaderboard] {leaderboard_id} leaderboard: champion {champion_name!r} "
-            f"resolved to IDENTICAL membership as {detail} — the comparison is vacuous "
+            f"resolved to the SAME membership as {detail} — the comparison is vacuous "
             "on those cohort date(s) while every other assertion still passes "
             "(champion-challenger-policy.md §4). Verify the challenger spec actually "
-            "differs from the champion."
+            "differs from the champion: check that its ranking function is not the "
+            "one the live path applies, and that both arms rank on the same input "
+            "snapshot (SCANNER_CONTRACT.md §3)."
         ),
         source=f"research:{leaderboard_id}_leaderboard",
         dedup_key=f"{leaderboard_id}_leaderboard_vacuous:{champion_name}:{'|'.join(sorted(by_challenger))}",
