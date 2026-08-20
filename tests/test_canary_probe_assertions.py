@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # The `TestQualAnalystProbeRejectsEmptyResults` class was REMOVED 2026-08-20
 # (alpha-engine-config-I7816, I7817) together with `probe_qual_analyst`. It
 # guarded a probe that delegated to `run_qual_analyst`, part of the multi-agent
