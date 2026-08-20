@@ -54,6 +54,43 @@ selects for exactly the short-horizon behaviour the momentum-zero ruling removed
 pointer holds the standing champion, and the engine says so rather than flipping
 the feed on a number it has already called wrong.
 
+### The promotion engine
+
+`scoring/cut_promotion.py::run_cut_promotion`, invoked from
+`lambda/scanner_handler.py` on every scanner run, immediately after
+`build_cuts_leaderboard` — the moment the board it reads exists. Slot registry:
+`CUT_PROMOTION_SLOT` (champion-challenger-policy.md §10).
+
+| | value | why |
+|---|---|---|
+| evidence | `research/cuts_leaderboard/{date}.json`, `topn_alpha_vs_population` | the arm against the population it narrowed (`alpha-engine-config-I7576`) |
+| decision horizon | **126 sessions** | the shorter of the two horizons matching the ~1-year objective, so it matures first |
+| corroborating horizon | 252 sessions, **veto only** | a longer horizon may block a promotion the shorter one proposes, never propose one — the asymmetry is `I7580` |
+| forbidden horizon | **21 sessions**, at any confidence | asserted at import; it is the block that produced `I7580` |
+| evidence floor | both arms `n_dates_scored ≥ min_dates_for_inference` (5) | below it a per-date mean is an anecdote (`alpha-engine-config-I7542`) |
+| hysteresis (§5.2) | margin `0.005` of mean lift, cooldown `28` days, symmetric on demotion | implemented, not waived — the §9.3 winner-take-all delta is scoped to the selection-producer slot and does not transfer |
+
+**A decision is written on every evaluation, promote or hold**, to three keys
+carrying one v1 document (`contracts/scanner_cut_champion.schema.json`):
+
+| key | role |
+|---|---|
+| `config/scanner_cut_champion.json` | the live pointer `live_cut_champion()` reads |
+| `config/apply_audit/scanner_cut_champion/{date}.json` | immutable dated history — the promote/hold series |
+| `config/apply_audit/scanner_cut_champion/latest.json` | liveness proxy: a dead engine must not read as an engine that held |
+
+Every record carries `decision`, a machine-readable `reason_code`, a prose
+`reason`, and **both arms' `n_dates_scored` even when zero** — that count is the
+number saying how far off a real decision is, and it is the measurability
+surface for this slot. An evidence-shaped hold (immature, thin, board absent) is
+the expected steady state and does not alert. A structural defect on the board
+(duplicate rows, a missing horizon block) is recorded as a hold **and then
+raised**: the defect is durable before the process is allowed to fail.
+
+The engine is **cadence-agnostic** — its hysteresis is measured in calendar
+days, not invocations — so it behaves identically before and after the weekly
+cadence change below.
+
 ### Cadence
 
 **Target: the scanner runs weekly** (Brian, 2026-08-20), one run producing the

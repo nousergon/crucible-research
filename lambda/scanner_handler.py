@@ -415,7 +415,15 @@ def _run(event, context):
     # extra try/except is belt-and-suspenders so the live candidates.json (primary
     # deliverable, already written) can never be downgraded. Cohort-gated: on a
     # fresh date with no matured 21d outcome it ships n_dates=0 with null metrics.
-    leaderboard_status: dict = {}
+    # (alpha-engine-config-I7841 D3) Sentinel BEFORE the try, and a start log
+    # line before the call that can raise/truncate: on a Lambda TIMEOUT the
+    # invocation is frozen mid-call and no `except` ever runs, so this line is
+    # the only evidence in CloudWatch that the board was reached at all, and
+    # the sentinel is what the returned summary reports if some future refactor
+    # makes this block conditional (today it always runs once membership
+    # succeeds, so "not_attempted" should never appear in a real invocation).
+    leaderboard_status: dict = {"status": "not_attempted"}
+    logger.info("[scanner_handler] attempting scanner leaderboard run_date=%s", run_date)
     try:
         from scoring.leaderboard_producers import build_scanner_leaderboard
 
@@ -441,7 +449,17 @@ def _run(event, context):
     # rather than paying for a second ~904-symbol ArcticDB slice. Same
     # observe-only, fail-soft contract; the live candidates.json is already
     # written and can never be downgraded by anything here.
-    cuts_leaderboard_status: dict = {}
+    # (alpha-engine-config-I7841 D1/D3) Same sentinel + start-log discipline as
+    # the scanner leaderboard above. This is the block a 450s Lambda timeout
+    # landed inside on 2026-08-20 — the scanner leaderboard logged status=ok,
+    # this line never printed, and no `except` ran. The freshness detector on
+    # `research/cuts_leaderboard/{trading_day}.json` (I7841 D1, coordinated via
+    # alpha-engine-config-PR7820 / I7833 — see PR body) is what catches an
+    # invocation that dies before even this log line; this block's own
+    # attempted/completed reporting covers the narrower case where the
+    # invocation returns but this call raised or degraded.
+    cuts_leaderboard_status: dict = {"status": "not_attempted"}
+    logger.info("[scanner_handler] attempting cuts leaderboard run_date=%s", run_date)
     try:
         from scoring.leaderboard_producers import build_cuts_leaderboard
 
@@ -457,6 +475,67 @@ def _run(event, context):
             exc,
         )
         cuts_leaderboard_status = {"status": "error", "error": str(exc)}
+
+    # ── Weekly cut-promotion decision (alpha-engine-config-I7826) ───────────
+    # Decides which of the two count-matched 60s holds the sector-team feed and
+    # WRITES that decision, promote or hold, to config/scanner_cut_champion.json
+    # plus an immutable dated audit record. Runs here because this is the moment
+    # the board it reads exists — and the freshly built leaderboard is handed in
+    # directly rather than re-fetched, so the decision reads the exact artifact
+    # this run produced.
+    #
+    # CADENCE-AGNOSTIC on purpose. Its hysteresis is measured in CALENDAR days
+    # (cooldown_days), not in invocations, so it behaves identically whether the
+    # scanner runs every weekday (today) or weekly (after nousergon-data#1464) —
+    # nothing here waits on that track. A re-evaluation that reaches the same
+    # conclusion rewrites the same hold and raises the liveness resolution of the
+    # audit record; it can never flip the feed twice inside one cooldown.
+    #
+    # FAIL-SOFT + LOUD, matching the two blocks above: the live candidates.json
+    # and the membership artifact are already written and must never be
+    # downgraded by a decision step, and a promotion failure is SAFE — the
+    # pointer keeps naming the standing champion. It is never SILENT: the engine
+    # raises on a defective board, and that raise lands here as an ERROR log, an
+    # ops alert and an explicit status in the summary.
+    promotion_status: dict = {"status": "not_attempted"}
+    logger.info("[scanner_handler] attempting cut promotion run_date=%s", run_date)
+    try:
+        from scoring.cut_promotion import run_cut_promotion
+
+        promotion_status = run_cut_promotion(
+            run_date,
+            bucket=bucket,
+            s3_client=s3_client,
+            leaderboard=(cuts_leaderboard_status or {}).get("leaderboard"),
+        )
+        logger.info(
+            "[scanner_handler] cut promotion decision=%s champion=%s reason_code=%s",
+            promotion_status.get("decision"),
+            promotion_status.get("champion"),
+            promotion_status.get("reason_code"),
+        )
+    except Exception as exc:  # noqa: BLE001 — live path already delivered; never silent
+        logger.exception(
+            "[scanner_handler] cut promotion FAILED on %s — the champion pointer "
+            "keeps naming the standing champion", run_date,
+        )
+        promotion_status = {"status": "error", "error": str(exc)}
+        try:
+            from observe_alerts import publish_observe_alert
+
+            publish_observe_alert(
+                message=(
+                    f"[cut_promotion] the scanner-cut promotion engine FAILED on "
+                    f"{run_date}: {exc}. The feed still resolves from the standing "
+                    "champion, so this is not a live outage — but no decision was "
+                    "recorded for this cycle (alpha-engine-config-I7826)."
+                ),
+                source="research:cut_promotion",
+                dedup_key=f"cut_promotion_error:{run_date}",
+                severity="ERROR",
+            )
+        except Exception:  # noqa: BLE001 — alerting is secondary, never fatal
+            logger.warning("[scanner_handler] cut promotion alert publish failed")
 
     summary = {
         "s3_key": s3_key,
@@ -476,6 +555,13 @@ def _run(event, context):
             "status": cuts_leaderboard_status.get("status"),
             "key": cuts_leaderboard_status.get("key"),
         },
+        "cut_promotion": {
+            "status": promotion_status.get("status", "ok"),
+            "decision": promotion_status.get("decision"),
+            "champion": promotion_status.get("champion"),
+            "reason_code": promotion_status.get("reason_code"),
+            "error": promotion_status.get("error"),
+        },
         "universe_board": {
             "status": "OK" if universe_board_key else "error",
             "key": universe_board_key,
@@ -485,6 +571,35 @@ def _run(event, context):
         summary["shadow_error"] = shadow_error
     if universe_board_error:
         summary["universe_board_error"] = universe_board_error
+
+    # ── Post-membership board legibility rollup (alpha-engine-config-I7841 D3) ──
+    # The three post-membership stages above (scanner leaderboard, cuts
+    # leaderboard, cut promotion) run sequentially in one invocation and each
+    # already carries its own nested status. This collapses them into one
+    # explicit attempted/completed view so a PARTIAL invocation — one stage's
+    # try/except caught a real error rather than the invocation dying outright
+    # — is legible straight from the Step Functions execution history's output
+    # field, without opening CloudWatch. "attempted" is driven by the
+    # `not_attempted` sentinel each block is seeded with before its own try:
+    # today every block always runs once membership succeeds, so this is
+    # false only if a future refactor makes one of them conditional — exactly
+    # the case this rollup exists to keep visible. It does NOT cover a Lambda
+    # TIMEOUT: that freezes the invocation before it ever returns, so no
+    # summary — this or any other shape — reaches the SF execution history.
+    # That failure mode is covered externally by the
+    # `research/cuts_leaderboard/{trading_day}.json` freshness detector
+    # (I7841 D1), keyed on the scanner having run rather than the calendar.
+    _board_stages = {
+        "scanner_leaderboard": leaderboard_status.get("status"),
+        "cuts_leaderboard": cuts_leaderboard_status.get("status"),
+        "cut_promotion": promotion_status.get("status", "ok"),
+    }
+    summary["boards"] = {
+        "attempted": [name for name, status in _board_stages.items() if status != "not_attempted"],
+        "completed": [name for name, status in _board_stages.items() if status in ("ok", "unmeasurable")],
+        "not_attempted": [name for name, status in _board_stages.items() if status == "not_attempted"],
+        "errored": [name for name, status in _board_stages.items() if status == "error"],
+    }
 
     logger.info(
         "[scanner_handler] done run_date=%s scanner_tickers=%d population=%d new=%d dropped=%d",

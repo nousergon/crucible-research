@@ -205,7 +205,8 @@ class ChallengerSelection(_Artifact):
     emitted for observability, but ``coverage_complete`` is the validity
     flag downstream consumers must gate on — Brian's ruling (config#1580):
     the selection only counts once the ENTIRE current-scan top-N coverage
-    window (``thinktank.run.GAP_FILL_TOP_N``) is covered. ``selections`` is
+    window (the cut ``universe_membership`` declares for Think Tank) is
+    covered. ``selections`` is
     ranked by Think Tank's OWN independent rating — never scanner
     attractiveness (independence is the point, see ``ratings.py``).
 
@@ -302,12 +303,8 @@ class TriageDecisionLLM(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    escalate: bool = Field(
-        description="True only if the event changes the standing thesis's claim."
-    )
-    reason: str = Field(
-        description="One-two sentences; why the belief does or does not move."
-    )
+    escalate: bool = Field(description="True only if the event changes the standing thesis's claim.")
+    reason: str = Field(description="One-two sentences; why the belief does or does not move.")
 
 
 class SweepBatchLLM(BaseModel):
@@ -463,8 +460,22 @@ class RunManifest(_Artifact):
     degraded_inputs: list[str] = Field(default_factory=list)
     coverage_gap: dict | None = Field(
         default=None,
-        description="Coverage gap vs scanner top-N: top60/top30 pct covered, "
-        "uncovered counts. Emitted at end of every daily run.",
+        description="Coverage gap vs the DECLARED coverage window: pct covered, "
+        "uncovered count, plus the cut and basis the window resolved to. "
+        "Emitted at end of every daily run.",
+    )
+    # ── Which contract this run read (alpha-engine-config-I7842) ─────────────
+    # The window is resolved from `universe_membership/latest.json` through the
+    # live champion pointer, so "which arm was Think Tank covering on date D"
+    # has an artifact rather than being reconstructed from a deploy log. Before
+    # this, Think Tank re-derived its own ranking and no run recorded what it
+    # had ranked by — a champion cutover would have been invisible in the run
+    # record as well as in the behaviour.
+    feed_window: dict | None = Field(
+        default=None,
+        description="Provenance of the coverage window this run consumed: "
+        "cut, declared_cut, basis, size, run_date, cut_effective_date, "
+        "cut_refresh_cadence, rank_table_size, schema_version.",
     )
     ratings_rows: int = 0
     challenger_selection_written: bool = False

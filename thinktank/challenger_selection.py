@@ -9,7 +9,7 @@ upsert) to ``thinktank/challenger_selection/{trading_day}.json`` +
 emitted for observability, but ``coverage_complete`` is the validity flag
 downstream consumers (leaderboard, evaluator) must gate on — Brian's ruling
 (config#1580): the selection only counts once the ENTIRE current-scan
-top-``thinktank.run.GAP_FILL_TOP_N`` window is covered.
+declared coverage window (``thinktank.feed.FeedWindow``) is covered.
 
 Names come from the ratings board — already independently rated, never the
 scanner attractiveness ranking (independence is the point; the ranking
@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 CHALLENGER_TOP_N = 20
 """Leaderboard submission size — the top covered/rated names by Think
-Tank's own rating. Distinct from ``thinktank.run.GAP_FILL_TOP_N`` (60, the
+Tank's own rating. Distinct from the declared coverage window (60 today, the
 coverage-window size that gates ``coverage_complete``); this is how many of
 those covered names actually get submitted as the challenger arm's picks."""
 
@@ -90,9 +90,7 @@ days leaves headroom to notice before a trading decision is at stake, instead
 of escalating on the day the arm stops trading."""
 
 
-def challenger_pointer_lag(
-    store: ThinktankStore, *, trading_day: str
-) -> tuple[str | None, int | None]:
+def challenger_pointer_lag(store: ThinktankStore, *, trading_day: str) -> tuple[str | None, int | None]:
     """Read ``latest.json`` and report ``(pointer_trading_day, lag_days)``
     relative to *trading_day*.
 
@@ -142,7 +140,7 @@ def write_challenger_selection(
 ) -> ChallengerSelection:
     """Upsert this run's top-``CHALLENGER_TOP_N`` rated names and persist
     dated + latest. ``coverage_gap`` must be a ``_compute_coverage_gap``
-    dict (same GAP_FILL_TOP_N window) computed AFTER this run's ledger
+    dict (same declared window) computed AFTER this run's ledger
     writes — the run that fills the last gap must self-report complete, or
     the leaderboard shadow view slips to the next run (the caller in
     ``run.py`` recomputes it post-write; ``manifest.coverage_gap`` keeps

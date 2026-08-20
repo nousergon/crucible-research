@@ -35,12 +35,16 @@ from scoring.universe_membership import (  # noqa: E402
     _RANK_CUTS,
     ATTRACTIVENESS_FEED_TOP_N,
     FEED_CUT_NAME,
+    FUNNEL_CONSUMER_THINKTANK,
     PREDICTOR_UNIVERSE_CUT,
+    PROMOTABLE_CUTS,
     SCHEMA_VERSION,
     UniverseMembershipError,
     attractiveness_from_board,
     build_universe_membership,
     compute_turnover,
+    declared_cut_for,
+    rank_table_for_cut,
     run_stamp,
     write_universe_membership_to_s3,
 )
@@ -654,3 +658,115 @@ def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
     written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
     assert written["cut_refresh_cadence"] == CADENCE_DAILY
     assert written["cut_effective_date"] == _RUN_DATE
+
+
+# ── 7. The funnel as a READ contract (alpha-engine-config-I7842) ──────────────
+#
+# Producer half of the Think Tank boundary contract. Think Tank resolves its
+# coverage window and its intake ranking FROM this artifact — it no longer
+# re-derives either from the universe board — so the fields it reads are now
+# part of the producer's contract and must fail here, on the producer, rather
+# than at 05:15 in a Lambda. Consumer half: tests/test_thinktank_feed_contract.py.
+
+
+def test_funnel_names_thinktank_coverage_window():
+    """The producer must keep DECLARING Think Tank's window.
+
+    If this key disappears, the consumer fails loud by design — and it fails in
+    production, on the run that needed it. The point of asserting it here is
+    that the deletion is caught by the producer's own suite instead.
+    """
+    m = _membership()
+    advances = m["funnel"]["advances_to"]
+    assert FUNNEL_CONSUMER_THINKTANK in advances, (
+        "universe_membership stopped declaring "
+        f"funnel.advances_to.{FUNNEL_CONSUMER_THINKTANK} — Think Tank resolves "
+        "its coverage window from this key and has no fallback"
+    )
+    assert advances[FUNNEL_CONSUMER_THINKTANK] == FEED_CUT_NAME
+
+
+def test_the_cut_the_funnel_names_for_thinktank_is_actually_emitted():
+    """A declaration pointing at a cut that is not in ``cuts`` is a dangling
+    contract: the consumer resolves a name and finds nothing behind it."""
+    m = _membership()
+    named = m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK]
+    assert named in m["cuts"]
+    assert m["cuts"][named]["tickers"]
+    assert declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK) == named
+
+
+def test_declared_cut_for_raises_when_the_declaration_is_dropped():
+    m = _membership()
+    del m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK]
+    with pytest.raises(UniverseMembershipError, match=FUNNEL_CONSUMER_THINKTANK):
+        declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK)
+
+
+def test_declared_cut_for_raises_when_the_named_cut_disappears():
+    m = _membership()
+    m["cuts"].pop(FEED_CUT_NAME)
+    with pytest.raises(UniverseMembershipError, match="not in ``cuts``|not in"):
+        declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK)
+
+
+def test_rank_table_covers_the_consumers_configured_ceiling():
+    """The rank map must reach as far as Think Tank's widest configured rank.
+
+    ``exit_rank`` is read from the consumer's own shipped config rather than
+    restated here: a test asserting a hardcoded 200 would keep passing after the
+    consumer widened its threshold, which is exactly the drift this is for.
+    """
+    import yaml
+
+    cfg = yaml.safe_load(
+        open(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "thinktank.sample.yaml")
+        )
+    )
+    coverage = (cfg.get("thinktank") or cfg).get("coverage") or {}
+    widest = int(coverage.get("exit_rank") or coverage.get("rank_ceiling"))
+    assert widest > 0
+
+    m = build_universe_membership(
+        _RUN_DATE,
+        _scanner_cut(),
+        {f"T{i:04d}": float(2000 - i) for i in range(widest + 50)},
+    )
+    ranks, basis = rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=widest)
+    assert basis == "attractiveness_rank"
+    assert len(ranks) >= widest
+
+
+def test_a_rank_table_short_of_the_universe_is_refused():
+    """The tech-basis asymmetry, asserted rather than described.
+
+    ``scanner_ranks`` covers the cut, not the universe, so a champion ranked in
+    that basis cannot answer "who is rank 150". Substituting the attractiveness
+    table would rank by an arm that is not the champion — the defect this whole
+    contract exists to stop — so the correct behaviour is a refusal naming the
+    producer-side fix (alpha-engine-config-I7843).
+    """
+    m = _membership()
+    m["ranks"] = dict(list(m["ranks"].items())[:10])
+    with pytest.raises(UniverseMembershipError, match="I7843"):
+        rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=150)
+
+
+def test_a_tech_basis_cut_has_no_rank_table_and_says_so():
+    m = _membership(tech_scores={t: float(i) for i, t in enumerate(_scanner_cut())})
+    incumbent = next(name for name, cut in m["cuts"].items() if cut["basis"] == "tech_score_rank")
+    with pytest.raises(UniverseMembershipError, match="I7843"):
+        rank_table_for_cut(m, incumbent, minimum_coverage=150)
+
+
+def test_every_promotable_cut_that_can_hold_the_feed_is_a_named_cut():
+    """A pointer may only name an arm the artifact can actually serve."""
+    m = _membership()
+    for name in PROMOTABLE_CUTS:
+        assert name.startswith(("attractiveness_top_", "tech_score_top_")), name
+    assert FEED_CUT_NAME in PROMOTABLE_CUTS, (
+        "the cut the funnel declares for the feed consumers is not in the "
+        "promotable set — the champion pointer could then never serve it"
+    )
+    assert m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK] in PROMOTABLE_CUTS

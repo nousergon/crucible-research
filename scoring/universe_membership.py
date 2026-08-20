@@ -298,7 +298,12 @@ _CHALLENGER_CUT_NS = (20, ATTRACTIVENESS_FEED_TOP_N)
 # computation, because ``attractiveness_from_factor_profiles`` already accepts
 # a ``pillar_weights`` vector. Same profiles, different weights.
 PILLAR_ORDER_FOR_WEIGHTS = (
-    "quality", "value", "momentum", "growth", "stewardship", "defensiveness",
+    "quality",
+    "value",
+    "momentum",
+    "growth",
+    "stewardship",
+    "defensiveness",
 )
 
 MOMZERO_CUT_PREFIX = "attractiveness_momzero_top_"
@@ -463,9 +468,7 @@ def live_cut_champion(*, bucket: str | None = None, s3_client: Any = None) -> st
     return champion
 
 
-def resolve_feed_cut(
-    *, bucket: str | None = None, s3_client: Any = None
-) -> tuple[list[str], dict]:
+def resolve_feed_cut(*, bucket: str | None = None, s3_client: Any = None) -> tuple[list[str], dict]:
     """``(tickers, provenance)`` for the sector teams' input set.
 
     Reads the LATEST membership artifact, not a dated one. Under the weekly
@@ -499,6 +502,229 @@ def resolve_feed_cut(
         "basis": cut.get("basis"),
         "size": len(tickers),
     }
+
+
+# ── The funnel as a READ contract (alpha-engine-config-I7842) ───────────────
+# ``build_universe_membership`` already records, in the artifact, which cut
+# each downstream consumer advances to. Until this section existed, only the
+# sector-team feed had a reader (:func:`resolve_feed_cut`); every other named
+# consumer re-derived its own set. Think Tank was the live instance: it sorted
+# the universe board by ``attractiveness_score`` in Python, so it agreed with
+# the funnel only for as long as the champion happened to rank on
+# attractiveness, and would have kept covering the attractiveness 60 through a
+# promotion to ``tech_score_top_60`` with nothing raising
+# (alpha-engine-config-I7808, the same shape).
+#
+# The declaration is read, never re-stated on the consumer side: a consumer
+# that hardcodes ``attractiveness_top_60`` is the duplicated-truth defect one
+# level down from the one this replaces.
+
+FUNNEL_CONSUMER_THINKTANK = "thinktank_coverage_window"
+"""Key under ``funnel.advances_to`` naming Think Tank's coverage window."""
+
+FUNNEL_CONSUMER_RAG = "rag_corpus_scope"
+FUNNEL_CONSUMER_PREDICTOR = "predictor_universe"
+
+_RANK_TABLE_BY_BASIS: dict[str, tuple[str, str, str]] = {
+    "attractiveness_rank": ("ranks", "attractiveness_rank", "attractiveness_score"),
+}
+"""``basis`` -> (membership field holding a FULL-UNIVERSE rank table, rank key, score key).
+
+Deliberately NOT populated for ``tech_score_rank``. ``scanner_ranks`` is a
+60-name table ranking names *within* the champion's own cut, so it cannot
+answer "who is rank 150 in this basis" — and answering that question with the
+attractiveness table instead would mean the champion pointer names one arm
+while the consumer ranks by another. The producer-side fix (emit a full rank
+table per promotable basis) is alpha-engine-config-I7843; until it lands,
+:func:`rank_table_for_cut` refuses rather than substitutes.
+"""
+
+
+def declared_cut_for(membership: dict, consumer: str) -> str:
+    """The cut name ``membership`` declares for ``consumer``, or raise.
+
+    Absence is a hard error, not a default. A defaulted or empty window is
+    indistinguishable from "the scanner selected nobody" — the reasoning
+    :func:`resolve_feed_cut` already gives for the sector-team feed, and it
+    applies identically to every other consumer of this artifact.
+    """
+    advances = ((membership or {}).get("funnel") or {}).get("advances_to") or {}
+    if consumer not in advances:
+        raise UniverseMembershipError(
+            f"universe_membership (run_date={(membership or {}).get('run_date')}) "
+            f"does not declare funnel.advances_to.{consumer} — the consumer's set "
+            f"is resolved FROM this declaration and has no fallback. Declared "
+            f"consumers: {sorted(advances)}"
+        )
+    named = advances[consumer]
+    cuts = (membership or {}).get("cuts") or {}
+    if not named or named not in cuts:
+        raise UniverseMembershipError(
+            f"universe_membership (run_date={(membership or {}).get('run_date')}): "
+            f"funnel.advances_to.{consumer}={named!r} names a cut that is not in "
+            f"``cuts`` ({sorted(cuts)}). The declaration and the cuts are written "
+            f"by the same producer in the same pass, so a dangling name is a "
+            f"producer defect, never a consumer's problem to route around."
+        )
+    return str(named)
+
+
+def serving_cut_for(
+    membership: dict,
+    consumer: str,
+    *,
+    bucket: str | None = None,
+    s3_client: Any = None,
+    champion: str | None = None,
+) -> tuple[str, str]:
+    """``(serving_cut_name, declared_cut_name)`` for ``consumer``.
+
+    The declaration states the ARRANGEMENT — which slot in the funnel this
+    consumer reads. The champion pointer states which ARM is serving that slot
+    today (the distinction ``_FEEDS_BY_RANK_CUT``'s docstring already draws).
+    So when the declared cut is one of :data:`PROMOTABLE_CUTS`, the serving cut
+    is :func:`live_cut_champion`'s answer, exactly as :func:`resolve_feed_cut`
+    resolves the sector-team feed. Brian's ruling 2026-08-20
+    (alpha-engine-config-I7823): the two count-matched 60s are promoted weekly
+    and the consumers of that slot read whichever is champion.
+
+    A declared cut OUTSIDE the promotable set is served verbatim — it is not a
+    contested slot, and routing it through the pointer would let a promotion in
+    one slot silently move another consumer's window.
+    """
+    declared = declared_cut_for(membership, consumer)
+    if declared not in PROMOTABLE_CUTS:
+        return declared, declared
+    serving = champion or live_cut_champion(bucket=bucket, s3_client=s3_client)
+    cuts = membership.get("cuts") or {}
+    if serving not in cuts:
+        raise UniverseMembershipError(
+            f"universe_membership (run_date={membership.get('run_date')}): the live "
+            f"champion {serving!r} holds the {declared!r} feed slot that "
+            f"funnel.advances_to.{consumer} names, but no such cut is emitted "
+            f"({sorted(cuts)}). Refusing to serve {consumer} the losing arm's "
+            f"membership — that is alpha-engine-config-I7808 repeating."
+        )
+    return serving, declared
+
+
+def rank_table_for_cut(
+    membership: dict,
+    cut_name: str,
+    *,
+    minimum_coverage: int | None = None,
+) -> tuple[dict[str, int], str]:
+    """``({ticker: rank}, basis)`` in the basis ``cut_name`` is ranked by.
+
+    ``minimum_coverage`` is the widest rank position the caller will ask about
+    (Think Tank's ``exit_rank``, say). A table shorter than that cannot answer
+    the caller's question, and this raises rather than returning a table that
+    silently makes every unranked name look absent — absence and "ranked worse
+    than N" must never render identically (champion-challenger-policy §7.2).
+
+    Raises for a basis with no full-universe table rather than substituting the
+    attractiveness one: see :data:`_RANK_TABLE_BY_BASIS` and
+    alpha-engine-config-I7843.
+    """
+    cut = (membership.get("cuts") or {}).get(cut_name) or {}
+    basis = cut.get("basis")
+    entry = _RANK_TABLE_BY_BASIS.get(str(basis))
+    if entry is None:
+        raise UniverseMembershipError(
+            f"universe_membership (run_date={membership.get('run_date')}): cut "
+            f"{cut_name!r} is ranked by {basis!r}, for which this artifact emits "
+            f"no full-universe rank table (it emits one only for "
+            f"{sorted(_RANK_TABLE_BY_BASIS)}). A consumer's rank ceiling cannot "
+            f"be resolved in this basis, and resolving it in the attractiveness "
+            f"basis instead would rank by an arm that is not the champion — "
+            f"alpha-engine-config-I7808. Producer fix: "
+            f"alpha-engine-config-I7843."
+        )
+    field, rank_key, _score_key = entry
+    table = membership.get(field) or {}
+    if not table:
+        raise UniverseMembershipError(
+            f"universe_membership (run_date={membership.get('run_date')}): "
+            f"{field!r} is empty — cut {cut_name!r} declares basis {basis!r} but "
+            f"the table that basis ranks in carries no names."
+        )
+    ranks = {str(t): int(v[rank_key]) for t, v in table.items() if rank_key in (v or {})}
+    if minimum_coverage is not None:
+        # Compared against the POPULATION, not against the ceiling alone: a
+        # universe smaller than the ceiling is a legitimate state (the ceiling
+        # simply does not bind), and refusing it would fail every small-universe
+        # run. What must never pass is a table that ranks a fraction of a
+        # universe it claims to rank — the tech basis today ranks 60 of 906, so
+        # every name past 60 would be indistinguishable from a name the scanner
+        # did not rank at all (alpha-engine-config-I7843).
+        population = int(
+            membership.get("universe_count") or ((membership.get("funnel") or {}).get("population")) or len(ranks)
+        )
+        required = min(int(minimum_coverage), population)
+        if len(ranks) < required:
+            raise UniverseMembershipError(
+                f"universe_membership (run_date={membership.get('run_date')}): "
+                f"{field!r} ranks {len(ranks)} of {population} name(s) in basis "
+                f"{basis!r}, short of the {required} the consumer's rank ceiling "
+                f"({minimum_coverage}) needs. A short table would make every name "
+                f"past {len(ranks)} indistinguishable from a name the scanner did "
+                f"not rank — refusing (alpha-engine-config-I7843)."
+            )
+    return ranks, str(basis)
+
+
+def resolve_funnel_cut(
+    consumer: str,
+    *,
+    bucket: str | None = None,
+    s3_client: Any = None,
+    membership: dict | None = None,
+    minimum_rank_coverage: int | None = None,
+) -> tuple[list[str], dict[str, int], dict]:
+    """``(cut_tickers, {ticker: rank}, provenance)`` for a declared consumer.
+
+    The one entry point a non-producer consumer needs: it reads the latest
+    membership artifact, resolves the consumer's declared slot through the
+    champion pointer, and returns both the membership (the cut) and the order
+    (the rank table in the serving arm's own basis).
+
+    ``membership`` is injectable so a caller that has already read the artifact
+    does not read it twice; everything else is resolved here.
+
+    Raises on every ambiguity. There is no degraded mode: an empty or defaulted
+    window is indistinguishable from "the scanner selected nobody".
+    """
+    doc = membership if membership is not None else read_latest_membership(bucket=bucket, s3_client=s3_client)
+    if not doc:
+        raise UniverseMembershipError(
+            f"no universe_membership/latest.json — {consumer} resolves its set "
+            "from the membership artifact and cannot fall back to the raw universe"
+        )
+    serving, declared = serving_cut_for(doc, consumer, bucket=bucket, s3_client=s3_client)
+    cut = (doc.get("cuts") or {}).get(serving) or {}
+    tickers = list(cut.get("tickers") or [])
+    if not tickers:
+        raise UniverseMembershipError(
+            f"universe_membership/latest.json (run_date={doc.get('run_date')}) "
+            f"carries no tickers under {serving!r}, the cut serving "
+            f"funnel.advances_to.{consumer} — refusing to hand {consumer} an "
+            "empty window"
+        )
+    ranks, basis = rank_table_for_cut(doc, serving, minimum_coverage=minimum_rank_coverage)
+    provenance = {
+        "consumer": consumer,
+        "cut": serving,
+        "declared_cut": declared,
+        "basis": basis,
+        "size": len(tickers),
+        "declared_size": cut.get("size"),
+        "run_date": doc.get("run_date"),
+        "cut_effective_date": doc.get("cut_effective_date"),
+        "cut_refresh_cadence": doc.get("cut_refresh_cadence"),
+        "rank_table_size": len(ranks),
+        "schema_version": doc.get("schema_version"),
+    }
+    return tickers, ranks, provenance
 
 
 def read_latest_membership(*, bucket: str | None = None, s3_client: Any = None) -> dict | None:
@@ -702,7 +928,6 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
                 f"(alpha-engine-config-I6630)."
             )
 
-
     # Momentum-horizon challenger arm (alpha-engine-config-I7538): the same
     # two guards the incumbent arm gets, for the same reasons.
     #
@@ -716,9 +941,7 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
     # -I6429). The two definitions differ only in the momentum pillar, so an
     # identical top-20 is the signature of the override having silently not
     # applied — precisely the failure this must not render as a tie.
-    for prefix, n in [
-        (p, n) for p in (CHALLENGER_CUT_PREFIX, MOMZERO_CUT_PREFIX) for n in _CHALLENGER_CUT_NS
-    ]:
+    for prefix, n in [(p, n) for p in (CHALLENGER_CUT_PREFIX, MOMZERO_CUT_PREFIX) for n in _CHALLENGER_CUT_NS]:
         challenger_cut = _cuts.get(f"{prefix}{n}")
         if challenger_cut is None:
             continue
@@ -971,10 +1194,7 @@ def build_universe_membership(
                 "basis": "tech_score_rank",
                 "size": len(tickers),
                 "tickers": tickers,
-                "source": (
-                    f"candidates/{run_date}/candidates.json::scanner_eval_log"
-                    "::tech_score@scan_path=momentum"
-                ),
+                "source": (f"candidates/{run_date}/candidates.json::scanner_eval_log::tech_score@scan_path=momentum"),
                 "feeds": [],
                 "role": (
                     "recorded baseline — the incumbent ranking the 2026-07-22 "
@@ -1008,10 +1228,7 @@ def build_universe_membership(
                 "basis": "attractiveness_rank_mom121",
                 "size": len(tickers),
                 "tickers": tickers,
-                "source": (
-                    f"scanner/factor_profiles_shadow/mom121/{run_date}/"
-                    "profiles.json::attractiveness_score"
-                ),
+                "source": (f"scanner/factor_profiles_shadow/mom121/{run_date}/profiles.json::attractiveness_score"),
             }
 
     # Zero-momentum arm (alpha-engine-config-I7574). Same champion factor
@@ -1026,10 +1243,7 @@ def build_universe_membership(
                 "basis": "attractiveness_rank_momzero",
                 "size": len(tickers),
                 "tickers": tickers,
-                "source": (
-                    f"factors/profiles/{run_date}/by_ticker.json"
-                    "::attractiveness_score@momentum_weight=0"
-                ),
+                "source": (f"factors/profiles/{run_date}/by_ticker.json::attractiveness_score@momentum_weight=0"),
             }
 
     assert_cut_invariants({"cuts": cuts}, run_date)
@@ -1048,10 +1262,11 @@ def build_universe_membership(
         # ``cuts`` except ``population``, which is the rank table's width.
         "funnel": {
             "population": len(ranks),
-            "feed_cut": {"name": FEED_CUT_NAME,
-                         "size": len(cuts.get(FEED_CUT_NAME, {}).get("tickers", []))},
-            "champion_cut": {"name": PREDICTOR_UNIVERSE_CUT,
-                             "size": len(cuts.get(PREDICTOR_UNIVERSE_CUT, {}).get("tickers", []))},
+            "feed_cut": {"name": FEED_CUT_NAME, "size": len(cuts.get(FEED_CUT_NAME, {}).get("tickers", []))},
+            "champion_cut": {
+                "name": PREDICTOR_UNIVERSE_CUT,
+                "size": len(cuts.get(PREDICTOR_UNIVERSE_CUT, {}).get("tickers", [])),
+            },
             "advances_to": {
                 "predictor_universe": PREDICTOR_UNIVERSE_CUT,
                 "rag_corpus_scope": FEED_CUT_NAME,
@@ -1239,9 +1454,7 @@ def momentum_path_tech_scores(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
-def champion_momentum_weight(
-    bucket: str | None = None, s3_client: Any = None
-) -> float:
+def champion_momentum_weight(bucket: str | None = None, s3_client: Any = None) -> float:
     """The momentum pillar's weight in the LIVE champion composite.
 
     Read from the same chokepoint the cut producer uses
@@ -1264,9 +1477,7 @@ def champion_momentum_weight(
         return 0.0
 
 
-def momentum_arms_applicable(
-    bucket: str | None = None, s3_client: Any = None
-) -> bool:
+def momentum_arms_applicable(bucket: str | None = None, s3_client: Any = None) -> bool:
     """Whether either momentum challenger arm can express a real experiment.
 
     **Both arms vary something that the champion's momentum weight multiplies.**
@@ -1330,9 +1541,7 @@ def momzero_attractiveness_for_run(
         profiles = _read_factor_profiles(run_date, bucket, s3_client) or {}
         if not profiles:
             return None
-        scored = attractiveness_from_factor_profiles(
-            profiles, pillar_weights=MOMZERO_PILLAR_WEIGHTS
-        )
+        scored = attractiveness_from_factor_profiles(profiles, pillar_weights=MOMZERO_PILLAR_WEIGHTS)
     except Exception as exc:  # noqa: BLE001 — observe-only arm
         logger.info(
             "[universe_membership] momzero arm not computed (%s) — cuts omitted, "
@@ -1434,12 +1643,8 @@ def compute_and_write_universe_membership(
         attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
         gate_eligible_tech_scores=momentum_path_tech_scores(scanner_eval_log),
-        challenger_attractiveness=challenger_attractiveness_for_run(
-            run_date, bucket=bucket, s3_client=s3_client
-        ),
-        momzero_attractiveness=momzero_attractiveness_for_run(
-            run_date, bucket=bucket, s3_client=s3_client
-        ),
+        challenger_attractiveness=challenger_attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
+        momzero_attractiveness=momzero_attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
         prior=prior,
     )
     membership["cut_refresh_cadence"] = cadence

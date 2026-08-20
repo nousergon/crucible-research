@@ -1,0 +1,89 @@
+name: Lambda deploy drift
+
+# Standing check that every alpha-engine-research-* Lambda is running the code
+# main describes (alpha-engine-config-I7840).
+#
+# ── Why this is NOT a step of deploy.yml ─────────────────────────────────────
+# deploy.yml already pages on a FAILED deploy via notify-main-failure, and that
+# signal fired on 2026-08-18 when crucible-research@2fc065fc's deploy died at
+# the Docker build. It said "a deploy failed". It did not say "the scanner is
+# now two days behind main", and it did not persist once a later deploy went
+# green. A detector that only runs when a deploy runs cannot see a deploy that
+# never ran, so this runs on its own clock.
+#
+# ── Why there is no `push` trigger ───────────────────────────────────────────
+# Deliberate. A push-triggered run would race deploy.yml on the same commit and
+# report the deploy it is watching as drift. The schedule plus the detector's
+# --grace-minutes window is the whole design: real drift outlives a deploy;
+# an in-flight deploy does not outlive the window.
+#
+# ── Its own liveness ─────────────────────────────────────────────────────────
+# A cron that stops firing is silent, which is the failure mode this file
+# exists to remove — so it is not allowed to be one. nousergon/crucible-research
+# is graded by alpha-engine-config's scheduled-workflow-health reconciler
+# (matrix row added in the same arc); that reconciler is what makes THIS
+# workflow's absence detectable.
+
+on:
+  schedule:
+    # Every three hours at :25 — off the top of the hour so it does not land
+    # inside the same minute as the fleet's other scheduled sweeps and get read
+    # as one failure.
+    - cron: '25 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC assume-role for the read-only AWS lookups
+  contents: read
+
+concurrency:
+  group: lambda-deploy-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: lambda-deploy-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: the detector resolves the deployed stamp SHA and walks
+      # stamped..HEAD. A shallow clone cannot resolve a SHA more than one
+      # commit back, which would turn every real drift into
+      # `stamp_unknown_commit` — an unmeasured verdict masquerading as
+      # coverage.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # boto3 for the read-only Lambda config lookups; krepis for the alert
+      # publish, exactly as deploy.yml installs it for the canary alerts on
+      # this same runner and role. Pin floor matches requirements.txt.
+      - name: Install detector dependencies
+        run: pip install boto3 pyyaml "krepis>=0.7.0"
+
+      # Read-only by construction. This job holds no UpdateFunctionCode and
+      # never redeploys: a drift checker that can silently repair the drift it
+      # reports cannot be trusted to report it.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: arn:aws:iam::711398986525:role/github-actions-lambda-deploy
+          aws-region: us-east-1
+
+      # Exit 1 only when a trading-critical function is behind main. An
+      # observe-only function's drift is a WARNING: annotated, in the job
+      # summary, and in the rolled-up alert, but it does not hold this check
+      # red. Both paths publish; neither is silent.
+      - name: Compare every deployed stamp against main
+        run: python3 infrastructure/lambda_deploy_drift.py --grace-minutes 45 --emit-alert
+
+      # if:always() so the machine-readable report is on the record even when
+      # the gate step above exited 1 — the same discipline as
+      # nous-ergon-ops/cloudwatch-alarm-drift.yml's --report step.
+      - name: Report (informational, always)
+        if: always()
+        run: python3 infrastructure/lambda_deploy_drift.py --grace-minutes 45 --json

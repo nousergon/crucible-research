@@ -27,18 +27,25 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests._feed_helpers import feed_window_for  # noqa: E402
 from thinktank.ledger import select_intake  # noqa: E402
 from thinktank.schemas import CoverageLedger, LedgerEntry  # noqa: E402
 from thinktank.settings import _parse_exit_rank  # noqa: E402
 
 
+def _si(ledger, board, **kw):
+    """``select_intake`` with the FeedWindow the scanner would have published.
+
+    The window is no longer derived from the board by the code under test
+    (alpha-engine-config-I7842); the fixture supplies it.
+    """
+    return select_intake(ledger, board, feed_window_for(board), **kw)
+
+
 def _board(ranked: list[str]) -> dict:
     """A universe board whose order IS the attractiveness ranking."""
     return {
-        "stocks": [
-            {"ticker": t, "attractiveness_score": 1000.0 - i, "sector": "Tech"}
-            for i, t in enumerate(ranked)
-        ]
+        "stocks": [{"ticker": t, "attractiveness_score": 1000.0 - i, "sector": "Tech"} for i, t in enumerate(ranked)]
     }
 
 
@@ -64,19 +71,26 @@ def test_a_name_oscillating_inside_the_band_enters_once_and_is_never_dropped():
     ranks 4 and 5 are inside the band (exit=5) and must not de-cover."""
     ledger = _ledger([])
     for ranking in (
-        ["AAA", "BBB", "TGT", "CCC", "DDD", "EEE"],   # TGT rank 3 — enters
-        ["AAA", "BBB", "CCC", "TGT", "DDD", "EEE"],   # rank 4 — inside band
-        ["AAA", "BBB", "CCC", "DDD", "TGT", "EEE"],   # rank 5 — still inside
-        ["AAA", "BBB", "TGT", "CCC", "DDD", "EEE"],   # back to 3
+        ["AAA", "BBB", "TGT", "CCC", "DDD", "EEE"],  # TGT rank 3 — enters
+        ["AAA", "BBB", "CCC", "TGT", "DDD", "EEE"],  # rank 4 — inside band
+        ["AAA", "BBB", "CCC", "DDD", "TGT", "EEE"],  # rank 5 — still inside
+        ["AAA", "BBB", "TGT", "CCC", "DDD", "EEE"],  # back to 3
     ):
-        new_rows, _ = select_intake(
-            ledger, _board(ranking), daily_new_names=5, rank_ceiling=3,
-            exit_rank=5, skip_stale_refill=True, trading_day="2026-08-10",
+        new_rows, _ = _si(
+            ledger,
+            _board(ranking),
+            daily_new_names=5,
+            rank_ceiling=3,
+            exit_rank=5,
+            skip_stale_refill=True,
+            trading_day="2026-08-10",
         )
         for row in new_rows:
             ledger.entries[row["ticker"]] = LedgerEntry(
-                ticker=row["ticker"], covered_since="2026-08-10",
-                thesis_version=1, thesis_updated_on="2026-08-10",
+                ticker=row["ticker"],
+                covered_since="2026-08-10",
+                thesis_version=1,
+                thesis_updated_on="2026-08-10",
             )
     assert "TGT" in ledger.covered(), (
         "a name oscillating strictly inside the hysteresis band was de-covered "
@@ -89,9 +103,14 @@ def test_a_name_past_the_exit_rank_is_dropped_exactly_once():
     ledger = _ledger(["TGT"])
     ranking = ["AAA", "BBB", "CCC", "DDD", "EEE", "TGT"]  # rank 6 > exit 5
     for _ in range(3):
-        select_intake(
-            ledger, _board(ranking), daily_new_names=5, rank_ceiling=3,
-            exit_rank=5, skip_stale_refill=True, trading_day="2026-08-10",
+        _si(
+            ledger,
+            _board(ranking),
+            daily_new_names=5,
+            rank_ceiling=3,
+            exit_rank=5,
+            skip_stale_refill=True,
+            trading_day="2026-08-10",
         )
     entry = ledger.entries["TGT"]
     assert entry.covered is False
@@ -111,9 +130,13 @@ def test_a_dropped_name_keeps_its_entry_and_its_thesis_lineage():
     ruling chose marking over removal precisely so the record survives."""
     ledger = _ledger(["TGT"])
     ledger.entries["TGT"].thesis_version = 7
-    select_intake(
-        ledger, _board(["A", "B", "C", "D", "E", "TGT"]), daily_new_names=5,
-        rank_ceiling=3, exit_rank=5, skip_stale_refill=True,
+    _si(
+        ledger,
+        _board(["A", "B", "C", "D", "E", "TGT"]),
+        daily_new_names=5,
+        rank_ceiling=3,
+        exit_rank=5,
+        skip_stale_refill=True,
         trading_day="2026-08-10",
     )
     assert "TGT" in ledger.entries, "the entry was REMOVED, not marked"
@@ -126,9 +149,13 @@ def test_absence_from_todays_ranking_never_de_covers():
     data gap, a halted ticker. Inferring 'it fell past the exit rank' from
     silence is a failure this codebase has shipped before."""
     ledger = _ledger(["TGT"])
-    select_intake(
-        ledger, _board(["AAA", "BBB", "CCC"]), daily_new_names=5,
-        rank_ceiling=3, exit_rank=5, skip_stale_refill=True,
+    _si(
+        ledger,
+        _board(["AAA", "BBB", "CCC"]),
+        daily_new_names=5,
+        rank_ceiling=3,
+        exit_rank=5,
+        skip_stale_refill=True,
         trading_day="2026-08-10",
     )
     assert ledger.entries["TGT"].covered is True
@@ -139,9 +166,12 @@ def test_no_exit_rank_configured_is_the_pre_i6648_ratchet_not_a_default_drop():
     """An un-migrated config must keep working. It must NOT start de-covering
     names because a default appeared."""
     ledger = _ledger(["TGT"])
-    select_intake(
-        ledger, _board(["A", "B", "C", "D", "E", "F", "G", "TGT"]),
-        daily_new_names=5, rank_ceiling=3, skip_stale_refill=True,
+    _si(
+        ledger,
+        _board(["A", "B", "C", "D", "E", "F", "G", "TGT"]),
+        daily_new_names=5,
+        rank_ceiling=3,
+        skip_stale_refill=True,
         trading_day="2026-08-10",
     )
     assert ledger.entries["TGT"].covered is True
@@ -154,16 +184,19 @@ def test_a_dropped_name_does_not_consume_a_staleness_refresh_slot():
     """Otherwise the ratchet returns through the back door: de-covered today,
     refreshed tomorrow because it is the stalest entry in the map."""
     ledger = _ledger(["TGT", "KEEP"])
-    ledger.entries["TGT"].thesis_updated_on = "2020-01-01"   # by far the stalest
+    ledger.entries["TGT"].thesis_updated_on = "2020-01-01"  # by far the stalest
     ledger.entries["TGT"].covered = False
     ledger.entries["TGT"].dropped_on = "2026-08-09"
-    _, refresh = select_intake(
-        ledger, _board(["KEEP", "AAA", "BBB"]), daily_new_names=5,
-        rank_ceiling=3, exit_rank=5, trading_day="2026-08-10",
+    _, refresh = _si(
+        ledger,
+        _board(["KEEP", "AAA", "BBB"]),
+        daily_new_names=5,
+        rank_ceiling=3,
+        exit_rank=5,
+        trading_day="2026-08-10",
     )
     assert "TGT" not in refresh, (
-        "a de-covered name consumed a refresh slot — coverage grows back "
-        "silently and the exit threshold means nothing"
+        "a de-covered name consumed a refresh slot — coverage grows back silently and the exit threshold means nothing"
     )
 
 
@@ -171,9 +204,14 @@ def test_a_dropped_name_does_not_breach_the_staleness_sla():
     ledger = _ledger(["TGT"])
     ledger.entries["TGT"].thesis_updated_on = "2020-01-01"
     ledger.entries["TGT"].covered = False
-    _, refresh = select_intake(
-        ledger, _board(["AAA"]), daily_new_names=0, rank_ceiling=3,
-        exit_rank=5, stale_after_days=30, trading_day="2026-08-10",
+    _, refresh = _si(
+        ledger,
+        _board(["AAA"]),
+        daily_new_names=0,
+        rank_ceiling=3,
+        exit_rank=5,
+        stale_after_days=30,
+        trading_day="2026-08-10",
     )
     assert "TGT" not in refresh
 
