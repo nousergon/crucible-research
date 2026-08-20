@@ -241,6 +241,19 @@ by inspection.
 
 _RANK_CUTS = (20, 25, ATTRACTIVENESS_FEED_TOP_N)
 
+_FEEDS_BY_RANK_CUT: dict[int, list[str]] = {
+    20: ["predictor_universe"],
+    25: [],
+    ATTRACTIVENESS_FEED_TOP_N: ["sector_teams", "rag_corpus_scope", "thinktank_window"],
+}
+"""Which consumer reads which attractiveness cut, recorded IN the artifact.
+
+``sector_teams`` on the 60 is Brian's ruling 2026-08-20
+(``alpha-engine-config-I7823``) — and it is conditional on this cut holding the
+champion pointer, which :func:`live_cut_champion` resolves at read time. The
+list states the ARRANGEMENT; the pointer states which arm is serving it today.
+"""
+
 FEED_CUT_NAME = f"attractiveness_top_{ATTRACTIVENESS_FEED_TOP_N}"
 """The cut downstream evidence ingestion scopes to. The champion cut must be
 its head — see the funnel invariant in :func:`build_universe_membership`."""
@@ -389,6 +402,103 @@ def should_recut(run_date: str, prior: dict | None, cadence: str | None = None) 
         # field. Re-cut rather than invent one.
         return True
     return _iso_week(run_date) > _iso_week(effective)
+
+
+# ── The champion cut pointer (alpha-engine-config-I7823) ────────────────────
+# Brian's ruling 2026-08-20: `attractiveness_top_60` and `tech_score_top_60`
+# run as a count-matched champion/challenger PAIR, the better performer is
+# promoted weekly, and the SECTOR TEAMS read whichever is champion.
+#
+# The pointer is an S3 object rather than an env var or a constant, because a
+# weekly promotion engine has to be able to move it without a deploy, and
+# because "which arm was live on date D" then has an artifact instead of being
+# reconstructed from a deploy log. Same reasoning as
+# `config/factor_attractiveness_weights.json` (I7580).
+CUT_CHAMPION_POINTER_KEY = "config/scanner_cut_champion.json"
+
+PROMOTABLE_CUTS: tuple[str, ...] = (
+    "attractiveness_top_60",
+    "tech_score_top_60",
+)
+"""The arms eligible to hold the feed. Count-matched at 60 by construction.
+
+A closed set, deliberately: the pointer is writable by an automated promotion
+engine, and an unvalidated pointer is an arbitrary-cut-selection primitive one
+bad write away from feeding the sector teams something nobody chose.
+"""
+
+DEFAULT_CUT_CHAMPION = "attractiveness_top_60"
+"""The standing champion, per Brian's ruling 2026-08-20. Serves whenever the
+pointer is absent or unreadable — the momentum-free 6-pillar composite, which
+is what fed the predictor and the evidence layers already."""
+
+
+def live_cut_champion(*, bucket: str | None = None, s3_client: Any = None) -> str:
+    """The cut the sector teams read this cycle.
+
+    Absence returns :data:`DEFAULT_CUT_CHAMPION` — a first run, or a fleet that
+    has never promoted, is not an error. A pointer that EXISTS but names a cut
+    outside :data:`PROMOTABLE_CUTS` is a different thing entirely and RAISES:
+    something wrote a value nobody validated, and quietly serving the default
+    instead would mean the promotion engine believes one arm is live while the
+    funnel serves another — the exact class of drift the 2026-07-22 cutover
+    produced (alpha-engine-config-I7808).
+    """
+    s3 = _client(s3_client)
+    b = _bucket(bucket)
+    try:
+        body = s3.get_object(Bucket=b, Key=CUT_CHAMPION_POINTER_KEY)["Body"].read()
+    except Exception as exc:  # noqa: BLE001 — absence is a legitimate state
+        if "NoSuchKey" in str(exc) or "404" in str(exc):
+            return DEFAULT_CUT_CHAMPION
+        raise
+    doc = json.loads(body)
+    champion = doc.get("champion")
+    if champion not in PROMOTABLE_CUTS:
+        raise UniverseMembershipError(
+            f"{CUT_CHAMPION_POINTER_KEY} names champion {champion!r}, which is not "
+            f"one of {list(PROMOTABLE_CUTS)}. Refusing to resolve a feed from an "
+            "unvalidated pointer."
+        )
+    return champion
+
+
+def resolve_feed_cut(
+    *, bucket: str | None = None, s3_client: Any = None
+) -> tuple[list[str], dict]:
+    """``(tickers, provenance)`` for the sector teams' input set.
+
+    Reads the LATEST membership artifact, not a dated one. Under the weekly
+    cadence the scanner does not run every day, so a consumer keyed on
+    ``{today}`` would find nothing and fail loud on four mornings out of five —
+    the failure mode that makes the weekly cadence unshippable on its own
+    (alpha-engine-config-I7823, step 1 of the merge order).
+
+    Raises rather than degrading: the sector teams' input set is load-bearing,
+    and an empty one is indistinguishable from "the scanner selected nobody".
+    """
+    champion = live_cut_champion(bucket=bucket, s3_client=s3_client)
+    membership = read_latest_membership(bucket=bucket, s3_client=s3_client)
+    if not membership:
+        raise UniverseMembershipError(
+            "no universe_membership/latest.json — the sector-team feed resolves "
+            "from the membership artifact and cannot fall back to the raw universe"
+        )
+    cut = (membership.get("cuts") or {}).get(champion) or {}
+    tickers = list(cut.get("tickers") or [])
+    if not tickers:
+        raise UniverseMembershipError(
+            f"universe_membership/latest.json (run_date={membership.get('run_date')}) "
+            f"carries no tickers under the champion cut {champion!r} — refusing to "
+            "feed the sector teams an empty set"
+        )
+    return tickers, {
+        "cut": champion,
+        "run_date": membership.get("run_date"),
+        "cut_effective_date": membership.get("cut_effective_date"),
+        "basis": cut.get("basis"),
+        "size": len(tickers),
+    }
 
 
 def read_latest_membership(*, bucket: str | None = None, s3_client: Any = None) -> dict | None:
@@ -793,14 +903,16 @@ def build_universe_membership(
         "size": len(set(scanner_tickers)),
         "tickers": sorted(set(scanner_tickers)),
         "source": f"candidates/{run_date}/candidates.json::scanner_tickers",
-        "feeds": ["sector_teams"],
+        "feeds": [],
         "role": (
-            "Group B of SCANNER_CONTRACT.md §1 — the technical candidate cut. "
-            "Feeds the SECTOR TEAMS, via candidates.json rather than via this "
-            "artifact (graph.research_graph._resolve_agent_input_set). Feeds "
-            "NONE of the attractiveness consumers: not the predictor universe, "
-            "not the RAG corpus scope, not Think Tank's coverage window. See "
-            "the funnel block."
+            "the scanner slot's champion-ARM artifact — a candidate-generation "
+            "experiment, scored on the scanner leaderboard. Feeds NOTHING as of "
+            "2026-08-20: the sector teams moved to the champion CUT resolved by "
+            "universe_membership.resolve_feed_cut, and no other consumer reads "
+            "it (alpha-engine-config-I7823). It fed the sector teams before "
+            "that only because _resolve_agent_input_set happened to read it, "
+            "which is how a cutover in another module silently replaced the "
+            "researched set with a disjoint one for four weeks."
         ),
     }
     cuts: dict[str, dict] = {
@@ -823,6 +935,10 @@ def build_universe_membership(
             "size": len(tickers),
             "tickers": tickers,
             "source": f"scanner/universe/{run_date}/universe.json::attractiveness_score",
+            # Named per width rather than as one blanket list: these three cuts
+            # have genuinely different consumers, and a shared value would make
+            # "who reads the 25?" unanswerable from the artifact.
+            "feeds": _FEEDS_BY_RANK_CUT.get(n, []),
         }
 
     # Incumbent challenger arm (alpha-engine-config-I4983). ``scanner_candidates``

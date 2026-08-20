@@ -17,34 +17,55 @@ artifacts against the tables below and fails when they disagree.
 
 ---
 
-## 1. The two groups
+## 1. The two groups — a count-matched champion/challenger pair
 
-The scanner emits **two independently-ranked cuts of the same ~900-name
-scanned universe**, at the same width. They are not variants of one selection;
-they answer different questions and feed different consumers.
+**Brian's ruling 2026-08-20.** The scanner ranks the same ~900-name universe two
+ways, at the same width, and the two compete. **The better performer is promoted
+weekly, and the champion is what the sector teams research.**
 
-| | **Group A — attractiveness** | **Group B — technical candidates** |
+| | **Group A — attractiveness** | **Group B — technical** |
 |---|---|---|
-| cut name | `attractiveness_top_60` | `scanner_gate_baseline_60` |
+| cut name | `attractiveness_top_60` | `tech_score_top_60` |
 | ranks over | the full scored universe | the momentum-path-eligible universe |
-| ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | the scanner slot's **live champion arm** (§3) |
-| momentum | **excluded.** The momentum pillar's weight is set by `s3://{bucket}/config/factor_attractiveness_weights.json` and is currently zero, per Brian's ruling 2026-08-17 (`alpha-engine-config-I7580`): the top-60 must capture ~1-year attractive names, not short-term movers. | **included, and it is the whole signal.** Every arm registered in this group ranks on some definition of price momentum. |
-| horizon it serves | ~1 year | weeks to months |
-| consumers | RAG corpus scope, Think Tank coverage window; its head `attractiveness_top_20` is the predictor's daily scoring universe (`PREDICTOR_UNIVERSE_CUT`) | the sector teams' input set (`graph/research_graph.py::_resolve_agent_input_set`, via `candidates.json::scanner_tickers`) |
-| produced by | `scoring/universe_membership.py` from `scanner/universe/{date}/universe.json` | `data/scanner_orchestrator.py` §4b from the live champion arm |
+| ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | `tech_score_rank` — RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted |
+| momentum | **excluded.** The momentum pillar's weight lives in `s3://{bucket}/config/factor_attractiveness_weights.json` and is zero, per Brian's ruling 2026-08-17 (`alpha-engine-config-I7580`): the top-60 must capture ~1-year attractive names, not short-term movers. | **included.** `momentum_20d` is one of the five equally-weighted `tech_score` terms. |
+| width | 60 | 60 — count-matched, so a win is never confounded with breadth |
+| graded on | `topn_alpha_vs_population` at 21 / 126 / 252 sessions, against the population it narrowed — never against SPY (`alpha-engine-config-I7576`) | same |
 
-**Why both exist.** Group A is a selection *rule* — a stable, slow-moving
-ranking whose membership should persist across cycles. Group B is a *gate* — a
-technical screen whose membership is expected to turn over. Conflating them is
-what `alpha-engine-config-I4983` corrected on the predictor side; keeping them
-separate is what this contract exists to hold.
+**The champion pointer.** `s3://{bucket}/config/scanner_cut_champion.json` names
+which arm is live. `universe_membership.live_cut_champion()` reads it;
+`resolve_feed_cut()` returns that cut's tickers, and
+`graph/research_graph.py::_resolve_agent_input_set` feeds them to the sector
+teams. Absent pointer ⇒ `DEFAULT_CUT_CHAMPION` = `attractiveness_top_60`, the
+standing champion. A pointer naming anything outside `PROMOTABLE_CUTS` **raises**
+— a promotion engine that believes one arm is live while the funnel serves
+another is the exact drift this contract exists to prevent.
 
-**Momentum appears in exactly one of the two.** If it is ever restored to a
-non-zero weight in Group A, `momentum_arms_applicable()` re-enables the
-`momzero` and `mom121` challenger arms automatically and this table is wrong
-until updated.
+**Fixed consumers, not subject to promotion:** `attractiveness_top_20` is the
+predictor's daily universe (`PREDICTOR_UNIVERSE_CUT`, explicitly ruled unchanged
+2026-08-20); `attractiveness_top_60` is the RAG corpus scope and Think Tank's
+coverage window regardless of which arm holds the feed.
 
----
+**Promotion refuses immature evidence.** The horizons that match a ~1-year
+objective are 126 and 252 sessions. `tech_score_top_60` was first emitted
+2026-08-20, so neither is measurable for months. Promoting on the 21-day block
+selects for exactly the short-horizon behaviour the momentum-zero ruling removed
+— the error recorded in `alpha-engine-config-I7580`. Until a horizon matures the
+pointer holds the standing champion, and the engine says so rather than flipping
+the feed on a number it has already called wrong.
+
+### Cadence
+
+**Target: the scanner runs weekly** (Brian, 2026-08-20), one run producing the
+week's cuts. Today it runs every weekday — a `Scanner` stage in both
+`step_function.json` (weekly) and `step_function_daily.json` (weekday preopen) —
+and `SCANNER_CUT_REFRESH_CADENCE` is unset, so the cut re-derives daily.
+
+Closing that gap is step 3 of `alpha-engine-config-I7823`, and the order is
+load-bearing: every consumer keyed on `{today}` fails loud the first morning the
+scanner does not run. This document's step 1 — the feed resolving from
+`universe_membership/latest.json` rather than a dated artifact — is what makes
+the weekly cadence shippable at all.
 
 ## 2. Every cut emitted, and what its `basis` means
 
@@ -57,9 +78,9 @@ holds it to that.
 |---|---|---|---|---|
 | `attractiveness_top_20` | 20 | `attractiveness_rank` | `_rank_table(attractiveness)` | predictor universe |
 | `attractiveness_top_25` | 25 | `attractiveness_rank` | same | historical series continuity |
-| `attractiveness_top_60` | 60 | `attractiveness_rank` | same | RAG corpus scope, Think Tank window |
-| `scanner_gate_baseline_60` | 60 | `scanner_champion_rank` | the live champion arm, verbatim from `candidates.json::scanner_tickers` | sector teams |
-| `tech_score_top_60` | 60 | `tech_score_rank` | `_rank_tech_score` over `scan_path == "momentum"` rows | nothing live — the displaced-incumbent baseline (§3) |
+| `attractiveness_top_60` | 60 | `attractiveness_rank` | same | RAG corpus scope, Think Tank window, and the sector teams whenever it holds the champion pointer |
+| `scanner_gate_baseline_60` | 60 | `scanner_champion_rank` | the scanner slot's champion ARM, verbatim from `candidates.json::scanner_tickers` | **nothing** — a candidate-generation experiment, scored on the scanner leaderboard |
+| `tech_score_top_60` | 60 | `tech_score_rank` | `_rank_tech_score` over `scan_path == "momentum"` rows | the sector teams whenever it holds the champion pointer (§1) |
 | `scanner_top_20` | 20 | `tech_score_rank_within_cut` | top 20 by `tech_score` **of the champion's 60** | nothing live — churn diagnostics |
 | `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | nothing — observe-only arm |
 | `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | nothing — observe-only arm |
