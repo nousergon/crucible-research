@@ -27,6 +27,16 @@ name: Judge Perturbation Smoke
 # one per corruption) — cents, cheaper than the pre-migration Haiku
 # baseline. Tolerant caught-rate gate absorbs LLM variance; a
 # regressed/insensitive judge still fails it.
+#
+# alpha-engine-config-I7853 (2026-08-20): this CI runner has no router-edge
+# credential, so the judge call (routed through krepis.router since
+# crucible-research#666) currently cannot reach any model — a
+# provisioning gap, not a judge regression. The `smoke` job itself still
+# exits 0 in that case (an infra gap must not hard-block every judge-code
+# PR), but a SEPARATE `judge-perturbation-smoke / coverage` check run
+# posts as `neutral` naming the zero judged_count whenever it happens, so
+# a green `smoke` tick is never the only signal on the PR — see the "Run
+# judge perturbation smoke" step's outputs and the step below it.
 
 on:
   pull_request:
@@ -38,7 +48,14 @@ on:
       - ".github/workflows/judge-perturbation-smoke.yml"
       - "requirements.txt"
 
-permissions: {}
+# `checks: write` is needed ONLY by the "Report zero-judged coverage as a
+# neutral check" step below, which posts a SEPARATE GitHub check run when
+# the smoke script signals judged_count=0 (principles.md §2.7 — a bare
+# `exit 0` on a provisioning gap would render identically to a real pass,
+# which the neutral check exists to prevent). Every other permission stays
+# at the repo default of none.
+permissions:
+  checks: write
 
 jobs:
   smoke:
@@ -108,7 +125,45 @@ jobs:
           printf '[extend]\nuseDefault = true\n' | sudo tee /opt/groom-llm-routing/gitleaks-egress.toml > /dev/null
 
       - name: Run judge perturbation smoke
+        id: run_smoke
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PYTHONPATH: .
         run: python tests/live_smoke/judge_perturbation_smoke.py
+
+      # alpha-engine-config-I7853 stopgap. The smoke script exits 0 when
+      # krepis.router finds nothing reachable (a CI provisioning gap, not a
+      # judge regression — see judge_perturbation_smoke.py's module
+      # docstring), so 0 perturbations judged would otherwise render
+      # identically to a real PASS. principles.md §2.7 forbids that: "a
+      # component emitting nothing is not healthy, it is unobserved; no
+      # data is never rendered as green." This step posts a SEPARATE
+      # `neutral`-concluding check run — visible on the PR, not blocking —
+      # naming the zero count whenever that happens. `if: always()` so it
+      # still runs after a FAIL (posting nothing, since outcome won't be
+      # skip_router_unreachable then).
+      #
+      # Trip wire for I7853 landing: once the router-edge credential is
+      # wired, resolve_group_spec stops raising, judged_count becomes >0,
+      # `steps.run_smoke.outputs.outcome` is never
+      # `skip_router_unreachable` again, and this step's `if` never
+      # matches — the neutral check simply stops appearing. No follow-up
+      # code change is needed to retire this step's *effect*; I7853 tracks
+      # deleting the now-dead script branch as cleanup once that's observed
+      # for a few runs.
+      - name: Report zero-judged coverage as a neutral check
+        if: always() && steps.run_smoke.outputs.outcome == 'skip_router_unreachable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JUDGED_COUNT: ${{ steps.run_smoke.outputs.judged_count }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+            --method POST \
+            -f name="judge-perturbation-smoke / coverage" \
+            -f head_sha="${HEAD_SHA}" \
+            -f status="completed" \
+            -f conclusion="neutral" \
+            -f "output[title]=${JUDGED_COUNT} perturbations judged — router unreachable from CI (alpha-engine-config-I7853)" \
+            -f "output[summary]=krepis.router could not reach any model in the judge group from this CI runner (missing router-edge credential wiring, tracked at alpha-engine-config-I7853). judged_count=${JUDGED_COUNT}. This run's own job status is green so the provisioning gap does not hard-block the PR, but that green does NOT mean the judge was validated — see this neutral check and \$GITHUB_STEP_SUMMARY for the resolver error."
