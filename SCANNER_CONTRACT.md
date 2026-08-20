@@ -118,21 +118,24 @@ holds it to that.
 | `attractiveness_top_20` | 20 | `attractiveness_rank` | `_rank_table(attractiveness)` | predictor universe |
 | `attractiveness_top_25` | 25 | `attractiveness_rank` | same | historical series continuity |
 | `attractiveness_top_60` | 60 | `attractiveness_rank` | same | RAG corpus scope, Think Tank window, and the sector teams whenever it holds the champion pointer |
-| `scanner_gate_baseline_60` | 60 | `scanner_champion_rank` | the scanner slot's champion ARM, verbatim from `candidates.json::scanner_tickers` | **nothing** — a candidate-generation experiment, scored on the scanner leaderboard |
+| `scanner_champion_60` | 60 | `scanner_champion_rank` | the scanner slot's champion ARM, verbatim from `candidates.json::scanner_tickers` | **nothing** — a candidate-generation experiment, scored on the scanner leaderboard |
 | `tech_score_top_60` | 60 | `tech_score_rank` | the head of `tech_score_ranks`, over `scan_path == "momentum"` rows (§2a) | the sector teams whenever it holds the champion pointer (§1) |
 | `scanner_top_20` | 20 | `tech_score_rank_within_cut` | top 20 by `tech_score` **of the champion's 60** | nothing live — churn diagnostics |
 | `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | nothing — observe-only arm |
 | `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | nothing — observe-only arm |
 
-**The name `scanner_gate_baseline_60` is dated and deliberately not changed
-here.** It predates the 2026-07-22 cutover and reads as a `tech_score` gate,
-which it has not been since. It was already renamed once this month (from
-`scanner_candidates`, `alpha-engine-config-I7578`, whose alias is still
-emitted for the deprecation window; known live reader
-`crucible-dashboard/loaders/universe_churn.py`). Renaming a load-bearing key
-twice in four weeks costs consumers more than the stale word costs readers, so
-`basis` and `role` carry the truth and the rename is bundled with the I7578
-alias removal.
+**The name is `scanner_champion_60` as of `alpha-engine-config-I7818`.** It was
+`scanner_gate_baseline_60` before that — a name that predates the 2026-07-22
+cutover and reads as a `tech_score` gate, which it has not been since — and
+`scanner_candidates` before that (`alpha-engine-config-I7578`). I7578 deferred
+this second rename deliberately: renaming a load-bearing key twice in four
+weeks costs consumers more than the stale word costs readers. That reasoning
+expired once the I7578 alias's deprecation window forced a consumer update
+anyway, so I7818 did both moves in one change instead of two.
+`scanner_gate_baseline_60` is now the deprecated alias, emitted for one
+window; `scanner_candidates` is retired outright and no longer emitted. Known
+live reader migrated in the same change:
+`crucible-dashboard/loaders/universe_churn.py`.
 
 **`scanner_top_20` is scoped within the champion's cut, not over the universe.**
 It answers "which 20 of the champion's 60 does `tech_score` like best?", not

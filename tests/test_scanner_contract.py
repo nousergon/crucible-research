@@ -131,8 +131,8 @@ def test_tech_score_arm_is_deterministic_under_ties():
 # ── §2 every cut's basis matches its producer ────────────────────────────────
 
 EXPECTED_BASES = {
+    "scanner_champion_60": "scanner_champion_rank",
     "scanner_gate_baseline_60": "scanner_champion_rank",
-    "scanner_candidates": "scanner_champion_rank",
     "attractiveness_top_20": "attractiveness_rank",
     "attractiveness_top_25": "attractiveness_rank",
     "attractiveness_top_60": "attractiveness_rank",
@@ -184,17 +184,22 @@ def test_tech_score_cut_is_the_universe_not_the_champions_cut():
     what made "the tech score top 60" name nothing real."""
     cuts = _membership()["cuts"]
     ts_cut = set(cuts[f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"]["tickers"])
-    live_cut = set(cuts["scanner_gate_baseline_60"]["tickers"])
+    live_cut = set(cuts["scanner_champion_60"]["tickers"])
     assert ts_cut - live_cut, "tech_score cut is a subset of the live cut — it did not rank the universe"
     assert set(cuts["scanner_top_20"]["tickers"]) <= live_cut
 
 
 def test_live_cut_names_the_arm_that_ranked_it():
-    cut = _membership()["cuts"]["scanner_gate_baseline_60"]
+    cut = _membership()["cuts"]["scanner_champion_60"]
     assert cut["ranked_by"] == LIVE_CHAMPION
     # It feeds nothing: the sector teams read the champion CUT, not this
     # candidate-generation arm's artifact (alpha-engine-config-I7823).
     assert cut["feeds"] == []
+
+
+def test_scanner_candidates_is_no_longer_emitted():
+    """alpha-engine-config-I7818: the I7578 deprecation window is closed."""
+    assert "scanner_candidates" not in _membership()["cuts"]
 
 
 def test_the_feed_cut_declares_its_consumers():
