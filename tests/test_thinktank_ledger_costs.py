@@ -8,6 +8,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from tests._feed_helpers import feed_window_for
 from thinktank.costs import BudgetExceededError, BudgetGuard
 from thinktank.ledger import (
     load_ledger,
@@ -20,13 +21,20 @@ from thinktank.settings import ThinktankSettings
 from thinktank.storage import ThinktankStore
 
 
+def _si(ledger, board, **kw):
+    """``select_intake`` with the FeedWindow the scanner would have published.
+
+    The window is no longer derived from the board by the code under test
+    (alpha-engine-config-I7842); the fixture supplies it.
+    """
+    return select_intake(ledger, board, feed_window_for(board), **kw)
+
+
 def _board(n: int = 10, none_scores: set[int] | None = None) -> dict:
     stocks = []
     for i in range(n):
         score = None if (none_scores and i in none_scores) else 100 - i
-        stocks.append(
-            {"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": score}
-        )
+        stocks.append({"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": score})
     return {"schema_version": 3, "stocks": stocks}
 
 
@@ -48,9 +56,7 @@ def _settings(**over) -> ThinktankSettings:
 
 def test_intake_takes_top_uncovered_by_attractiveness():
     ledger = CoverageLedger()
-    new_rows, refresh = select_intake(
-        ledger, _board(), daily_new_names=5, rank_ceiling=150
-    )
+    new_rows, refresh = _si(ledger, _board(), daily_new_names=5, rank_ceiling=150)
     assert [r["ticker"] for r in new_rows] == ["T0", "T1", "T2", "T3", "T4"]
     assert [r["_attractiveness_rank"] for r in new_rows] == [1, 2, 3, 4, 5]
     assert refresh == []
@@ -59,9 +65,7 @@ def test_intake_takes_top_uncovered_by_attractiveness():
 def test_intake_skips_covered_and_null_scores():
     ledger = CoverageLedger()
     record_thesis_write(ledger, ticker="T0", trading_day="2026-07-01", thesis_version=1)
-    new_rows, _ = select_intake(
-        ledger, _board(none_scores={1}), daily_new_names=3, rank_ceiling=150
-    )
+    new_rows, _ = _si(ledger, _board(none_scores={1}), daily_new_names=3, rank_ceiling=150)
     # T0 covered, T1 has no score → next are T2,T3,T4
     assert [r["ticker"] for r in new_rows] == ["T2", "T3", "T4"]
 
@@ -72,9 +76,7 @@ def test_rank_ceiling_bounds_intake_and_stalest_refresh_fills_slots():
     record_thesis_write(ledger, ticker="T1", trading_day="2026-06-20", thesis_version=1)
     record_thesis_write(ledger, ticker="T2", trading_day="2026-06-10", thesis_version=1)
     # ceiling 3 → only ranks 1-3 (T0,T1,T2) eligible, all covered → 0 new
-    new_rows, refresh = select_intake(
-        ledger, _board(), daily_new_names=2, rank_ceiling=3
-    )
+    new_rows, refresh = _si(ledger, _board(), daily_new_names=2, rank_ceiling=3)
     assert new_rows == []
     # slots refresh the STALEST theses first
     assert refresh == ["T0", "T2"]
@@ -87,9 +89,7 @@ def test_skip_stale_refill_returns_new_only_even_with_slots_left():
     with stale-refill picks would silently do daily's job for it."""
     ledger = CoverageLedger()
     record_thesis_write(ledger, ticker="T0", trading_day="2026-06-01", thesis_version=1)
-    new_rows, refresh = select_intake(
-        ledger, _board(), daily_new_names=5, rank_ceiling=150, skip_stale_refill=True
-    )
+    new_rows, refresh = _si(ledger, _board(), daily_new_names=5, rank_ceiling=150, skip_stale_refill=True)
     assert [r["ticker"] for r in new_rows] == ["T1", "T2", "T3", "T4", "T5"]
     assert refresh == []
 
@@ -101,9 +101,7 @@ def test_skip_stale_refill_zero_gap_returns_nothing():
     ledger = CoverageLedger()
     for i in range(10):
         record_thesis_write(ledger, ticker=f"T{i}", trading_day="2026-07-01", thesis_version=1)
-    new_rows, refresh = select_intake(
-        ledger, _board(), daily_new_names=0, rank_ceiling=150, skip_stale_refill=True
-    )
+    new_rows, refresh = _si(ledger, _board(), daily_new_names=0, rank_ceiling=150, skip_stale_refill=True)
     assert new_rows == []
     assert refresh == []
 
@@ -139,7 +137,7 @@ def test_stale_entries_are_refreshed_regardless_of_new_names_slot_fill():
     # own — the "coverage already full" condition under which the
     # discretionary graceful-refresh path never fires (slots_left <= 0).
     board = _board(n=20)
-    new_rows, refresh = select_intake(
+    new_rows, refresh = _si(
         ledger,
         board,
         daily_new_names=5,
@@ -154,8 +152,7 @@ def test_stale_entries_are_refreshed_regardless_of_new_names_slot_fill():
     breached = {
         e.ticker
         for e in ledger.entries.values()
-        if (date.fromisoformat(trading_day) - date.fromisoformat(e.thesis_updated_on)).days
-        >= stale_after_days
+        if (date.fromisoformat(trading_day) - date.fromisoformat(e.thesis_updated_on)).days >= stale_after_days
     }
     assert breached == {"T0", "T1"}
     assert breached <= set(refresh), (
@@ -180,7 +177,7 @@ def test_stale_breach_is_mandatory_even_under_skip_stale_refill():
     ledger = CoverageLedger()
     record_thesis_write(ledger, ticker="T0", trading_day="2026-06-01", thesis_version=1)  # 64d old — breach
 
-    new_rows, refresh = select_intake(
+    new_rows, refresh = _si(
         ledger,
         _board(),
         daily_new_names=5,
@@ -196,8 +193,12 @@ def test_stale_breach_is_mandatory_even_under_skip_stale_refill():
 def test_record_thesis_write_updates_existing_entry():
     ledger = CoverageLedger()
     record_thesis_write(
-        ledger, ticker="T9", trading_day="2026-07-01", thesis_version=1,
-        sector="Tech", attractiveness_rank=4,
+        ledger,
+        ticker="T9",
+        trading_day="2026-07-01",
+        thesis_version=1,
+        sector="Tech",
+        attractiveness_rank=4,
     )
     record_thesis_write(ledger, ticker="T9", trading_day="2026-07-02", thesis_version=2)
     entry = ledger.entries["T9"]
