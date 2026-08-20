@@ -41,6 +41,48 @@ ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FUNCTION_MAIN}"
 
 TARGET="${1:-both}"
 
+# ── Deploy stamp: what commit is this function actually running? ─────────────
+#
+# alpha-engine-config-I7840. Until now the only stamp was the Docker ENV
+# ``ALPHA_ENGINE_CODE_SHA`` baked by ``--build-arg GIT_SHA`` (Dockerfile L69).
+# Runtime code can read it, but nothing OUTSIDE the function can: an image ENV
+# is not surfaced by ``lambda get-function-configuration``, so answering "is
+# this Lambda behind main?" required invoking it. That is why the 2026-08-18
+# scanner ran two days of pre-fix code with nobody able to see it (I7645 →
+# I7819 → I7840): the fact existed and was unreadable.
+#
+# Setting the SAME name as a function-level environment variable makes it
+# readable without a redeploy and without an invoke. Same name deliberately —
+# a second stamp key would be a fork, and the two would diverge in exactly the
+# direction that produces a confident wrong answer. The function-level value
+# overrides the image ENV with an identical value for the main image, and
+# supplies one for the image-shared Lambdas and for the alerts image, which
+# has no GIT_SHA build-arg at all.
+#
+# Resolved ONCE here, at global scope, rather than inside build_and_deploy_main:
+# deploy.yml invokes this script once PER TARGET, so `deploy.sh scanner` never
+# enters the main build path and would otherwise stamp nothing.
+GIT_SHA="${GITHUB_SHA:-$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse HEAD 2>/dev/null || echo '')}"
+if [[ ! "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: could not resolve a 40-hex commit SHA to stamp this deploy with." >&2
+  echo "  GITHUB_SHA='${GITHUB_SHA:-<unset>}' and 'git rev-parse HEAD' gave '${GIT_SHA}'." >&2
+  echo "  Refusing to publish an UNSTAMPED function: an unstamped deploy is exactly" >&2
+  echo "  the invisible state alpha-engine-config-I7840 exists to remove, and the" >&2
+  echo "  drift detector would report it as unmeasured forever." >&2
+  exit 1
+fi
+
+# A deploy built from a working tree with uncommitted changes carries a SHA
+# that does NOT describe the running code. Stamping the SHA alone would make
+# the drift detector report `in_sync` about code that exists nowhere in git.
+# Say so instead. Empty `git status --porcelain` output means clean.
+if [ -n "$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." status --porcelain 2>/dev/null)" ]; then
+  GIT_TREE_DIRTY="true"
+  echo "WARNING: deploying from a DIRTY working tree — functions will be stamped DEPLOY_STAMP_DIRTY=true."
+else
+  GIT_TREE_DIRTY="false"
+fi
+
 
 # ── Lambda existence check (fail-loud on non-NotFound errors) ────────────────
 #
@@ -188,6 +230,30 @@ _apply_cost_sink_env() {
   local fn="$1"
   echo "  Applying cost-sink addressing to $fn (merge, not replace)..."
   python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set KREPIS_COST_SINK_BUCKET="$BUCKET" --set KREPIS_COST_SINK_PREFIX=decision_artifacts/_cost_raw --region "$REGION"
+}
+
+# ── Deploy stamp applier (alpha-engine-config-I7840) ─────────────────────────
+#
+# Merge, never replace — same read-modify-write CLI as the cost-sink applier,
+# so provider keys, RAG_DATABASE_URL and LangSmith config that exist only on
+# the live functions survive.
+#
+# ORDERING IS LOAD-BEARING, twice over:
+#   1. This must run BEFORE `publish-version`, or the `live` alias serves a
+#      version whose environment has no stamp while `$LATEST` shows one — the
+#      deploy-path defect that is invisible in every file (config#2766), and
+#      the drift detector reads the ALIAS, not $LATEST.
+#   2. It must WAIT first. `_apply_cost_sink_env` runs immediately before it
+#      and leaves the function in LastUpdateStatus=InProgress for a few
+#      seconds; a configuration update issued inside that window fails with
+#      ResourceConflictException, which under `set -euo pipefail` aborts the
+#      whole deploy (observed live on the router-env applier, deploy runs
+#      30866612804 / 30867141385, 2026-08-04).
+_apply_deploy_stamp_env() {
+  local fn="$1"
+  echo "  Stamping $fn with ALPHA_ENGINE_CODE_SHA=$GIT_SHA (dirty=$GIT_TREE_DIRTY, merge not replace)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set ALPHA_ENGINE_CODE_SHA="$GIT_SHA" --set DEPLOY_STAMP_DIRTY="$GIT_TREE_DIRTY" --region "$REGION"
 }
 
 _apply_router_env() {
@@ -383,13 +449,15 @@ build_and_deploy_main() {
   # falls back to `git rev-parse HEAD`. Empty (not "unknown") when neither
   # resolves, so graph/research_graph.py's `os.environ.get(...) or None` read
   # records None rather than a misleading literal. Mirrors the predictor wire-in.
-  GIT_SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo '')}"
-  echo "  Stamping image with GIT_SHA=${GIT_SHA:-<unset>}"
+  # GIT_SHA is resolved once at global scope (see the deploy-stamp block near
+  # the top) so every target stamps the same value, not just this one.
+  echo "  Stamping image with GIT_SHA=${GIT_SHA}"
 
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false \
     --build-arg "GIT_SHA=${GIT_SHA}" \
+    --label "org.opencontainers.image.revision=${GIT_SHA}" \
     -t "$FUNCTION_MAIN:latest" .
 
   # Only remove staged files — never touch a local dev checkout that
@@ -467,6 +535,7 @@ build_and_deploy_main() {
 
   _apply_router_env "$FUNCTION_MAIN"
   _apply_cost_sink_env "$FUNCTION_MAIN"
+  _apply_deploy_stamp_env "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
@@ -595,6 +664,7 @@ build_and_deploy_alerts() {
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false \
+    --label "org.opencontainers.image.revision=${GIT_SHA}" \
     -f Dockerfile.alerts \
     -t "$FUNCTION_ALERTS:latest" .
 
@@ -652,6 +722,7 @@ build_and_deploy_alerts() {
       --memory-size 256 \
       --region "$REGION" > /dev/null
   fi
+  _apply_deploy_stamp_env "$FUNCTION_ALERTS"
   echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
@@ -700,6 +771,8 @@ deploy_eval_judge() {
   echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
 
   _apply_cost_sink_env "$FUNCTION_EVAL_JUDGE"
+
+  _apply_deploy_stamp_env "$FUNCTION_EVAL_JUDGE"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
@@ -763,6 +836,8 @@ deploy_eval_rolling_mean() {
   echo "  $FUNCTION_EVAL_ROLLING_MEAN deployed (CMD=eval_rolling_mean_handler.handler)."
 
   _apply_cost_sink_env "$FUNCTION_EVAL_ROLLING_MEAN"
+
+  _apply_deploy_stamp_env "$FUNCTION_EVAL_ROLLING_MEAN"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" 2>/dev/null || sleep 5
@@ -839,6 +914,8 @@ deploy_rationale_clustering() {
   echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
 
   _apply_cost_sink_env "$FUNCTION_RATIONALE_CLUSTERING"
+
+  _apply_deploy_stamp_env "$FUNCTION_RATIONALE_CLUSTERING"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
@@ -922,6 +999,8 @@ _deploy_image_shared_lambda() {
   echo "  $fn_name deployed (CMD=${handler_module}.handler timeout=${timeout_s}s memory=${memory_mb}MB)."
 
   _apply_cost_sink_env "$fn_name"
+
+  _apply_deploy_stamp_env "$fn_name"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5
@@ -1065,7 +1144,7 @@ deploy_perturbation_battery() {
 
 case "$TARGET" in
   main)                  build_and_deploy_main ;;
-  alerts)                build_and_deploy_alerts ;;  # ci-deploy-guard: manual — alerts Lambda deployed on demand, not on every merge
+  alerts)                build_and_deploy_alerts ;;
   eval_judge)            deploy_eval_judge ;;
   eval_judge_batch)      deploy_eval_judge_batch ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
