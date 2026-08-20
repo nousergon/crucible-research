@@ -13,15 +13,18 @@ name: Judge Perturbation Smoke
 # or the smoke itself. Rubric PROMPT changes live in alpha-engine-config
 # and reach the judge via that repo's notify-research dispatch.
 #
-# alpha-engine-config-I2997 (2026-07-19): evaluate_artifact (the sync
-# judge path this smoke exercises via _default_judge) migrated off direct
-# Anthropic to OpenRouter/DeepSeek V4 Flash — this workflow now needs
-# OPENROUTER_API_KEY instead of ANTHROPIC_API_KEY.
+# alpha-engine-config-I6559 (2026-08-19, crucible-research#666):
+# evaluate_artifact (the sync judge path this smoke exercises via
+# _default_judge) moved off direct OpenRouter onto krepis.router — this
+# workflow reads NO provider API key (alpha-engine-config-I7880 removed
+# the stale OPENROUTER_API_KEY injection this comment used to describe;
+# the earlier I2997 OpenRouter/DeepSeek V4 Flash migration this paragraph
+# once documented was itself superseded by I6559's router move).
 #
-# Needs BOTH the OPENROUTER_API_KEY secret (live judge call) AND the
-# alpha-engine-config checkout (the eval rubric prompts are gitignored
-# here and loaded at runtime). Forks without the API secret get a clean
-# skip (the script exits 0 when the env var is unset).
+# Needs the alpha-engine-config checkout (the eval rubric prompts are
+# gitignored here and loaded at runtime) and a reachable router — see the
+# I7853 paragraph below for the CI-runner reachability gap and how the
+# smoke script's own outputs communicate it.
 #
 # Cost: ~6 DeepSeek V4 Flash judge calls per run (1 reference per rubric +
 # one per corruption) — cents, cheaper than the pre-migration Haiku
@@ -63,11 +66,12 @@ jobs:
     timeout-minutes: 20
     # dependabot[bot] PRs never receive secrets on a pull_request-triggered
     # run (GitHub withholds them even same-repo — alpha-engine-config#7266/
-    # #7268), and this job needs a live OPENROUTER_API_KEY to call the judge
-    # LLM plus PR-controlled code (evals/judge.py, evals/perturbation.py) —
-    # unlike ci.yml's config checkout, that combination can't be split
-    # safely into a secrets-holding, code-executing step. A dependency bump
-    # never legitimately touches judge/perturbation code (the requirements.txt
+    # #7268), and this job needs the live ALPHA_ENGINE_CONFIG_TOKEN secret
+    # (to check out the gitignored rubric prompts) plus PR-controlled code
+    # (evals/judge.py, evals/perturbation.py) — unlike ci.yml's config
+    # checkout, that combination can't be split safely into a
+    # secrets-holding, code-executing step. A dependency bump never
+    # legitimately touches judge/perturbation code (the requirements.txt
     # path filter is what pulls dependabot PRs in here incidentally), so skip
     # entirely rather than widen what a compromised dependency update could
     # exfiltrate or spend. Not a required check — skip is a clean pass.
@@ -127,7 +131,6 @@ jobs:
       - name: Run judge perturbation smoke
         id: run_smoke
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PYTHONPATH: .
         run: python tests/live_smoke/judge_perturbation_smoke.py
 
