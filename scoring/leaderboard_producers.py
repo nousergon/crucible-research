@@ -55,7 +55,10 @@ MULTI-HORIZON (alpha-engine-config-I7540). Every arm is now scored at 21, 126
 AND 252 trading sessions — one block per horizon under ``horizons``, each with
 its own ``n_dates`` and its own per-spec rows. 21 alone could not answer the
 ~1-year question the scanner exists to ask. The panel is read ONCE, sized to
-the longest horizon, and every horizon's returns are derived from it. The 21-
+the COHORT'S SPAN (alpha-engine-config-I7812 — no session before the earliest
+entry date can appear in any forward return, at any horizon), and every
+horizon's returns are derived from it. Whether the SOURCE can serve a given
+horizon is a separate question answered by a one-ticker calendar read. The 21-
 session block remains the artifact's TOP LEVEL, unchanged in shape and value,
 because a promoted arm keeps its history (champion-challenger-policy.md §3) and
 every existing consumer reads that surface.
@@ -126,11 +129,19 @@ _MEMBERSHIP = "universe_membership/{date}/membership.json"
 # Within-invocation closes-panel dedup (alpha-engine-config-I7584). Three
 # leaderboards now run in one Scanner invocation and, since config-I7587, each
 # needs the FULL universe panel rather than its own arms' picks. Without this
-# that is three identical ~904-symbol ArcticDB reads sized to 252 sessions —
-# the dominant cost of the whole observe path, paid three times for one answer.
+# that is three identical ~905-symbol ArcticDB reads — the dominant cost of
+# the whole observe path, paid three times for one answer. (I7812 measured
+# that cost: it is the SYMBOL COUNT, not the window. See
+# ``_closes_panel_from_arcticdb``.)
 # Not a cross-run cache: see the key construction in _load_closes_panel —
 # and note that the key holds the loader OBJECT, never its ``id()``.
 _PANEL_CACHE: dict[tuple, dict[str, dict[str, float]]] = {}
+
+# Calendar-day slack added to the cohort span when sizing the closes panel
+# (alpha-engine-config-I7812). Boundary insurance only — see
+# ``_closes_panel_from_arcticdb`` for why the window does NOT scale with
+# the horizon.
+_PANEL_MARGIN_DAYS = 10
 
 _CANDIDATES_SHADOW = "candidates_shadow/{spec}/{date}/candidates.json"
 _CANDIDATES_LIVE = "candidates/{date}/candidates.json"
@@ -266,41 +277,95 @@ def _closes_panel_from_arcticdb(
     from nousergon_lib.arcticdb import load_universe_ohlcv
 
     earliest = min(entry_dates)
-    # Cover earliest entry → today, plus slack so the horizon session after the
-    # LAST entry date is inside the window AND the panel holds at least
-    # ``horizon_days`` sessions in total (which is what
-    # ``_assert_horizon_is_satisfiable`` checks).
+    # TWO WINDOWS, ONE PANEL (alpha-engine-config-I7812).
     #
-    # alpha-engine-config-I7540 widened this: ``horizon_days`` is now the
-    # LONGEST horizon scored (252 sessions), not 21. Trading sessions run ~252
-    # per 365 calendar days (~0.69), so H sessions span ~H/0.69 calendar days —
-    # 252 sessions ≈ 366 calendar days. The 2x + 10 slack therefore yields ~514
-    # calendar days of pad against the ~366 actually needed at the longest
-    # horizon, and proportionally more at the shorter ones. Deliberately kept
-    # multiplicative rather than pinned to a constant: a slack that does not
-    # scale with the horizon is exactly the shape of the I5195 defect (a
-    # measurement whose window silently could not serve its own horizon).
+    # PRICES cover the COHORT'S SPAN, not the horizon. It used to be
+    # ``span + horizon_days * 2 + 10``, and with I7540 making ``horizon_days``
+    # the LONGEST horizon (252) that read 569 calendar days over ~905 tickers
+    # instead of 107. Every one of those ~460 extra days is dead weight, and
+    # the reason is structural rather than empirical: a forward return reads
+    # ``panel[entry]`` and ``panel[horizon_date]``, and BOTH are >= the
+    # earliest entry date by construction (``_horizon_date`` only considers
+    # sessions strictly AFTER the entry). No session before ``min(entry_dates)``
+    # can appear in any metric, at any horizon. Measured live 2026-08-20:
+    # 353,413 panel rows -> 40,441 for identical output.
+    #
+    # The CALENDAR still covers the longest horizon, because
+    # ``_assert_horizon_is_satisfiable`` asks a question about the SOURCE —
+    # "does the store hold ``horizon_days`` sessions at all", the I5195
+    # invariant — and answering it from a window narrowed to the cohort would
+    # turn a truncated ArcticDB into a silent "nothing has matured yet". So
+    # the benchmark alone is read over the wide window and merged in. One
+    # ticker, measured 2.9s, versus 905 tickers for the same answer.
+    #
+    # Trading sessions run ~252 per 365 calendar days (~0.69), so H sessions
+    # span ~H/0.69 calendar days — 252 sessions ~= 366. The 2x + 10 slack is
+    # deliberately kept multiplicative on the calendar read: a slack that does
+    # not scale with the horizon is exactly the shape of the I5195 defect.
+    #
+    # CONSEQUENCE, stated because it is not visible from the return type: the
+    # panel is RAGGED. Dates before ``min(entry_dates)`` carry the benchmark
+    # only. That is sound precisely because those dates are unreachable by any
+    # metric (the paragraph above), and it is why the calendar half must never
+    # be widened past the benchmark into a partial universe — a date with SOME
+    # tickers is a wrong cross-section, not a small one.
     #
     # ArcticDB carries no lifecycle expiry (verified live 2026-08-17: the
     # ``alpha-engine-research`` bucket has exactly two lifecycle rules, on
-    # ``staging/`` and ``features/``, neither matching ``arcticdb/``), and
-    # ``load_universe_ohlcv`` defaults to a 730-day window, so a ~570-day read
-    # is comfortably inside what the source holds.
+    # ``staging/`` and ``features/``, neither matching ``arcticdb/``).
     span_days = (pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timestamp(earliest)).days
-    lookback = max(span_days, 1) + horizon_days * 2 + 10
+    # ``_PANEL_MARGIN_DAYS`` is boundary insurance only: the earliest entry
+    # date must itself be inside the window, and a cohort date landing on the
+    # exact first day of the read is not a state to depend on.
+    price_lookback = max(span_days, 1) + _PANEL_MARGIN_DAYS
+    calendar_lookback = max(price_lookback, horizon_days * 2 + 10)
 
-    # Narrow to the tickers the arms actually picked (plus the benchmark).
-    # Reading the full ~900-symbol universe took >2min locally — far too
-    # slow for the Lambda this runs in, and entirely wasted work since only
-    # picked names contribute to any metric.
-    frames = load_universe_ohlcv(
-        bucket,
-        symbols=sorted(symbols) if symbols else None,
-        lookback_days=lookback,
-        columns=[_CLOSE_COL],
+    # Narrow to the tickers the arms actually picked (plus the benchmark) when
+    # the caller asks for it. Since config-I7587 the CUTS board grades against
+    # the population it narrowed, so it passes ``symbols=None`` and this reads
+    # the full ~905-symbol universe — which, measured 2026-08-20, is the whole
+    # cost of this function. That cost was fixed at the shared read chokepoint
+    # (nousergon-lib: ONE ``read_batch`` rather than 905 threaded per-symbol
+    # reads, 462.5s -> 75.1s live over the same window), NOT by narrowing the
+    # graded population back — a narrowed baseline is a silently wrong answer,
+    # not a smaller one.
+    frames = dict(
+        load_universe_ohlcv(
+            bucket,
+            symbols=sorted(symbols) if symbols else None,
+            lookback_days=price_lookback,
+            columns=[_CLOSE_COL],
+        )
+        or {}
     )
+    if calendar_lookback > price_lookback:
+        calendar_frames = (
+            load_universe_ohlcv(
+                bucket,
+                symbols=[_BENCHMARK_TICKER],
+                lookback_days=calendar_lookback,
+                columns=[_CLOSE_COL],
+            )
+            or {}
+        )
+        # Overwrite, not setdefault: same library, same column, strictly wider
+        # range, so the calendar frame is a SUPERSET of whatever the price read
+        # returned for the benchmark. setdefault would keep the narrow one and
+        # the calendar would silently not widen at all. The benchmark is always
+        # present in the panel afterwards, narrowed ``symbols`` included —
+        # which is what "plus the benchmark" above has always meant.
+        benchmark = calendar_frames.get(_BENCHMARK_TICKER)
+        if benchmark is None or benchmark.empty:
+            raise LeaderboardUnmeasurableError(
+                f"the closes source returned no {_BENCHMARK_TICKER} history "
+                f"over {calendar_lookback} days, so the session calendar "
+                "cannot be established and no horizon's capability can be "
+                "judged against it. Check the ArcticDB universe library and "
+                "MorningArcticAppend."
+            )
+        frames[_BENCHMARK_TICKER] = benchmark
     panel: dict[str, dict[str, float]] = {}
-    for ticker, df in (frames or {}).items():
+    for ticker, df in frames.items():
         if df is None or df.empty:
             continue
         # ArcticDB's universe library stores TITLE-case OHLCV ("Close"), per
@@ -447,7 +512,7 @@ def _resolve_realized_returns_by_horizon(
     Returns ``({horizon_days: realized}, {horizon_days: (status, reason)})`` —
     the second map naming only the horizons that could not be measured at all.
 
-    The panel is loaded ONCE, sized to the LONGEST horizon, and every horizon's
+    The panel is loaded ONCE, sized to the cohort's span, and every horizon's
     forward returns are derived from it. Three reads of an ArcticDB slice for
     three horizons would triple the Lambda's dominant cost for data it already
     holds in memory.
