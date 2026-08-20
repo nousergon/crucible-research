@@ -97,6 +97,7 @@ from nousergon_lib.trading_calendar import count_trading_days
 
 from observe_alerts import publish_observe_alert
 from scoring.leaderboard_scoring import (
+    CONFIDENCE_INSUFFICIENT,
     DEFAULT_HORIZON_DAYS,
     HORIZON_IMMATURE,
     HORIZON_OK,
@@ -570,6 +571,66 @@ def _annotate_horizon_maturity(
             source=f"research:{leaderboard_id}_leaderboard",
             dedup_key=f"{leaderboard_id}_leaderboard_horizon_overdue:{h}:{as_of}",
         )
+
+
+def _annotate_arm_measurement_gaps(
+    leaderboard_id: str,
+    blocks: list[dict],
+    arms: list[SpecHistory],
+    as_of: str,
+) -> None:
+    """A block's ``n_dates`` is the UNION of every arm's scored dates
+    (alpha-engine-config-I7819) — one arm with real history reads the whole
+    block as ``status: ok``, ``n_dates: 8``, even while its co-arms carry
+    ``confidence: insufficient`` and contributed nothing. Measured live on
+    ``research/cuts_leaderboard/2026-08-19.json``: the board read
+    ``n_dates: 8`` while 2 of 3 arms scored 0 dates each — a board that looks
+    measured while a majority of its arms are not (the observability gap the
+    issue's deliverable #4 names, precedent alpha-engine-config-I5195). This
+    makes that gap an explicit, machine-checkable field rather than something
+    a reader has to notice by scanning every row's ``confidence``.
+
+    Each unmeasured arm is then classified exactly as
+    ``_overdue_zero_cohort_reason`` classifies a whole block: ``immature``
+    (that arm's own oldest cohort has not aged past this horizon yet —
+    self-resolving, correctly silent, no alert) or overdue (it has, and the
+    arm still scored nothing — a real defect, alerted once per arm/horizon/day,
+    deduped). A brand-new arm (e.g. a cut introduced days ago) is immature by
+    construction and must not page; an arm whose alias/name resolution is
+    broken IS a defect and must.
+    """
+    by_name = {a.name: a for a in arms}
+    for block in blocks:
+        h = block["horizon_days"]
+        unmeasured = sorted({
+            row["name"] for row in block["specs"]
+            if row.get("confidence") == CONFIDENCE_INSUFFICIENT
+        })
+        block["arms_total"] = len(block["specs"])
+        block["arms_unmeasured"] = unmeasured
+        for name in unmeasured:
+            arm = by_name.get(name)
+            arm_dates = sorted(arm.by_date) if arm is not None else []
+            overdue = _overdue_zero_cohort_reason(arm_dates, h, as_of)
+            if overdue is None:
+                continue  # genuine immaturity — self-resolving, not a defect
+            logger.error(
+                "[leaderboard] %s arm %r OVERDUE at %sd on %s (block reads "
+                "n_dates=%s from other arms): %s",
+                leaderboard_id, name, h, as_of, block["n_dates"], overdue,
+            )
+            publish_observe_alert(
+                message=(
+                    f"[leaderboard] {leaderboard_id} leaderboard: arm {name!r} "
+                    f"scored ZERO cohorts at the {h}-session horizon on {as_of} "
+                    f"despite the block overall reading n_dates={block['n_dates']} "
+                    "(other arms ARE scoring, so this is not whole-block "
+                    f"immaturity): {overdue}. The board-level rollup was hiding "
+                    "a per-arm miss (alpha-engine-config-I7819)."
+                ),
+                source=f"research:{leaderboard_id}_leaderboard",
+                dedup_key=f"{leaderboard_id}_leaderboard_arm_overdue:{name}:{h}:{as_of}",
+            )
 
 
 # ── Shadow-artifact → SpecHistory loaders ─────────────────────────────────────
@@ -1347,6 +1408,7 @@ def build_cuts_leaderboard(
             })
         merged["n_dates"] = primary_block["n_dates"]
         _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
+        _annotate_arm_measurement_gaps("cuts", merged["horizons"], arms, date_str)
         merged["leaderboard_id"] = "cuts"
         merged["date"] = date_str
         # The slot-level top_n is meaningless here and must not be read as one.
