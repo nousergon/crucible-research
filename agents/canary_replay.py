@@ -129,62 +129,6 @@ def probe_thesis_update(am, tickers: list[dict]) -> dict:
         )
 
 
-def probe_qual_analyst(am, tickers: list[dict]) -> dict:
-    """Probe 2b: qual-analyst ReAct extraction for the same held tickers,
-    live LLM + live tool-use loop (news/filings/insider/RAG tools)."""
-    from agents.sector_teams.qual_analyst import run_qual_analyst
-
-    start = time.monotonic()
-    try:
-        symbols = [p["ticker"] for p in tickers]
-        prior_theses = am.load_latest_theses(symbols)
-        quant_top5 = [
-            {
-                "ticker": p["ticker"],
-                "score": p.get("long_term_score", 0),
-                "sector": p.get("sector"),
-            }
-            for p in tickers
-        ]
-        result = run_qual_analyst(
-            team_id="canary",
-            quant_top5=quant_top5,
-            prior_theses=prior_theses,
-            market_regime="neutral",
-            run_date=CANARY_RUN_DATE,
-        )
-        assessments = result.get("assessments") or []
-        n = len(assessments)
-        # `run_qual_analyst` SWALLOWS its own failures by design — it returns
-        # `{"assessments": [], "error": ..., "partial": ...}` so the score
-        # aggregator can treat a dead team as degraded rather than fatal. A
-        # probe that only checks "did it raise" therefore reports PASS through
-        # a total outage: on 2026-08-16 this said `PASS / 0 assessments
-        # returned` while every call in the run was answered `401 Authorization
-        # Required` (alpha-engine-config-I7463). Had the sibling probes been
-        # healthy, the canary would have returned overall_status PASS for a run
-        # that made no successful model call.
-        error = result.get("error")
-        partial = result.get("partial")
-        if error is not None or partial or n == 0:
-            return _probe_result(
-                "qual_analyst",
-                "FAIL",
-                f"{n} assessments for {len(tickers)} real held tickers "
-                f"(error={error!r}, partial={partial!r}, "
-                f"partial_reason={result.get('partial_reason')!r})",
-                time.monotonic() - start,
-            )
-        return _probe_result(
-            "qual_analyst", "PASS", f"{n} assessments returned", time.monotonic() - start
-        )
-    except Exception as e:
-        log.exception("[canary_replay] qual_analyst probe failed")
-        return _probe_result(
-            "qual_analyst", "FAIL", f"{type(e).__name__}: {e}", time.monotonic() - start
-        )
-
-
 # The probe's own output budget (alpha-engine-config-I7589), deliberately NOT
 # MAX_TOKENS_STRATEGIC. This is ONE call per canary run, so sizing it
 # generously costs nothing, and borrowing a constant tuned for strategic agent
@@ -333,9 +277,22 @@ def run_canary(run_id: str, n_tickers: int = 5, api_key: str | None = None) -> d
             "held-ticker paths against real data."
         )
 
+    # `probe_qual_analyst` was REMOVED 2026-08-20 (alpha-engine-config-I7816,
+    # I7817). It delegated to `agents.sector_teams.qual_analyst.run_qual_analyst`,
+    # part of the multi-agent research path retired by Brian's 2026-07-27 ruling.
+    # The registry row for the probe originally said so verbatim — "Canary probe
+    # delegates to a retired multi-agent agent, so it measures nothing
+    # reachable. Retired with its target" — and was reinstated on 2026-08-12
+    # (I7011 §2) on the reasoning that the canary calls it, which made a TEST the
+    # sole evidence of the component's liveness. Brian ruled 2026-08-20 that no
+    # test may run against a deprecated element; the probe goes with its target.
+    #
+    # Measured before removing, not assumed: production `signals/latest.json`
+    # (producer `signals_envelope`) carries no `sector_team_outputs`, no
+    # assessments, no cio and no macro — the multi-agent graph produces no
+    # production artifact.
     probes = [
         probe_thesis_update(am, tickers),
-        probe_qual_analyst(am, tickers),
         probe_validation_retry(api_key),
     ]
     overall = "PASS" if all(p["status"] == "PASS" for p in probes) else "FAIL"

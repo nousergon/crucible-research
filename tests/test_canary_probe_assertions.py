@@ -18,64 +18,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-class TestQualAnalystProbeRejectsEmptyResults:
-    """The I7463 shape: a swallowed failure must not read as a pass."""
-
-    @staticmethod
-    def _probe(result: dict):
-        from agents.canary_replay import probe_qual_analyst
-
-        am = MagicMock()
-        am.load_latest_theses.return_value = {}
-        tickers = [{"ticker": "AAPL", "long_term_score": 1}, {"ticker": "MSFT", "long_term_score": 2}]
-
-        with patch(
-            "agents.sector_teams.qual_analyst.run_qual_analyst", return_value=result
-        ):
-            return probe_qual_analyst(am, tickers)
-
-    def test_swallowed_error_is_a_fail(self):
-        """The exact 2026-08-16 payload: the ReAct loop died on a 401 and
-        returned an empty, error-carrying dict rather than raising."""
-        out = self._probe(
-            {
-                "assessments": [],
-                "error": "AuthenticationError: 401 Authorization Required",
-                "partial": False,
-            }
-        )
-        assert out["status"] == "FAIL"
-        assert "401" in out["detail"]
-
-    def test_zero_assessments_is_a_fail_even_with_no_error(self):
-        out = self._probe({"assessments": [], "error": None, "partial": False})
-        assert out["status"] == "FAIL", (
-            "zero assessments for real held tickers is a failure however it was "
-            "produced — this is the 'plausible zero' the probe used to pass on"
-        )
-
-    def test_partial_is_a_fail(self):
-        out = self._probe(
-            {
-                "assessments": [{"ticker": "AAPL"}],
-                "error": None,
-                "partial": True,
-                "partial_reason": "recursion_limit_exhausted",
-            }
-        )
-        assert out["status"] == "FAIL"
-        assert "recursion_limit_exhausted" in out["detail"]
-
-    def test_full_result_still_passes(self):
-        out = self._probe(
-            {
-                "assessments": [{"ticker": "AAPL"}, {"ticker": "MSFT"}],
-                "error": None,
-                "partial": False,
-            }
-        )
-        assert out["status"] == "PASS"
+# The `TestQualAnalystProbeRejectsEmptyResults` class was REMOVED 2026-08-20
+# (alpha-engine-config-I7816, I7817) together with `probe_qual_analyst`. It
+# guarded a probe that delegated to `run_qual_analyst`, part of the multi-agent
+# research path retired by Brian's 2026-07-27 ruling. Its assertions were good
+# ones — they are what turned I7463's false PASS into a real FAIL — but a test
+# whose subject is retired is not fresh, current or accurate, and keeping it
+# made a TEST the sole evidence that a retired component was live (the I7011 §2
+# reversal). Deleted with its subject rather than kept as coverage of nothing.
 
 
 class TestThesisUpdateProbeRejectsUnratedTickers:
