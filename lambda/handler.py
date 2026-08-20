@@ -531,7 +531,8 @@ def _run(event, context):
     #   * EventBridge `alpha-research-weekly` and `alpha-research-daily` are
     #     both DISABLED;
     #   * `infrastructure/spot_research_weekly.sh` → `weekly_box_runner.py`
-    #     → `handler(weekly_run=True)` has no invoker in any fleet repo.
+    #     → `handler(weekly_run=True)` had no invoker in any fleet repo, and
+    #     both files were DELETED 2026-08-20 (alpha-engine-config-I7856).
     #
     # The producer it ran (`agentic_sector_teams`) is `kind="retired"`,
     # `retired_date="2026-07-12"`, and champion-challenger-policy.md §6 is
