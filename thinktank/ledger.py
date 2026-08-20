@@ -2,8 +2,10 @@
 
 Intake policy (EPIC config#1579, skeleton-crew MVP):
 - each daily run takes the top ``daily_new_names`` UNCOVERED names from the
-  scanner attractiveness ranking, bounded by ``rank_ceiling`` (never initiate
-  coverage on a name ranked below R);
+  scanner's DECLARED ranking — ``thinktank.feed.FeedWindow``, resolved from
+  ``universe_membership/latest.json`` through the live champion pointer, never
+  re-derived here (alpha-engine-config-I7842) — bounded by ``rank_ceiling``
+  (never initiate coverage on a name ranked below R);
 - when fewer than ``daily_new_names`` eligible uncovered names exist, the
   remaining slots refresh the STALEST covered theses — coverage maintenance
   falls out of the intake rule for free (the DISCRETIONARY path);
@@ -23,6 +25,7 @@ import logging
 from datetime import UTC, date, datetime
 
 from thinktank import LEDGER_KEY
+from thinktank.feed import FeedWindow, join_board_rows
 from thinktank.schemas import CoverageLedger, LedgerEntry
 from thinktank.storage import ThinktankStore
 
@@ -48,25 +51,10 @@ def save_ledger(store: ThinktankStore, ledger: CoverageLedger) -> None:
     store.put_json(LEDGER_KEY, ledger.model_dump())
 
 
-def ranked_universe(board: dict) -> list[dict]:
-    """Universe-board ``stocks[]`` sorted by attractiveness_score desc.
-
-    Names with a null attractiveness_score sort last and are never eligible
-    for intake (no basis to rank them).
-    """
-    stocks = board.get("stocks", [])
-    return sorted(
-        stocks,
-        key=lambda s: (
-            s.get("attractiveness_score") is None,
-            -(s.get("attractiveness_score") or 0.0),
-        ),
-    )
-
-
 def select_intake(
     ledger: CoverageLedger,
     board: dict,
+    window: FeedWindow,
     *,
     daily_new_names: int,
     rank_ceiling: int,
@@ -77,8 +65,18 @@ def select_intake(
 ) -> tuple[list[dict], list[str]]:
     """Pick today's work: (new_names_with_board_rows, refresh_tickers).
 
-    ``new`` = top uncovered by attractiveness with rank <= rank_ceiling (rank
-    is 1-based position in the attractiveness-sorted universe). ``refresh``
+    ``window`` is the scanner's declared contract (``thinktank.feed``): the
+    coverage window's membership plus the full ranking in the SERVING arm's
+    basis. Every rank in this function is that artifact's rank — nothing here
+    sorts the board, and nothing here names a basis. Before
+    alpha-engine-config-I7842 this module sorted ``board["stocks"]`` by
+    ``attractiveness_score`` itself, which hardcoded the basis (so a promotion
+    to a tech-basis champion would have left Think Tank covering the losing
+    arm's names in silence) and used board POSITION as universe rank, which is
+    off by one below rank 98 today (alpha-engine-config-I7844).
+
+    ``new`` = top uncovered names with rank <= rank_ceiling (rank is the
+    1-based rank the membership artifact publishes). ``refresh``
     fills any remaining slots with the stalest covered names (the
     DISCRETIONARY path) — UNLESS ``skip_stale_refill``, which suppresses
     that discretionary fill (used by the Saturday SF's gap-fill mode:
@@ -102,7 +100,10 @@ def select_intake(
     staleness enforcement is the daily job's role, not gap_fill's, per
     ``thinktank/run.py``'s module docstring.
     """
-    ranked = ranked_universe(board)
+    # Fails loud if a name in the declared window has no board row: the row is
+    # what the analyst underwrites from, and the two artifacts come from the
+    # same Scanner run.
+    board_rows = join_board_rows(window, board)
     covered = ledger.covered()
 
     # ── HYSTERESIS EXIT (alpha-engine-config-I6648) ─────────────────────────
@@ -125,13 +126,8 @@ def select_intake(
     # worse than `exit_rank` de-covers.
     dropped: list[str] = []
     if exit_rank is not None and covered:
-        rank_by_ticker = {
-            row.get("ticker"): rank
-            for rank, row in enumerate(ranked, start=1)
-            if row.get("ticker")
-        }
         for ticker in sorted(covered):
-            rank = rank_by_ticker.get(ticker)
+            rank = window.rank_of(ticker)
             if rank is not None and rank > exit_rank:
                 entry = ledger.entries[ticker]
                 entry.covered = False
@@ -141,25 +137,47 @@ def select_intake(
         if dropped:
             covered = ledger.covered()
             logger.info(
-                "[thinktank] de-covered %d name(s) past exit_rank=%d: %s "
-                "(thesis history retained — config-I6648)",
-                len(dropped), exit_rank, ", ".join(dropped),
+                "[thinktank] de-covered %d name(s) past exit_rank=%d: %s (thesis history retained — config-I6648)",
+                len(dropped),
+                exit_rank,
+                ", ".join(dropped),
             )
 
     new_rows: list[dict] = []
-    for rank, row in enumerate(ranked, start=1):
+    unjoinable: list[str] = []
+    for rank, ticker in enumerate(window.ordered, start=1):
         if rank > rank_ceiling:
             break
-        ticker = row.get("ticker")
-        if not ticker or ticker in covered:
+        if ticker in covered:
             continue
-        if row.get("attractiveness_score") is None:
+        row = board_rows.get(ticker)
+        if row is None:
+            # Swallowed: a name the scanner RANKED inside the ceiling but for
+            # which the board carries no row — there is nothing to underwrite
+            # from, so it cannot be intake. Recorded, never silent: WARNed
+            # below and returned to the caller, which puts the count in the run
+            # manifest via ``thinktank.feed.unjoinable_ranked_names``. Names
+            # INSIDE the declared window raise instead — ``join_board_rows``.
+            unjoinable.append(ticker)
             continue
         row = dict(row)
+        # Grandfathered field name (``thinktank.schemas.LedgerEntry``): this is
+        # the rank in ``window.basis``, which is only "attractiveness" while
+        # that arm holds the feed. The basis itself is carried in the run
+        # manifest's window provenance, so the number is interpretable.
         row["_attractiveness_rank"] = rank
         new_rows.append(row)
         if len(new_rows) >= daily_new_names:
             break
+    if unjoinable:
+        logger.warning(
+            "[thinktank] %d ranked name(s) inside rank_ceiling=%d have no "
+            "universe-board row and were skipped for intake: %s "
+            "(alpha-engine-config-I7844)",
+            len(unjoinable),
+            rank_ceiling,
+            ", ".join(unjoinable),
+        )
 
     graceful_refresh: list[str] = []
     if not skip_stale_refill:
@@ -179,8 +197,7 @@ def select_intake(
         breached_entries = [
             e
             for e in ledger.entries.values()
-            if e.covered
-            and _age_days(trading_day, e.thesis_updated_on) >= stale_after_days
+            if e.covered and _age_days(trading_day, e.thesis_updated_on) >= stale_after_days
         ]
         breached_entries.sort(key=lambda e: e.thesis_updated_on)  # stalest first
         breached = [e.ticker for e in breached_entries]

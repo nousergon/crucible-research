@@ -18,6 +18,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from tests._feed_helpers import membership_for_board
 from thinktank import LEDGER_KEY
 from thinktank.challenger_selection import (
     CHALLENGER_TOP_N,
@@ -189,6 +190,14 @@ def _seed_read_side(s3, *, signals_date="2026-06-28"):
         Bucket=BUCKET,
         Key="scanner/universe/latest.json",
         Body=json.dumps({"schema_version": 3, "stocks": stocks}),
+    )
+    # The coverage window is READ from the membership artifact
+    # (alpha-engine-config-I7842) — a board alone is a state Think Tank
+    # deliberately refuses, so every read-side seed publishes both.
+    s3.put_object(
+        Bucket=BUCKET,
+        Key="universe_membership/latest.json",
+        Body=json.dumps(membership_for_board({"stocks": stocks})),
     )
     s3.put_object(
         Bucket=BUCKET,
@@ -993,10 +1002,7 @@ def test_pointer_lag_is_published_as_zero_on_a_healthy_run(tt_config):
 
         assert manifest.challenger_selection_written is True
         assert manifest.challenger_selection_pointer_lag_days == 0
-        assert (
-            manifest.challenger_selection_pointer_trading_day
-            == manifest.trading_day
-        )
+        assert manifest.challenger_selection_pointer_trading_day == manifest.trading_day
 
 
 def test_an_aborted_run_publishes_the_frozen_pointers_lag(tt_config):
@@ -1026,27 +1032,18 @@ def test_an_aborted_run_publishes_the_frozen_pointers_lag(tt_config):
         trading_day = board["trading_day"]
 
         prefix = f"thinktank/runs/{trading_day}/"
-        keys = [
-            o["Key"]
-            for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])
-        ]
+        keys = [o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])]
         assert len(keys) == 1, keys
         manifest = store.get_json(keys[0])
         assert manifest["challenger_selection_written"] is False
 
         # The dated key for THIS run exists — the directory listing, and every
         # freshness signal reading it, looks healthy.
-        assert store.get_json(
-            f"thinktank/challenger_selection/{trading_day}.json"
-        ) is not None
+        assert store.get_json(f"thinktank/challenger_selection/{trading_day}.json") is not None
         # The pointer was correctly NOT advanced...
-        assert store.get_json(
-            "thinktank/challenger_selection/latest.json"
-        )["trading_day"] == frozen_day
+        assert store.get_json("thinktank/challenger_selection/latest.json")["trading_day"] == frozen_day
         # ...and the run published how far behind it now is, in its own output.
-        expected = (
-            date.fromisoformat(trading_day) - date.fromisoformat(frozen_day)
-        ).days
+        expected = (date.fromisoformat(trading_day) - date.fromisoformat(frozen_day)).days
         assert expected > 0
         assert manifest["challenger_selection_pointer_trading_day"] == frozen_day
         assert manifest["challenger_selection_pointer_lag_days"] == expected
@@ -1099,8 +1096,11 @@ def test_a_stale_pointer_is_logged_at_ERROR_past_the_threshold(caplog):
         s3.create_bucket(Bucket=BUCKET)
         store = ThinktankStore(BUCKET, s3)
         manifest = RunManifest(
-            run_id="r", mode="daily", trading_day="2026-08-13",
-            calendar_date="2026-08-14", started_at="2026-08-14T00:00:00Z",
+            run_id="r",
+            mode="daily",
+            trading_day="2026-08-13",
+            calendar_date="2026-08-14",
+            started_at="2026-08-14T00:00:00Z",
         )
 
         store.put_json(

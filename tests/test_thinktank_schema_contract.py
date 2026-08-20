@@ -209,6 +209,11 @@ _FROZEN_FIELDS = {
         "usage_by_tier",
         "total_cost_usd",
         "coverage_gap",
+        # alpha-engine-config-I7842 — which contract this run read: the cut,
+        # the declared cut, and the basis the window resolved to. Without it,
+        # "which arm was Think Tank covering on date D" is reconstructed from a
+        # deploy log rather than read from the run record.
+        "feed_window",
         "budget_month_spent_usd",
         "budget_month_limit_usd",
         "errors",

@@ -18,7 +18,7 @@ eval_judge / scanner / rationale_clustering). Two invocation sources
    — a narrow, reactive top-up: once the fresh weekly scan lands, shore
    up whatever of the CURRENT top-60 the daily cadence hasn't caught up
    to yet. Sized to the exact measured gap (see ``thinktank/run.py``'s
-   ``GAP_FILL_TOP_N``/``gap_fill_only``), never a fixed constant, never
+   the declared coverage window/``gap_fill_only``), never a fixed constant, never
    padded with stale-refill — kept small and bounded regardless of how
    large the full-universe backlog gets.
 
@@ -194,6 +194,7 @@ def handler(event, context):
     finally:
         try:
             from krepis.cost_sink import flush_default_sink
+
             _n = flush_default_sink()
             if _n:
                 logger.info("cost sink flushed: %d object(s)", _n)
@@ -232,7 +233,7 @@ def _run(event, context):
 
     # Saturday SF gap-fill mode: shores up whatever of the CURRENT top-60
     # the daily cadence hasn't caught up to yet, sized to the exact
-    # measured gap (thinktank/run.py's GAP_FILL_TOP_N/gap_fill_only) —
+    # measured gap (thinktank/run.py's declared window/gap_fill_only) —
     # never a fixed constant, never padded with stale-refill (that's the
     # daily job's role). Runs observe-only — writes to thinktank/ S3
     # prefix for validation tracking; does NOT gate the Predictor.
