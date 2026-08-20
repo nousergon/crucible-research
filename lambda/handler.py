@@ -18,7 +18,6 @@ import logging
 import os
 import sys
 import tempfile
-import time
 
 # Ensure the project root is on sys.path so sibling modules
 # (graph.langsmith_pandas_patch) can be imported below.
@@ -57,7 +56,7 @@ _install_ls_patch()
 # only after observing real ERROR-level noise from the Saturday SF — the
 # canonical lib pattern (mirrors executor/main.py:65-67) forces every
 # entrypoint to think about it explicitly rather than inherit defaults.
-from nousergon_lib.logging import get_flow_doctor, monitor_handler, setup_logging  # noqa: E402
+from nousergon_lib.logging import monitor_handler, setup_logging  # noqa: E402
 
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
@@ -71,6 +70,17 @@ setup_logging(
 )
 
 logger = logging.getLogger(__name__)
+
+
+class RetiredResearchPathError(RuntimeError):
+    """This function was invoked for a stage that no longer exists.
+
+    The champion research graph was retired 2026-07-12 and its code deleted
+    (alpha-engine-config-I7827, champion-challenger-policy.md §6). Raised
+    rather than returning ``SKIPPED`` so a reactivated trigger is LOUD: a
+    silent skip is indistinguishable from a run that had nothing to do, and
+    that ambiguity is how this component was read as live three times.
+    """
 
 # Expensive init is deferred to the first handler invocation to keep
 # Lambda's cold-start init phase under the 10-second hard timeout.
@@ -95,36 +105,14 @@ def _ensure_init() -> None:
     _init_done = True
 
 
-def _scorecard_enabled() -> bool:
-    """Read the `RESEARCH_SCORECARD_ENABLED` flag.
-
-    Default-off until Phase 2 (CIO/Macro prompt wiring) lands and the
-    operator flips this on to start the ≥4-cycle shadow soak.
-    """
-    return os.environ.get("RESEARCH_SCORECARD_ENABLED", "").lower() in ("1", "true", "yes")
-
-
-def _team_accuracy_enabled() -> bool:
-    """Read the `TEAM_ACCURACY_PRODUCER_ENABLED` flag.
-
-    Default-ON (unlike the scorecard flag): config#1422 exists specifically
-    to start live history accruing NOW, ahead of `ADAPTIVE_SLOT_ALLOCATION_ENABLED`
-    being flipped — the consumer (`compute_team_slots` in
-    `agents/sector_teams/team_config.py`) already gates its own read behind
-    that separate flag and degrades gracefully when the artifact is absent,
-    so there's no risk in writing it early. Kept as an env-overridable flag
-    (not hardcoded True) purely for operator kill-switch safety, mirroring
-    every other producer's pattern in this handler.
-    """
-    return os.environ.get("TEAM_ACCURACY_PRODUCER_ENABLED", "true").lower() in ("1", "true", "yes")
-
-
 def _maybe_emit_self_test(trading_date: datetime.date) -> None:
     """Run the numeric self-test and publish its artifact + console row.
 
-    alpha-engine-config-I7262. Mirrors the shadow-safe posture of
-    `_maybe_emit_scorecard` / `_maybe_emit_team_accuracy`, with one difference
-    that matters: those are OBSERVABILITY producers whose absence degrades a
+    alpha-engine-config-I7262. It used to be described against the handler's
+    two OBSERVABILITY producers (`_maybe_emit_scorecard` /
+    `_maybe_emit_team_accuracy`), both of which were deleted with the champion
+    pass they hung off (alpha-engine-config-I7827). The distinction they drew
+    still governs this function: an observability producer's absence degrades a
     dashboard, while this one is a §2.3a CORRECTNESS VERDICT whose absence must
     never read as a pass. So the failure paths are deliberately asymmetric:
 
@@ -175,226 +163,6 @@ def _maybe_emit_self_test(trading_date: datetime.date) -> None:
             "Research self-test could not run at all — NO correctness guarantee is granted for this run's numbers.",
             exc_info=True,
         )
-
-
-def _maybe_emit_team_accuracy(archive, trading_date: datetime.date) -> None:
-    """Build + write the per-team historical-accuracy artifact. Shadow-safe.
-
-    Producer half of config#926's adaptive slot allocation (config#1422):
-    the consumer (`archive/manager.py::load_team_accuracy` +
-    `ADAPTIVE_SLOT_ALLOCATION_ENABLED` + `compute_team_slots`'s
-    `team_accuracy` nudge) shipped in config#926 but nothing wrote
-    `config/team_accuracy.json`, so flipping that flag was a no-op.
-
-    WARN-and-continue on any failure — same shadow-mode posture as
-    `_maybe_emit_scorecard` — so the morning briefing is never blocked by
-    this secondary-observability producer, and the adaptive-slot consumer
-    already treats a missing/stale artifact as "degrade to static
-    allocation" by design.
-    """
-    if not _team_accuracy_enabled():
-        logger.debug("team_accuracy producer disabled (flag off) — skipping emission")
-        return
-    try:
-        import boto3  # local import — only paid when flag is on
-
-        from evals.team_accuracy import analyze_team_performance, save_team_accuracy
-
-        team_accuracy = analyze_team_performance(archive.db_conn, as_of_date=trading_date)
-        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
-        save_team_accuracy(
-            team_accuracy,
-            s3_client=boto3.client("s3"),
-            bucket=bucket,
-        )
-        # team_accuracy is the schema_version-1 envelope (config#1844) —
-        # analyze_team_performance already WARNs with the full counts when
-        # status="insufficient".
-        logger.info(
-            "team_accuracy emitted: status=%s n_teams=%d n_advance_picks=%d n_resolved_outcomes=%d (%s)",
-            team_accuracy["status"],
-            team_accuracy["n_teams"],
-            team_accuracy["n_advance_picks"],
-            team_accuracy["n_resolved_outcomes"],
-            {tid: v["n_obs"] for tid, v in team_accuracy["teams"].items()},
-        )
-    except Exception as tae:
-        # §61 pre-persistence carve-out: this producer runs BEFORE the
-        # graph persists the champion signals.json (it feeds adaptive slot
-        # allocation), so it cannot raise without sacrificing the live
-        # deliverable. Non-fatal — but the failure now lands on an ALARMED
-        # surface with a consumer (observe_alerts → SNS + flow-doctor forum),
-        # not a bare WARN nobody reads (ARCHITECTURE.md §61 / config#1684).
-        logger.warning(
-            "team_accuracy emission failed (shadow mode — non-fatal): %s",
-            tae,
-            exc_info=True,
-        )
-        from observe_alerts import publish_observe_alert
-
-        publish_observe_alert(
-            f"team_accuracy producer emission FAILED (non-fatal, live path unaffected): {tae}",
-            source="research-runner:team_accuracy",
-            dedup_key=f"team_accuracy_emit_fail:{trading_date}",
-        )
-
-
-def _maybe_emit_scorecard(archive, trading_date: datetime.date) -> None:
-    """Build + write the prior-cycle scorecard. Shadow-safe.
-
-    Pulled out of the handler body so the wiring + failure posture can
-    be unit-tested with a stub archive + stub S3 client. The handler
-    body sees only the helper call site.
-
-    Skips when the flag is off; logs WARN-and-continues on any failure
-    so the morning briefing isn't blocked by a producer artifact that
-    no consumer is reading yet (the shadow-mode carve-out
-    `[[feedback_no_silent_fails]]` permits).
-    """
-    if not _scorecard_enabled():
-        logger.debug("scorecard disabled (flag off) — skipping emission")
-        return
-    try:
-        import boto3  # local import — only paid when flag is on
-
-        from evals.last_week_scorecard import build_scorecard, emit_scorecard_to_s3
-
-        sc = build_scorecard(archive.db_conn, as_of_date=trading_date)
-        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
-        result = emit_scorecard_to_s3(
-            sc,
-            s3_client=boto3.client("s3"),
-            bucket=bucket,
-        )
-        logger.info(
-            "scorecard emitted run_id=%s dated_key=%s n_resolved_predictions=%d n_resolved_signals_21d=%d",
-            result["run_id"],
-            result["dated_key"],
-            sc.n_resolved_predictions,
-            sc.n_resolved_signals_21d,
-        )
-    except Exception as sce:
-        # §61 pre-persistence carve-out (config#1684): runs before the graph
-        # persists signals.json, so it cannot raise without losing the live
-        # deliverable. Non-fatal — but promoted NOW from a bare WARN to an
-        # ALARMED surface with a consumer (observe_alerts → SNS + flow-doctor).
-        # The "Phase 2 promotion" the old comment deferred is this.
-        logger.warning(
-            "Scorecard emission failed (shadow mode — non-fatal): %s",
-            sce,
-            exc_info=True,
-        )
-        from observe_alerts import publish_observe_alert
-
-        publish_observe_alert(
-            f"scorecard producer emission FAILED (non-fatal, live path unaffected): {sce}",
-            source="research-runner:scorecard",
-            dedup_key=f"scorecard_emit_fail:{trading_date}",
-        )
-
-
-def _emit_flow_doctor_heartbeat() -> None:
-    """Write flow-doctor's end-of-run status snapshot (config#646).
-
-    Option A dedicated call site: at the tail of a successful research
-    run we ask the flow-doctor singleton to persist its ``status()``
-    snapshot to
-    ``s3://alpha-engine-research/_flow_doctor/heartbeat/research/{date}.json``.
-    The console System Health consumer reads these heartbeats from the
-    **research** bucket, so the write MUST target ``alpha-engine-research``
-    (the same bucket every other artifact in this handler writes to via
-    the ``RESEARCH_BUCKET`` env override).
-
-    ``emit_heartbeat`` soft-fails internally (returns None, never raises),
-    and this helper no-ops cleanly when flow-doctor is inactive (local dev
-    / disabled) so it is safe to call unconditionally on the success path.
-
-    The ``hasattr`` guard makes the wire-up forward/backward-compatible
-    across the phased flow-doctor lib rollout: ``emit_heartbeat`` only
-    exists in flow-doctor >=0.6.2, and the 5 producing repos deploy
-    independently, so a version-skewed image pinning an older lib
-    (the #646 arc historically pinned 0.6.0rc3) would otherwise
-    AttributeError at end-of-run. Missing method -> silent no-op, never a
-    crashed production run — mirroring flow-doctor's own soft-fail posture.
-    """
-    fd = get_flow_doctor()
-    if fd and hasattr(fd, "emit_heartbeat"):
-        fd.emit_heartbeat(bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"))
-
-
-def is_trading_day(date: datetime.date | None = None) -> bool:
-    """Return True if date (default: today) is an NYSE trading day.
-
-    Delegates to the alpha_engine_lib.trading_calendar chokepoint
-    (L4466/config#886) — the scanner Lambda already resolves through the
-    lib, and two calendar sources in one repo is the drift class that
-    produced the 2026-05-30 calendar-vs-trading-day recovery failure.
-    """
-    from nousergon_lib import trading_calendar as _tc
-
-    d = date or datetime.date.today()
-    return _tc.is_trading_day(d)
-
-
-# NOTE (config-I6667): the repo-local `most_recent_trading_day` that used to
-# live here was removed in favour of `nousergon_lib.dates.resolve_trading_day`,
-# the fleet chokepoint the backtester, evaluator, Scanner and
-# signals_envelope_handler all resolve through. Its rationale is preserved at
-# the two call sites below, because it is the stamping doctrine and not an
-# implementation note:
-#
-#   Research stamps signals, scanner_evaluations, team_candidates and
-#   cio_evaluations with the data-close date it actually saw — the prior
-#   trading day's close is the anchor for 5d-forward-return evaluation and
-#   matches the quant convention of measuring signals against the close that
-#   fed them. This supersedes the `next_trading_day` stamping (2026-04-13,
-#   commit 9a94e34), which stamped with the Monday the signals would be traded
-#   on: that fixed the executor's staleness check at the cost of shifting the
-#   evaluator's 5d forward window by one trading day (Mon→Mon instead of the
-#   cleaner Fri→Fri). The executor's staleness check uses a 7 calendar-day
-#   threshold (signal_reader._warn_if_stale), so Friday-stamped signals read
-#   Monday morning show age=3d, well inside tolerance.
-#
-# `resolve_trading_day` takes and returns an ISO `yyyy-mm-dd` STRING, so each
-# call site converts explicitly rather than re-introducing a local wrapper.
-
-
-def is_early_close(date: datetime.date | None = None) -> bool:
-    """
-    Return True if the NYSE has an early close today (partial session).
-    Early closes: day before July 4th, Black Friday, Christmas Eve.
-    These still run — the morning report executes normally.
-    """
-    from exchange_calendars import get_calendar
-
-    nyse = get_calendar("XNYS")
-    d = date or datetime.date.today()
-    try:
-        # exchange_calendars exposes early close dates
-        session = nyse.schedule.loc[str(d)] if str(d) in nyse.schedule.index else None
-        if session is not None:
-            close_time = session["market_close"]
-            # NYSE standard close is 4pm ET = 21:00 UTC
-            standard_close_utc_hour = 21
-            if close_time.hour < standard_close_utc_hour:
-                return True
-    except (KeyError, AttributeError, TypeError):
-        pass  # expected: schedule format edge cases
-    except Exception as e:
-        logger.warning("Early close detection failed: %s — assuming normal close", e)
-    return False
-
-
-def _is_scheduled_run_time() -> bool:
-    """
-    Return True if current PT time is within the 5:40–5:55am run window.
-    Used by the weekday EventBridge rule (12:45+13:45 UTC).
-    Only the invocation that lands in 5:45am PT proceeds.
-    """
-    import pytz
-
-    pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
-    return pt.hour == 5 and 40 <= pt.minute <= 55
 
 
 def _resolve_self_test_date(event: dict) -> str:
@@ -595,17 +363,24 @@ def handler(event, context):
 
 def _run(event, context):
     """
-    AWS Lambda handler for the research pipeline.
+    AWS Lambda handler for the research runner.
 
-    Gate logic:
-      - force=True  → bypass all gates (manual testing)
-      - weekly_run=True → bypass time gate (Saturday 06:00 UTC weekly schedule)
-      - Otherwise → require 5:40-5:55am PT time window AND NYSE trading day
+    Three modes reach real work; there is no fourth, and no default run.
+    The champion LangGraph pass this handler used to carry was retired on
+    2026-07-12 and DELETED (alpha-engine-config-I7827) — see the closing
+    block of this function for what was removed and what proved it dead.
 
-    Operator modes:
-      - mode="challengers_only" + date=YYYY-MM-DD → re-emit the challenger
-        shadow cohort for the latest weekly run (config#1683 recovery path);
-        bypasses the time/trading-day gates, runs nothing else.
+      - ``mode="challengers_only"`` + ``date=YYYY-MM-DD`` → the weekly SF's
+        ChallengerShadow stage (and the config#1683 operator recovery path):
+        builds every registered challenger's shadow cohort. THE live path.
+      - ``mode="self_test"`` → the §2.3a numeric correctness verdict
+        (alpha-engine-config-I7726). ``dry_run: true`` exercises the battery
+        and writes nothing.
+      - ``{"dry_run_llm": true}`` → the deploy canary
+        (``infrastructure/deploy.sh``): a deterministic, side-effect-free boot
+        validation of the LIVE producer path.
+
+    Anything else RAISES ``RetiredResearchPathError``.
 
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
@@ -668,514 +443,111 @@ def _run(event, context):
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
-    # Dry-run controls (added 2026-04-30):
-    #   skip_dry_run_gate — bypass the auto-gate stub-pass, run real only.
-    #   dry_run_llm — exclusive stub-only mode (no real LLM calls). Implies
-    #                 no S3 writes, no email, no DB upload.
-    # Default behavior (both false): run a stub-pass first, halt on failure,
-    # only proceed to real pass if stub-pass succeeds.
-    skip_dry_run_gate = event.get("skip_dry_run_gate", False)
+    # `dry_run_llm` — the deploy canary's stub-only mode: no real LLM call, no
+    # S3 write, no email, no DB upload. `skip_dry_run_gate` went with the
+    # champion pass (alpha-engine-config-I7827): it only ever chose whether to
+    # run the stub-LLM auto-gate before the real graph pass, and there is no
+    # longer a graph pass to gate.
     dry_run_llm = event.get("dry_run_llm", False)
 
-    # ── dry_run_llm — deploy-canary boot/import/wiring smoke ──────────────
+    # ── dry_run_llm — deploy-canary boot/import/wiring smoke ──────────
     # dry_run_llm is EXCLUSIVELY the deploy canary's smoke-test mode
     # (infrastructure/deploy.sh sends {"dry_run_llm": true}). It MUST be a
-    # deterministic, side-effect-free boot validation: build_graph()
-    # exercises node wiring + imports (the 2026-05-06 RAG-import class of
-    # bug) and create_initial_state() exercises state construction — neither
-    # needs upstream data, S3, the DB, or the wall clock. Returning HERE —
-    # before the time gate, preflight, DB download, and the scorecard /
-    # team-accuracy emitters below — makes the canary behave identically no
-    # matter WHEN a deploy lands. Previously the dry return was buried past
-    # all that real I/O, so a deploy landing inside the 5:40-5:55am PT
-    # weekday gate window (so the time gate did not SKIP it) executed real
-    # S3/DB work in the canary; a transient failure there returned
-    # status=ERROR and tripped a spurious auto-rollback (2026-07-21
-    # incident). This matches the fleet convention already used by the
-    # thinktank / aggregate_costs / rationale_clustering / eval_judge dry
-    # paths (return before any S3 / secrets).
+    # deterministic, side-effect-free boot validation of the LIVE path:
+    # `producers.boot_check.run_live_producer_boot_check()` imports every
+    # producer the ChallengerShadow stage will build (derived from
+    # producers/registry.py, so a newly-registered arm is covered the day it
+    # lands) and drives the shared signals-payload assembly on a synthetic
+    # in-memory state. Neither needs upstream data, S3, the DB, or the wall
+    # clock, so the canary behaves identically no matter WHEN a deploy lands.
+    # (The time gate, the trading-day gate, preflight and the DB download that
+    # used to sit between the invoke and this return went with the champion
+    # pass.) Previously the dry return was buried past real I/O, so a
+    # deploy landing inside the 5:40-5:55am PT weekday gate window executed
+    # real S3/DB work in the canary; a transient failure there returned
+    # status=ERROR and tripped a spurious auto-rollback (2026-07-21 incident).
+    # This matches the fleet convention already used by the thinktank /
+    # aggregate_costs / rationale_clustering / eval_judge dry paths (return
+    # before any S3 / secrets).
+    #
+    # Until alpha-engine-config-I7827 this block called
+    # `graph.research_graph.build_graph()` — a producer RETIRED 2026-07-12 and
+    # unreachable in production since. The deploy's own safety check was
+    # smoke-testing dead code and NOT smoke-testing the live producers, so a
+    # deploy that broke `producers/` passed the canary green. The stub
+    # installation is KEPT unchanged: that is what the 2026-05-04 misfire (a
+    # canary that produced a real signals.json + research email outside the
+    # Saturday cadence) is about, and it is orthogonal to which path runs.
+    # tests/test_handler_dry_run_canary_noop.py holds the no-op contract.
     if dry_run_llm:
         from nousergon_lib.dates import resolve_trading_day
 
         from archive.manager import ArchiveManager
         from dry_run import install_dry_run_stubs
-        from graph.research_graph import build_graph, create_initial_state
+        from producers.boot_check import run_live_producer_boot_check
 
         _dry_run_date = resolve_trading_day(datetime.date.today().isoformat())
         logger.info(
-            "dry_run_llm=True: boot/import/wiring validation only "
-            "(preflight-equivalent; time gate + data-dependent graph not executed)"
+            "dry_run_llm=True: LIVE producer boot/import/wiring validation only "
+            "(preflight-equivalent; no LLM, no S3 write, no email, no DB)"
         )
         # ArchiveManager() is constructed but never downloads the DB — boot
         # validation needs no upstream artifacts. Stubs are installed so any
-        # direct-bound archive_writer / email_sender nodes captured at
-        # build_graph() time stay inert.
+        # write path reachable from the producer modules stays inert even
+        # though the check itself performs no I/O.
         _dry_archive = ArchiveManager()
         _restore = install_dry_run_stubs(_dry_archive)
         try:
-            build_graph()
-            create_initial_state(
-                run_date=_dry_run_date,
-                archive_manager=_dry_archive,
-                is_early_close=False,
-            )
+            _boot = run_live_producer_boot_check()
         finally:
             _restore()
-        logger.info("dry_run_llm boot validation OK for %s", _dry_run_date)
+        logger.info(
+            "dry_run_llm boot validation OK for %s — producers=%s",
+            _dry_run_date,
+            _boot["producers"],
+        )
         return {
             "status": "OK",
             "dry_run_llm": True,
             "phase": "boot_validation",
             "date": _dry_run_date,
+            "producers": _boot["producers"],
         }
 
-    # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
-    if not force and not weekly and not _is_scheduled_run_time():
-        return {"status": "SKIPPED", "reason": "wrong_time"}
-
-    today = datetime.date.today()
-
-    # Trading day gate: force bypasses; weekly runs Saturday (never a trading day,
-    # so weekly always proceeds — signals are stamped with the most recent trading
-    # day below). Weekday runs require an actual NYSE session.
-    if not force and not is_trading_day(today):
-        if weekly:
-            logger.info("Non-trading day %s — running anyway (weekly population refresh).", today)
-        else:
-            logger.info("Market holiday on %s — skipping run.", today)
-            return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
-
-    # Preflight runs AFTER the skip gates — no point paying head_bucket +
-    # ANTHROPIC_API_KEY validation on invocations we're about to skip.
-    # ANTHROPIC_API_KEY is resolved on-demand via
-    # alpha_engine_lib.secrets.get_secret() at consumer sites.
-    from preflight import ResearchPreflight
-
-    ResearchPreflight(
-        bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-        mode="weekly",
-    ).run()
-
-    early_close = is_early_close(today) if not weekly else False
-    # Stamp signals with the *most recent* trading day whose close fed
-    # this run — never today (weekend) and never a future trading day.
-    # System-wide rule: every eval_date (signal folder, latest.json,
-    # scanner_evaluations, team_candidates, cio_evaluations, universe_returns)
-    # anchors to "most recent trading day with data available at run time."
+    # ── The champion graph pass is GONE (alpha-engine-config-I7827) ──────
     #
-    # Supersedes commit 9a94e34 (2026-04-13) which stamped with
-    # next_trading_day. That fix addressed executor staleness but shifted
-    # the evaluator's 5d forward window by one trading day (Mon->Mon vs
-    # Fri->Fri), mis-aligning the measurement anchor with the close data
-    # research actually saw. The executor's staleness check uses a 7
-    # calendar-day threshold (signal_reader._warn_if_stale), so
-    # Friday-stamped signals read Monday morning show age=3 days, well
-    # inside tolerance.
-    from nousergon_lib.dates import resolve_trading_day
-
-    run_date = resolve_trading_day(today.isoformat())
-    # `trading_date` stays a `datetime.date`: _maybe_emit_scorecard,
-    # _maybe_emit_team_accuracy and the aggregate_day / compute_corpus_stats
-    # `target_date=` arguments are all date-typed. Convert here rather than
-    # wrapping the lib helper (config-I6667).
-    trading_date = datetime.date.fromisoformat(run_date)
-
-    # Idempotency gate: skip if signals already written for this date
-    if not force:
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
-
-            s3 = boto3.client("s3")
-            s3.head_object(
-                Bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                Key=f"signals/{run_date}/signals.json",
-            )
-            logger.info("Signals already exist for %s — skipping (use force=True to override)", run_date)
-            return {"status": "SKIPPED", "reason": "already_run", "date": run_date}
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "404":
-                logger.warning("S3 idempotency check failed: %s — proceeding with run", e)
-        except Exception as e:
-            logger.warning("S3 idempotency check failed: %s — proceeding with run", e)
-
-    run_type = "weekly population refresh" if weekly else "weekday"
-    logger.info(
-        "Starting alpha-engine-research run for %s (%s)%s",
-        run_date,
-        run_type,
-        " [early close]" if early_close else "",
+    # Everything below this point used to be the weekday/weekly champion run:
+    # the time gate, the trading-day gate, preflight, the DB download, the
+    # scorecard / team-accuracy emitters, `build_graph()`, the stub-LLM
+    # auto-gate, `graph.invoke()`, the challenger post-step and the health /
+    # manifest / cost-aggregation tail. Every one of those was reachable ONLY
+    # from `force`, `weekly_run`, or the 5:40-5:55am PT weekday window, and
+    # measured 2026-08-20 none of the three has an invoker:
+    #
+    #   * the weekly SF (`ne-weekly-freshness-pipeline`) has had no `Research`
+    #     state since 2026-07-14 (nousergon-data#814); its only invocation of
+    #     `alpha-engine-research-runner:live` is ChallengerShadow, handled at
+    #     the top of this function;
+    #   * EventBridge `alpha-research-weekly` and `alpha-research-daily` are
+    #     both DISABLED;
+    #   * `infrastructure/spot_research_weekly.sh` → `weekly_box_runner.py`
+    #     → `handler(weekly_run=True)` has no invoker in any fleet repo.
+    #
+    # The producer it ran (`agentic_sector_teams`) is `kind="retired"`,
+    # `retired_date="2026-07-12"`, and champion-challenger-policy.md §6 is
+    # explicit that a retired arm's CODE is deleted, not left dormant: "a
+    # disabled-but-present arm ... reads as capability while doing nothing, and
+    # a future change can silently reactivate it."
+    #
+    # So an invocation reaching here is a DEFECT, not a run: something is
+    # sending this function a payload whose stage no longer exists. It raises
+    # rather than returning SKIPPED, because a silent skip is exactly how the
+    # previous three misreadings of this component happened.
+    raise RetiredResearchPathError(
+        "the champion research graph was retired 2026-07-12 and its code was "
+        "deleted (alpha-engine-config-I7827). This function serves "
+        'mode="challengers_only", mode="self_test" and the deploy canary '
+        '({"dry_run_llm": true}) only. Received an event with '
+        f"force={force!r} weekly_run={weekly!r} mode={event.get('mode')!r} — "
+        "whatever sent it is pointing at a stage that no longer exists."
     )
-
-    _health_start = time.time()
-
-    # Import pipeline (deferred to reduce cold-start time)
-    try:
-        from archive.manager import ArchiveManager
-
-        # ── Validate required env vars (fail fast, not 30 min in) ─────
-        from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
-        from graph.research_graph import build_graph, create_initial_state
-
-        _missing = []
-        if not ANTHROPIC_API_KEY:
-            _missing.append("ANTHROPIC_API_KEY")
-        if not FMP_API_KEY:
-            _missing.append("FMP_API_KEY")
-        if not FRED_API_KEY:
-            _missing.append("FRED_API_KEY")
-        if _missing:
-            msg = f"Missing required env vars: {', '.join(_missing)}"
-            # ERROR — pipeline can't proceed; flow-doctor should escalate
-            # so the operator notices the missing-secret class fast
-            # (vs surfacing only via Step Function failure email).
-            logger.error("FATAL: %s", msg)
-            return {"statusCode": 500, "body": msg}
-
-        archive = ArchiveManager()
-        archive.download_db()
-
-        # Phase 1.B.2 — research-feedback scorecard.
-        # Emits the prior-cycle realized-outcomes scorecard artifact under
-        # `research/last_week_scorecard/{run_id}.json` for Phase 2 prompt
-        # injection. Gated default-OFF behind `RESEARCH_SCORECARD_ENABLED`
-        # until Phase 2 (CIO/Macro prompt wiring) is ready to consume it.
-        # Shadow-mode failure posture: WARN log + continue. Per
-        # [[feedback_no_silent_fails]] secondary-observability carve-out —
-        # (a) swallowing scorecard build/write failures, (b) primary
-        # deliverable (Saturday morning briefing) is independent of the
-        # scorecard during shadow, (c) WARN log is the recording surface
-        # (promotable to ERROR + CloudWatch alarm in Phase 2 when the
-        # consumer depends on the artifact).
-        _maybe_emit_scorecard(archive, trading_date)
-
-        # config#1422 — per-team historical-accuracy producer for adaptive
-        # slot allocation (config#926). Writes `config/team_accuracy.json`
-        # from CIO-ADVANCED picks' realized 21d beat-SPY outcomes, joined by
-        # team_id. Default-ON (unlike the scorecard) so live history starts
-        # accruing now, ahead of `ADAPTIVE_SLOT_ALLOCATION_ENABLED` being
-        # flipped for the soak. Same shadow-mode WARN-and-continue posture.
-        _maybe_emit_team_accuracy(archive, trading_date)
-
-        # alpha-engine-config-I7262 — the R slot's numeric CORRECTNESS verdict
-        # (`sf-pipeline-policy.md` §2.3a), computed where the numbers are
-        # computed: in the deployed interpreter, on the deployed wheels. CI
-        # proves the code is right on a runner; this proves the INSTRUMENT is
-        # right on the image that produced this week's signal set.
-        #
-        # Runs BEFORE the graph so the verdict exists even if the pipeline
-        # later fails, and CANNOT block it: `run_self_test` never raises and
-        # this block is isolated. An accuracy instrument that can take down the
-        # pipeline is a worse defect than the one it detects.
-        _maybe_emit_self_test(trading_date)
-
-        # Build and run the LangGraph pipeline
-        graph = build_graph()
-        initial_state = create_initial_state(
-            run_date=run_date,
-            archive_manager=archive,
-            is_early_close=early_close,
-        )
-
-        # Extract episodic memories from newly completed signal outcomes
-        try:
-            from memory.episodic import extract_memories
-
-            n_memories = extract_memories(archive.db_conn)
-            if n_memories:
-                logger.info("Extracted %d new episodic memories from outcomes", n_memories)
-        except Exception as _me:
-            # §61 pre-persistence carve-out (config#1684): episodic memory
-            # feeds the graph, so it must run first and cannot raise. Non-fatal,
-            # but loud on an alarmed surface, not a silent WARN.
-            logger.warning("memory extraction skipped: %s", _me)
-            from observe_alerts import publish_observe_alert
-
-            publish_observe_alert(
-                f"episodic memory extraction FAILED (non-fatal, live path unaffected): {_me}",
-                source="research-runner:memory_extraction",
-                dedup_key=f"memory_extraction_fail:{run_date}",
-            )
-
-        # ── Auto-gate: stub-LLM dry-run before real pass ─────────────
-        # Catches bugs below the LLM layer (graph orchestration, schema
-        # parse, reducer behavior, archive writes) without paying for
-        # Anthropic tokens. Real pass only fires if stub-pass succeeds.
-        # Skipped when skip_dry_run_gate=True or when dry_run_llm=True
-        # (which is itself the stub-only mode, no real pass to gate).
-        if not skip_dry_run_gate and not dry_run_llm:
-            from dry_run import install_dry_run_stubs
-
-            logger.info("Stub-LLM dry-run gate: starting...")
-            _restore = install_dry_run_stubs(archive)
-            try:
-                _stub_graph = build_graph()
-                _stub_state = create_initial_state(
-                    run_date=run_date,
-                    archive_manager=archive,
-                    is_early_close=early_close,
-                )
-                _stub_graph.invoke(_stub_state)
-                logger.info("Stub-LLM dry-run gate: OK (proceeding to real pass)")
-            except Exception as _se:
-                # ERROR — the stub-pass is the cheap-tokens gate that
-                # catches sub-LLM-layer bugs before we burn Anthropic
-                # budget on the real pass. flow-doctor must escalate.
-                logger.error(
-                    "Stub-LLM dry-run gate: FAILED — halting before real LLM calls. Stub-pass error: %s",
-                    _se,
-                    exc_info=True,
-                )
-                return {
-                    "status": "ERROR",
-                    "phase": "stub_pass",
-                    "date": run_date,
-                    "error": str(_se),
-                }
-            finally:
-                _restore()
-
-            # Stub-pass mutated state + may have left archive in odd shape.
-            # Rebuild archive + supporting state for the real pass so it
-            # starts from a clean slate.
-            archive.close()
-            archive = ArchiveManager()
-            archive.download_db()
-            graph = build_graph()
-            initial_state = create_initial_state(
-                run_date=run_date,
-                archive_manager=archive,
-                is_early_close=early_close,
-            )
-
-        # Snapshot the PRIOR population BEFORE the champion's graph mutates
-        # + commits it (archive_writer node) so the challenger producers
-        # (post-step below) start from the SAME held book — a clean
-        # selection-only comparison (config#1223 B3).
-        _prior_population = archive.load_population()
-        final_state = graph.invoke(initial_state)
-
-        # ── Challenger producers (config#1223 research observe substrate) ──
-        # FAIL-HARD (Brian ruling 2026-07-03, config#1683): the champion's
-        # signals.json is ALREADY persisted by the graph's archive_writer
-        # node before this step, so a raise here loses no live deliverable —
-        # it turns an experiment gap into a red run instead of weeks of
-        # silently-empty signals_shadow/ (the 6/27 audit, then the 7/3
-        # observe_alerts packaging miss — both invisible behind the previous
-        # WARN swallow). Experiment producers are producers; producers fail
-        # loud (feedback_no_silent_fails). run_challengers itself raises
-        # ChallengerShadowGapError on any producer gap.
-        from producers.runner import run_challengers
-
-        _shadow = run_challengers(
-            archive,
-            run_date,
-            run_time=final_state.get("run_time", "") or run_date,
-            population=_prior_population,
-        )
-        logger.info("[handler] challenger shadows: %s", _shadow.get("written"))
-
-        # ── Trajectory validation (Phase 2 eval) ──────────────────
-        _trajectory_result = None
-        try:
-            from evals.trajectory import validate_trajectory
-
-            _trajectory_result = validate_trajectory(
-                project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
-                final_state=final_state,
-            )
-            if _trajectory_result and not _trajectory_result["passed"]:
-                import logging as _logging
-
-                _logging.getLogger("evals.trajectory").error(
-                    "Trajectory validation failed: %s", _trajectory_result["failures"]
-                )
-        except Exception as _te:
-            # §61 (config#1684): an INFRA error in the trajectory validator
-            # (distinct from a validation that ran and FAILED, handled+ERROR'd
-            # above) was silently swallowed. Now loud on an alarmed surface.
-            # This runs post-persistence so it is *eligible* to raise, but
-            # reding an already-shipped run on an eval-infra error has a wide
-            # blast radius (SF FAILED → fleet-SF-watch), so we take the alarmed
-            # carve-out; promoting to a hard raise is a follow-up judgment call.
-            logger.warning("trajectory validation skipped: %s", _te)
-            from observe_alerts import publish_observe_alert
-
-            publish_observe_alert(
-                f"trajectory validation INFRA error (non-fatal, signals already shipped): {_te}",
-                source="research-runner:trajectory_validation",
-                dedup_key=f"trajectory_validation_infra_fail:{run_date}",
-            )
-
-        archive.close()
-
-        # Write health status on success
-        try:
-            from nousergon_lib.health import Deliverable, write_health
-
-            _population = final_state.get("new_population", [])
-            _rotations = final_state.get("population_rotation_events", [])
-            _email_sent = final_state.get("email_sent", False)
-            write_health(
-                module_name="research",
-                deliverables=[
-                    Deliverable(name="signals", required=True, produced=True),
-                    Deliverable(
-                        name="research_email",
-                        required=False,
-                        produced=_email_sent,
-                    ),
-                ],
-                run_date=run_date,
-                duration_seconds=time.time() - _health_start,
-                summary={
-                    "n_population": len(_population) if isinstance(_population, list) else 0,
-                    "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
-                    "market_regime": final_state.get("market_regime", "unknown"),
-                },
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-            )
-        except Exception as he:
-            logger.warning("health status write failed: %s", he)
-
-        # Write data manifest
-        try:
-            from data_manifest import write_data_manifest
-
-            write_data_manifest(
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                module_name="research",
-                run_date=run_date,
-                manifest={
-                    "n_population": len(_population) if isinstance(_population, list) else 0,
-                    "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
-                    "market_regime": final_state.get("market_regime", "unknown"),
-                    "n_buy_candidates": len(final_state.get("buy_candidates", [])),
-                    "n_universe": len(final_state.get("universe_scores", [])),
-                    "weekly_run": weekly,
-                    "email_sent": final_state.get("email_sent", False),
-                },
-            )
-        except Exception as _me:
-            logger.warning("data manifest write failed: %s", _me)
-
-        # ── Cost-telemetry aggregation ────────────────────────────────
-        # Aggregate today's per-call JSONLs into a single parquet that
-        # the Backtester evaluator email reads to render the
-        # ``## LLM cost report`` section. Previously a manual CLI step
-        # (``scripts/aggregate_costs.py``); now invoked inline at the
-        # end of every Research Lambda run so no manual action is
-        # required between Research and Backtester.
-        #
-        # Failure is non-fatal — Research already succeeded by this
-        # point and the Backtester gracefully renders an empty cost
-        # section if the parquet is absent. Logged WARN so a recurring
-        # failure surfaces without blocking trading.
-        if final_state.get("email_sent"):
-            try:
-                import boto3 as _boto3_agg
-
-                from scripts.aggregate_costs import aggregate_day
-
-                _agg_summary = aggregate_day(
-                    s3_client=_boto3_agg.client("s3"),
-                    bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                    # L4466/config#886: key the parquet by the TRADING day the
-                    # run's cost rows were written under (llm_cost_tracker keys
-                    # by run_date) — date.today() on a Saturday run pointed the
-                    # aggregator at an empty calendar-date partition.
-                    target_date=trading_date,
-                )
-                if _agg_summary is not None:
-                    logger.info(
-                        "[cost_aggregator] wrote parquet: rows=%d cost=$%.4f → %s",
-                        _agg_summary.get("rows_in", 0),
-                        _agg_summary.get("total_cost_usd", 0.0),
-                        _agg_summary.get("output_key", "<unknown>"),
-                    )
-                else:
-                    logger.warning(
-                        "[cost_aggregator] no JSONL files found for today — "
-                        "Backtester email will render empty cost section"
-                    )
-            except Exception as _agg_exc:
-                logger.warning(
-                    "[cost_aggregator] aggregation failed (non-fatal — "
-                    "Backtester gracefully renders empty cost section): %s",
-                    _agg_exc,
-                )
-
-        # ── Distillation SFT-corpus stats ─────────────────────────────
-        # Read the cumulative _sft_raw corpus and (re)write the compact
-        # ``distillation/corpus_stats/latest.json`` artifact the console
-        # Distillation-Corpus panel + the config#1542 kill-gate trigger
-        # consume (deduped, teacher-segregated, per-task counts + growth).
-        # Reads the WHOLE corpus each run, so weekly cadence keeps the
-        # cumulative number correct. Non-fatal — pure observability hung
-        # off a primary path that already succeeded; a recurring failure
-        # surfaces via WARN without blocking trading.
-        if final_state.get("email_sent"):
-            try:
-                import boto3 as _boto3_cs
-
-                from scripts.corpus_stats import compute_corpus_stats
-
-                _cs = compute_corpus_stats(
-                    s3_client=_boto3_cs.client("s3"),
-                    bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-                    target_date=trading_date,
-                )
-                logger.info(
-                    "[corpus_stats] deduped=%d quant_calibrator=%d/%d → %s",
-                    _cs["totals"]["deduped_pairs"],
-                    _cs["trigger"]["deduped_single_teacher"],
-                    _cs["trigger"]["target_pairs"],
-                    _cs.get("output_key", "<unknown>"),
-                )
-            except Exception as _cs_exc:
-                logger.warning(
-                    "[corpus_stats] stats refresh failed (non-fatal — console panel renders last artifact): %s",
-                    _cs_exc,
-                )
-
-        logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
-
-        # End-of-run flow-doctor heartbeat (config#646). Persist the flow's
-        # status() snapshot to the research bucket so the console System
-        # Health panel can confirm the daily research producer ran to
-        # completion. Soft-fails internally; no-ops when flow-doctor is off.
-        _emit_flow_doctor_heartbeat()
-
-        return {
-            "status": "OK",
-            "date": run_date,
-            "email_sent": final_state.get("email_sent", False),
-            "early_close": early_close,
-            "weekly_run": weekly,
-            "trajectory_passed": _trajectory_result["passed"] if _trajectory_result else None,
-        }
-
-    except Exception as e:
-        # ERROR — top-level pipeline crash; flow-doctor must escalate
-        # so the operator gets paged before the next Step Function tick
-        # (vs only finding out via the SF failure email).
-        logger.error("Pipeline error: %s", e, exc_info=True)
-
-        # Write health status on failure
-        try:
-            from nousergon_lib.health import Deliverable, write_health
-
-            write_health(
-                module_name="research",
-                deliverables=[
-                    Deliverable(name="signals", required=True, produced=False),
-                ],
-                run_date=run_date,
-                duration_seconds=time.time() - _health_start,
-                error=str(e),
-                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
-            )
-        except Exception as he:
-            logger.warning("health status write failed: %s", he)
-
-        return {"status": "ERROR", "date": run_date, "error": str(e)}

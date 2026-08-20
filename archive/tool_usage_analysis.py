@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 # Sentinel ``ticker`` for tool-call rows recorded at team/sector grain (the
 # combined quant+qual ReAct log is not scoped to a single ticker). Kept here so
-# both the writer (graph/research_graph.py archive_writer) and this analysis
+# both the writer (the retired research graph's archive_writer) and this analysis
 # import one definition.
 TEAM_RESOURCE_TICKER = "__team__"
 

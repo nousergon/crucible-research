@@ -330,7 +330,7 @@ def _use_arctic(tickers: list[str] | None, *, what: str) -> bool:
     ``tickers`` presence is the selector, with ``SCANNER_FEATURE_SOURCE=s3``
     as a hard override. ArcticDB is keyed per symbol and cannot enumerate a
     universe, so a caller that passes no ticker list structurally cannot use
-    it — ``graph/research_graph.py::fetch_data_node`` is the one such
+    it — the retired research graph's ``fetch_data_node`` is the one such
     caller, and it iterates the returned mapping to DISCOVER its universe.
 
     Raising there instead would break the ``challengers_only`` graph runner

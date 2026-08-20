@@ -300,7 +300,7 @@ def run_macro_agent(
       sector_modifiers: dict[str, float]
     """
     # Defer-import the cost-telemetry callback so this module's import
-    # path stays leaf-side of graph/* (research_graph imports macro_agent).
+    # path stays leaf-side of graph/* (the retired research graph imports macro_agent).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     llm = make_agent_llm(
@@ -444,7 +444,7 @@ def run_macro_agent(
             validated_ratings[sector] = {"rating": rating, "rationale": rationale}
 
     # Build macro_json in the dict shape downstream consumers expect
-    # (graph/research_graph.py merge_results, archive_writer, consolidator).
+    # (the retired research graph's merge_results, archive_writer, consolidator).
     macro_json = {
         "market_regime": parsed.market_regime,
         "sector_modifiers": dict(parsed.sector_modifiers),
@@ -469,13 +469,13 @@ def run_macro_agent(
         # ``_PROMPT_TEMPLATE.format(...)``) — this is what was handed to
         # ``HumanMessage(content=prompt)`` above, not the raw template.
         # Threaded back up through ``run_macro_agent_with_reflection`` so
-        # ``research_graph.py``'s ``track_llm_cost`` scope can stamp it
+        # The retired research graph's ``track_llm_cost`` scope can stamp it
         # onto ``FullPromptContext.user_prompt`` instead of falling back
         # to the unsubstituted ``LoadedPrompt.text`` template body. The
         # critic prompt (``run_macro_critic``) is a refinement pass, not
         # the canonical decision prompt, so it's intentionally excluded —
         # mirrors the existing ModelMetadata prompt_id/version comment
-        # in research_graph.py's macro call site.
+        # in the retired research graph's macro call site.
         "rendered_prompt": prompt,
     }
 

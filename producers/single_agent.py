@@ -379,7 +379,7 @@ def run_single_agent_producer(
 
     # The champion CUT, not candidates.json (alpha-engine-config-I7823).
     #
-    # This is the LIVE feed. `graph/research_graph.py::_resolve_agent_input_set`
+    # This is the LIVE feed. The retired research graph's `_resolve_agent_input_set`
     # looks like the feed and is not: `agentic_sector_teams` is
     # `kind="retired"` with `retired_date=2026-07-12`, and this producer is what
     # actually selects from the scanner's output. Rewiring the graph alone

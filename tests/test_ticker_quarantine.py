@@ -8,8 +8,6 @@ run-level floor (> MAX_QUARANTINED_TICKERS, OR a whole failed/missing/partial
 team) is breached, in which case the run still hard-fails.
 
 Layers covered here:
-  * score_aggregator — aggregation across teams + the per-ticker floor, and
-    that a WHOLE-team failure still hard-fails (the other floor arm).
   * _build_signals_payload — the explicit-absence field + suppression of the
     stale-thesis carry-forward for a quarantined held ticker.
 
@@ -19,11 +17,8 @@ exercised in test_held_thesis_strict.py.
 """
 from __future__ import annotations
 
-import pytest
-
 from agents.sector_teams.team_config import ALL_TEAM_IDS
-from config import MAX_QUARANTINED_TICKERS
-from graph.research_graph import _build_signals_payload, score_aggregator
+from scoring.signals_payload import _build_signals_payload
 
 
 def _state(team_outputs: dict) -> dict:
@@ -62,68 +57,15 @@ def _q(ticker, team_id):
     }
 
 
-# ── score_aggregator: aggregation + floor ────────────────────────────────
-
-
-class TestQuarantineFloor:
-    def test_within_floor_completes_and_returns_quarantined(self):
-        team = next(iter(ALL_TEAM_IDS))
-        outs = _all_clean({team: _clean(team, quarantined=[_q("CRUS", team)])})
-        result = score_aggregator(_state(outs))
-        assert result["investment_theses"] == {}
-        assert [q["ticker"] for q in result["quarantined"]] == ["CRUS"]
-        # team_id is preserved for downstream attribution.
-        assert result["quarantined"][0]["team_id"] == team
-
-    def test_exactly_at_floor_still_completes(self):
-        # MAX_QUARANTINED_TICKERS quarantined == at floor (not OVER) → completes.
-        tickers = [f"T{i}" for i in range(MAX_QUARANTINED_TICKERS)]
-        team = next(iter(ALL_TEAM_IDS))
-        outs = _all_clean({
-            team: _clean(team, quarantined=[_q(t, team) for t in tickers]),
-        })
-        result = score_aggregator(_state(outs))
-        assert sorted(q["ticker"] for q in result["quarantined"]) == sorted(tickers)
-
-    def test_over_floor_hard_fails(self):
-        # One MORE than the floor → hard-fail the whole run.
-        n = MAX_QUARANTINED_TICKERS + 1
-        team = next(iter(ALL_TEAM_IDS))
-        outs = _all_clean({
-            team: _clean(team, quarantined=[_q(f"T{i}", team) for i in range(n)]),
-        })
-        with pytest.raises(RuntimeError, match="QUARANTINE-FLOOR"):
-            score_aggregator(_state(outs))
-
-    def test_quarantine_aggregates_across_teams(self):
-        team_ids = list(ALL_TEAM_IDS)[:2]
-        outs = _all_clean({
-            team_ids[0]: _clean(team_ids[0], quarantined=[_q("AAA", team_ids[0])]),
-            team_ids[1]: _clean(team_ids[1], quarantined=[_q("BBB", team_ids[1])]),
-        })
-        result = score_aggregator(_state(outs))
-        assert sorted(q["ticker"] for q in result["quarantined"]) == ["AAA", "BBB"]
-
-    def test_whole_team_failure_still_hard_fails_over_quarantine(self):
-        # The OTHER floor arm: a failed team hard-fails regardless of quarantine
-        # (the all-agents-strict team gate fires before the per-ticker floor).
-        team_ids = list(ALL_TEAM_IDS)
-        outs = _all_clean({
-            team_ids[0]: {
-                "team_id": team_ids[0],
-                "recommendations": [],
-                "thesis_updates": {},
-                "error": "RecursionError: exhausted",
-                "quarantined": [],
-            },
-        })
-        with pytest.raises(RuntimeError, match="ALL-AGENTS-STRICT"):
-            score_aggregator(_state(outs))
-
-    def test_clean_run_has_empty_quarantine(self):
-        result = score_aggregator(_state(_all_clean()))
-        assert result["quarantined"] == []
-
+# ── score_aggregator tests DELETED with the champion graph ──────────────
+# (alpha-engine-config-I7827). `TestQuarantineFloor` exercised
+# `graph/research_graph.py::score_aggregator` — the run-level quarantine floor
+# and the whole-team hard-fail. That function was part of the retired arm
+# (`agentic_sector_teams`, retired 2026-07-12) and was deleted with it, so
+# the floor it enforced no longer exists to be tested. The half of this
+# contract that IS live — the explicit-absence field and the suppression of
+# stale-thesis carry-forward, both in `_build_signals_payload` — is below and
+# is unchanged.
 
 # ── _build_signals_payload: explicit absence + no carry-forward ──────────
 

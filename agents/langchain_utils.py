@@ -9,7 +9,7 @@ Two concerns:
      agent Haiku/Sonnet call (``invoke_with_rate_limit_retry``).
 
 The 429 wrapper exists because the 6-team parallel ``Send()`` fan-out
-in ``graph/research_graph.py`` bursts over the org's Haiku input-TPM
+in the retired research graph bursts over the org's Haiku input-TPM
 ceiling (450,000 tokens/min, claude-haiku-4-5). On the 2026-05-16
 recovery run that surfaced as ``RateLimitError 429`` aborting
 defensives/financials/technology.

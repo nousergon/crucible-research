@@ -560,18 +560,30 @@ build_and_deploy_main() {
 
   # Canary invocation
   #
-  # Use ``dry_run_llm: true`` — the flag the handler actually recognizes
-  # (lambda/handler.py:191). Earlier versions sent ``{"dry_run": true}``,
-  # which the handler silently ignored, leaving the canary running in
-  # full production mode (real LLM calls, real S3 writes, real email).
-  # That misfired on 2026-05-04 when a config-changed deploy landed
-  # inside the 5:40-5:55 PT weekday gate window in
-  # ``_is_scheduled_run_time()`` and produced a real ``signals.json`` +
-  # research email outside the intended Saturday cadence. The
-  # ``dry_run_llm`` path installs full stubs (no LLM, no S3, no email)
-  # before the graph runs, so a future deploy landing in the gate
-  # window stays a no-op.
-  echo "  Running canary (dry_run_llm=true)..."
+  # WHAT IT EXERCISES (changed by alpha-engine-config-I7827): the LIVE
+  # producer path -- ``producers/boot_check.py::run_live_producer_boot_check``
+  # imports every producer the weekly SF's ChallengerShadow stage will build
+  # (derived from ``producers/registry.py``, so a newly-registered arm is
+  # covered the day it lands) and drives the shared signals-payload assembly
+  # on a synthetic in-memory state.
+  #
+  # Until 2026-08-20 it called ``graph.research_graph.build_graph()`` instead:
+  # a producer RETIRED 2026-07-12 and with no invoker in production since the
+  # weekly SF dropped its ``Research`` state on 2026-07-14. The deploy's own
+  # safety check was smoke-testing dead code and NOT smoke-testing the path
+  # that runs, so a deploy that broke ``producers/`` passed this canary green.
+  #
+  # WHY THE PAYLOAD IS ``dry_run_llm`` AND NOT ``dry_run`` -- unchanged, and
+  # orthogonal to the above. ``dry_run_llm`` is the flag the handler actually
+  # recognizes. Earlier versions sent ``{"dry_run": true}``, which the handler
+  # silently ignored, leaving the canary running in full production mode (real
+  # LLM calls, real S3 writes, real email). That misfired on 2026-05-04 when a
+  # config-changed deploy landed inside the 5:40-5:55 PT weekday gate window
+  # and produced a real ``signals.json`` + research email outside the intended
+  # Saturday cadence. The ``dry_run_llm`` path still installs full stubs (no
+  # LLM, no S3, no email, no DB) around the check, and the check itself
+  # performs no I/O at all, so a deploy landing at any hour stays a no-op.
+  echo "  Running canary (dry_run_llm=true, live producer path)..."
   CANARY_OUT=$(mktemp)
   if ! python3 -m krepis.aws invoke-canary \
       --function-name "${FUNCTION_MAIN}:live" \

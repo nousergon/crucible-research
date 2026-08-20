@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Box entrypoint for the weekly Research run on spot EC2 (config#1687).
+"""DEAD ENTRY POINT — box entrypoint for the weekly Research run on spot EC2
+(config#1687).
+
+It invokes ``lambda/handler.py::handler`` with ``weekly_run=True``, and that
+branch was DELETED on 2026-08-20 (alpha-engine-config-I7827) along with the
+champion LangGraph pass it drove: the producer was retired 2026-07-12 and
+nothing had invoked this script since. Running it now raises
+``RetiredResearchPathError``. It is retained ONLY because five cross-cutting
+launcher-invariant tests take ``spot_research_weekly.sh`` (which dispatches
+this file) as their subject; retiring the launcher is tracked separately.
+Everything below describes the pre-retirement behaviour.
 
 Runs the **same production orchestration** the Lambda handler drives today —
 by invoking ``lambda/handler.py::handler`` directly with the weekly event —
@@ -68,8 +78,8 @@ def _import_handler():
     (``tests/test_challengers_only_mode.py``).
     """
     # The handler's deferred imports (``from preflight import ...``,
-    # ``from archive.manager import ...``, ``from graph.research_graph import
-    # ...``) resolve against the repo root, so it must be importable.
+    # ``from archive.manager import ...``) resolve against the repo root, so it
+    # must be importable.
     root = str(_REPO_ROOT)
     if root not in sys.path:
         sys.path.insert(0, root)

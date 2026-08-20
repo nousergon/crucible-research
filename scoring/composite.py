@@ -5,7 +5,7 @@ Two paths:
 
   * ``compute_composite_score`` — legacy 0.5×quant + 0.5×qual + 0.3×factor blend
     with macro_shift + boosts. Used by the held-stock thesis recompute path
-    (research_graph.py:1641) and pre-Phase-4 callers. Stays as the
+    (the retired research graph's score_aggregator) and pre-Phase-4 callers. Stays as the
     regression baseline for Phase 4.
   * ``compute_composite_breakdown`` — Phase 4 of attractiveness-pillars-260520
     arc (lib v0.23.0 ``CompositeBreakdown``). 7-term composite:

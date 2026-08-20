@@ -1,4 +1,4 @@
-"""Locks the cost-aggregator wire-up in lambda/handler.py.
+"""Locks the cost-aggregator PACKAGING invariants.
 
 Per ROADMAP P2 "SF-wire the aggregate_costs.py CLI" (closed 2026-05-02):
 the aggregator must run automatically at the end of every successful
@@ -28,59 +28,21 @@ def _strip_comments_and_strings(src: str) -> str:
     return src
 
 
-def test_handler_invokes_aggregate_day_on_success():
-    """Locks the canonical wire-up: ``from scripts.aggregate_costs import
-    aggregate_day`` followed by an ``aggregate_day(...)`` call at the
-    success-return path. Removing this resurrects the pre-2026-05-02
-    manual-CLI step."""
-    src = _strip_comments_and_strings(_HANDLER_PATH.read_text())
-    assert "from scripts.aggregate_costs import aggregate_day" in src, (
-        "lambda/handler.py must import aggregate_day — without it, the "
-        "Backtester email's cost section renders empty between Research "
-        "and Backtester (manual CLI step required)."
-    )
-    assert "aggregate_day(" in src
-
-
-def test_aggregator_call_is_gated_on_email_sent():
-    """The aggregator only runs when Research actually succeeded enough
-    to send the email (email_sent=True). On dry_run / early failure /
-    skipped-by-time the aggregator should NOT fire — there's no captured
-    data to aggregate, and a spurious WARN log per skipped invocation
-    would be noise."""
-    src = _HANDLER_PATH.read_text()
-    # Locate the aggregator call block.
-    block_start = src.find("aggregate_day(")
-    assert block_start != -1, "aggregator call site not found"
-    # Walk backwards to the nearest ``if `` / ``try`` to confirm gating.
-    preamble = src[max(0, block_start - 500):block_start]
-    assert "email_sent" in preamble, (
-        "aggregator must be gated on email_sent — without the gate it "
-        "fires on dry-runs and skipped invocations and emits noise WARNs."
-    )
-
-
-def test_aggregator_failure_is_non_fatal():
-    """Aggregator failure must NOT propagate. Research already succeeded
-    by this point and the Backtester gracefully renders an empty cost
-    section if the parquet is absent. A failed aggregation should surface
-    via a WARN log, not crash the Research Lambda return path.
-
-    Locks the canonical ``except _agg_exc`` name so the wrap doesn't get
-    accidentally removed in a refactor — the unique variable name flags
-    this as the aggregator-specific catch."""
-    src = _HANDLER_PATH.read_text()
-    assert "_agg_exc" in src, (
-        "aggregator must be wrapped in ``try: ... except Exception as "
-        "_agg_exc:`` — without the catch a transient S3 hiccup or pandas "
-        "issue would crash a successful Research run."
-    )
-    # And the catch must surface a WARN, not silently swallow.
-    assert "[cost_aggregator] aggregation failed" in src, (
-        "aggregator catch must log a WARN with the canonical "
-        "``[cost_aggregator] aggregation failed`` prefix so a recurring "
-        "failure is greppable in CloudWatch."
-    )
+# ── Three tests DELETED with the champion graph (alpha-engine-config-I7827) ──
+# `test_handler_invokes_aggregate_day_on_success`,
+# `test_aggregator_call_is_gated_on_email_sent` and
+# `test_aggregator_failure_is_non_fatal` asserted source-text invariants over
+# `lambda/handler.py`'s INLINE cost-aggregation tail: the `aggregate_day(...)`
+# call gated on `final_state["email_sent"]` at the end of the champion pass.
+# That whole tail was deleted with the retired graph, and the capability did
+# not go with it — `lambda/aggregate_costs_handler.py` is the live invoker
+# (the weekly SF's AggregateCosts stage, ROADMAP L1146), with its own tests.
+# Keeping the three would have been testing a retired element.
+#
+# The two below are NOT about the retired handler: they lock the packaging
+# invariants (`scripts/__init__.py`, the Dockerfile COPY) that
+# `aggregate_costs_handler.py` still depends on to resolve
+# `from scripts.aggregate_costs import ...` inside the image.
 
 
 def test_scripts_package_is_importable():
