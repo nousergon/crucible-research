@@ -912,7 +912,7 @@ def build_cases() -> list[Case]:
                               "attractiveness_trajectory._zmap"],
                     "measured_safe_count": 3, "total_sites": 3,
                     "sites_fixed_at_source": 3,
-                    "installed_lib_pin": "v0.124.70",
+                    "installed_lib_pin": "v0.124.77",
                     "units": "count of sites reporting undefined honestly"},
             expected=3.0,
             compute=_undefined_representation_count,

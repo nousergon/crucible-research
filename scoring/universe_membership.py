@@ -117,7 +117,9 @@ Schema::
     "producer": "crucible-research/scoring/universe_membership.py",
     "run_date": "YYYY-MM-DD",
     "generated_at": "ISO-8601 UTC",
-    "universe_count": int,             # names with a rankable attractiveness score
+    "universe_count": int,             # SCANNED names with a rankable attractiveness
+                                       # score. Equals the board's universe_count
+                                       # minus population_reconciliation.unrankable.
     "predictor_universe_cut": "attractiveness_top_20",  # names the cut the predictor resolves from
     "cuts": {
       "<cut_name>": {
@@ -132,9 +134,27 @@ Schema::
       "AAPL": {"attractiveness_rank": int, "attractiveness_score": float},
       ...
     },
+    "tech_score_ranks": {               # FULL momentum-path universe, rank 1 = highest
+      "AAPL": {"tech_score_rank": int, "tech_score": float},
+      ...                               # Absent when no eval log was supplied.
+    },
     "scanner_ranks": {                  # SCANNER CUT only, rank 1 = highest
       "AAPL": {"tech_score_rank": int, "tech_score": float},   # tech_score.
       ...                               # Absent when no eval log was supplied.
+    },
+    "rank_tables": {                    # basis -> which field holds its FULL table
+      "attractiveness_rank": {"field": "ranks", "rank_key": ..., "score_key": ...,
+                              "size": int, "population": int,
+                              "serves_rank_ceiling": bool, "eligibility": str},
+      "tech_score_rank":     {"field": "tech_score_ranks", ...},
+    },
+    "population_reconciliation": {      # this artifact vs the universe board
+      "source": "candidates/{date}/candidates.json::scanner_eval_log::ticker",
+      "scanned_universe_size": int | null,   # null on a historical backfill
+      "ranked": int,
+      "unrankable": ["VMRK", ...],           # scanned, no rankable score
+      "ranked_outside_scanned_universe": [], # ALWAYS empty — asserted
+      "unrankable_reason": str
     },
     "turnover": {                       # null when no prior artifact was readable
       "prior_run_date": "YYYY-MM-DD",
@@ -148,7 +168,19 @@ Schema::
 
 ``ranks`` is the reconstruction substrate: a consumer wanting top-N at an N this
 module does not emit slices it directly, with no board read and no re-derivation
-of the ranking method.
+of the ranking method. Since alpha-engine-config-I7843 there is one such table
+per PROMOTABLE BASIS, indexed by ``rank_tables``: a consumer resolves the rank
+ceiling of whichever arm is CHAMPION, so a basis served by only a 60-name
+within-cut table could not answer a ceiling of 150 and the arm was unpromotable.
+
+``schema_version`` stays 1 through both changes (2026-08-20). Everything added
+is additive — ``ranks``, ``scanner_ranks``, ``cuts`` and every existing key keep
+their name, type and meaning, so a consumer reading
+``ranks[t]["attractiveness_rank"]`` is untouched. The RANKED POPULATION narrows
+by the names the scanner never evaluated (alpha-engine-config-I7844), which is a
+defect fix inside the field's declared meaning rather than a new contract, and
+it is made visible by ``population_reconciliation`` rather than by a version
+bump that would tell every consumer to change code none of them has to change.
 """
 
 from __future__ import annotations
@@ -525,18 +557,45 @@ FUNNEL_CONSUMER_THINKTANK = "thinktank_coverage_window"
 FUNNEL_CONSUMER_RAG = "rag_corpus_scope"
 FUNNEL_CONSUMER_PREDICTOR = "predictor_universe"
 
+TECH_SCORE_RANKS_FIELD = "tech_score_ranks"
+"""Top-level field holding the FULL-UNIVERSE ``tech_score`` rank table.
+
+Separate from ``scanner_ranks``, which is retained unchanged: that one ranks
+names *within* the champion's own 60 and is what the incumbent-arm comparison
+reads. Two tables because they answer two questions — "where does this name sit
+in the tech_score universe?" and "how did the incumbent order the cut it was
+actually given?" — and collapsing them would silently answer one with the other.
+"""
+
 _RANK_TABLE_BY_BASIS: dict[str, tuple[str, str, str]] = {
     "attractiveness_rank": ("ranks", "attractiveness_rank", "attractiveness_score"),
+    "tech_score_rank": (TECH_SCORE_RANKS_FIELD, "tech_score_rank", "tech_score"),
 }
 """``basis`` -> (membership field holding a FULL-UNIVERSE rank table, rank key, score key).
 
-Deliberately NOT populated for ``tech_score_rank``. ``scanner_ranks`` is a
-60-name table ranking names *within* the champion's own cut, so it cannot
-answer "who is rank 150 in this basis" — and answering that question with the
-attractiveness table instead would mean the champion pointer names one arm
-while the consumer ranks by another. The producer-side fix (emit a full rank
-table per promotable basis) is alpha-engine-config-I7843; until it lands,
-:func:`rank_table_for_cut` refuses rather than substitutes.
+The DEFAULT index, used for artifacts written before ``rank_tables`` existed.
+A current artifact carries its own ``rank_tables`` index and
+:func:`rank_table_for_cut` prefers it: which field holds which basis is a fact
+about the artifact in hand, and reading it out of a constant in the producer's
+source is the same duplicated-truth defect the funnel declaration replaced.
+
+``tech_score_rank`` was deliberately ABSENT here until
+alpha-engine-config-I7843: the only tech table emitted was ``scanner_ranks``,
+60 names ranked within the champion's cut, which cannot answer "who is rank 150
+in this basis" — and answering it with the attractiveness table instead would
+mean the champion pointer names one arm while the consumer ranks by another
+(alpha-engine-config-I7808). The producer now emits the full table, so the
+refusal is no longer the right answer for this basis; :func:`rank_table_for_cut`
+still refuses for any basis that has none.
+"""
+
+MIN_PROMOTABLE_RANK_COVERAGE = 200
+"""Widest rank position a consumer of a PROMOTABLE cut may ask about.
+
+Think Tank's ``exit_rank`` (``config/thinktank.sample.yaml``) is the binding
+consumer today. Asserted at the producer against every promotable cut's basis
+so a basis that cannot serve the funnel's own consumers is a red Scanner run
+rather than a promotion that fails on the morning it is made.
 """
 
 
@@ -608,6 +667,77 @@ def serving_cut_for(
     return serving, declared
 
 
+_RANK_TABLE_ELIGIBILITY: dict[str, str] = {
+    "attractiveness_rank": (
+        "every name in the SCANNED universe with a rankable attractiveness "
+        "score (factors/profiles/{run_date}/by_ticker.json, cross-sectional "
+        "percentile over that same population)"
+    ),
+    "tech_score_rank": (
+        "every scanned row the MOMENTUM PATH admitted (scan_path == 'momentum': "
+        "liquidity floor, price floor, tech_score_min, MA200 floor, momentum "
+        "volatility ceiling). Legitimately narrower than the universe — ranking "
+        "a name the incumbent rule rejected would invent an ordering it never "
+        "expressed."
+    ),
+}
+"""Human-readable eligibility statement per basis, emitted with each table.
+
+A consumer that finds its ceiling unanswerable in some basis is entitled to
+know WHY the table is narrow — a declared gate, or a broken read — without
+opening this module (alpha-engine-config-I7843)."""
+
+
+def _rank_tables_block(membership: dict, population: int) -> dict[str, dict]:
+    """The self-describing ``rank_tables`` index for an assembled artifact.
+
+    One entry per basis that actually has a full-universe table in this
+    artifact. ``size`` and ``serves_rank_ceiling`` are recorded so a consumer
+    can check whether a basis reaches its ceiling rather than discover it by
+    being refused (alpha-engine-config-I7843).
+    """
+    block: dict[str, dict] = {}
+    for basis, (field, rank_key, score_key) in _RANK_TABLE_BY_BASIS.items():
+        table = membership.get(field) or {}
+        if not table:
+            continue
+        block[basis] = {
+            "field": field,
+            "rank_key": rank_key,
+            "score_key": score_key,
+            "size": len(table),
+            "population": population,
+            "serves_rank_ceiling": len(table) >= min(MIN_PROMOTABLE_RANK_COVERAGE, population),
+            "eligibility": _RANK_TABLE_ELIGIBILITY.get(basis, ""),
+        }
+    return block
+
+
+def _rank_table_index(membership: dict) -> dict[str, tuple[str, str, str]]:
+    """``basis -> (field, rank_key, score_key)`` for the artifact in hand.
+
+    Read from the artifact's own ``rank_tables`` declaration when it carries
+    one, so a producer that adds a basis needs no matching edit in every
+    consumer; falls back to :data:`_RANK_TABLE_BY_BASIS` for artifacts written
+    before ``rank_tables`` existed (alpha-engine-config-I7843).
+
+    A malformed declaration is IGNORED per-entry rather than raised on: the
+    fallback is the honest older contract, and the caller's own coverage check
+    is what decides whether the resolved table can answer its question.
+    """
+    declared = (membership or {}).get("rank_tables")
+    if not isinstance(declared, dict) or not declared:
+        return dict(_RANK_TABLE_BY_BASIS)
+    index: dict[str, tuple[str, str, str]] = {}
+    for basis, meta in declared.items():
+        if not isinstance(meta, dict):
+            continue
+        field, rank_key, score_key = (meta.get("field"), meta.get("rank_key"), meta.get("score_key"))
+        if field and rank_key and score_key:
+            index[str(basis)] = (str(field), str(rank_key), str(score_key))
+    return index or dict(_RANK_TABLE_BY_BASIS)
+
+
 def rank_table_for_cut(
     membership: dict,
     cut_name: str,
@@ -628,13 +758,13 @@ def rank_table_for_cut(
     """
     cut = (membership.get("cuts") or {}).get(cut_name) or {}
     basis = cut.get("basis")
-    entry = _RANK_TABLE_BY_BASIS.get(str(basis))
+    entry = _rank_table_index(membership).get(str(basis))
     if entry is None:
         raise UniverseMembershipError(
             f"universe_membership (run_date={membership.get('run_date')}): cut "
             f"{cut_name!r} is ranked by {basis!r}, for which this artifact emits "
             f"no full-universe rank table (it emits one only for "
-            f"{sorted(_RANK_TABLE_BY_BASIS)}). A consumer's rank ceiling cannot "
+            f"{sorted(_rank_table_index(membership))}). A consumer's rank ceiling cannot "
             f"be resolved in this basis, and resolving it in the attractiveness "
             f"basis instead would rank by an arm that is not the champion — "
             f"alpha-engine-config-I7808. Producer fix: "
@@ -646,7 +776,10 @@ def rank_table_for_cut(
         raise UniverseMembershipError(
             f"universe_membership (run_date={membership.get('run_date')}): "
             f"{field!r} is empty — cut {cut_name!r} declares basis {basis!r} but "
-            f"the table that basis ranks in carries no names."
+            f"the table that basis ranks in carries no names. Refusing rather "
+            f"than resolving the ceiling out of another basis' table, which "
+            f"would rank by an arm the champion pointer does not name "
+            f"(alpha-engine-config-I7843)."
         )
     ranks = {str(t): int(v[rank_key]) for t, v in table.items() if rank_key in (v or {})}
     if minimum_coverage is not None:
@@ -791,22 +924,53 @@ def _client(s3_client: Any):
     return boto3.client("s3")
 
 
+def _ranked(scores: dict[str, float], rank_key: str, score_key: str) -> dict[str, dict]:
+    """``{ticker: {rank_key: int, score_key: float}}``, rank 1 = highest score.
+
+    The one ranking primitive in this module. Ties broken by ticker so the
+    table is deterministic across runs (a reproducible rank matters — consumers
+    diff these week over week), and the KEY NAMES are a parameter rather than
+    hardcoded: a table of ``tech_score`` values carrying ``attractiveness_rank``
+    keys is a lie a reader has no way to catch, and until
+    alpha-engine-config-I7843 the tech cut was derived from exactly that.
+    """
+    ordered = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {ticker: {rank_key: i + 1, score_key: score} for i, (ticker, score) in enumerate(ordered)}
+
+
 def _rank_table(attractiveness: dict[str, float]) -> dict[str, dict]:
     """``{ticker: {attractiveness_rank, attractiveness_score}}``, rank 1 = most
-    attractive. Ties broken by ticker so the table is deterministic across runs
-    (a reproducible rank matters — consumers diff these week over week)."""
-    ordered = sorted(attractiveness.items(), key=lambda kv: (-kv[1], kv[0]))
-    return {
-        ticker: {"attractiveness_rank": i + 1, "attractiveness_score": score}
-        for i, (ticker, score) in enumerate(ordered)
-    }
+    attractive."""
+    return _ranked(attractiveness, "attractiveness_rank", "attractiveness_score")
+
+
+def _tech_score_universe_rank_table(gate_eligible_tech_scores: dict[str, float]) -> dict[str, dict]:
+    """``{ticker: {tech_score_rank, tech_score}}`` over every MOMENTUM-PATH row.
+
+    The full-universe table in the ``tech_score_rank`` basis
+    (alpha-engine-config-I7843). Distinct from :func:`_tech_score_rank_table`,
+    which ranks the champion's own 60 and answers a different question.
+
+    Legitimately narrower than the attractiveness table: ``scan_path ==
+    "momentum"`` (see :func:`momentum_path_tech_scores`) is the incumbent rule's
+    own eligibility gate, and ranking a name it rejected would invent an
+    ordering the incumbent never expressed. The WIDTH is therefore declared in
+    the artifact (``rank_tables["tech_score_rank"].size``) rather than left for
+    a consumer to discover by finding its ceiling unanswerable.
+    """
+    return _ranked(gate_eligible_tech_scores, "tech_score_rank", "tech_score")
+
+
+def _top_n_by(ranks: dict[str, dict], rank_key: str, n: int) -> list[str]:
+    """The N highest-ranked tickers, returned SORTED (set semantics — this is a
+    membership list, and rank order is already recoverable from the table)."""
+    top = sorted(ranks.items(), key=lambda kv: kv[1][rank_key])[:n]
+    return sorted(t for t, _ in top)
 
 
 def _top_n(ranks: dict[str, dict], n: int) -> list[str]:
-    """The N most attractive tickers, returned SORTED (set semantics — this is a
-    membership list, and rank order is already recoverable from ``ranks``)."""
-    top = sorted(ranks.items(), key=lambda kv: kv[1]["attractiveness_rank"])[:n]
-    return sorted(t for t, _ in top)
+    """The N most attractive tickers, SORTED."""
+    return _top_n_by(ranks, "attractiveness_rank", n)
 
 
 def _tech_score_rank_table(scanner_tickers: list[str], tech_scores: dict[str, float]) -> dict[str, dict]:
@@ -862,6 +1026,123 @@ def assert_gate_cut_feeds_nothing_live(membership: dict, run_date: str) -> None:
             raise UniverseMembershipError(
                 f"universe membership {run_date}: funnel.advances_to."
                 f"{consumer}={named!r} — the gate cut feeds nothing live."
+            )
+
+
+MAX_UNRANKABLE_FRACTION = 0.05
+"""Ceiling on the share of the scanned universe with no rankable score.
+
+1 of 903 on 2026-08-20 (``VMRK``, no factor-profile row at all). A handful of
+names the factor pipeline could not score is a normal state; a fifth of the
+universe unrankable means the profiles read is broken upstream, and the
+membership artifact must not publish a rank table over the remains of it as if
+nothing had happened.
+"""
+
+
+def assert_population_parity(membership: dict, run_date: str) -> None:
+    """The ranked population must be a subset of the SCANNED universe.
+
+    This is the guard whose absence produced alpha-engine-config-I7844. Two
+    artifacts are written by one Scanner invocation from two different sources:
+    the universe board iterates ``candidates.json::scanner_eval_log`` (the
+    scanned universe), while this artifact's ranks came from every key in
+    ``factors/profiles/{date}/by_ticker.json``. That file legitimately carries
+    names outside the scanned universe — Metron-supplemental rows and
+    fundamental-only rows — so the two populations drifted apart with nothing
+    raising. Measured 2026-08-20: ``EQR``/``AVB``/``HYOAS``/``XLRE`` were
+    ranked 98/420/421/422 with NO technical data at all (``momentum_n: 0``,
+    ``low_vol_n: 0``, ``sector: "Unknown"``, three of them carrying identical
+    neutral default pillars), and ``EQR`` sat inside Think Tank's
+    ``rank_ceiling: 150``.
+
+    Asserted against the EVAL LOG rather than by reading the board, for two
+    reasons. The board's population IS the eval log's by construction
+    (``scanner_orchestrator.write_universe_board_for_scanner_run`` builds its
+    rows from ``scanner_eval_log``, verified equal on the live 2026-08-20
+    artifacts), so the eval log is the same fact one hop earlier. And the board
+    write is fail-soft dashboard-only while this artifact is load-bearing —
+    making the predictor's universe depend on a best-effort artifact being
+    readable is the coupling :func:`attractiveness_for_run` already refuses.
+
+    The reverse direction — scanned names with no rank — is a legitimate,
+    BOUNDED state (a name with no factor profile cannot be ranked and must not
+    be fabricated a score), so it is recorded in
+    ``population_reconciliation.unrankable`` and only raises past
+    :data:`MAX_UNRANKABLE_FRACTION`.
+    """
+    recon = membership.get("population_reconciliation") or {}
+    scanned = recon.get("scanned_universe_size")
+    if not scanned:
+        # No eval log was supplied (historical backfill). Recorded as such in
+        # the reconciliation block rather than asserted against a population
+        # this run does not have.
+        return
+    outside = recon.get("ranked_outside_scanned_universe") or []
+    if outside:
+        raise UniverseMembershipError(
+            f"universe membership {run_date}: {len(outside)} ranked name(s) are "
+            f"absent from the scanned universe ({outside[:20]}). ``ranks`` and "
+            f"the universe board are two views of ONE Scanner run and must "
+            f"cover the same names; a name ranked here with no board row is "
+            f"invisible to every consumer that joins the two, and it was "
+            f"ranked on whatever partial pillar data the factor profiles "
+            f"happened to carry (alpha-engine-config-I7844)."
+        )
+    unrankable = recon.get("unrankable") or []
+    if len(unrankable) > MAX_UNRANKABLE_FRACTION * int(scanned):
+        raise UniverseMembershipError(
+            f"universe membership {run_date}: {len(unrankable)} of {scanned} "
+            f"scanned name(s) have no rankable attractiveness score, past the "
+            f"{MAX_UNRANKABLE_FRACTION:.0%} allowance. A rank table over the "
+            f"remains of a broken factor-profile read must not be published as "
+            f"a universe ranking (alpha-engine-config-I7844). Unrankable: "
+            f"{unrankable[:20]}"
+        )
+
+
+def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) -> None:
+    """Every promotable cut's basis must have a full-universe rank table.
+
+    The producer half of alpha-engine-config-I7843. A cut in
+    :data:`PROMOTABLE_CUTS` can be handed the funnel by the champion pointer at
+    any time, and the consumer of that slot resolves its rank ceiling in the
+    SERVING arm's basis. A basis with no table — or a table too short to reach
+    :data:`MIN_PROMOTABLE_RANK_COVERAGE` — makes the promotion fail on the
+    morning it is made, in a consumer, with the cut already live. Checked here
+    instead, on the run that emits the arm.
+
+    EXISTENCE is what raises. Whether the table is WIDE ENOUGH for a given
+    consumer's ceiling is recorded (``rank_tables[basis].serves_rank_ceiling``)
+    and enforced by :func:`rank_table_for_cut` at read time, not raised on here:
+    a table's width depends on how many names cleared that arm's own
+    eligibility gate this cycle, and an observe-only arm narrowing must never
+    red a Scanner run whose load-bearing output — the predictor's universe — is
+    fine. A basis with NO table is the opposite: a producer defect, decided by
+    the code and identical on every run.
+    """
+    cuts = membership.get("cuts") or {}
+    index = _rank_table_index(membership)
+    for cut_name in PROMOTABLE_CUTS:
+        cut = cuts.get(cut_name)
+        if cut is None:
+            # An arm can be legitimately absent (no eval log, unavailable
+            # shadow profiles) — that is recorded as a miss for the arm, and it
+            # is not promotable while it is missing.
+            continue
+        basis = str(cut.get("basis"))
+        entry = index.get(basis)
+        table = membership.get(entry[0]) if entry else None
+        if not entry or not table:
+            raise UniverseMembershipError(
+                f"universe membership {run_date}: promotable cut {cut_name!r} is "
+                f"ranked by {basis!r}, for which this artifact emits no "
+                f"full-universe rank table (it emits one for {sorted(index)}). "
+                f"The champion pointer can hand this arm the funnel at any "
+                f"time, and the consumer of that slot resolves its rank ceiling "
+                f"in the SERVING arm's basis — so an arm with no table is a "
+                f"promotion that fails in a consumer on the morning it is made "
+                f"(alpha-engine-config-I7843)."
             )
 
 
@@ -1053,6 +1334,7 @@ def build_universe_membership(
     gate_eligible_tech_scores: dict[str, float] | None = None,
     challenger_attractiveness: dict[str, float] | None = None,
     momzero_attractiveness: dict[str, float] | None = None,
+    scanned_universe: list[str] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
     prior: dict | None = None,
@@ -1083,6 +1365,15 @@ def build_universe_membership(
         baseline. Kept separate from ``tech_scores`` rather than derived from
         it because the two answer different questions and applying the wrong
         one silently produces a cut over names the incumbent rule rejected.
+    scanned_universe : every ticker the scanner EVALUATED this run
+        (``candidates.json::scanner_eval_log::ticker``, via
+        :func:`scanned_universe_from_eval_log`). This is the universe board's
+        population by construction, so supplying it lets the producer assert
+        that its own rank table and the board cover the same names
+        (alpha-engine-config-I7844). ``None`` — the historical-backfill path,
+        which has no eval log — skips the parity assertion and records the
+        absence in ``population_reconciliation`` rather than asserting against
+        a population the run does not have.
     prior : the previous membership artifact, when one was readable. Used only
         to compute the ``turnover`` block; passing None yields ``turnover:
         null`` rather than a fabricated zero-churn record. Kept a parameter
@@ -1186,10 +1477,14 @@ def build_universe_membership(
     # projection is non-empty rather than gated on a config flag: its whole
     # purpose is that the cutover stays measurable, and a baseline that can be
     # switched off is a baseline that is off on the cycle you needed it.
+    #
+    # The full table is now KEPT, not discarded after the top-60 slice
+    # (alpha-engine-config-I7843): this cut is promotable, and the consumer of
+    # the slot it can be promoted into resolves its rank ceiling in this basis.
+    tech_score_ranks = _tech_score_universe_rank_table(gate_eligible_tech_scores or {})
     if gate_eligible_tech_scores:
-        _ts_ranks = _rank_table(gate_eligible_tech_scores)
         for n in (ATTRACTIVENESS_FEED_TOP_N,):
-            tickers = _top_n(_ts_ranks, n)
+            tickers = _top_n_by(tech_score_ranks, "tech_score_rank", n)
             cuts[f"{TECH_SCORE_CUT_PREFIX}{n}"] = {
                 "basis": "tech_score_rank",
                 "size": len(tickers),
@@ -1248,6 +1543,33 @@ def build_universe_membership(
 
     assert_cut_invariants({"cuts": cuts}, run_date)
 
+    # ── Population reconciliation (alpha-engine-config-I7844) ───────────────
+    # The scanned universe is the board's population by construction. Stating
+    # both sides and their difference IN the artifact is what makes the two
+    # halves of one Scanner run checkable by a reader who has only one of them.
+    scanned = sorted({str(t).upper() for t in (scanned_universe or [])})
+    ranked_set = set(ranks)
+    reconciliation: dict[str, Any] = {
+        "source": f"candidates/{run_date}/candidates.json::scanner_eval_log::ticker",
+        "scanned_universe_size": len(scanned) or None,
+        "ranked": len(ranks),
+        "unrankable": sorted(set(scanned) - ranked_set) if scanned else [],
+        "ranked_outside_scanned_universe": sorted(ranked_set - set(scanned)) if scanned else [],
+        "unrankable_reason": (
+            "in the scanned universe with no rankable attractiveness score — no "
+            "factor-profile row, or every pillar leg undefined. Carried on the "
+            "universe board with attractiveness_score=null and counted there in "
+            "attractiveness_coverage.excluded_tickers; absent from ``ranks``, "
+            "because a fabricated score would occupy a rank position."
+        ),
+    }
+    if not scanned:
+        reconciliation["note"] = (
+            "no scanner_eval_log was supplied (historical backfill) — the ranked "
+            "population could not be reconciled against the scanned universe on "
+            "this run, and was NOT asserted."
+        )
+
     membership = {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER,
@@ -1279,16 +1601,29 @@ def build_universe_membership(
         # holds the prior cut instead. ``cut_effective_date == run_date`` is
         # therefore the test for "this cut is today's".
         "cut_effective_date": run_date,
+        "population_reconciliation": reconciliation,
         "cuts": cuts,
         "ranks": ranks,
     }
     if scanner_ranks:
         membership["scanner_ranks"] = scanner_ranks
+    if tech_score_ranks:
+        membership[TECH_SCORE_RANKS_FIELD] = tech_score_ranks
+    # The basis -> full-universe-table INDEX, declared in the artifact rather
+    # than left in a constant on the consumer side (alpha-engine-config-I7843).
+    # A consumer resolving its serving arm's rank ceiling asks this block which
+    # field to read and how wide it is; adding a basis is then a producer-side,
+    # versioned change with no matching edit in every reader — the same reason
+    # ``funnel.advances_to`` is declared here rather than restated downstream.
+    membership["rank_tables"] = _rank_tables_block(membership, len(ranks))
     if backfilled_from:
         membership["backfilled_from"] = backfilled_from
-    # Runs on the ASSEMBLED artifact, unlike the cut invariants above: what it
-    # checks are the routing fields, which do not exist until the dict is built.
+    # Runs on the ASSEMBLED artifact, unlike the cut invariants above: what
+    # these check are the routing fields and the rank tables, which do not
+    # exist until the dict is built.
     assert_gate_cut_feeds_nothing_live(membership, run_date)
+    assert_population_parity(membership, run_date)
+    assert_rank_tables_cover_promotable_cuts(membership, run_date)
     membership["turnover"] = compute_turnover(membership, prior)
     return membership
 
@@ -1370,9 +1705,65 @@ def attractiveness_from_board(board: dict) -> dict[str, float]:
     return out
 
 
-def attractiveness_for_run(run_date: str, *, bucket: str | None = None, s3_client: Any = None) -> dict[str, float]:
+def _restrict_to_scanned_universe(
+    profiles: dict,
+    scanned_universe: list[str] | None,
+    *,
+    arm: str,
+) -> dict:
+    """``profiles`` restricted to the names the scanner actually evaluated.
+
+    Applied BEFORE the cross-sectional scoring chokepoint, never after
+    (alpha-engine-config-I7844). Attractiveness is a percentile over the
+    population being scored, so filtering afterwards leaves every surviving
+    score computed against a population that included names the scanner never
+    saw. Measured on the live 2026-08-20 artifacts: scoring all 906 profile rows
+    and scoring the 902 that the scanner evaluated gave DIFFERENT scores for
+    860 of the 902 common names, and the two orderings first diverged at rank
+    26 — while filtering first reproduces the universe board's scores exactly,
+    which is the byte-identity this module's docstring has always claimed and
+    did not have.
+
+    ``None`` leaves the profiles untouched: the historical backfill has no eval
+    log, and inventing one would be worse than an unreconciled artifact that
+    says so.
+    """
+    if not scanned_universe:
+        return profiles
+    keep = {str(t).upper() for t in scanned_universe}
+    restricted = {t: v for t, v in profiles.items() if str(t).upper() in keep}
+    dropped = sorted(set(profiles) - set(restricted))
+    if dropped:
+        logger.info(
+            "[universe_membership] %s: %d factor-profile row(s) are outside the "
+            "scanned universe and are NOT ranked (%s%s) — the profiles file "
+            "legitimately carries Metron-supplemental and fundamental-only names "
+            "the scanner never evaluated (alpha-engine-config-I7844)",
+            arm,
+            len(dropped),
+            dropped[:20],
+            "..." if len(dropped) > 20 else "",
+        )
+    if not restricted:
+        raise UniverseMembershipError(
+            f"{arm}: no factor-profile row survives restriction to the "
+            f"{len(keep)}-name scanned universe — the profiles and the scanner "
+            f"eval log describe disjoint populations, which is a broken read, "
+            f"never an empty universe (alpha-engine-config-I7844)"
+        )
+    return restricted
+
+
+def attractiveness_for_run(
+    run_date: str,
+    *,
+    scanned_universe: list[str] | None = None,
+    bucket: str | None = None,
+    s3_client: Any = None,
+) -> dict[str, float]:
     """``{ticker: attractiveness_score}`` for ``run_date``, computed from the
-    run's factor profiles via the SSOT cross-sectional chokepoint.
+    run's factor profiles via the SSOT cross-sectional chokepoint, over the
+    SCANNED universe.
 
     Deliberately NOT sourced from the universe board, for two reasons:
 
@@ -1386,8 +1777,15 @@ def attractiveness_for_run(run_date: str, *, bucket: str | None = None, s3_clien
 
     Factor profiles are written earlier in the same Scanner invocation
     (``compute_and_write_factor_profiles``), so this read is same-run data, and
-    it goes through the identical pillar-weighting chokepoint the board uses —
-    the ranks here are byte-identical to the console board's.
+    it goes through the identical pillar-weighting chokepoint the board uses.
+
+    ``scanned_universe`` is what makes the ranks here byte-identical to the
+    console board's — a property this docstring asserted for weeks while it was
+    false. The profiles file is NOT the scanned universe: it legitimately
+    carries Metron-supplemental and fundamental-only rows the scanner never
+    evaluated, and scoring them shifted every percentile in the table
+    (alpha-engine-config-I7844, corrected 2026-08-20). Omit it only where no
+    eval log exists — the historical backfill.
     """
     from scoring.universe_board import (
         _read_factor_profiles,
@@ -1399,6 +1797,7 @@ def attractiveness_for_run(run_date: str, *, bucket: str | None = None, s3_clien
         raise UniverseMembershipError(
             f"universe membership {run_date}: no factor profiles readable — attractiveness rank cuts cannot be built"
         )
+    profiles = _restrict_to_scanned_universe(profiles, scanned_universe, arm=f"champion attractiveness {run_date}")
     scored = attractiveness_from_factor_profiles(profiles, bucket=bucket, s3_client=s3_client)
     return {
         ticker: float(v["attractiveness_score"])
@@ -1424,6 +1823,35 @@ def tech_scores_from_eval_log(eval_log: list[dict] | None) -> dict[str, float]:
         score = row.get("tech_score")
         if ticker and isinstance(score, (int, float)):
             out[str(ticker).upper()] = float(score)
+    return out
+
+
+def scanned_universe_from_eval_log(eval_log: list[dict] | None) -> list[str]:
+    """Every ticker the scanner EVALUATED this run, from the eval log.
+
+    This is the universe board's population by construction:
+    ``data.scanner_orchestrator.write_universe_board_for_scanner_run`` builds
+    the board's rows from this same list (``build_scanner_eval_rows_for_board``),
+    and ``scoring.universe_board.build_universe_board`` emits one row per row it
+    is given. Verified equal on the live 2026-08-20 artifacts (903 = 903, same
+    set). Projecting it here is therefore how this producer checks itself
+    against the board without reading a fail-soft artifact
+    (alpha-engine-config-I7844).
+
+    Distinct from every other eval-log projection in this module: the others
+    select rows by a SCORE or a gate, this one is the population itself, so a
+    row with no ``tech_score`` and a row that failed every gate both count.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in eval_log or []:
+        ticker = row.get("ticker")
+        if not ticker:
+            continue
+        t = str(ticker).upper()
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
     return out
 
 
@@ -1510,9 +1938,19 @@ def momentum_arms_applicable(bucket: str | None = None, s3_client: Any = None) -
 
 
 def momzero_attractiveness_for_run(
-    run_date: str, *, bucket: str | None = None, s3_client: Any = None
+    run_date: str,
+    *,
+    scanned_universe: list[str] | None = None,
+    bucket: str | None = None,
+    s3_client: Any = None,
 ) -> dict[str, float] | None:
     """``{ticker: attractiveness_score}`` with the momentum pillar weighted 0.
+
+    ``scanned_universe`` is threaded through for the same reason the champion
+    gets it, and it is load-bearing for the COMPARISON rather than only for
+    correctness: this arm and the champion must rank the same population, or
+    the leaderboard attributes a population difference to the weight vector
+    (champion-challenger-policy.md §4).
 
     Reads the CHAMPION's factor profiles — not a shadow copy — because this arm
     changes only the weight vector, not the pillar scores. Sharing the input
@@ -1541,6 +1979,7 @@ def momzero_attractiveness_for_run(
         profiles = _read_factor_profiles(run_date, bucket, s3_client) or {}
         if not profiles:
             return None
+        profiles = _restrict_to_scanned_universe(profiles, scanned_universe, arm=f"momzero arm {run_date}")
         scored = attractiveness_from_factor_profiles(profiles, pillar_weights=MOMZERO_PILLAR_WEIGHTS)
     except Exception as exc:  # noqa: BLE001 — observe-only arm
         logger.info(
@@ -1557,7 +1996,11 @@ def momzero_attractiveness_for_run(
 
 
 def challenger_attractiveness_for_run(
-    run_date: str, *, bucket: str | None = None, s3_client: Any = None
+    run_date: str,
+    *,
+    scanned_universe: list[str] | None = None,
+    bucket: str | None = None,
+    s3_client: Any = None,
 ) -> dict[str, float] | None:
     """``{ticker: attractiveness_score}`` under the mom121 challenger composite,
     or ``None`` when the shadow profiles are unreadable.
@@ -1598,6 +2041,9 @@ def challenger_attractiveness_for_run(
         return None
     if not profiles:
         return None
+    # Same population as the champion — an arm compared over a different set of
+    # names answers a question about the population, not about the horizon.
+    profiles = _restrict_to_scanned_universe(profiles, scanned_universe, arm=f"mom121 arm {run_date}")
     scored = attractiveness_from_factor_profiles(profiles)
     return {
         ticker: rec["attractiveness_score"]
@@ -1637,14 +2083,24 @@ def compute_and_write_universe_membership(
     # not weaken the weekly path's read guarantee.
     prior = read_latest_membership(bucket=bucket, s3_client=s3_client)
 
+    # The scanned universe — the board's population, one hop earlier. Every arm
+    # is ranked over it, so no arm can differ from another by which names it
+    # scored (alpha-engine-config-I7844).
+    scanned_universe = scanned_universe_from_eval_log(scanner_eval_log)
+
     membership = build_universe_membership(
         run_date,
         scanner_tickers,
-        attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
+        attractiveness_for_run(run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client),
         tech_scores=tech_scores_from_eval_log(scanner_eval_log),
         gate_eligible_tech_scores=momentum_path_tech_scores(scanner_eval_log),
-        challenger_attractiveness=challenger_attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
-        momzero_attractiveness=momzero_attractiveness_for_run(run_date, bucket=bucket, s3_client=s3_client),
+        challenger_attractiveness=challenger_attractiveness_for_run(
+            run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client
+        ),
+        momzero_attractiveness=momzero_attractiveness_for_run(
+            run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client
+        ),
+        scanned_universe=scanned_universe,
         prior=prior,
     )
     membership["cut_refresh_cadence"] = cadence

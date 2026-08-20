@@ -119,7 +119,7 @@ holds it to that.
 | `attractiveness_top_25` | 25 | `attractiveness_rank` | same | historical series continuity |
 | `attractiveness_top_60` | 60 | `attractiveness_rank` | same | RAG corpus scope, Think Tank window, and the sector teams whenever it holds the champion pointer |
 | `scanner_gate_baseline_60` | 60 | `scanner_champion_rank` | the scanner slot's champion ARM, verbatim from `candidates.json::scanner_tickers` | **nothing** — a candidate-generation experiment, scored on the scanner leaderboard |
-| `tech_score_top_60` | 60 | `tech_score_rank` | `_rank_tech_score` over `scan_path == "momentum"` rows | the sector teams whenever it holds the champion pointer (§1) |
+| `tech_score_top_60` | 60 | `tech_score_rank` | the head of `tech_score_ranks`, over `scan_path == "momentum"` rows (§2a) | the sector teams whenever it holds the champion pointer (§1) |
 | `scanner_top_20` | 20 | `tech_score_rank_within_cut` | top 20 by `tech_score` **of the champion's 60** | nothing live — churn diagnostics |
 | `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | nothing — observe-only arm |
 | `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | nothing — observe-only arm |
@@ -138,6 +138,57 @@ alias removal.
 It answers "which 20 of the champion's 60 does `tech_score` like best?", not
 "what is the universe's `tech_score` top 20?". The universe-wide question is
 `tech_score_top_60`. These two were conflated before this contract existed.
+
+### 2a. One full-universe rank table per promotable basis
+
+`alpha-engine-config-I7843`. A consumer resolves its rank ceiling in the basis
+of whichever arm is **champion** — so every promotable arm needs a table wide
+enough to answer it, or the arm is unpromotable in practice. Until this landed,
+the only `tech_score` table emitted was `scanner_ranks` (60 names, ranked
+*within* the champion's cut), so a `tech_score_top_60` champion could not say who
+was rank 150 and `rank_table_for_cut()` refused rather than substituting the
+attractiveness table.
+
+| basis | field | ranks over | width (2026-08-20) |
+|---|---|---|---|
+| `attractiveness_rank` | `ranks` | the scanned universe with a rankable score | 902 |
+| `tech_score_rank` | `tech_score_ranks` | scanned rows the momentum path admitted (`scan_path == "momentum"`) | 818 |
+
+`rank_tables` is the **index**: `basis -> {field, rank_key, score_key, size,
+population, serves_rank_ceiling, eligibility}`. A consumer resolves the field
+from the artifact, not from a constant on its own side — adding a basis is then
+a producer-side change with no matching edit in every reader, the same reason
+`funnel.advances_to` is declared here. The tech table is legitimately narrower
+than the universe (that gate is the incumbent rule's own), so its `size` is
+declared rather than left for a consumer to discover by being refused.
+
+`scanner_ranks` is unchanged and still emitted: the two tables answer two
+questions, and collapsing them would answer one with the other.
+
+### 2b. The ranked population is the SCANNED universe
+
+`alpha-engine-config-I7844`. `ranks` and `scanner/universe/latest.json` are two
+views of ONE Scanner invocation and were built from two different sources: the
+board iterates `candidates.json::scanner_eval_log`, while the ranks came from
+every key in `factors/profiles/{date}/by_ticker.json` — a file that legitimately
+carries Metron-supplemental and fundamental-only rows the scanner never
+evaluated. Measured 2026-08-20 on the live artifacts: **906 ranked vs 903 board
+rows**, with `EQR` at rank 98 — inside Think Tank's `rank_ceiling: 150` — scored
+on four of six pillars with no technical data at all (`momentum_n: 0`,
+`low_vol_n: 0`, `sector: "Unknown"`), and the 3-name population difference
+shifted the percentile of 860 of the 902 common names, first changing the
+ordering at rank 26.
+
+The profiles are now restricted to the scanned universe **before** the
+cross-sectional scoring chokepoint — after would leave every surviving score
+computed against a population including names nobody scanned. Every arm
+(champion, `momzero`, `mom121`) is restricted identically, so no arm can differ
+from another by which names it scored.
+
+`population_reconciliation` states both sides and the difference. A ranked name
+outside the scanned universe **raises**; scanned names with no rankable score
+are listed in `unrankable` (the board carries them with
+`attractiveness_score: null`) and raise only past a 5% allowance.
 
 ---
 
@@ -194,7 +245,7 @@ Ordering is not recoverable from a cut; read `candidates.json` for it.
 | producer | posture | why |
 |---|---|---|
 | live candidate cut (§4b) | falls back to `tech_score_gate`'s ranking if factor loadings are unavailable, and logs it | the trading day must not stop for a missing shadow input |
-| `universe_membership` | **raises** on empty inputs or a violated cut invariant | the predictor resolves its universe from it; a silently-empty membership is indistinguishable from a real empty |
+| `universe_membership` | **raises** on empty inputs, a violated cut invariant, a promotable basis with no full-universe rank table (§2a), or a ranked name outside the scanned universe (§2b) | the predictor resolves its universe from it; a silently-empty or silently-divergent membership is indistinguishable from a real one |
 | shadow challenger arms | fail-soft per arm, alarmed, and record an explicit `scanner_shadow_status.v1` miss | one broken arm must not take out the live cut or the other arms |
 | scanner leaderboard | fail-soft, never raises into the live path | observe-only |
 
