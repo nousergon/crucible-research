@@ -12,7 +12,6 @@ on:
       - 'config/**'
       - 'config.py'
       - 'data/**'
-      - 'data_manifest.py'
       - 'dry_run.py'
       - 'emailer/**'
       - 'evals/**'

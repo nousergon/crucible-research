@@ -555,6 +555,19 @@ def write_envelope(
     """Write the envelope to the dated key + ``latest.json`` sidecar for
     ``target``. Returns ``(dated_key, latest_key)``."""
     dated_key, latest_key = _s3_keys_for_target(target, run_date)
+
+    # Write-site refusals, BEFORE any put_object (scoring/promotion_guards.py):
+    # the stub-quarantine marker scan (2026-05-15 promoted-stub incident) and
+    # the unresolved-sector gate (2026-05-04 EOG/NVT). Both were reachable only
+    # from the retired graph until crucible-research-PR685 deleted it, leaving
+    # this — the live producer's only write site — with neither
+    # (alpha-engine-config-I7856). Deliberately NOT fail-soft: the whole
+    # contract is that a bad artifact is never promoted, and the executor's
+    # correct degradation is the prior day's signals, which it already has.
+    from scoring.promotion_guards import assert_promotable
+
+    assert_promotable(envelope, surface=dated_key)
+
     s3 = _client(s3_client)
     body = json.dumps(envelope, separators=(",", ":"), default=str).encode("utf-8")
     for key in (dated_key, latest_key):

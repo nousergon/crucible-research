@@ -127,7 +127,6 @@ COPY thinktank/ ${LAMBDA_TASK_ROOT}/thinktank/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
-COPY data_manifest.py ${LAMBDA_TASK_ROOT}/
 COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # observe_alerts.py is a repo-ROOT single-file module imported TRANSITIVELY
