@@ -164,7 +164,7 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # config_apply_audit_producer_champion registry row). ARTIFACT_REGISTRY.yaml
     # rows for config_scanner_cut_champion + config_apply_audit_scanner_cut_
     # champion (liveness_via the audit latest.json, cadence = the scanner run)
-    # are filed as alpha-engine-config-I7830 — three docs PRs were already open
+    # are filed as alpha-engine-config-I7833 — three docs PRs were already open
     # against that repo's private-docs on 2026-08-20, and opening a fourth
     # against work in flight is what the engagement protocol forbids.
     "scoring/cut_promotion.py": 1,
