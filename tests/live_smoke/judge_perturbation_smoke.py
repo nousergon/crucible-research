@@ -27,31 +27,40 @@ Runs:
 alpha-engine-config-I6559 (2026-08-19, crucible-research#666) moved the
 judge call this smoke exercises off direct OpenRouter and onto the krepis
 model router (``evals.judge.JUDGE_MODEL_GROUP``), per the no-direct-
-OpenRouter ruling (alpha-engine-config-I6367). The GitHub-hosted CI runner
-this workflow runs on has never been provisioned with a router-edge
-credential (model-router-policy.md §3.4a — reaching the router off-host
-needs `KREPIS_LITELLM_PROXY_URL` + `KREPIS_ROUTER_CREDENTIAL_SECRET`,
-neither of which this workflow sets; tracked at
-alpha-engine-config-I7853), so today's CI environment structurally
-cannot reach any model in the group. That is an infrastructure-provisioning
-gap, not a judge regression, so `main()` treats "router resolution found
-nothing reachable" as a distinct outcome from the same FAIL path as a real
-caught-rate regression (see `_ROUTER_UNREACHABLE_MARKER` below) — but it
-is NOT rendered as a bare ``exit 0`` (principles.md §2.7: "a component
-emitting nothing is not healthy, it is unobserved; no data is never
-rendered as green"). ``main()`` still exits 0 for this job's own
-success/failure (a provisioning gap must not hard-block every PR touching
-judge code), but it writes ``outcome=skip_router_unreachable`` and
-``judged_count=0`` to ``$GITHUB_OUTPUT`` and a summary to
-``$GITHUB_STEP_SUMMARY``; the workflow (see
-``judge-perturbation-smoke.yml``) reads those and posts a SEPARATE
-``neutral``-concluding GitHub check run naming the zero count and
-alpha-engine-config-I7853, so a reviewer sees "0 judged, not validated"
-rather than a plain green tick indistinguishable from a real pass. Once
-the credential is wired, ``resolve_group_spec`` stops raising, this whole
-branch stops firing, ``judged_count`` becomes >0, and the neutral check
-run stops being posted — the carve-out expires on its own trigger rather
-than needing separate cleanup.
+OpenRouter ruling (alpha-engine-config-I6367) — and did not give this
+GitHub-hosted runner the router-edge credential that move made
+load-bearing, so between #666 and alpha-engine-config-I7853 this smoke
+placed no judge call at all.
+
+I7853 provisions it: nginx consumer ``researchci`` at
+``router.nousergon.ai:8443``, credential
+``/alpha-engine/ROUTER_CONSUMER_RESEARCH_CI``, surfaced to the workflow as
+the repo secret of the same name. Reaching the router takes a URL and a
+credential and nothing else (model-router-policy.md §3.4a — the workflow
+sets ``KREPIS_LITELLM_PROXY_URL`` and ``KREPIS_ROUTER_CREDENTIAL_SECRET``
+together, and krepis refuses the half-set pair outright, I6965).
+
+The unreachable branch below is PERMANENT, not a carve-out awaiting
+cleanup. There is deliberately no up-front credential check
+(alpha-engine-config-I7880): reachability is the real gate, and a
+key-presence gate would skip a fork PR for the wrong reason while telling
+a reader nothing about whether the router answered. So `main()` treats
+"router resolution found nothing reachable" as an outcome distinct from
+a real caught-rate regression (see `_ROUTER_UNREACHABLE_MARKER` below) —
+and it is NOT rendered as a bare ``exit 0`` (principles.md §2.7: "a
+component emitting nothing is not healthy, it is unobserved; no data is
+never rendered as green"). ``main()`` still exits 0 for this job's own
+success/failure (an infrastructure fault must not hard-block every PR
+touching judge code), but it writes ``outcome=skip_router_unreachable``
+and ``judged_count=0`` to ``$GITHUB_OUTPUT`` and a summary to
+``$GITHUB_STEP_SUMMARY``; the workflow reads those and posts a SEPARATE
+``neutral``-concluding GitHub check run naming the zero count, so a
+reviewer sees "0 judged, not validated" rather than a plain green tick
+indistinguishable from a real pass.
+
+A revoked credential, an expired edge certificate, a router outage and a
+fork PR that receives no secrets all reproduce exactly that shape, which
+is why the branch stays after the credential lands.
 
 Tolerant by design: LLM scores vary run-to-run, so the gate is a
 caught-RATE threshold over a curated high-signal subset, not a per-case
