@@ -71,7 +71,7 @@ def _probe_result(name: str, status: str, detail: str, duration_s: float) -> dic
 
 def _load_held_tickers(am, n: int) -> list[dict]:
     """Top-N held tickers by ``long_term_score`` — the same source
-    production uses (``graph/research_graph.py`` fetch_data node calls
+    production uses (the retired research graph's fetch_data node called
     ``am.load_population()`` and takes every ticker; the canary narrows to
     the top N to bound LLM cost)."""
     return am.load_population()[:n]

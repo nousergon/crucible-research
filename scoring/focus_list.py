@@ -255,7 +255,7 @@ def build_focus_list_audit_lookup(
     outside its focus list" signal to attribute.
 
     Shared by TWO callers so the projection logic lives in exactly one
-    place: ``graph.research_graph._compute_focus_list_audit_lookup``'s
+    place: the retired research graph's ``_compute_focus_list_audit_lookup``'s
     legacy (agent-state-absent) fallback branch, and the standalone
     Scanner path (``data.scanner_orchestrator.build_pure_quant_focus_lookup``)
     where this IS the only audit path — there is no agent/graph run at
@@ -307,7 +307,7 @@ def build_pure_quant_focus_lookup(
     alpha-engine-config-I2515 — completes L1995 Phase 5's producer side).
 
     This is the SAME pure-quant computation as
-    ``graph.research_graph._compute_focus_list_audit_lookup``'s legacy
+    The retired research graph's ``_compute_focus_list_audit_lookup``'s legacy
     (agent-state-absent) fallback branch — factor profiles → regime blend
     → per-team top-N — reused here via :func:`build_focus_list_audit_lookup`
     so the two call sites can't drift. Unlike the graph's fallback (which

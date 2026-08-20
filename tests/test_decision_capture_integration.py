@@ -23,14 +23,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import boto3
 import pytest
 from moto import mock_aws
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
-    DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
     capture_decision,
@@ -446,147 +444,18 @@ class TestCaptureFiresWhenEnabled:
         assert artifact.input_data_summary == summary
 
 
-class TestCaptureNoOpWhenDisabled:
-    def test_capture_if_enabled_skips_when_flag_off(self, monkeypatch, mocked_s3):
-        """When the flag is off, ``_capture_if_enabled`` short-circuits
-        before any S3 call. Test by invoking it with an invalid bucket
-        — it must NOT raise (no S3 attempt at all)."""
-        monkeypatch.delenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", raising=False)
-
-        from graph.research_graph import _capture_if_enabled
-
-        # No exception even though the bucket doesn't exist — capture
-        # function must short-circuit on the env-var check.
-        _capture_if_enabled(
-            state={"run_date": "2026-04-29"},
-            agent_id="sector_quant:technology",
-            model_name_key="sector_team",
-            input_data_snapshot={"x": 1},
-            input_data_summary="test",
-            agent_output={"ranked_picks": []},
-        )
-
-        # Verify nothing was written to S3
-        objects = mocked_s3.list_objects_v2(Bucket="alpha-engine-research")
-        assert "Contents" not in objects or not objects["Contents"]
-
-
-class TestCaptureHardFailsOnS3Error:
-    def test_capture_if_enabled_raises_on_s3_error(self, monkeypatch):
-        """When the flag is on AND S3 unreachable, ``_capture_if_enabled``
-        re-raises ``DecisionCaptureWriteError`` per ``feedback_no_silent_fails``.
-
-        Mocks ``boto3.client`` to return a stub whose ``put_object`` raises
-        a ``ClientError`` shaped like NoSuchBucket. Avoids moto-vs-botocore
-        version brittleness — moto 5.x's S3 response serialization fails
-        on newer botocore versions (``Unsupported protocol [rest-json] for
-        service s3``), which surfaced when this test ran in CI on
-        botocore 1.43+.
-        """
-        from unittest.mock import patch
-
-        from botocore.exceptions import ClientError
-
-        monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
-
-        fake_s3 = MagicMock()
-        fake_s3.put_object.side_effect = ClientError(
-            {"Error": {"Code": "NoSuchBucket", "Message": "The specified bucket does not exist"}},
-            "PutObject",
-        )
-
-        # capture_decision (in alpha_engine_lib.decision_capture) calls
-        # boto3.client("s3") at write time. Patch the lib-side import so
-        # the stub takes effect across this whole call.
-        with patch("nousergon_lib.decision_capture.boto3.client", return_value=fake_s3):
-            from graph.research_graph import _capture_if_enabled
-
-            with pytest.raises(DecisionCaptureWriteError):
-                _capture_if_enabled(
-                    state={"run_date": "2026-04-29"},
-                    agent_id="sector_quant:technology",
-                    model_name_key="sector_team",
-                    input_data_snapshot={"x": 1},
-                    input_data_summary="test",
-                    agent_output={"ranked_picks": []},
-                )
-
-
-# ── Provenance stamps: data_snapshot_id + code_sha threading (1b / #781) ──
-
-
-class TestProvenanceStampThreading:
-    """``_capture_if_enabled`` must thread the run-level ``data_snapshot_id``
-    (from state, surfaced by the price fetcher) and ``code_sha`` (from the
-    ``ALPHA_ENGINE_CODE_SHA`` deploy env var) into ``capture_decision`` so
-    every captured DecisionArtifact records the immutable data snapshot +
-    code revision it was computed on (L4567 1b)."""
-
-    def _invoke_capturing_kwargs(self, monkeypatch, state, env=None):
-        """Run ``_capture_if_enabled`` with capture enabled and
-        ``capture_decision`` stubbed; return the kwargs it was called with."""
-        from unittest.mock import patch
-
-        monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
-        monkeypatch.delenv("ALPHA_ENGINE_CODE_SHA", raising=False)
-        for k, v in (env or {}).items():
-            monkeypatch.setenv(k, v)
-
-        import graph.research_graph as rg
-
-        captured = {}
-
-        def _fake_capture(**kwargs):
-            captured.update(kwargs)
-            return "s3://fake/key"
-
-        with patch.object(rg, "capture_decision", _fake_capture):
-            rg._capture_if_enabled(
-                state=state,
-                agent_id="sector_quant:technology",
-                model_name_key="sector_team",
-                input_data_snapshot={"x": 1},
-                input_data_summary="test",
-                agent_output={"ranked_picks": []},
-            )
-        return captured
-
-    def test_data_snapshot_id_threaded_from_state(self, monkeypatch):
-        captured = self._invoke_capturing_kwargs(
-            monkeypatch,
-            {"run_date": "2026-04-29", "data_snapshot_id": "7"},
-        )
-        assert captured["data_snapshot_id"] == "7"
-
-    def test_code_sha_threaded_from_env(self, monkeypatch):
-        captured = self._invoke_capturing_kwargs(
-            monkeypatch,
-            {"run_date": "2026-04-29", "data_snapshot_id": "7"},
-            env={"ALPHA_ENGINE_CODE_SHA": "abc123def"},
-        )
-        assert captured["code_sha"] == "abc123def"
-
-    def test_missing_data_snapshot_id_records_unknown(self, monkeypatch):
-        # State without the stamp (e.g. resume path skipping fetch_data) →
-        # "unknown" sentinel, no crash, artifact still written.
-        captured = self._invoke_capturing_kwargs(
-            monkeypatch, {"run_date": "2026-04-29"},
-        )
-        assert captured["data_snapshot_id"] == "unknown"
-
-    def test_missing_code_sha_is_none(self, monkeypatch):
-        # No deploy env var (local/dev) → code_sha None, artifact still lands.
-        captured = self._invoke_capturing_kwargs(
-            monkeypatch, {"run_date": "2026-04-29", "data_snapshot_id": "7"},
-        )
-        assert captured["code_sha"] is None
-
-    def test_unknown_string_in_state_passed_through(self, monkeypatch):
-        captured = self._invoke_capturing_kwargs(
-            monkeypatch,
-            {"run_date": "2026-04-29", "data_snapshot_id": "unknown"},
-        )
-        assert captured["data_snapshot_id"] == "unknown"
+# ── Deleted with the champion graph (alpha-engine-config-I7827) ───────────
+# `TestCaptureNoOpWhenDisabled`, `TestCaptureHardFailsOnS3Error` and
+# `TestProvenanceStampThreading` all exercised
+# `graph/research_graph.py::_capture_if_enabled` — the graph's own thin wrapper
+# around `nousergon_lib.decision_capture.capture_decision`, which threaded the
+# flag check plus the `data_snapshot_id` / `code_sha` provenance stamps. That
+# wrapper belonged to the retired arm (`agentic_sector_teams`, retired
+# 2026-07-12) and was deleted with it, so there is no longer a wrapper to test.
+# The PAYLOAD BUILDERS in `graph/decision_capture_helpers.py` are shared and
+# still live — every test above this note covers them, unchanged. The provenance
+# threading itself is now only exercised where a live producer captures:
+# `producers/experiment_record.py` reads `ALPHA_ENGINE_CODE_SHA` directly.
 
 
 # ── Run-id derivation ─────────────────────────────────────────────────────

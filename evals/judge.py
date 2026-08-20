@@ -203,7 +203,7 @@ def resolve_rubric_for_agent(agent_id: str) -> str | None:
     the agent type is intentionally unevaluated.
 
     Mapping mirrors the captured agent_id taxonomy (see
-    research_graph.sector_team_node + cio_node + macro_economist_node):
+    The retired research graph's sector_team_node + cio_node + macro_economist_node):
 
       sector_quant:{team_id}        → eval_rubric_sector_quant
       sector_qual:{team_id}         → eval_rubric_sector_qual
@@ -450,7 +450,7 @@ def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
 
     Per-rubric definitions (added 2026-05-13 alongside the L83
     spot-check P0 — substrate-side fix in
-    ``graph.research_graph._pre_fetch_held_enrichment`` for thesis_update):
+    The retired research graph's ``_pre_fetch_held_enrichment`` for thesis_update):
 
     * **thesis_update:** prior_thesis.thesis_summary empty AND
       news_data.articles empty AND analyst_data null. The agent has

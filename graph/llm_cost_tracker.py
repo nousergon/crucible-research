@@ -29,7 +29,7 @@ flag governs both since they're complementary views of the same data.
 Why both per-node and per-call streams:
 
 - The existing decision-capture surface writes ONE artifact per node
-  boundary in ``research_graph.py``. A sector_team node fires up to four
+  boundary in the retired research graph. A sector_team node fires up to four
   LLM calls (quant ReAct → qual ReAct → peer_review quant addition →
   peer_review joint finalization); summing them into ``ModelMetadata``
   yields the total cost attributed to that team's decision.
@@ -552,7 +552,7 @@ class _Frame:
     # from inside the ``with`` block when rendering happens deeper in a
     # called function that returns it (e.g. ``ic_cio.run_cio`` /
     # ``macro_agent.run_macro_agent_with_reflection`` — see their
-    # ``"rendered_prompt"`` result-dict key and the research_graph.py
+    # ``"rendered_prompt"`` result-dict key and the retired research graph
     # call sites that copy it onto ``frame.rendered_prompt`` before the
     # ``with`` block exits). Read at frame-exit to populate
     # ``FullPromptContext.user_prompt``; falls back to ``prompt.text``
