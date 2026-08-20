@@ -429,6 +429,47 @@ def _run(event, context):
                     dedup_key=f"research_health_write_fail:{run_date}",
                 )
 
+            # ── Flow-doctor end-of-run heartbeat (config#646) ─────────────
+            # REPOINTED WRITER, exactly like the health stamp above.
+            # `_flow_doctor/heartbeat/research/{date}.json` had one producer —
+            # `lambda/handler.py::_emit_flow_doctor_heartbeat` — deleted with the
+            # research graph in crucible-research-PR685. Measured 2026-08-20:
+            # `_flow_doctor/heartbeat/` holds backtester, data-collector, executor
+            # and predictor-inference, and NO research row has ever existed there.
+            #
+            # The console Flow-Doctor pane discovers flows from what is present in
+            # S3 (crucible-dashboard `list_flow_doctor_heartbeat_flows`), so the
+            # research producer does not render as broken — it does not render at
+            # all. That is `principles.md` §2.7's UNREPORTED state: four of the
+            # five producers report and the fifth is silently absent from the list
+            # nobody counts.
+            #
+            # Gated identically to the health stamp — production target, not
+            # preflight — because a heartbeat off a Friday transport smoke is the
+            # same false-green the stamp's gate exists to prevent. `emit_heartbeat`
+            # soft-fails internally and the `hasattr` guard keeps a version-skewed
+            # lib pin from AttributeError-ing at end-of-run (the lib deploys
+            # independently of this image), mirroring the predictor's call site.
+            try:
+                from nousergon_lib.logging import get_flow_doctor
+
+                fd = get_flow_doctor()
+                if fd and hasattr(fd, "emit_heartbeat"):
+                    fd.emit_heartbeat(bucket=bucket)
+            except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+                logger.warning(
+                    "[signals_envelope_handler] flow-doctor heartbeat write "
+                    "FAILED (non-fatal — signals.json unaffected): %s", e,
+                )
+                from observe_alerts import publish_observe_alert
+                publish_observe_alert(
+                    f"flow-doctor heartbeat write FAILED for {run_date} "
+                    f"(non-fatal, signals.json already persisted). The console "
+                    f"Flow-Doctor pane will not list the research producer: {e}",
+                    source="signals_envelope_handler:flow_doctor_heartbeat",
+                    dedup_key=f"flow_doctor_heartbeat_write_fail:{run_date}",
+                )
+
     logger.info(
         "[signals_envelope_handler] done run_date=%s target=%s dated_key=%s "
         "universe=%d market_regime=%s",

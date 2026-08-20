@@ -306,10 +306,81 @@ def _run(event, context):
     if coverage_verdict is not None:
         summary["coverage"] = coverage_verdict
 
+    _refresh_corpus_stats(s3_client, bucket, date_str, summary)
+
     result = {"status": "OK", "summary": summary, "date": date_str}
     _publish_capture_freshness(s3_client, bucket, target_date, result)
     _attach_stage_coverage(result, run_date=date_str, window_start=_started)
     return result
+
+
+def _refresh_corpus_stats(s3_client, bucket: str, date_str: str, summary: dict) -> None:
+    """Rewrite the distillation SFT-corpus stats artifact.
+
+    REPOINTED PRODUCER (alpha-engine-config-I7856).
+    ``decision_artifacts/distillation/corpus_stats/latest.json`` had exactly one
+    invoker — an inline post-step in ``lambda/handler.py``'s champion pass,
+    deleted with the research graph in ``crucible-research-PR685``. Measured
+    2026-08-20: the artifact is frozen at 2026-07-01 and
+    ``compute_corpus_stats`` had no invoker anywhere in the fleet.
+
+    Two consumers, both real and both GRACEFUL, which is precisely why the
+    absence went unnoticed for seven weeks: the console Distillation-Corpus
+    panel renders an explainer on ``None``, and
+    ``alpha-engine-config/scripts/check_corpus_trigger.py`` prints "no stats
+    artifact — nothing to do" and returns 0. The second one matters: the
+    config#1542 distill-or-shelve kill-gate clock reads its trigger metric from
+    this artifact, so a frozen corpus_stats means the 90-day clock can never
+    auto-start — a decision gate silently disarmed, not a panel gone blank.
+    Meanwhile the corpus itself keeps growing: Think Tank writes
+    ``decision_artifacts/_sft_raw/`` daily through ``nousergon_lib.sft``.
+
+    THIS stage is the right host. ``compute_corpus_stats`` reads the WHOLE
+    cumulative corpus on every call, so the cadence only has to be regular, not
+    frequent — and AggregateCosts is the weekly SF stage that survived the same
+    deletion (``scripts/aggregate_costs.py`` lost its inline call site too and
+    this Lambda is its live second invoker). Same repo, same weekly cadence,
+    same bucket, no new schedule, no new IAM.
+
+    Fail-soft with an alert, mirroring the two sibling post-steps in
+    ``signals_envelope_handler``: the parquet is already written and is this
+    stage's primary deliverable, so sinking the run on an observability refresh
+    would trade the deliverable for the stat. Never silent — the alert is the
+    recording surface, and the artifact's own ``generated_date`` is what a
+    freshness row reads.
+    """
+    try:
+        from scripts.corpus_stats import compute_corpus_stats
+
+        stats = compute_corpus_stats(s3_client, bucket, target_date=date_str)
+        summary["corpus_stats"] = {
+            "deduped_pairs": stats.get("totals", {}).get("deduped_pairs"),
+            "output_key": stats.get("output_key"),
+        }
+        logger.info(
+            "[corpus_stats] refreshed for %s: deduped_pairs=%s -> %s",
+            date_str,
+            summary["corpus_stats"]["deduped_pairs"],
+            summary["corpus_stats"]["output_key"],
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary observability, never fatal
+        logger.warning(
+            "[corpus_stats] refresh FAILED for %s (non-fatal — the cost "
+            "parquet is already written): %s", date_str, exc,
+        )
+        try:
+            from observe_alerts import publish_observe_alert
+
+            publish_observe_alert(
+                f"distillation corpus_stats refresh FAILED for {date_str} "
+                f"(non-fatal, cost parquet already written). The config#1542 "
+                f"kill-gate trigger reads a stale artifact until this "
+                f"succeeds: {exc}",
+                source="aggregate_costs_handler:corpus_stats",
+                dedup_key=f"corpus_stats_refresh_fail:{date_str}",
+            )
+        except Exception:  # noqa: BLE001 — the alerter itself is best-effort
+            logger.exception("[corpus_stats] alert publication also failed")
 
 
 def _publish_capture_freshness(s3_client, bucket: str, target_date, result: dict):
