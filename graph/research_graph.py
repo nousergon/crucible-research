@@ -659,54 +659,68 @@ def _resolve_agent_input_set(
 ) -> AgentInputSetResolution:
     """Resolve the sector-team screening input (L1995 Phase 5 / L4464).
 
-    The standalone Scanner SF state (run upstream of Research) writes
-    ``candidates/{run_date}/candidates.json`` (903 → ~60 quant-filtered via
-    ``run_quant_filter`` — the same primitive Research used to embed inline).
-    Feed the sector teams that pre-filtered set ∪ the held population instead
-    of the raw ~900-by-sector slice that overran the Lambda recursion budget
-    (each quant ReAct agent hit recursion_limit on 92-217 tickers → 0 picks →
-    retry storm → 900s timeout). ``scanner_universe`` is retained by the
-    caller for the exit_evaluator constituent whitelist.
+    **Reads the CHAMPION CUT from the latest membership artifact**, not
+    ``candidates.json``. Brian's ruling 2026-08-20
+    (``alpha-engine-config-I7823``): ``attractiveness_top_60`` and
+    ``tech_score_top_60`` run as a count-matched champion/challenger pair with
+    weekly promotion, and the sector teams read whichever is champion —
+    ``attractiveness_top_60`` standing, until a promotion moves the pointer.
+
+    Two things changed here and both are load-bearing:
+
+    * **The SOURCE moved** from ``candidates/{run_date}/candidates.json`` to
+      ``universe_membership/latest.json``. ``candidates.json`` is the scanner
+      slot's champion-arm artifact — a candidate-generation experiment — and it
+      fed the sector teams only because it happened to be what this function
+      read. Between 2026-07-22 and 2026-08-20 that meant a silent cutover in
+      another module changed which ~60 names got researched, with zero overlap
+      against the previous set and nothing anywhere saying so
+      (``alpha-engine-config-I7808``). The membership artifact is the SSoT for
+      which names are in which cut, and the predictor already resolves from it.
+    * **The DATE moved** from ``{run_date}`` to *latest*. Under the weekly
+      cadence the scanner does not run every weekday, so a consumer keyed on
+      today would find no artifact and fail loud four mornings in five.
 
     The held population is sourced from Research's own state
-    (``population_tickers``), NOT ``candidates.json::population_tickers`` which
-    is cold-start-empty (it depends on the prior signals.json).
+    (``population_tickers``), NOT the artifact's, which is cold-start-empty.
 
-    Fail-loud: a missing/empty ``candidates.json`` raises. The Scanner SF
-    state runs unconditionally upstream of Research (L1995 Phase 3, post-#338),
-    so absence is a real upstream failure — NOT a soft fallback to the raw
-    ~900 universe (that path is exactly what overruns the budget, L4464).
-    The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the stub/offline
-    installers) relaxes this to a full-universe fallback for wiring validation;
-    production never sets it.
+    Fail-loud: a missing membership artifact, or a champion cut with no
+    tickers, RAISES. Absence is a real upstream failure — never a soft fallback
+    to the raw ~900 universe, which is exactly what overruns the Lambda budget
+    (L4464). The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the
+    stub/offline installers) relaxes this for wiring validation; production
+    never sets it.
 
     Also returns ``scanner_eval_log`` — ``candidates.json``'s per-ticker
-    scanner gate verdict (config#1458), read here (rather than a second call
-    to ``am.load_candidates_json``) since this function already loads the
-    artifact. Empty on the dry-run-stub fallback path (no real candidates.json
-    was read) or when the artifact predates this field.
+    scanner gate verdict (config#1458). That artifact is still read for the
+    eval log alone, which the archive writer needs and which the membership
+    artifact does not carry. A missing ``candidates.json`` no longer fails the
+    run: it is no longer the feed.
     """
     import os as _os
+
+    from scoring.universe_membership import UniverseMembershipError, resolve_feed_cut
+
     candidates = am.load_candidates_json(run_date)
-    scanner_tickers = (candidates or {}).get("scanner_tickers") or []
     scanner_eval_log = (candidates or {}).get("scanner_eval_log") or []
-    if not scanner_tickers:
-        if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() == "true":
-            logger.warning(
-                "[fetch_data] dry-run stub: no candidates.json for %s — "
-                "falling back to full scanner_universe for wiring validation "
-                "(NOT a real candidate selection)", run_date,
-            )
-            scanner_tickers = scanner_universe
-            scanner_eval_log = []
-        else:
-            raise RuntimeError(
-                f"[fetch_data] candidates.json missing or empty scanner_tickers "
-                f"for run_date={run_date} (key candidates/{run_date}/candidates.json). "
-                f"The standalone Scanner SF state must run + produce candidates "
-                f"upstream of Research (L1995). Refusing to fall back to the raw "
-                f"~900 universe (that path overruns the Lambda budget, L4464)."
-            )
+    try:
+        scanner_tickers, provenance = resolve_feed_cut()
+        logger.info(
+            "[fetch_data] sector-team feed: %d tickers from %s "
+            "(membership run_date=%s, cut_effective_date=%s, basis=%s)",
+            provenance["size"], provenance["cut"], provenance["run_date"],
+            provenance["cut_effective_date"], provenance["basis"],
+        )
+    except UniverseMembershipError:
+        if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() != "true":
+            raise
+        logger.warning(
+            "[fetch_data] dry-run stub: no resolvable membership feed for %s — "
+            "falling back to full scanner_universe for wiring validation "
+            "(NOT a real candidate selection)", run_date,
+        )
+        scanner_tickers = scanner_universe
+        scanner_eval_log = []
     agent_input_set = sorted(set(scanner_tickers) | set(population_tickers))
     logger.info(
         "[fetch_data] sector-team input set: %d tickers "

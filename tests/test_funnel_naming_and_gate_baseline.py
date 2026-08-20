@@ -65,10 +65,14 @@ def test_gate_cut_is_emitted_under_the_new_name(membership):
     # artifact — and none of the attractiveness consumers. "Feeds nothing" was
     # true only of the predictor/RAG/Think Tank family, and reading it as
     # "feeds nothing at all" is the misreading this spells out.
-    assert cut["feeds"] == ["sector_teams"]
+    # Feeds NOTHING as of Brian's ruling 2026-08-20: the sector teams moved to
+    # the champion CUT (universe_membership.resolve_feed_cut), so this artifact
+    # is the scanner slot's champion-ARM output and a measurement input only
+    # (alpha-engine-config-I7823).
+    assert cut["feeds"] == []
     role = cut["role"].lower()
-    assert "sector teams" in role
-    assert "not the predictor universe" in role
+    assert "feeds nothing" in role
+    assert "champion cut" in role
 
 
 def test_legacy_key_still_emitted_and_marked_deprecated(membership):

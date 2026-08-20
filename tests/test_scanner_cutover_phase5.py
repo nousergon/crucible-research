@@ -1,12 +1,24 @@
-"""L1995 Phase 5 / L4464 — Research consumes the standalone scanner's
-candidates.json and feeds the sector teams the pre-filtered candidate set
-(∪ held population) instead of the raw ~900-by-sector slice.
+"""L1995 Phase 5 / L4464 — Research feeds the sector teams a ~60-name
+pre-filtered candidate set (∪ held population) instead of the raw
+~900-by-sector slice.
 
 Root cause these pin: the sector-team quant ReAct agents were handed
 92-217 tickers/sector with ~9-10 reasoning iterations, hit the recursion
 limit, produced 0 picks, and triggered a retry storm that overran the
 900s Lambda ceiling. Screening the ~60-name candidate set (~10/sector)
 converges on the first attempt.
+
+**The SOURCE of that set moved on 2026-08-20** (`alpha-engine-config-I7823`),
+and these tests moved with it. It was `candidates/{run_date}/candidates.json`;
+it is now the CHAMPION CUT of `universe_membership/latest.json`, resolved by
+`scoring.universe_membership.resolve_feed_cut`. Two reasons, both measured:
+`candidates.json` is a candidate-generation EXPERIMENT's artifact, and a
+cutover inside it silently replaced the researched set with a disjoint one for
+four weeks (`alpha-engine-config-I7808`); and under the weekly scanner cadence
+it does not exist on four mornings in five, where `latest.json` always does.
+
+The size and union invariants below are unchanged — they are properties of the
+feed, not of where it came from.
 """
 
 from __future__ import annotations
@@ -18,7 +30,12 @@ import pytest
 # ── _resolve_agent_input_set ────────────────────────────────────────────────
 
 class _FakeAM:
-    """Minimal ArchiveManager stand-in exposing only load_candidates_json."""
+    """Minimal ArchiveManager stand-in exposing only load_candidates_json.
+
+    Still used: `candidates.json` remains the source of `scanner_eval_log`,
+    which the archive writer needs and the membership artifact does not carry.
+    It is no longer the source of the FEED.
+    """
 
     def __init__(self, candidates: dict | None):
         self._candidates = candidates
@@ -26,6 +43,33 @@ class _FakeAM:
     def load_candidates_json(self, run_date: str) -> dict | None:
         self.last_run_date = run_date
         return self._candidates
+
+
+@pytest.fixture
+def feed(monkeypatch):
+    """Control what `resolve_feed_cut` returns, without S3.
+
+    Patched at `graph.research_graph`'s import site is NOT possible — the
+    import is function-local by design (circular-import avoidance), so the
+    patch goes on the owning module.
+    """
+    import scoring.universe_membership as um
+
+    state: dict = {"tickers": ["ACM", "INGR", "TTEK"], "raises": None}
+
+    def _fake(**kwargs):
+        if state["raises"] is not None:
+            raise state["raises"]
+        return list(state["tickers"]), {
+            "cut": "attractiveness_top_60",
+            "run_date": "2026-05-30",
+            "cut_effective_date": "2026-05-30",
+            "basis": "attractiveness_rank",
+            "size": len(state["tickers"]),
+        }
+
+    monkeypatch.setattr(um, "resolve_feed_cut", _fake)
+    return state
 
 
 def _resolve(am, run_date, universe, population):
@@ -38,50 +82,62 @@ def _resolve(am, run_date, universe, population):
     return _resolve_agent_input_set(am, run_date, universe, population).agent_input_set
 
 
-def test_union_of_scanner_tickers_and_population():
-    am = _FakeAM({"scanner_tickers": ["ACM", "INGR", "TTEK"]})
+def test_union_of_feed_cut_and_population(feed):
+    am = _FakeAM({})
     out = _resolve(am, "2026-05-30", ["ACM", "INGR", "TTEK", "ZZZ", "QQQ"],
                    population=["AAPL", "MSFT"])
     assert set(out) == {"ACM", "INGR", "TTEK", "AAPL", "MSFT"}
 
 
-def test_held_population_always_retained_even_if_not_in_scanner():
+def test_held_population_always_retained_even_if_not_in_the_cut(feed):
     """Holdings must never drop out of coverage — they are unioned in even
-    when the scanner did not surface them this cycle."""
-    am = _FakeAM({"scanner_tickers": ["ACM", "INGR"]})
+    when the cut did not surface them this cycle."""
+    feed["tickers"] = ["ACM", "INGR"]
+    am = _FakeAM({})
     out = _resolve(am, "2026-05-30", ["ACM", "INGR"], population=["AAPL", "JNJ"])
     assert {"AAPL", "JNJ"}.issubset(set(out))
 
 
-def test_input_set_is_far_smaller_than_full_universe():
+def test_input_set_is_far_smaller_than_full_universe(feed):
     """The whole point: feed ~60, not ~900. Guards against a regression that
     re-points screening at the raw universe."""
     universe = [f"T{i}" for i in range(903)]
-    scanner = [f"T{i}" for i in range(60)]
-    am = _FakeAM({"scanner_tickers": scanner})
+    feed["tickers"] = [f"T{i}" for i in range(60)]
+    am = _FakeAM({})
     out = _resolve(am, "2026-05-30", universe, population=["T0", "T1"])
-    assert len(out) <= 65  # ~60 scanner ∪ a couple held — never ~900
+    assert len(out) <= 65  # ~60 cut ∪ a couple held — never ~900
 
 
-def test_missing_candidates_hard_fails_without_sentinel(monkeypatch):
+def test_missing_membership_hard_fails_without_sentinel(monkeypatch, feed):
+    from scoring.universe_membership import UniverseMembershipError
+
     monkeypatch.delenv("ALPHA_ENGINE_DRY_RUN_STUB", raising=False)
-    am = _FakeAM(None)
-    with pytest.raises(RuntimeError, match="candidates.json missing"):
+    feed["raises"] = UniverseMembershipError("no universe_membership/latest.json")
+    am = _FakeAM({})
+    with pytest.raises(UniverseMembershipError, match="latest.json"):
         _resolve(am, "2026-05-30", ["ACM", "INGR"], population=["AAPL"])
 
 
-def test_empty_scanner_tickers_hard_fails_without_sentinel(monkeypatch):
+def test_empty_champion_cut_hard_fails_without_sentinel(monkeypatch, feed):
+    """An empty feed is indistinguishable from 'the scanner selected nobody',
+    so it raises rather than quietly screening only the held population."""
+    from scoring.universe_membership import UniverseMembershipError
+
     monkeypatch.delenv("ALPHA_ENGINE_DRY_RUN_STUB", raising=False)
-    am = _FakeAM({"scanner_tickers": []})
-    with pytest.raises(RuntimeError, match="empty scanner_tickers"):
+    feed["raises"] = UniverseMembershipError("carries no tickers under the champion cut")
+    am = _FakeAM({})
+    with pytest.raises(UniverseMembershipError, match="champion cut"):
         _resolve(am, "2026-05-30", ["ACM", "INGR"], population=["AAPL"])
 
 
-def test_dry_run_sentinel_falls_back_to_full_universe(monkeypatch):
-    """Stub/offline wiring validation tolerates a missing candidates.json —
-    falls back to scanner_universe (NOT a real selection). Prod never sets
-    the sentinel."""
+def test_dry_run_sentinel_falls_back_to_full_universe(monkeypatch, feed):
+    """Stub/offline wiring validation tolerates an unresolvable feed — falls
+    back to scanner_universe (NOT a real selection). Prod never sets the
+    sentinel."""
+    from scoring.universe_membership import UniverseMembershipError
+
     monkeypatch.setenv("ALPHA_ENGINE_DRY_RUN_STUB", "true")
+    feed["raises"] = UniverseMembershipError("absent")
     am = _FakeAM(None)
     out = _resolve(am, "2026-05-30", ["ACM", "INGR", "TTEK"], population=["AAPL"])
     assert set(out) == {"ACM", "INGR", "TTEK", "AAPL"}
@@ -97,14 +153,19 @@ def test_dry_run_sentinel_falls_back_to_full_universe(monkeypatch):
 # candidates.json itself (the artifact that already crosses the process
 # boundary) and then through ResearchState, exactly like agent_input_set.
 
-def test_resolve_agent_input_set_also_returns_scanner_eval_log():
+def test_resolve_agent_input_set_also_returns_scanner_eval_log(feed):
+    """The eval log still rides through candidates.json — that artifact is no
+    longer the FEED, but it is still the only carrier of the per-ticker gate
+    verdict across the Scanner/Research process boundary."""
     from graph.research_graph import _resolve_agent_input_set
+
+    feed["tickers"] = ["ACM", "INGR"]
 
     eval_log = [
         {"ticker": "ACM", "quant_filter_pass": 1, "scan_path": "momentum"},
         {"ticker": "ZZZ", "quant_filter_pass": 0, "filter_fail_reason": "liquidity"},
     ]
-    am = _FakeAM({"scanner_tickers": ["ACM", "INGR"], "scanner_eval_log": eval_log})
+    am = _FakeAM({"scanner_eval_log": eval_log})
     result = _resolve_agent_input_set(
         am, "2026-05-30", ["ACM", "INGR", "ZZZ"], ["AAPL"],
     )
@@ -112,23 +173,25 @@ def test_resolve_agent_input_set_also_returns_scanner_eval_log():
     assert result.scanner_eval_log == eval_log
 
 
-def test_resolve_agent_input_set_scanner_eval_log_defaults_empty_when_absent():
+def test_resolve_agent_input_set_scanner_eval_log_defaults_empty_when_absent(feed):
     """candidates.json predating this field (or produced with an empty
     eval log) must degrade to [] rather than raising — same fail-soft
     posture as the archive_writer WARN path that consumes this."""
     from graph.research_graph import _resolve_agent_input_set
 
-    am = _FakeAM({"scanner_tickers": ["ACM"]})  # no scanner_eval_log key
+    am = _FakeAM({})  # no scanner_eval_log key
     result = _resolve_agent_input_set(am, "2026-05-30", ["ACM"], [])
     assert result.scanner_eval_log == []
 
 
-def test_resolve_agent_input_set_scanner_eval_log_empty_on_dry_run_fallback(monkeypatch):
+def test_resolve_agent_input_set_scanner_eval_log_empty_on_dry_run_fallback(monkeypatch, feed):
     """The dry-run-stub full-universe fallback doesn't read a real
     candidates.json, so it must not fabricate an eval log either."""
     from graph.research_graph import _resolve_agent_input_set
+    from scoring.universe_membership import UniverseMembershipError
 
     monkeypatch.setenv("ALPHA_ENGINE_DRY_RUN_STUB", "true")
+    feed["raises"] = UniverseMembershipError("absent")
     am = _FakeAM(None)
     result = _resolve_agent_input_set(am, "2026-05-30", ["ACM", "INGR"], ["AAPL"])
     assert result.scanner_eval_log == []
