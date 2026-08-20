@@ -98,9 +98,19 @@ def test_run_injects_assess_fn(monkeypatch):
 
     import data.fetchers.price_fetcher as pf
     import data.scanner_orchestrator as so
+    import scoring.universe_membership as um
+
+    # The feed is the champion CUT, not candidates.json
+    # (alpha-engine-config-I7823). Unpatched, this reaches S3 — which is the
+    # point: the producer no longer has a fail-soft empty-list path to fall
+    # into when the artifact is missing.
+    monkeypatch.setattr(um, "resolve_feed_cut", lambda **kw: (
+        ["AAA", "BBB"],
+        {"cut": "attractiveness_top_60", "run_date": "2026-06-19",
+         "cut_effective_date": "2026-06-19", "basis": "attractiveness_rank", "size": 2},
+    ))
 
     am = MagicMock()
-    am.load_candidates_json.return_value = {"scanner_tickers": ["AAA", "BBB"]}
     am.load_population.return_value = []
     am.load_latest_theses.return_value = {}
     monkeypatch.setattr(pf, "fetch_sp500_sp400_with_sectors",
