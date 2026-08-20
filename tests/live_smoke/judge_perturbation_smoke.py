@@ -34,10 +34,23 @@ neither of which this workflow sets; tracked at
 alpha-engine-config-I7853), so today's CI environment structurally
 cannot reach any model in the group. That is an infrastructure-provisioning
 gap, not a judge regression, so `main()` treats "router resolution found
-nothing reachable" as a distinct, loud SKIP rather than folding it into
-the same FAIL path as a real caught-rate regression (see
-`_ROUTER_UNREACHABLE_MARKER` below). Once the credential is wired this
-condition stops firing and the smoke resumes making real judge calls.
+nothing reachable" as a distinct outcome from the same FAIL path as a real
+caught-rate regression (see `_ROUTER_UNREACHABLE_MARKER` below) — but it
+is NOT rendered as a bare ``exit 0`` (principles.md §2.7: "a component
+emitting nothing is not healthy, it is unobserved; no data is never
+rendered as green"). ``main()`` still exits 0 for this job's own
+success/failure (a provisioning gap must not hard-block every PR touching
+judge code), but it writes ``outcome=skip_router_unreachable`` and
+``judged_count=0`` to ``$GITHUB_OUTPUT`` and a summary to
+``$GITHUB_STEP_SUMMARY``; the workflow (see
+``judge-perturbation-smoke.yml``) reads those and posts a SEPARATE
+``neutral``-concluding GitHub check run naming the zero count and
+alpha-engine-config-I7853, so a reviewer sees "0 judged, not validated"
+rather than a plain green tick indistinguishable from a real pass. Once
+the credential is wired, ``resolve_group_spec`` stops raising, this whole
+branch stops firing, ``judged_count`` becomes >0, and the neutral check
+run stops being posted — the carve-out expires on its own trigger rather
+than needing separate cleanup.
 
 Tolerant by design: LLM scores vary run-to-run, so the gate is a
 caught-RATE threshold over a curated high-signal subset, not a per-case
@@ -89,6 +102,29 @@ _MIN_CAUGHT_RATE = 0.75
 _ROUTER_UNREACHABLE_MARKER = "No model in group "
 
 
+def _emit_github_signals(*, outcome: str, judged_count: int, title: str, summary: str) -> None:
+    """Write machine-readable + human-readable coverage signals for CI.
+
+    principles.md §2.7: "a component emitting nothing is not healthy, it is
+    unobserved; no data is never rendered as green." Every exit path from
+    main() calls this exactly once (including the two paths that already
+    predate this function — OPENROUTER_API_KEY missing, and the eventual
+    PASS/FAIL), so GITHUB_OUTPUT/GITHUB_STEP_SUMMARY always carry an
+    outcome and a judged_count, not only the paths a first pass happened to
+    remember. A local run (no GITHUB_OUTPUT/GITHUB_STEP_SUMMARY env vars)
+    is a silent no-op here — these are CI-only signals.
+    """
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as fh:
+            fh.write(f"outcome={outcome}\n")
+            fh.write(f"judged_count={judged_count}\n")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write(f"### {title}\n\n{summary}\n\n**judged_count:** {judged_count}\n")
+
+
 def main() -> int:
     # alpha-engine-config-I2997 (2026-07-19): evaluate_artifact migrated
     # off direct Anthropic to OpenRouter/DeepSeek V4 Flash — this smoke
@@ -101,6 +137,15 @@ def main() -> int:
             "(Expected on fork PRs without the secret; not a failure.)",
             file=sys.stderr,
         )
+        _emit_github_signals(
+            outcome="skip_no_key",
+            judged_count=0,
+            title="judge_perturbation_smoke: SKIP (no OPENROUTER_API_KEY)",
+            summary=(
+                "OPENROUTER_API_KEY was not set — expected on fork PRs, "
+                "which never receive secrets. 0 perturbations judged."
+            ),
+        )
         return 0
 
     try:
@@ -111,12 +156,24 @@ def main() -> int:
         )
     except ImportError as exc:
         print(f"judge_perturbation_smoke: import failed — {exc}", file=sys.stderr)
+        _emit_github_signals(
+            outcome="fail_import",
+            judged_count=0,
+            title="judge_perturbation_smoke: FAIL (import error)",
+            summary=f"`evals.perturbation` import failed: {exc}",
+        )
         return 1
 
     subset = [c for c in CORRUPTIONS if c.name in _SUBSET_NAMES]
     if not subset:
         print("judge_perturbation_smoke: empty subset — check _SUBSET_NAMES",
               file=sys.stderr)
+        _emit_github_signals(
+            outcome="fail_empty_subset",
+            judged_count=0,
+            title="judge_perturbation_smoke: FAIL (empty subset)",
+            summary="_SUBSET_NAMES matched zero entries in CORRUPTIONS.",
+        )
         return 1
 
     try:
@@ -134,24 +191,66 @@ def main() -> int:
         #     call has made no claim about the judge at all, so treating it
         #     as a pass-by-default FAIL trains reviewers to ignore a check
         #     that is permanently red for a reason unrelated to their PR.
-        # (c) recording surface: this stderr line, on every affected run,
-        #     naming the tracked issue — never silent.
+        # (c) recording surface: this stderr line on every affected run,
+        #     PLUS a distinct `neutral`-concluding check run the workflow
+        #     posts from the judged_count=0 signal below (principles.md
+        #     §2.7 — a bare exit 0 here would render this identically to a
+        #     real pass, which is the failure mode this whole carve-out
+        #     exists to avoid, not just relocate).
         if str(exc).startswith(_ROUTER_UNREACHABLE_MARKER):
             print(
-                f"judge_perturbation_smoke: SKIP — router resolution found "
-                f"no reachable model from this CI runner's execution "
-                f"context ({exc}). This is an infrastructure-provisioning "
-                f"gap (missing router-edge credential wiring for this "
-                f"consumer, alpha-engine-config-I7853), not a judge "
-                f"regression — the battery never placed a call, so it has "
-                f"nothing to say about judge quality. Not a failure.",
+                f"judge_perturbation_smoke: SKIP (0 judged) — router "
+                f"resolution found no reachable model from this CI "
+                f"runner's execution context ({exc}). This is an "
+                f"infrastructure-provisioning gap (missing router-edge "
+                f"credential wiring for this consumer, "
+                f"alpha-engine-config-I7853), not a judge regression — "
+                f"the battery never placed a call, so it has nothing to "
+                f"say about judge quality. This run's own exit code is 0 "
+                f"so a provisioning gap does not hard-block every PR "
+                f"touching judge code, but it is NOT a validated pass: "
+                f"see the separate neutral check run and "
+                f"alpha-engine-config-I7853.",
                 file=sys.stderr,
+            )
+            _emit_github_signals(
+                outcome="skip_router_unreachable",
+                judged_count=0,
+                title=(
+                    "judge_perturbation_smoke: 0 perturbations judged — "
+                    "router unreachable from CI"
+                ),
+                summary=(
+                    f"krepis.router found no reachable model for the judge model "
+                    f"group (`low`) from this CI runner. This is a known, tracked "
+                    f"infrastructure-provisioning gap "
+                    f"(**alpha-engine-config-I7853**) — the CI runner has "
+                    f"never been given a router-edge credential "
+                    f"(`KREPIS_LITELLM_PROXY_URL` / "
+                    f"`KREPIS_ROUTER_CREDENTIAL_SECRET`). **0 of "
+                    f"{len(subset)} perturbations were judged.** This run "
+                    f"validates nothing about judge quality; do not read "
+                    f"it as a pass.\n\n"
+                    f"Resolver error: `{exc}`"
+                ),
             )
             return 0
         print(f"judge_perturbation_smoke: battery raised — {exc}", file=sys.stderr)
+        _emit_github_signals(
+            outcome="fail_other_valueerror",
+            judged_count=0,
+            title="judge_perturbation_smoke: FAIL (battery raised)",
+            summary=f"`run_perturbation_battery` raised: {exc}",
+        )
         return 1
     except Exception as exc:  # noqa: BLE001 — surface loudly, fail the gate
         print(f"judge_perturbation_smoke: battery raised — {exc}", file=sys.stderr)
+        _emit_github_signals(
+            outcome="fail_battery_exception",
+            judged_count=0,
+            title="judge_perturbation_smoke: FAIL (battery raised)",
+            summary=f"`run_perturbation_battery` raised: {exc}",
+        )
         return 1
 
     print(format_scorecard(report))
@@ -164,13 +263,30 @@ def main() -> int:
             f"degraded reasoning (sensitivity/specificity regression).",
             file=sys.stderr,
         )
+        _emit_github_signals(
+            outcome="fail_caught_rate",
+            judged_count=report["n"],
+            title="judge_perturbation_smoke: FAIL (caught_rate below threshold)",
+            summary=(
+                f"caught_rate {rate:.2f} < {_MIN_CAUGHT_RATE:.2f} "
+                f"({report['n_caught']}/{report['n']} corruptions caught)."
+            ),
+        )
         return 1
 
     print(f"\njudge_perturbation_smoke: PASS — caught_rate {rate:.2f} "
           f">= {_MIN_CAUGHT_RATE:.2f} "
           f"({report['n_caught']}/{report['n']} corruptions caught).")
+    _emit_github_signals(
+        outcome="pass",
+        judged_count=report["n"],
+        title="judge_perturbation_smoke: PASS",
+        summary=(
+            f"caught_rate {rate:.2f} >= {_MIN_CAUGHT_RATE:.2f} "
+            f"({report['n_caught']}/{report['n']} corruptions caught)."
+        ),
+    )
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
