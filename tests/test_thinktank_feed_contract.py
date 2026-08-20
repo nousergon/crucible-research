@@ -39,6 +39,7 @@ from scoring.universe_membership import (  # noqa: E402
     CUT_CHAMPION_POINTER_KEY,
     FUNNEL_CONSUMER_THINKTANK,
     UniverseMembershipError,
+    rank_table_for_cut,
 )
 from thinktank.feed import (  # noqa: E402
     build_feed_window,
@@ -57,6 +58,43 @@ def _board(n: int = 300) -> dict:
             {"ticker": f"T{i:04d}", "sector": "Tech", "attractiveness_score": float(2000 - i)} for i in range(n)
         ],
     }
+
+
+def _with_tech_basis_champion(membership: dict, board: dict) -> dict:
+    """``membership`` with a promotable ``tech_score_top_60`` arm AND the
+    full-universe rank table its basis is served from (I7843).
+
+    The cut is the head of the tech ranking (Think Tank asserts that), but the
+    TAIL is reversed against the attractiveness ordering, so a consumer that
+    resolved the wrong table is visible in the assertion rather than
+    coincidentally right.
+    """
+    tickers = [s["ticker"] for s in board["stocks"]]
+    membership["cuts"]["tech_score_top_60"] = {
+        "basis": "tech_score_rank",
+        "size": 60,
+        "tickers": sorted(tickers[:60]),
+        "source": "test",
+    }
+    tech_order = tickers[:60] + list(reversed(tickers[60:]))
+    membership["tech_score_ranks"] = {
+        t: {"tech_score_rank": i + 1, "tech_score": float(len(tech_order) - i)} for i, t in enumerate(tech_order)
+    }
+    membership["rank_tables"] = {
+        "attractiveness_rank": {
+            "field": "ranks",
+            "rank_key": "attractiveness_rank",
+            "score_key": "attractiveness_score",
+            "size": len(tickers),
+        },
+        "tech_score_rank": {
+            "field": "tech_score_ranks",
+            "rank_key": "tech_score_rank",
+            "score_key": "tech_score",
+            "size": len(tickers),
+        },
+    }
+    return membership
 
 
 def _membership(board: dict, *, window_cut: str = "attractiveness_top_60", size: int = 60) -> dict:
@@ -175,38 +213,39 @@ def test_the_window_follows_the_champion_pointer_not_the_static_declaration():
     whichever is champion. The declaration states the ARRANGEMENT; the pointer
     states which arm serves it."""
     board = _board()
-    m = _membership(board)
-    tickers = [s["ticker"] for s in board["stocks"]]
-    # a tech-basis champion, with the full-universe rank table I7843 will add
-    m["cuts"]["tech_score_top_60"] = {
-        "basis": "attractiveness_rank",  # stand-in table until I7843 lands
-        "size": 60,
-        "tickers": sorted(tickers[:60]),
-        "source": "test",
-    }
+    m = _with_tech_basis_champion(_membership(board), board)
     window = load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
     assert window.cut == "tech_score_top_60"
     assert window.provenance["declared_cut"] == "attractiveness_top_60"
+    assert window.provenance["basis"] == "tech_score_rank"
 
 
-def test_a_tech_basis_champion_refuses_rather_than_ranking_by_attractiveness():
-    """The schema asymmetry, held honest.
+def test_a_tech_basis_champion_is_ranked_in_its_own_basis():
+    """The basis the pointer names is the basis the consumer ranks by.
 
-    ``ranks`` covers the universe in ``attractiveness_rank``; there is no
-    full-universe ``tech_score_rank`` table. Serving Think Tank's
-    ``rank_ceiling`` from the attractiveness table under a tech champion would
-    mean the pointer names one arm while the consumer ranks by another. The
-    refusal names the producer-side fix.
+    Since alpha-engine-config-I7843 the producer emits a full-universe
+    ``tech_score_rank`` table, so a tech-basis champion is SERVED — in its own
+    basis. What must never happen is being served out of ``ranks``: the pointer
+    would name one arm while the consumer ranked by another (I7808's shape).
     """
     board = _board()
-    m = _membership(board)
+    m = _with_tech_basis_champion(_membership(board), board)
+    ranks, basis = rank_table_for_cut(m, "tech_score_top_60", minimum_coverage=200)
+    assert basis == "tech_score_rank"
+    # Below the cut the two tables disagree by construction, so serving this
+    # out of ``ranks`` would be visible here — and is not happening.
     tickers = [s["ticker"] for s in board["stocks"]]
-    m["cuts"]["tech_score_top_60"] = {
-        "basis": "tech_score_rank",
-        "size": 60,
-        "tickers": sorted(tickers[:60]),
-        "source": "test",
-    }
+    assert ranks[tickers[-1]] == 61
+    assert ranks[tickers[60]] == len(tickers)
+
+
+def test_a_tech_basis_champion_with_no_full_table_still_refuses():
+    """The refusal survives the fix: a cut whose basis has no table is refused,
+    never quietly resolved out of the attractiveness table."""
+    board = _board()
+    m = _with_tech_basis_champion(_membership(board), board)
+    m.pop("tech_score_ranks")
+    m.pop("rank_tables")
     with pytest.raises(UniverseMembershipError, match="I7843"):
         load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
 
