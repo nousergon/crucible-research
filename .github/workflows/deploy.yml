@@ -283,6 +283,24 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh perturbation_battery
 
+      # Alerts Lambda — alpha-engine-config-I7840. This step did not exist
+      # until 2026-08-20 and deploy.sh's `alerts)` case carried
+      # `ci-deploy-guard: manual`, so the function was last published
+      # 2026-03-31 while being invoked 43 times in the fortnight to 2026-08-20:
+      # 142 days of merged-but-not-deployed on the path that REPORTS every
+      # other failure. Found by the first sweep of the drift detector this
+      # change adds, which is the point of running the sweep before the
+      # detector is allowed to page (engagement-protocol §5.1).
+      #
+      # Deliberately LAST. It is the only step that builds a second Docker
+      # image (Dockerfile.alerts), so a failure in it must not be able to
+      # block the trading-critical publishes above it.
+      - name: Deploy alerts Lambda (alpha-engine-research-alerts)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh alerts
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
