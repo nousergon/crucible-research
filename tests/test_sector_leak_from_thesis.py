@@ -38,7 +38,7 @@ def _held_buy_thesis(ticker: str, sector: str = "Unknown") -> dict:
 def test_signals_payload_prefers_sector_map_over_unknown_thesis_sector():
     """Authoritative sector_map must overwrite an LLM-emitted "Unknown"
     in held-stock thesis updates. Repros today's EOG/NVT/UNP/VICI bug."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -70,7 +70,7 @@ def test_signals_payload_prefers_sector_map_over_unknown_thesis_sector():
 def test_signals_payload_falls_back_to_thesis_sector_when_map_missing():
     """If sector_map doesn't carry a ticker (truly outside S&P universe),
     fall back to whatever the thesis claims rather than hard-coding."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {
@@ -93,7 +93,7 @@ def test_signals_payload_unknown_when_both_map_and_thesis_missing():
     """Last resort: if neither sector_map nor thesis carries sector,
     the public default of "Unknown" is honest and matches the executor's
     fallback handling."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     state = {
         "investment_theses": {

@@ -285,7 +285,7 @@ def run_cio(
         # ``_build_cio_prompt(...)``) — what was handed to
         # ``HumanMessage(content=prompt)`` above, not the raw
         # ``LoadedPrompt`` template. Threaded back so the
-        # ``research_graph.py`` call site's ``track_llm_cost`` scope can
+        # The retired research graph's call site's ``track_llm_cost`` scope can
         # stamp it onto ``FullPromptContext.user_prompt`` instead of
         # falling back to the unsubstituted template text.
         cio_result["rendered_prompt"] = prompt

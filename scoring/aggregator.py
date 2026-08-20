@@ -1,8 +1,9 @@
 """
 Score aggregator — live helpers used by the sector-team pipeline.
 
-This module now hosts only the LIVE surface consumed by ``graph.research_graph``
-and ``thesis.updater``:
+This module now hosts only the surface consumed by ``scoring.self_test`` and
+``thesis.updater`` (its third consumer, the retired research graph's
+``score_aggregator``, was deleted 2026-08-20 — alpha-engine-config-I7827):
 
   * ``_load_weights_from_s3`` / ``_get_weights`` — backtester-tuned scoring
     weights loader (contract-pinned by ``tests/test_tuned_config_consumer_contract``).

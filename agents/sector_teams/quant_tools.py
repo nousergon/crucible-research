@@ -139,7 +139,7 @@ def create_quant_tools(context: dict) -> list:
     # before they hit external APIs.
     #
     # Closes 5/23-SF P0 sweep (q) — the pre-fix `set(price_data.keys())`
-    # was the NARROW set: `research_graph._fetch_team_data` excludes
+    # was the NARROW set: the retired research graph's `_fetch_team_data` excludes
     # feature-store-covered tickers from the raw-OHLCV fetch unless they
     # also live in `population_tickers`, so `price_data` ended up with
     # only ~25-30 population tickers + a few uncovered ones. The sector

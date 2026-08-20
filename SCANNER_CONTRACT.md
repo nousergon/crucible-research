@@ -34,9 +34,11 @@ weekly, and the champion is what the sector teams research.**
 
 **The champion pointer.** `s3://{bucket}/config/scanner_cut_champion.json` names
 which arm is live. `universe_membership.live_cut_champion()` reads it;
-`resolve_feed_cut()` returns that cut's tickers, and
-`graph/research_graph.py::_resolve_agent_input_set` feeds them to the sector
-teams. Absent pointer ⇒ `DEFAULT_CUT_CHAMPION` = `attractiveness_top_60`, the
+`resolve_feed_cut()` returns that cut's tickers, and the live producers
+(`producers/no_agent.py`, `producers/single_agent.py`) read them through
+`live_cut_champion()`. (The multi-agent sector teams read the same pointer via
+`_resolve_agent_input_set` until that graph was retired 2026-07-12 and deleted
+2026-08-20, alpha-engine-config-I7827.) Absent pointer ⇒ `DEFAULT_CUT_CHAMPION` = `attractiveness_top_60`, the
 standing champion. A pointer naming anything outside `PROMOTABLE_CUTS` **raises**
 — a promotion engine that believes one arm is live while the funnel serves
 another is the exact drift this contract exists to prevent.

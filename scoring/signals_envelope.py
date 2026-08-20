@@ -521,7 +521,7 @@ def build_signals_envelope(
         "buy_candidates": [],
         # Legacy list-of-ticker-strings shape (matches the multi-agent
         # producer's own "population" field byte-for-byte — see
-        # graph/research_graph.py's `"population": [p["ticker"] for p in pop]`).
+        # The retired research graph's `"population": [p["ticker"] for p in pop]`).
         "population": [e["ticker"] for e in universe],
         # Legacy v2 ticker-keyed dict (schema-tolerated free-form object;
         # matches the multi-agent producer's own `signals[ticker] = {...}`
