@@ -681,6 +681,36 @@ def parse_batch_message(
         ) from None
 
 
+# ── Router group + execution context ─────────────────────────────────────
+#
+# Defined ABOVE the call sites rather than beside the resolver: both are
+# default values in `def` signatures below, which bind at import time.
+
+JUDGE_MODEL_GROUP = "low"
+"""Router model group both judge call sites resolve through
+(alpha-engine-config-I6559 — no agent may be directly linked to
+OpenRouter, I6367 ruling). Matches ``LLM_CALLSITE_REGISTRY.yaml`` rows
+``evaljudge-sync`` and ``evaljudge-shadow``, both declared
+``model_group: low``, ``transport: krepis_llm``."""
+
+JUDGE_EXEC_CONTEXT = "lambda"
+"""DEFAULT for the two production call sites, which run as Lambda
+invocations: ``evaluate_artifact`` from the batch Process Lambda's
+Sonnet-escalation tail and ``evaluate_artifact_openrouter`` from
+``lambda/openrouter_shadow_handler.py``.
+
+It is a DEFAULT and no longer an assumption. ``evaluate_artifact``,
+``evaluate_artifact_openrouter`` and ``_call_openrouter_judge_llm`` all take
+``exec_context``, so a caller that runs somewhere else declares where it
+runs instead of inheriting a word that is false for it — which is what
+``tests/live_smoke/judge_perturbation_smoke.py`` had been doing on a
+GitHub-hosted runner (alpha-engine-config-I7853). Where a caller runs is a
+FACT it alone knows (model-router-policy R29: declared, never inferred), and
+never a routing preference: the value selects which DIRECT entries the
+registry says can serve it, and nothing about the router route, which R27a
+offers from every context."""
+
+
 # ── Judge call ────────────────────────────────────────────────────────────
 
 
@@ -693,6 +723,7 @@ def evaluate_artifact(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     judged_artifact_s3_key: str | None = None,
     max_retries: int = MAX_JUDGE_RETRIES,
+    exec_context: str = JUDGE_EXEC_CONTEXT,
 ) -> RubricEvalArtifact:
     """Judge a single ``DecisionArtifact`` against its rubric — the sync
     primary path (Haiku/Sonnet ``judge_model`` tiers).
@@ -843,6 +874,7 @@ def evaluate_artifact(
         api_key=api_key,
         max_retries=max_retries,
         log_prefix="[eval_judge]",
+        exec_context=exec_context,
         callsite_id="evaljudge-sync",
     )
 
@@ -900,24 +932,9 @@ module's own leak-guard gate (``check_openai_tool_response_for_leak``),
 not a langchain correction turn. Caps worst-case latency at 3 full model
 calls."""
 
-JUDGE_MODEL_GROUP = "low"
-"""Router model group both judge call sites resolve through
-(alpha-engine-config-I6559 — no agent may be directly linked to
-OpenRouter, I6367 ruling). Matches ``LLM_CALLSITE_REGISTRY.yaml`` rows
-``evaljudge-sync`` and ``evaljudge-shadow``, both declared
-``model_group: low``, ``transport: krepis_llm``."""
-
-JUDGE_EXEC_CONTEXT = "lambda"
-"""Both judge call sites run as Lambda invocations: ``evaluate_artifact``
-from the batch Process Lambda's Sonnet-escalation tail (plus ad-hoc
-replay / ``judge_only`` smoke, which run off-laptop against the same
-Lambda-shaped environment) and ``evaluate_artifact_openrouter`` from
-``lambda/openrouter_shadow_handler.py``. A future non-Lambda caller
-should pass its own declared context rather than assume this one
-(model-router-policy R28/R29 — a fact, never a routing preference)."""
-
-
-def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
+def _judge_router_spec_and_route(
+    *, max_tokens: int, exec_context: str = JUDGE_EXEC_CONTEXT
+) -> tuple[ModelSpec, dict]:
     """Resolve the router group spec for a judge call
     (alpha-engine-config-I6559).
 
@@ -950,7 +967,7 @@ def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
 
     spec, route = resolve_group_spec(
         JUDGE_MODEL_GROUP,
-        exec_context=JUDGE_EXEC_CONTEXT,
+        exec_context=exec_context,
         # This call builds an LLMClient on the openai transport (forced
         # tool_choice below, in `_call_openrouter_judge_llm`). Asking for
         # the anthropic wire could hand it a URL its transport cannot speak.
@@ -983,6 +1000,7 @@ def _call_openrouter_judge_llm(
     log_prefix: str,
     system_prompt: str = "",
     callsite_id: str = "evaljudge-sync",
+    exec_context: str = JUDGE_EXEC_CONTEXT,
 ) -> _OpenRouterJudgeCallResult:
     """Shared router-resolved judge-call core: forced-tool-call request +
     leak guard + bounded retry loop. Used by BOTH ``evaluate_artifact``
@@ -1024,7 +1042,8 @@ def _call_openrouter_judge_llm(
     Raises ``RuntimeError`` if all ``max_retries`` attempts fail (leak
     guard trip or schema validation failure).
     """
-    spec, route = _judge_router_spec_and_route(max_tokens=max_tokens)
+    spec, route = _judge_router_spec_and_route(
+        max_tokens=max_tokens, exec_context=exec_context)
     llm_client = LLMClient(
         spec,
         callsite_id=callsite_id,
@@ -1201,6 +1220,7 @@ def evaluate_artifact_openrouter(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     judged_artifact_s3_key: str | None = None,
     max_retries: int = MAX_OPENROUTER_JUDGE_RETRIES,
+    exec_context: str = JUDGE_EXEC_CONTEXT,
 ) -> RubricEvalArtifact:
     """Judge a single ``DecisionArtifact`` against its rubric via the
     OpenRouter shadow-judge tier.
@@ -1299,6 +1319,7 @@ def evaluate_artifact_openrouter(
         api_key=api_key,
         max_retries=max_retries,
         log_prefix="[eval_judge_openrouter]",
+        exec_context=exec_context,
         callsite_id="evaljudge-shadow",
     )
 

@@ -69,6 +69,7 @@ exact assertion. A regressed/insensitive judge still fails it.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 from pathlib import Path
@@ -146,6 +147,7 @@ def main() -> int:
     try:
         from evals.perturbation import (
             CORRUPTIONS,
+            _default_judge,
             format_scorecard,
             run_perturbation_battery,
         )
@@ -179,7 +181,25 @@ def main() -> int:
         # resolution rather than merely gate on presence, krepis.llm.
         # LLMClient._resolve_api_key prefers a truthy `api_key` argument
         # over the registry-resolved one).
-        report = run_perturbation_battery(corruptions=subset)
+        #
+        # alpha-engine-config-I7853 — declare where this actually runs.
+        # It ran as `lambda` until now, inherited from evals.judge's
+        # production constant because krepis had no word for a GitHub-hosted
+        # runner. Nothing broke: the router route carries no `reachable_from`
+        # and is offered from every context (model-router-policy R27a), so
+        # the wrong word chose the right route. It was still a caller
+        # asserting a false fact about itself, and R29 makes the context
+        # DECLARED precisely so it cannot be inherited by accident — the next
+        # reader comparing this run's exec_context against the registry would
+        # have been reasoning about a Lambda that does not exist.
+        #
+        # Bound on the adapter, not passed to the battery: `judge_fn` is a
+        # duck-typed seam with several independent implementations, and a
+        # kwarg the harness forwarded would break every one of them.
+        report = run_perturbation_battery(
+            corruptions=subset,
+            judge_fn=functools.partial(_default_judge, exec_context="ci"),
+        )
     except ValueError as exc:
         # Narrow, named swallow (fail-loud default, ~/Development/CLAUDE.md):
         # (a) failure mode swallowed: krepis.router found no reachable

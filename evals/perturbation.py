@@ -52,7 +52,12 @@ from nousergon_lib.decision_capture import (
     ModelMetadata,
 )
 
-from evals.judge import DEFAULT_JUDGE_MODEL, evaluate_artifact, evaluate_artifact_openrouter
+from evals.judge import (
+    DEFAULT_JUDGE_MODEL,
+    JUDGE_EXEC_CONTEXT,
+    evaluate_artifact,
+    evaluate_artifact_openrouter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +550,8 @@ def build_artifact(agent_id: str, agent_output: dict,
 
 
 def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
-                   api_key: str | None) -> dict[str, int]:
+                   api_key: str | None,
+                   exec_context: str = JUDGE_EXEC_CONTEXT) -> dict[str, int]:
     """Live-judge adapter: score an artifact → {dimension: score}.
 
     ``api_key`` since alpha-engine-config-I6559 (2026-08-19) is a TEST
@@ -554,13 +560,20 @@ def _default_judge(artifact: DecisionArtifact, *, judge_model: str,
     by name; a non-None ``api_key`` here OVERRIDES that resolution
     (``krepis.llm.LLMClient._resolve_api_key`` prefers a truthy explicit
     argument). Production callers, including this smoke harness, leave
-    it ``None``. See ``evaluate_artifact``'s docstring."""
-    ev = evaluate_artifact(artifact, judge_model=judge_model, api_key=api_key)
+    it ``None``. See ``evaluate_artifact``'s docstring.
+
+    ``exec_context`` defaults to the production Lambda value and is passed
+    through so a caller running somewhere else declares where it runs
+    (model-router-policy R29 — declared, never inferred;
+    alpha-engine-config-I7853, the CI smoke)."""
+    ev = evaluate_artifact(artifact, judge_model=judge_model, api_key=api_key,
+                           exec_context=exec_context)
     return {d.dimension: d.score for d in ev.dimension_scores}
 
 
 def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
-                     api_key: str | None) -> dict[str, int]:
+                     api_key: str | None,
+                     exec_context: str = JUDGE_EXEC_CONTEXT) -> dict[str, int]:
     """OpenRouter shadow-judge adapter (config#2575 item 6) — same
     ``judge_fn`` call shape as ``_default_judge`` but routes through
     ``evals.judge.evaluate_artifact_openrouter`` (the shadow-tagged,
@@ -575,7 +588,8 @@ def openrouter_judge(artifact: DecisionArtifact, *, judge_model: str,
     (same battery, same caught-rate threshold) used to validate Haiku —
     the EXPERIMENTS 2026-05-29 harness this whole module implements.
     """
-    ev = evaluate_artifact_openrouter(artifact, judge_model=judge_model, api_key=api_key)
+    ev = evaluate_artifact_openrouter(artifact, judge_model=judge_model,
+                                      api_key=api_key, exec_context=exec_context)
     return {d.dimension: d.score for d in ev.dimension_scores}
 
 
@@ -593,6 +607,19 @@ def run_perturbation_battery(
     variant, then check the TARGETED dimension dropped by >= ``min_drop``.
     ``judge_fn`` is injectable so the harness logic is unit-testable
     without a live LLM; defaults to the live judge.
+
+    NOTE — ``exec_context`` is deliberately NOT a parameter here. It belongs
+    to the judge adapter, not the harness, and this function reaches
+    ``judge_fn`` through a duck-typed seam that test doubles and the
+    ``openrouter_judge`` variant each implement independently. A kwarg the
+    harness forwarded would turn every one of them into a ``TypeError``. A
+    caller running outside the production Lambda binds it on the adapter
+    instead::
+
+        judge_fn=functools.partial(_default_judge, exec_context="ci")
+
+    which is what ``tests/live_smoke/judge_perturbation_smoke.py`` does
+    (alpha-engine-config-I7853).
     """
     corruptions = corruptions if corruptions is not None else CORRUPTIONS
     judge_fn = judge_fn or _default_judge
