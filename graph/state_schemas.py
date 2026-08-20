@@ -4,7 +4,7 @@ artifacts referenced from ``ResearchState``.
 
 These schemas are the typed-state successor to the ``dict[str, Any]`` and
 ``dict[str, dict]`` annotations that lived in
-``graph.research_graph.ResearchState``. They are now wired into
+The retired research graph's ``ResearchState``. They are now wired into
 ``ResearchState`` via ``Annotated[..., reducer]`` field types and used by
 ``_validate`` at every node boundary in strict-by-default mode.
 
@@ -334,7 +334,7 @@ class InvestmentThesis(BaseModel):
 
     ticker: str
     # `None` is the schema-level marker for "LLM omitted this field" so the
-    # downstream `or` chains in research_graph.py route to sector_map first.
+    # downstream `or` chains in the retired research graph route to sector_map first.
     # Prior default of "Unknown" was a truthy string that short-circuited
     # those `or` chains and leaked through to signals.json + trades.db
     # (2026-05-04 EOG/NVT incident; root-cause fix in 39c379f).

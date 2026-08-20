@@ -2,9 +2,8 @@
 Dry-run support for the research Lambda.
 
 Installs LLM-only function-level stubs plus side-effect suppression
-(archive_writer, email_sender, archive instance methods) so the entire
-LangGraph pipeline can be exercised end-to-end without paying for
-Anthropic tokens or polluting prod artifacts.
+(ArchiveManager write methods) so agent-bearing code can be exercised
+without paying for Anthropic tokens or polluting prod artifacts.
 
 Returned ``restore()`` callable MUST be invoked after the stub-pass.
 Lambda containers are reused across invocations, and module-level
@@ -12,10 +11,11 @@ patches persist on warm starts; failing to restore would silently
 contaminate the subsequent real pass.
 
 Used by:
-- ``lambda/handler.py`` auto-gate — default behavior, runs a stub pass
-  before every real pass and halts on stub-pass failure.
-- ``local/offline_stubs.py`` — re-exports the agent stubs so the
-  ``local/run.py --stub-llm`` path keeps working.
+- ``lambda/handler.py``'s deploy canary (``{"dry_run_llm": true}``), which
+  installs these stubs around ``producers.boot_check`` so no write path
+  reachable from the live producer modules can fire. The stub-LLM auto-gate
+  that used to run a full graph pass before the real one went with the
+  retired champion graph (alpha-engine-config-I7827).
 
 Decision-artifact capture is force-disabled during stub-pass via the
 ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED`` env var (saved + restored).
@@ -327,17 +327,6 @@ def _stub_run_cio(
 # ── Side-effect suppressors ──────────────────────────────────────────────
 
 
-def _noop_archive_writer(state):
-    """No-op archive writer for stub-pass — leaves state unchanged."""
-    logger.info("[dry-run] stub archive_writer: no-op")
-    return {}
-
-
-def _noop_email_sender(state):
-    logger.info("[dry-run] stub email_sender: no-op")
-    return {"email_sent": False}
-
-
 # ── Stub installer with restore ──────────────────────────────────────────
 
 # Module-level patches: replace the function attribute on its source module.
@@ -351,19 +340,14 @@ _AGENT_PATCHES: list[tuple[str, str, Any]] = [
     ("agents.investment_committee.ic_cio", "run_cio", _stub_run_cio),
 ]
 
-# Late-bound name patches: the graph module imports these names from
-# agent modules into its own namespace, so setattr on the source module
-# alone leaves the graph's bound reference pointing at the original.
-# These targets only take effect if the graph module is already in
-# sys.modules — handler imports build_graph + create_initial_state
-# before invoking the gate, so it always is.
-_GRAPH_NAME_PATCHES: list[tuple[str, str, Any]] = [
-    ("graph.research_graph", "run_macro_agent_with_reflection", _stub_run_macro_agent_with_reflection),
-    ("graph.research_graph", "run_sector_team", _stub_run_sector_team),
-    ("graph.research_graph", "run_cio", _stub_run_cio),
-    ("graph.research_graph", "archive_writer", _noop_archive_writer),
-    ("graph.research_graph", "email_sender", _noop_email_sender),
-]
+# Late-bound name patches: a module that imports these names from the agent
+# modules into its OWN namespace keeps a bound reference that `setattr` on the
+# source module does not reach. The only such module was
+# `graph.research_graph`, deleted with the retired champion graph
+# (alpha-engine-config-I7827), so the list is empty — kept rather than removed
+# because the mechanism is still correct and the next module that does a
+# `from agents.x import y` at import time will need a row here.
+_GRAPH_NAME_PATCHES: list[tuple[str, str, Any]] = []
 
 
 def install_dry_run_stubs(archive_manager: Any | None = None) -> Callable[[], None]:
@@ -380,27 +364,18 @@ def install_dry_run_stubs(archive_manager: Any | None = None) -> Callable[[], No
         stub-pass to undo every patch. Failing to restore leaves
         contaminated module state on warm Lambda containers.
 
-    CRITICAL CONTRACT — build_graph AFTER install:
-        ``archive_writer`` and ``email_sender`` are wired via
-        ``graph.add_node(name, fn)`` in ``build_graph()``. That captures the
-        function reference at build time. If you call ``build_graph()`` BEFORE
-        ``install_dry_run_stubs()``, the resulting graph holds the REAL
-        archive_writer + email_sender references, and patching the module
-        global afterwards has NO effect on the bound nodes — the real S3
-        writes + email send will fire.
-
-        LLM agent functions (run_macro_agent_with_reflection, run_sector_team,
-        run_cio) are late-bound through wrapper nodes that resolve them from
-        the module's globals at call time. Those pick up patches regardless
-        of build order — but you should not rely on this asymmetry. Always
-        ``build_graph()`` AFTER ``install_dry_run_stubs()``.
+    CRITICAL CONTRACT — install BEFORE the code under test is constructed:
+        A caller that captures a function reference at construction time (the
+        deleted graph did this via ``add_node``) holds the REAL function if it
+        is built before the stubs are installed, and patching the module global
+        afterwards has NO effect on the bound reference — the real S3 write or
+        email send fires. The agent stubs above are late-bound and pick up the
+        patch either way, but do not rely on that asymmetry.
 
         Order:
             restore = install_dry_run_stubs(archive)
             try:
-                graph = build_graph()             # captures stubbed bindings
-                state = create_initial_state(...)
-                graph.invoke(state)
+                ...                               # code under test
             finally:
                 restore()
     """
@@ -487,9 +462,15 @@ def install_dry_run_stubs(archive_manager: Any | None = None) -> Callable[[], No
         # finds no persisted team and runs every agent for real (or
         # hard-fails per all-agents-strict). The quarantine guard at
         # the signals.json write site is the second line of defense.
+        # ``write_shadow_signals_json`` added with alpha-engine-config-I7827:
+        # the stub set was written for the champion graph and covered only the
+        # methods THAT path wrote through. The live producer path writes
+        # through ``write_shadow_signals_json`` instead, so a stub-installed
+        # run over ``producers/`` had no suppression on its one write method.
         for method_name in (
             "upload_db",
             "write_signals_json",
+            "write_shadow_signals_json",
             "save_sector_team_run",
             "save_agent_run",
         ):

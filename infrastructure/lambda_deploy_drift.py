@@ -132,7 +132,7 @@ _REGION = os.environ.get("AWS_REGION", "us-east-1")
 #:
 #: Deliberately the SAME name the Dockerfile already bakes as an image ENV
 #: (``ARG GIT_SHA`` -> ``ENV ALPHA_ENGINE_CODE_SHA``, Dockerfile L69-70) and
-#: that ``producers/experiment_record.py`` and ``graph/research_graph.py``
+#: that ``producers/experiment_record.py`` and the retired research graph
 #: already read at runtime. A second stamp key would be a fork of the one fact
 #: this file exists to read, and the two copies would diverge in exactly the
 #: direction that yields a confident wrong answer. What I7840 added is not a

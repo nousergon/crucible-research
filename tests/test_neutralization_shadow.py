@@ -230,46 +230,12 @@ def test_live_enabled_tracks_resolved_config_default_false():
     # The default fallback is observe-mode (False) when the key is absent.
     assert bool({}.get("live_enabled", False)) is False
 
-
-def test_live_cutover_branch_inert_when_gate_off(monkeypatch):
-    """Drive archive_writer's live-cutover gate: with NEUTRALIZATION_LIVE_ENABLED
-    False (default), the live signals.json that would be written is unchanged by
-    neutralization — only the shadow artifact is produced."""
-    import graph.research_graph as rg
-
-    # Simulate the exact archive_writer gated block in isolation.
-    payload, loadings = _synthetic_cross_section(n=30)
-    am = _FakeAM()
-    scores_before = {t: s["score"] for t, s in payload["signals"].items()}
-
-    monkeypatch.setattr(rg, "NEUTRALIZATION_LIVE_ENABLED", False, raising=False)
-    art = run_neutralization_shadow(am, "2026-06-22", payload, loadings)
-    if rg.NEUTRALIZATION_LIVE_ENABLED and art:  # mirror archive_writer's gate
-        live_signals = payload.get("signals", {})
-        for t, row in art.get("tickers", {}).items():
-            if t in live_signals and row.get("neutralized_score") is not None:
-                live_signals[t]["score"] = row["neutralized_score"]
-
-    scores_after = {t: s["score"] for t, s in payload["signals"].items()}
-    assert scores_before == scores_after  # live ranking untouched
-
-
-def test_live_cutover_branch_applies_when_gate_on(monkeypatch):
-    """Belt-and-suspenders: when the gate is ON, the same block DOES substitute
-    the neutralized scores (proves the gate is wired, not dead code)."""
-    import graph.research_graph as rg
-
-    payload, loadings = _synthetic_cross_section(n=30)
-    am = _FakeAM()
-    scores_before = {t: s["score"] for t, s in payload["signals"].items()}
-
-    monkeypatch.setattr(rg, "NEUTRALIZATION_LIVE_ENABLED", True, raising=False)
-    art = run_neutralization_shadow(am, "2026-06-22", payload, loadings)
-    if rg.NEUTRALIZATION_LIVE_ENABLED and art:
-        live_signals = payload.get("signals", {})
-        for t, row in art.get("tickers", {}).items():
-            if t in live_signals and row.get("neutralized_score") is not None:
-                live_signals[t]["score"] = row["neutralized_score"]
-
-    scores_after = {t: s["score"] for t, s in payload["signals"].items()}
-    assert scores_before != scores_after  # neutralized scores applied
+# ── DELETED with the champion graph (alpha-engine-config-I7827) ─────────────
+# `test_live_cutover_branch_inert_when_gate_off` and
+# `test_live_cutover_branch_applies_when_gate_on` lived here. Both simulated
+# `graph/research_graph.py::archive_writer`'s NEUTRALIZATION_LIVE_ENABLED gate
+# by re-implementing the gated block inline against `graph.research_graph`'s
+# module global. That graph was retired 2026-07-12 and deleted 2026-08-20, so
+# the gate they mirrored no longer exists anywhere and the tests could only
+# ever have asserted against their own copy of it. The shadow producer itself
+# (`run_neutralization_shadow`) is live and is covered by everything above.

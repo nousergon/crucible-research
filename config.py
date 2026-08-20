@@ -90,7 +90,7 @@ TECHNICAL_CFG: dict = _scoring_cfg.get("technical", {})
 # All stocks are derived from S&P 900 scanner — no hardcoded starting stocks.
 # UNIVERSE / UNIVERSE_TICKERS / SECTOR_MAP are loaded dynamically from
 # population/latest.json (S3) or SQLite at run time.
-# The static list below is kept empty — graph.research_graph loads the active
+# The static list below is kept empty — the retired research graph loads the active
 # population from the archive manager at startup.
 POPULATION_CFG: dict = _cfg.get("population", {})
 UNIVERSE: list[dict] = _cfg.get("universe", [])  # backward compat (empty after migration)
@@ -189,7 +189,7 @@ MAX_QUARANTINED_TICKERS: int = int(_AGGREGATOR_CFG.get("max_quarantined_tickers"
 # Regime-conditional blend of the 4 factor composites (quality / momentum /
 # value / low_vol — produced by scoring.factor_scoring) into the composite
 # score. Loaded from scoring.yaml `aggregator.factor_blend`. Wired in
-# graph.research_graph.score_aggregator: per-ticker factor profile is read
+# The retired research graph's score_aggregator: per-ticker factor profile is read
 # once from S3, blended at `weight` into the existing quant+qual base.
 _FACTOR_BLEND_CFG: dict = _AGGREGATOR_CFG.get("factor_blend", {})
 FACTOR_BLEND_ENABLED: bool = bool(_FACTOR_BLEND_CFG.get("enabled", False))

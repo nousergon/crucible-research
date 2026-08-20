@@ -63,7 +63,7 @@ def _local_git_sha() -> str | None:
 def _resolve_code_sha() -> str | None:
     """This repo's own resolved SHA: the baked ``ALPHA_ENGINE_CODE_SHA`` env
     var first (Lambda image, GHA ``--build-arg GIT_SHA`` / manual deploy.sh
-    stamp — same convention ``graph/research_graph.py``'s decision-capture
+    stamp — same convention the retired research graph's decision-capture
     provenance already reads), local ``git rev-parse HEAD`` fallback
     (dev/test)."""
     return os.environ.get("ALPHA_ENGINE_CODE_SHA") or _local_git_sha()

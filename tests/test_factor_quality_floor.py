@@ -11,7 +11,7 @@ Plan: ~/Development/alpha-engine-docs/private/factor-substrate-260513.md (Phase 
 """
 
 
-from graph.research_graph import _build_signals_payload
+from scoring.signals_payload import _build_signals_payload
 
 
 def _make_thesis(

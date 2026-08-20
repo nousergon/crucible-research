@@ -28,7 +28,7 @@ Phase 1 posture (observe-only): this module is invoked ONLY by
 ``lambda/scanner_handler.py`` and writes ``candidates.json`` to S3 for
 parallel-observe comparison against Research Lambda's internal scanner
 output. Research's internal scanner is unchanged in Phase 1 — the
-divergence between this module and ``graph/research_graph.fetch_data_node``
+divergence between this module and the retired research graph's ``fetch_data_node``
 is the load-bearing signal of the Phase 3 soak. Phase 5 (later) cuts
 Research over to read this module's artifact + retires the internal
 scanner.
@@ -423,7 +423,7 @@ def build_candidates_artifact(
     # archive.manager.load_population directly. Empty list on cold-start.
     population_tickers = list(prior_population)
     # agent_input_set = population ∪ top-50 scanner picks (the Research
-    # Lambda's existing convention at research_graph.py:734).
+    # Lambda's existing convention at the retired research graph's fetch_data_node).
     agent_input_set = list(dict.fromkeys(population_tickers + scanner_tickers[:50]))
 
     # Diff vs prior cycle's scanner picks (the operationally interesting
@@ -651,7 +651,7 @@ def build_scanner_eval_rows_for_board(
     shape ``scoring.universe_board.build_universe_board`` consumes.
 
     This is the Scanner-path equivalent of
-    ``graph.research_graph._build_scanner_eval_rows`` — same eval_log
+    The retired research graph's ``_build_scanner_eval_rows`` — same eval_log
     source, same row shape — minus the agent-only ``extra_override_tickers``
     union (there is no agent run in this Lambda, so every row comes
     straight from the scanner's own ~900-ticker universe pass).
@@ -692,7 +692,7 @@ def write_universe_board_for_scanner_run(
     until now).
 
     DUAL-WRITE TRANSITION STATE: the Research graph ALSO writes this board
-    (``graph/research_graph.py::archive_writer`` →
+    (the retired research graph's ``archive_writer`` →
     ``scoring.universe_board.compute_and_write_universe_board``) and will
     keep doing so until the SF cutover retires the graph's internal scanner
     (S3 contract safety — both producers coexist during the migration).
