@@ -384,6 +384,32 @@ def decide_cut_champion(
             defect=defect,
         )
 
+    # ── WHOLE-BOARD integrity runs BEFORE the registry check ───────────────
+    # A duplicate arm row is a PRODUCER fault, and a producer fault is true
+    # whether or not a decision was available to take. Ordering this after the
+    # `len(slot.arms) < 2` hold below made a defective board render as the quiet
+    # `no_promotable_challenger` — a benign-looking verdict that fails no run and
+    # names no defect — the moment alpha-engine-config-I8060 left the slot with a
+    # single promotable arm. That is this module's own stated worse failure:
+    # "a defect that also erases the evidence of itself".
+    #
+    # Guarded on `board` being present so it cannot mask the registry condition
+    # when there is no artifact at all — which is what the ordering below was
+    # protecting, and which still holds.
+    if board:
+        _early_dupes = duplicate_arm_rows(board)
+        if _early_dupes:
+            return hold(
+                REASON_BOARD_DEFECTIVE,
+                f"cuts leaderboard {decided_on} reports duplicate arm rows "
+                f"({', '.join(_early_dupes)}) — including on surfaces this engine "
+                "does not decide from. A board that counts any arm twice cannot be "
+                f"shown to have counted the others once. {champion_before!r} holds "
+                "and the run fails loud. Reported ahead of any registry-shape hold: "
+                "a producer fault is true whether or not a decision was available.",
+                defect=f"duplicate arm rows: {', '.join(_early_dupes)}",
+            )
+
     # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───
     # Brian ruling 2026-08-21: `tech_score_top_60` is observe-only until it has
     # weeks of measured performance. With one promotable arm there is nothing to
