@@ -15,6 +15,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from evals import judge as judge_mod
 from tests.test_eval_judge import _make_artifact, _make_llm_output
 
@@ -45,9 +47,12 @@ def _patch_router(monkeypatch, *, route=None, captured=None):
 
     the_route = route or _fake_route()
 
-    def fake_resolve_structured(group, *, exec_context=None, wire="openai"):
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
         if captured is not None:
-            captured.append({"group": group, "exec_context": exec_context, "wire": wire})
+            captured.append({
+                "group": group, "exec_context": exec_context,
+                "wire": wire, "requires": requires,
+            })
         return the_route
 
     monkeypatch.setattr(_kr, "resolve_group_structured", fake_resolve_structured)
@@ -200,3 +205,82 @@ def test_module_constructs_no_provider_pinned_spec():
         "evals/judge.py binds OPENROUTER_API_KEY — no agent may be directly "
         "linked to OpenRouter (Brian's ruling 2026-08-03, I6367)"
     )
+
+
+# ── alpha-engine-config-I7904 ────────────────────────────────────────────
+#
+# The judge FORCES a tool call. `low`'s declared primary refuses one — the
+# registry says so in `capabilities.tool_choice: false`, and this module's own
+# LLM_CALLSITE_REGISTRY row says so from the other side in
+# `requires_forced_tool_call: true`. Neither fact reached routing, so the judge
+# resolved to the member that cannot serve it and took an identical permanent
+# 400 on all three attempts, which the router then failed over and reported as
+# a rate limit on a different model entirely.
+
+def test_the_judge_declares_the_call_shape_it_cannot_do_without(monkeypatch):
+    """Resolution must be asked for a tool-capable member, not just a tier."""
+    captured: dict = {}
+
+    def _spy(group, **kwargs):
+        captured["group"] = group
+        captured.update(kwargs)
+        raise _StopResolution()
+
+    class _StopResolution(Exception):
+        pass
+
+    import krepis.router as _kr
+    monkeypatch.setattr(_kr, "resolve_group_spec", _spy)
+
+    from evals import judge as _judge
+    with pytest.raises(_StopResolution):
+        _judge._judge_router_spec_and_route(max_tokens=1024)
+
+    assert captured["group"] == "low"
+    assert captured["requires"] == ("tool_choice",)
+
+
+def test_a_permanent_contract_error_is_not_retried(monkeypatch):
+    """A 400 refusing the request shape is identical on every attempt.
+
+    Spending the retry budget on it turns one loud, correct error into three
+    and delays it, which is exactly what the I7904 log shows.
+    """
+    from krepis.llm_errors import PermanentContractError
+
+    from evals import judge as _judge
+
+    attempts: list[int] = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, **kwargs):
+            attempts.append(1)
+            raise PermanentContractError(
+                "Thinking mode does not support this tool_choice",
+                status_code=400,
+                deployment="low-deepseek-v4-flash-low",
+            )
+
+    monkeypatch.setattr(_judge, "LLMClient", _Client)
+    monkeypatch.setattr(
+        _judge, "_judge_router_spec_and_route",
+        lambda **kw: (_FakeSpec(), {"route": "litellm_proxy"}),
+    )
+
+    with pytest.raises(PermanentContractError) as exc:
+        _judge._call_openrouter_judge_llm(
+            "rendered", agent_id="a", request_model="m", max_tokens=64,
+            api_key=None, max_retries=3, log_prefix="[t]",
+        )
+
+    assert len(attempts) == 1, f"a permanent 400 consumed {len(attempts)} attempts"
+    assert "Thinking mode does not support this tool_choice" in str(exc.value)
+
+
+class _FakeSpec:
+    model = "low-glm-4.7-flash"
+    provider = "litellm"
+    registry_id = "glm-4.7-flash"
