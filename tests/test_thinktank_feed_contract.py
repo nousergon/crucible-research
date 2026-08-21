@@ -30,6 +30,7 @@ import pathlib
 import re
 import sys
 import types
+from unittest.mock import patch
 
 import pytest
 
@@ -208,13 +209,24 @@ def test_a_missing_membership_artifact_fails_loud_with_no_board_fallback():
 
 
 def test_the_window_follows_the_champion_pointer_not_the_static_declaration():
-    """Brian's ruling 2026-08-20 (alpha-engine-config-I7823): the two
-    count-matched 60s are promoted weekly and the consumers of that slot read
+    """Brian's ruling 2026-08-20 (alpha-engine-config-I7823): the arms of the
+    count-matched slot are promoted weekly and the consumers of that slot read
     whichever is champion. The declaration states the ARRANGEMENT; the pointer
-    states which arm serves it."""
+    states which arm serves it.
+
+    `PROMOTABLE_CUTS` is patched to include the tech-basis arm: this test is
+    about what the WINDOW does once an arm holds the pointer, not about which
+    arms may hold it. `tech_score_top_60` became observe-only on 2026-08-21
+    (alpha-engine-config-I8060), and the separate refusal test below is what
+    pins that.
+    """
     board = _board()
     m = _with_tech_basis_champion(_membership(board), board)
-    window = load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
+    with patch(
+        "scoring.universe_membership.PROMOTABLE_CUTS",
+        ("attractiveness_top_60", "tech_score_top_60"),
+    ):
+        window = load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
     assert window.cut == "tech_score_top_60"
     assert window.provenance["declared_cut"] == "attractiveness_top_60"
     assert window.provenance["basis"] == "tech_score_rank"
@@ -246,8 +258,26 @@ def test_a_tech_basis_champion_with_no_full_table_still_refuses():
     m = _with_tech_basis_champion(_membership(board), board)
     m.pop("tech_score_ranks")
     m.pop("rank_tables")
-    with pytest.raises(UniverseMembershipError, match="I7843"):
+    with patch(
+        "scoring.universe_membership.PROMOTABLE_CUTS",
+        ("attractiveness_top_60", "tech_score_top_60"),
+    ), pytest.raises(UniverseMembershipError, match="I7843"):
         load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
+
+
+def test_an_observe_only_arm_cannot_hold_the_window_even_if_the_pointer_names_it():
+    """The consumer-side half of alpha-engine-config-I8060.
+
+    `tech_score_top_60` is observe-only, so a pointer naming it is refused by
+    `live_cut_champion` before the window is ever built — the refusal does not
+    depend on the promotion engine, the board, or this module being correct.
+    """
+    board = _board()
+    m = _with_tech_basis_champion(_membership(board), board)
+    with pytest.raises(UniverseMembershipError) as exc:
+        load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
+    assert "tech_score_top_60" in str(exc.value)
+    assert "attractiveness_top_60" in str(exc.value)
 
 
 def test_an_unvalidated_champion_pointer_is_refused():
