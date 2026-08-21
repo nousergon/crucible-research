@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.universe_membership import (  # noqa: E402
+    CHAMPION_CUT,
     FEED_CUT_NAME,
     GATE_BASELINE_CUT,
     GATE_LEGACY_CUT,
@@ -53,12 +54,13 @@ def test_gate_cut_name_contains_baseline():
 
 
 def test_gate_cut_is_emitted_under_the_new_name(membership):
-    cut = membership["cuts"][GATE_BASELINE_CUT]
-    # NOT "scanner_gate". The live cut is ranked by the scanner slot's champion
-    # arm and has been since the 2026-07-22 cutover; the old basis, together
-    # with a docstring calling this cut a tech_score ranking, is what let three
-    # separate labels outlive the ranking they named
-    # (alpha-engine-config-I7808, SCANNER_CONTRACT.md §2).
+    cut = membership["cuts"][CHAMPION_CUT]
+    # NOT "scanner_gate", NOT "scanner_gate_baseline_60" (alpha-engine-config-I7818
+    # renamed it again — see below), NOT "scanner_candidates". The live cut is
+    # ranked by the scanner slot's champion arm and has been since the
+    # 2026-07-22 cutover; the old basis, together with a docstring calling this
+    # cut a tech_score ranking, is what let three separate labels outlive the
+    # ranking they named (alpha-engine-config-I7808, SCANNER_CONTRACT.md §2).
     assert cut["basis"] == "scanner_champion_rank"
     assert cut["size"] == 60
     # It feeds the SECTOR TEAMS — via candidates.json rather than via this
@@ -75,19 +77,29 @@ def test_gate_cut_is_emitted_under_the_new_name(membership):
     assert "champion cut" in role
 
 
-def test_legacy_key_still_emitted_and_marked_deprecated(membership):
-    """A consumer pinned on the old name must break loudly at a stated date,
-    never silently read a missing key as an empty cut. Known live reader:
-    crucible-dashboard/loaders/universe_churn.py."""
-    legacy = membership["cuts"][GATE_LEGACY_CUT]
-    assert legacy["deprecated_alias_for"] == GATE_BASELINE_CUT
+def test_baseline_alias_still_emitted_and_marked_deprecated(membership):
+    """alpha-engine-config-I7818: ``scanner_gate_baseline_60`` is now the
+    deprecated alias for :data:`CHAMPION_CUT`, emitted for one window. A
+    consumer pinned on it must break loudly at a stated date, never silently
+    read a missing key as an empty cut. Known live reader:
+    crucible-dashboard/loaders/universe_churn.py (migrated to CHAMPION_CUT in
+    the same change)."""
+    legacy = membership["cuts"][GATE_BASELINE_CUT]
+    assert legacy["deprecated_alias_for"] == CHAMPION_CUT
     assert legacy["removal_tracked_by"]
+
+
+def test_scanner_candidates_is_retired_and_no_longer_emitted(membership):
+    """alpha-engine-config-I7818: the I7578 alias's deprecation window is
+    closed. Emitting it forever would make "one deprecation window" a
+    fiction."""
+    assert GATE_LEGACY_CUT not in membership["cuts"]
 
 
 def test_alias_and_canonical_carry_identical_membership(membership):
     """An alias that could drift from its target is a second source of truth."""
-    a = membership["cuts"][GATE_BASELINE_CUT]
-    b = membership["cuts"][GATE_LEGACY_CUT]
+    a = membership["cuts"][CHAMPION_CUT]
+    b = membership["cuts"][GATE_BASELINE_CUT]
     assert a["tickers"] == b["tickers"]
     assert a["size"] == b["size"]
     assert a["basis"] == b["basis"]
@@ -118,7 +130,7 @@ def test_funnel_names_all_three_live_consumers(membership):
 
 def test_funnel_says_which_cuts_feed_nothing(membership):
     assert set(membership["funnel"]["feeds_nothing_live"]) == {
-        GATE_BASELINE_CUT, GATE_LEGACY_CUT,
+        CHAMPION_CUT, GATE_BASELINE_CUT,
     }
 
 
@@ -136,7 +148,7 @@ def test_every_name_in_the_funnel_block_is_a_real_cut(membership):
 
 
 @pytest.mark.parametrize("field", ["predictor_universe_cut", "feed_cut"])
-@pytest.mark.parametrize("gate_name", [GATE_BASELINE_CUT, GATE_LEGACY_CUT])
+@pytest.mark.parametrize("gate_name", [CHAMPION_CUT, GATE_BASELINE_CUT])
 def test_routing_a_live_consumer_at_the_gate_cut_raises(membership, field, gate_name):
     """This is the check whose absence produced I6630 — the RAG corpus scoped
     to the gate cut against a champion drawn from the rank, overlapping 2 of
@@ -152,7 +164,7 @@ def test_routing_a_funnel_consumer_at_the_gate_cut_raises(membership):
         "funnel": {
             **membership["funnel"],
             "advances_to": {**membership["funnel"]["advances_to"],
-                            "rag_corpus_scope": GATE_BASELINE_CUT},
+                            "rag_corpus_scope": CHAMPION_CUT},
         },
     }
     with pytest.raises(UniverseMembershipError, match="feeds nothing live"):
@@ -172,6 +184,6 @@ def test_only_the_feed_cut_advances(membership):
     cuts = membership["cuts"]
     champion = set(cuts[PREDICTOR_UNIVERSE_CUT]["tickers"])
     feed = set(cuts[FEED_CUT_NAME]["tickers"])
-    gate = set(cuts[GATE_BASELINE_CUT]["tickers"])
+    gate = set(cuts[CHAMPION_CUT]["tickers"])
     assert champion <= feed
     assert not (champion & gate)

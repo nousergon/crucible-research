@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scoring.universe_membership import (  # noqa: E402
     _RANK_CUTS,
     ATTRACTIVENESS_FEED_TOP_N,
+    CHAMPION_CUT,
     FEED_CUT_NAME,
     FUNNEL_CONSUMER_THINKTANK,
     PREDICTOR_UNIVERSE_CUT,
@@ -138,16 +139,16 @@ def test_unrankable_names_are_absent_not_zeroed():
 
 def test_scanner_cut_passes_through_verbatim():
     m = _membership()
-    assert m["cuts"]["scanner_candidates"]["tickers"] == sorted(_scanner_cut())
+    assert m["cuts"][CHAMPION_CUT]["tickers"] == sorted(_scanner_cut())
     # NOT "scanner_gate": the live cut is ranked by the scanner slot's champion
     # arm, not by the gate's tech_score, and has been since the 2026-07-22
     # cutover (alpha-engine-config-I7808).
-    assert m["cuts"]["scanner_candidates"]["basis"] == "scanner_champion_rank"
+    assert m["cuts"][CHAMPION_CUT]["basis"] == "scanner_champion_rank"
 
 
 def test_scanner_cut_is_deduped():
     m = build_universe_membership(_RUN_DATE, ["AAA", "BBB", "AAA"], _attractiveness())
-    cut = m["cuts"]["scanner_candidates"]
+    cut = m["cuts"][CHAMPION_CUT]
     assert cut["tickers"] == ["AAA", "BBB"]
     assert cut["size"] == 2
 
@@ -179,7 +180,7 @@ def test_scanner_cut_and_rank_cut_are_independent():
     # Guards against a refactor that quietly derives one cut from the other —
     # their divergence is the measurement this artifact exists to enable.
     m = _membership()
-    scanner = set(m["cuts"]["scanner_candidates"]["tickers"])
+    scanner = set(m["cuts"][CHAMPION_CUT]["tickers"])
     rank60 = set(m["cuts"]["attractiveness_top_60"]["tickers"])
     assert scanner != rank60
 
@@ -323,8 +324,9 @@ def test_build_attaches_turnover_and_defaults_it_to_null():
 
 # ── 6. Incumbent challenger arm (alpha-engine-config-I4983) ──────────────────
 #
-# `scanner_candidates` is stored alphabetically (set semantics), so the
-# incumbent's own `tech_score` ordering is NOT recoverable from it. Without
+# The scanner's champion cut (`CHAMPION_CUT`) is stored alphabetically (set
+# semantics), so the incumbent's own `tech_score` ordering is NOT recoverable
+# from it. Without
 # `scanner_ranks` there is no way to ask "what would the pre-I4983 rule have
 # picked at the champion's width?" — which is the comparison the champion flip
 # has to be judged against.

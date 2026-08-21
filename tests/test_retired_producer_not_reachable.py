@@ -263,7 +263,7 @@ def test_b_the_scheduled_sf_payloads_reach_only_live_producers():
         {"weekly_run": True},                      # DISABLED EventBridge alpha-research-weekly
         {},                                        # DISABLED EventBridge alpha-research-daily
         {"force": True},                           # the old manual-override shape
-        {"weekly_run": True, "skip_dry_run_gate": True},  # the spot weekly_box_runner shape
+        {"weekly_run": True, "skip_dry_run_gate": True},  # the deleted weekly_box_runner shape
     ],
 )
 def test_b_a_payload_for_the_retired_stage_fails_loud(payload):

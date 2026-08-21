@@ -13,20 +13,41 @@ name: Judge Perturbation Smoke
 # or the smoke itself. Rubric PROMPT changes live in alpha-engine-config
 # and reach the judge via that repo's notify-research dispatch.
 #
-# alpha-engine-config-I2997 (2026-07-19): evaluate_artifact (the sync
-# judge path this smoke exercises via _default_judge) migrated off direct
-# Anthropic to OpenRouter/DeepSeek V4 Flash — this workflow now needs
-# OPENROUTER_API_KEY instead of ANTHROPIC_API_KEY.
+# alpha-engine-config-I6559 (2026-08-19, crucible-research#666):
+# evaluate_artifact (the sync judge path this smoke exercises via
+# _default_judge) moved off direct OpenRouter onto krepis.router — this
+# workflow reads NO provider API key (alpha-engine-config-I7880 removed
+# the stale OPENROUTER_API_KEY injection this comment used to describe;
+# the earlier I2997 OpenRouter/DeepSeek V4 Flash migration this paragraph
+# once documented was itself superseded by I6559's router move).
 #
-# Needs BOTH the OPENROUTER_API_KEY secret (live judge call) AND the
-# alpha-engine-config checkout (the eval rubric prompts are gitignored
-# here and loaded at runtime). Forks without the API secret get a clean
-# skip (the script exits 0 when the env var is unset).
+# Needs the alpha-engine-config checkout (the eval rubric prompts are
+# gitignored here and loaded at runtime) and a reachable router — see the
+# I7853 paragraph below for the CI-runner reachability gap and how the
+# smoke script's own outputs communicate it.
 #
 # Cost: ~6 DeepSeek V4 Flash judge calls per run (1 reference per rubric +
 # one per corruption) — cents, cheaper than the pre-migration Haiku
 # baseline. Tolerant caught-rate gate absorbs LLM variance; a
 # regressed/insensitive judge still fails it.
+#
+# alpha-engine-config-I7853 (2026-08-20): this runner now HOLDS a router-edge
+# credential. Between crucible-research#666 and this change it did not, so
+# the judge call — routed through krepis.router since #666 — could not
+# reach any model and this job judged zero perturbations on every PR. That
+# was a consumer-provisioning gap, not a judge regression: neither the
+# registry's reachable_from nor krepis' context filtering was wrong.
+#
+# Reaching the router takes a URL and a credential and nothing else
+# (model-router-policy.md §3.4a R27a); both are set on the "Run judge
+# perturbation smoke" step below.
+#
+# The `judge-perturbation-smoke / coverage` neutral check stays. The `smoke`
+# job exits 0 whenever nothing is reachable — an infrastructure fault must
+# not hard-block every judge-code PR — and a revoked credential, an expired
+# edge certificate, a router outage and a fork PR that receives no secrets
+# all arrive in exactly that shape. Each must stay visible rather than
+# rendering as a green tick over zero judged perturbations.
 
 on:
   pull_request:
@@ -38,7 +59,14 @@ on:
       - ".github/workflows/judge-perturbation-smoke.yml"
       - "requirements.txt"
 
-permissions: {}
+# `checks: write` is needed ONLY by the "Report zero-judged coverage as a
+# neutral check" step below, which posts a SEPARATE GitHub check run when
+# the smoke script signals judged_count=0 (principles.md §2.7 — a bare
+# `exit 0` on a provisioning gap would render identically to a real pass,
+# which the neutral check exists to prevent). Every other permission stays
+# at the repo default of none.
+permissions:
+  checks: write
 
 jobs:
   smoke:
@@ -46,11 +74,14 @@ jobs:
     timeout-minutes: 20
     # dependabot[bot] PRs never receive secrets on a pull_request-triggered
     # run (GitHub withholds them even same-repo — alpha-engine-config#7266/
-    # #7268), and this job needs a live OPENROUTER_API_KEY to call the judge
-    # LLM plus PR-controlled code (evals/judge.py, evals/perturbation.py) —
-    # unlike ci.yml's config checkout, that combination can't be split
-    # safely into a secrets-holding, code-executing step. A dependency bump
-    # never legitimately touches judge/perturbation code (the requirements.txt
+    # #7268), and this job needs the live ALPHA_ENGINE_CONFIG_TOKEN secret
+    # (to check out the gitignored rubric prompts) and ROUTER_CONSUMER_RESEARCH_CI
+    # (to authenticate at the router edge, alpha-engine-config-I7853), plus
+    # PR-controlled code
+    # (evals/judge.py, evals/perturbation.py) — unlike ci.yml's config
+    # checkout, that combination can't be split safely into a
+    # secrets-holding, code-executing step. A dependency bump never
+    # legitimately touches judge/perturbation code (the requirements.txt
     # path filter is what pulls dependabot PRs in here incidentally), so skip
     # entirely rather than widen what a compromised dependency update could
     # exfiltrate or spend. Not a required check — skip is a clean pass.
@@ -108,7 +139,73 @@ jobs:
           printf '[extend]\nuseDefault = true\n' | sudo tee /opt/groom-llm-routing/gitleaks-egress.toml > /dev/null
 
       - name: Run judge perturbation smoke
+        id: run_smoke
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # alpha-engine-config-I7853 — the two halves of (url, credential),
+          # the only things model-router-policy §3.4a R27a permits a consumer
+          # to need in order to reach the router. Without them krepis takes
+          # its `http://127.0.0.1:8980` default, finds nothing listening on a
+          # GitHub-hosted runner, and correctly refuses every direct-provider
+          # fallback (their registry `reachable_from` genuinely excludes CI).
+          #
+          # The URL is NOT a secret: the credential is what authorises, and
+          # the edge answers 401 to an absent or unrecognised one before the
+          # router process sees anything (R27c). In plain sight it also makes
+          # a mis-set URL debuggable straight from the run log.
+          KREPIS_LITELLM_PROXY_URL: https://router.nousergon.ai:8443
+          # Names the variable below as THIS consumer's credential. Without
+          # it krepis falls back to the shared `LITELLM_MASTER_KEY` name and
+          # the job authenticates as whoever holds that — the identity
+          # collapse per-consumer credentials exist to prevent (R22).
+          KREPIS_ROUTER_CREDENTIAL_SECRET: ROUTER_CONSUMER_RESEARCH_CI
+          # Minted for CI alone: SSM /alpha-engine/ROUTER_CONSUMER_RESEARCH_CI,
+          # nginx consumer `researchci`. Deliberately NOT the `research`
+          # consumer's value — a runner executing pull-request-authored code
+          # is a lower-trust context than the alpha-engine-research-runner
+          # Lambda, and revoking this must not take that Lambda down.
+          #
+          # Both halves are set together, deliberately. A per-consumer
+          # credential paired with the loopback default returns
+          # `400 no_db_connection` on every call — the I6965 shape that aired
+          # four days of morning-signal episodes off a forbidden fallback.
+          # krepis now refuses that pair outright rather than returning it as
+          # a successful resolution.
+          ROUTER_CONSUMER_RESEARCH_CI: ${{ secrets.ROUTER_CONSUMER_RESEARCH_CI }}
           PYTHONPATH: .
         run: python tests/live_smoke/judge_perturbation_smoke.py
+
+      # alpha-engine-config-I7853 stopgap. The smoke script exits 0 when
+      # krepis.router finds nothing reachable (a CI provisioning gap, not a
+      # judge regression — see judge_perturbation_smoke.py's module
+      # docstring), so 0 perturbations judged would otherwise render
+      # identically to a real PASS. principles.md §2.7 forbids that: "a
+      # component emitting nothing is not healthy, it is unobserved; no
+      # data is never rendered as green." This step posts a SEPARATE
+      # `neutral`-concluding check run — visible on the PR, not blocking —
+      # naming the zero count whenever that happens. `if: always()` so it
+      # still runs after a FAIL (posting nothing, since outcome won't be
+      # skip_router_unreachable then).
+      #
+      # With the credential wired (alpha-engine-config-I7853) this step's
+      # `if` stops matching on a healthy run and the neutral check simply
+      # disappears. It is NOT deleted, and the script branch behind it is not
+      # dead code: a revoked credential, an expired edge certificate, a
+      # router outage and a fork PR that receives no secrets all reproduce
+      # the same zero-judged shape, and this is the only thing that would say
+      # so instead of showing a green tick over an unvalidated judge.
+      - name: Report zero-judged coverage as a neutral check
+        if: always() && steps.run_smoke.outputs.outcome == 'skip_router_unreachable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JUDGED_COUNT: ${{ steps.run_smoke.outputs.judged_count }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+            --method POST \
+            -f name="judge-perturbation-smoke / coverage" \
+            -f head_sha="${HEAD_SHA}" \
+            -f status="completed" \
+            -f conclusion="neutral" \
+            -f "output[title]=${JUDGED_COUNT} perturbations judged — router unreachable from CI" \
+            -f "output[summary]=krepis.router could not reach any model in the judge group from this CI runner. judged_count=${JUDGED_COUNT}. Likely causes, in the order worth checking: this is a fork PR (forks never receive secrets, so ROUTER_CONSUMER_RESEARCH_CI is unset and this is expected); the credential was revoked or rotated without the repo secret being updated; the edge certificate expired; the router itself is down. This run's own job status is green so an infrastructure fault does not hard-block the PR, but that green does NOT mean the judge was validated — read \$GITHUB_STEP_SUMMARY for the resolver's own error, which names which entries were skipped and why."

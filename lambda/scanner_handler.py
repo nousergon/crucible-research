@@ -24,7 +24,35 @@ Event shape (all fields optional except ``run_date``):
       "bucket": "alpha-engine-research", # default RESEARCH_BUCKET env
       "market_regime": "neutral",        # default "neutral"
       "dry_run_llm": false,              # shell-run dry path
+      "mode": "scan",                    # "scan" (default) | "scanner_leaderboard"
     }
+
+``mode`` (alpha-engine-config-I7813) selects WHICH work this invocation
+does, so an observe-only board can be its own Step Functions leaf state
+instead of riding inline on the scan:
+
+``scan`` (default)
+    The live path: ``candidates.json``, the challenger shadows, the
+    universe-membership artifact, the funnel-cut leaderboard and the
+    weekly cut-promotion decision. It does NOT build
+    ``scanner/leaderboard/{date}.json`` any more — that board moved to
+    the leaf below. The cut leaderboard and the promotion decision stay
+    here because the promotion engine BRANCHES on the cut board and
+    writes the live champion pointer: a control, not a report.
+
+``scanner_leaderboard``
+    Builds ``scanner/leaderboard/{date}.json`` and returns. Nothing else
+    reads that board — the dashboard renders it and gate predicates poll
+    it — so it is a report, and it runs as a post-Report-Card leaf state
+    on the weekly SF (``ne-weekly-freshness-pipeline``) whose failure
+    cannot reach any stage that does not consume it (sf-pipeline-policy
+    §2.1). Unlike ``scan``, a build failure here RAISES: the board is
+    this invocation's only deliverable, so a swallowed error would leave
+    the SF task green with nothing written.
+
+``date_str`` is only the OUTPUT key on the board producer — the cohort
+dates come from the S3 walk over ``candidates_shadow/`` — so a Saturday
+``run_date`` scores correctly.
 
 Returns one of:
 
@@ -78,6 +106,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 
+# alpha-engine-config-I7813. Closed set, and an unknown value is an ERROR
+# rather than a silent fall-through to the live scan: a typo in a Step
+# Functions Payload would otherwise run the FULL scan under a name that
+# asked for a board, and the operator would read a green task.
+_MODE_SCAN = "scan"
+_MODE_SCANNER_LEADERBOARD = "scanner_leaderboard"
+_MODES = (_MODE_SCAN, _MODE_SCANNER_LEADERBOARD)
+
 _init_done = False
 
 
@@ -127,6 +163,72 @@ def handler(event, context):
             # (floor is >=0.59.8). Cost records for this invocation are lost,
             # and AggregateCosts' fan-in coverage check will name this stage.
             logger.error("cost-sink flush unavailable — records lost: %s", exc)
+
+
+class ScannerLeaderboardBuildError(RuntimeError):
+    """The ``scanner_leaderboard`` leaf's board did not get written.
+
+    Raised so the Step Functions Task FAILS and its own ``Catch`` fires. In
+    ``scan`` mode a board failure is swallowed to a status field because the
+    live ``candidates.json`` is that invocation's deliverable and must never be
+    downgraded by an observe-only scorer. In the leaf there is no other
+    deliverable: swallowing it would leave a green SF task with nothing written
+    to S3, which is the one shape sf-pipeline-policy.md §2.3 forbids outright.
+    """
+
+
+def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
+    """``mode="scanner_leaderboard"`` — build ONLY ``scanner/leaderboard/{date}.json``.
+
+    alpha-engine-config-I7813. The board is observe-only: the dashboard's
+    Experiments view renders it and gate predicates poll its ``n_dates``, and no
+    pipeline stage branches on any number in it. So it is a REPORT, and it runs
+    as a leaf state of the weekly SF placed after the Report Card and Director,
+    where its failure cannot reach a stage that does not consume its output
+    (sf-pipeline-policy.md §2.1's blast-radius test).
+
+    ``build_scanner_leaderboard`` never raises — it returns a status dict and
+    publishes its own observe alert on the way. That contract is right for the
+    inline caller and WRONG here, so this wrapper converts a non-terminal status
+    into a raise. Statuses:
+
+    ``ok``            — written, returns OK.
+    ``unmeasurable``  — a decision, not a failure: the producer wrote the
+                        artifact carrying its own reason (immature cohorts, an
+                        empty closes panel). Returns OK; the reason is in the
+                        summary and in the artifact.
+    ``error``         — nothing was written. Raises.
+    """
+    logger.info(
+        "[scanner_handler] mode=scanner_leaderboard run_date=%s bucket=%s",
+        run_date,
+        bucket,
+    )
+    from scoring.leaderboard_producers import build_scanner_leaderboard
+
+    status = build_scanner_leaderboard(s3_client, bucket, run_date)
+    state = (status or {}).get("status")
+    logger.info(
+        "[scanner_handler] scanner leaderboard status=%s key=%s",
+        state,
+        (status or {}).get("key"),
+    )
+    if state not in ("ok", "unmeasurable"):
+        raise ScannerLeaderboardBuildError(
+            f"scanner leaderboard build did not write scanner/leaderboard/{run_date}.json: "
+            f"status={state!r} error={(status or {}).get('error')!r}"
+        )
+    return {
+        "status": "OK",
+        "mode": _MODE_SCANNER_LEADERBOARD,
+        "summary": {
+            "leaderboard": {
+                "status": state,
+                "key": (status or {}).get("key"),
+                "reason": (status or {}).get("reason"),
+            },
+        },
+    }
 
 
 def _run(event, context):
@@ -225,6 +327,19 @@ def _run(event, context):
     )
 
     s3_client = boto3.client("s3")
+
+    # ── Mode dispatch (alpha-engine-config-I7813) ────────────────────────────
+    # Placed AFTER run_date normalization + bucket resolution so the leaf mode
+    # keys its output on exactly the same trading day the scan would have.
+    mode = event.get("mode", _MODE_SCAN)
+    if mode not in _MODES:
+        logger.error("[scanner_handler] unknown mode %r — expected one of %s", mode, _MODES)
+        return {
+            "status": "ERROR",
+            "error": f"unknown mode {mode!r}: expected one of {_MODES}",
+        }
+    if mode == _MODE_SCANNER_LEADERBOARD:
+        return _run_scanner_leaderboard(s3_client, bucket, run_date)
 
     try:
         artifact = build_candidates_artifact(
@@ -405,53 +520,25 @@ def _run(event, context):
         membership_key,
     )
 
-    # ── Champion/challenger leaderboard SCORER (config#1221) ─────────────────
-    # Same trigger point + S3 access as the shadow emission above, and the moment
-    # the fresh candidates_shadow/ for this cohort exists. The shared scorer
-    # (scoring/leaderboard_producers.build_scanner_leaderboard) reads ALL cohort
-    # dates' shadow candidates, joins to realized 21d outcomes, scores every spec
-    # vs the champion, and writes scanner/leaderboard/{run_date}.json. OBSERVE-ONLY
-    # + fail-soft: the function itself never raises (returns a status dict); the
-    # extra try/except is belt-and-suspenders so the live candidates.json (primary
-    # deliverable, already written) can never be downgraded. Cohort-gated: on a
-    # fresh date with no matured 21d outcome it ships n_dates=0 with null metrics.
-    # (alpha-engine-config-I7841 D3) Sentinel BEFORE the try, and a start log
-    # line before the call that can raise/truncate: on a Lambda TIMEOUT the
-    # invocation is frozen mid-call and no `except` ever runs, so this line is
-    # the only evidence in CloudWatch that the board was reached at all, and
-    # the sentinel is what the returned summary reports if some future refactor
-    # makes this block conditional (today it always runs once membership
-    # succeeds, so "not_attempted" should never appear in a real invocation).
-    leaderboard_status: dict = {"status": "not_attempted"}
-    logger.info("[scanner_handler] attempting scanner leaderboard run_date=%s", run_date)
-    try:
-        from scoring.leaderboard_producers import build_scanner_leaderboard
-
-        leaderboard_status = build_scanner_leaderboard(s3_client, bucket, run_date)
-        logger.info(
-            "[scanner_handler] scanner leaderboard status=%s key=%s",
-            leaderboard_status.get("status"),
-            leaderboard_status.get("key"),
-        )
-    except Exception as exc:  # noqa: BLE001 — observe-only, live unaffected
-        logger.warning(
-            "[scanner_handler] scanner leaderboard build failed (non-fatal, live unaffected): %s",
-            exc,
-        )
-        leaderboard_status = {"status": "error", "error": str(exc)}
-
     # ── Funnel-cut leaderboard (alpha-engine-config-I7584) ───────────────────
     # Scores attractiveness_top_60, attractiveness_top_20 and the gate baseline
-    # against the population each narrowed. Runs immediately after the scanner
-    # leaderboard and INSIDE the same invocation deliberately: both now need the
-    # full-universe closes panel (config-I7587), and the in-process panel cache
-    # in leaderboard_producers means the second build reuses the first's read
-    # rather than paying for a second ~904-symbol ArcticDB slice. Same
-    # observe-only, fail-soft contract; the live candidates.json is already
-    # written and can never be downgraded by anything here.
-    # (alpha-engine-config-I7841 D1/D3) Same sentinel + start-log discipline as
-    # the scanner leaderboard above. This is the block a 450s Lambda timeout
-    # landed inside on 2026-08-20 — the scanner leaderboard logged status=ok,
+    # against the population each narrowed. Stays in THIS invocation — while the
+    # sibling scanner leaderboard left for its own SF leaf (I7813) — because the
+    # cut-promotion block below BRANCHES on this board and writes the live
+    # champion pointer from it. That makes it a control input, not a report, and
+    # the issue's own discriminator keeps controls where their consumer is.
+    #
+    # (alpha-engine-config-I7813) The panel-cache rationale this comment used to
+    # carry — "the scanner leaderboard read the ~904-symbol closes panel first,
+    # so this build reuses it" — was MEASURED FALSE on 2026-08-20 and is not
+    # what keeps this block here. `_PANEL_CACHE` keys on the cohort entry-date
+    # set and holds exactly ONE entry (it `.clear()`s before inserting). The two
+    # builds walk different prefixes: this one `universe_membership/` (23 dates
+    # live), the scanner board `candidates_shadow/` (21 dates, a different set).
+    # The keys never matched, so the second build has always paid its own full
+    # panel read — splitting the boards across invocations adds no read at all.
+    # (alpha-engine-config-I7841 D1/D3) Sentinel + start-log discipline: this is
+    # the block a 450s Lambda timeout landed inside on 2026-08-20 —
     # this line never printed, and no `except` ran. The freshness detector on
     # `research/cuts_leaderboard/{trading_day}.json` (I7841 D1, coordinated via
     # alpha-engine-config-PR7820 / I7833 — see PR body) is what catches an
@@ -547,10 +634,6 @@ def _run(event, context):
         "baseline_missing": artifact["stats"]["baseline_missing"],
         "universe_membership": membership_key,
         "shadows": shadows,
-        "leaderboard": {
-            "status": leaderboard_status.get("status"),
-            "key": leaderboard_status.get("key"),
-        },
         "cuts_leaderboard": {
             "status": cuts_leaderboard_status.get("status"),
             "key": cuts_leaderboard_status.get("key"),
@@ -573,8 +656,9 @@ def _run(event, context):
         summary["universe_board_error"] = universe_board_error
 
     # ── Post-membership board legibility rollup (alpha-engine-config-I7841 D3) ──
-    # The three post-membership stages above (scanner leaderboard, cuts
-    # leaderboard, cut promotion) run sequentially in one invocation and each
+    # The two post-membership stages above (cuts leaderboard, cut promotion —
+    # the scanner leaderboard left for its own SF leaf state, I7813) run
+    # sequentially in one invocation and each
     # already carries its own nested status. This collapses them into one
     # explicit attempted/completed view so a PARTIAL invocation — one stage's
     # try/except caught a real error rather than the invocation dying outright
@@ -590,7 +674,6 @@ def _run(event, context):
     # `research/cuts_leaderboard/{trading_day}.json` freshness detector
     # (I7841 D1), keyed on the scanner having run rather than the calendar.
     _board_stages = {
-        "scanner_leaderboard": leaderboard_status.get("status"),
         "cuts_leaderboard": cuts_leaderboard_status.get("status"),
         "cut_promotion": promotion_status.get("status", "ok"),
     }
