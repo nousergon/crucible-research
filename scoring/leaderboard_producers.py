@@ -1308,12 +1308,22 @@ def _load_cut_specs(
     is a property of the source artifact, recorded here rather than hidden.
     """
     from scoring.universe_membership import (
+        ATTRACTIVENESS_FEED_TOP_N,
+        CHALLENGER_CUT_PREFIX,
         CHAMPION_CUT,
         FEED_CUT_NAME,
         GATE_BASELINE_CUT,
         GATE_LEGACY_CUT,
+        MOMZERO_CUT_PREFIX,
         PREDICTOR_UNIVERSE_CUT,
+        TECH_SCORE_CUT_PREFIX,
+        TECH_SCORE_RANKS_FIELD,
+        live_cut_champion,
     )
+
+    tech_score_cut = f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+    momzero_cut = f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+    mom121_cut = f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
 
     # Each arm, and the membership keys it may appear under, newest name first.
     # The gate cut was renamed by crucible-research-PR648, then again by
@@ -1329,6 +1339,21 @@ def _load_cut_specs(
         FEED_CUT_NAME: (FEED_CUT_NAME,),
         PREDICTOR_UNIVERSE_CUT: (PREDICTOR_UNIVERSE_CUT,),
         CHAMPION_CUT: (CHAMPION_CUT, GATE_BASELINE_CUT, GATE_LEGACY_CUT),
+        # ── The universe-cut SLOT's arms (alpha-engine-config-I8026) ────────
+        # The three above are funnel STAGES. These three are competing RULES in
+        # the slot `FEED_CUT_NAME` currently holds, and until this change none
+        # of them was scored anywhere. `cut_promotion.decide_cut_champion`
+        # decides between `attractiveness_top_60` and `tech_score_top_60` from
+        # THIS board, so it was reading a board that had never carried one of
+        # the two arms it compares — a promotion engine structurally unable to
+        # promote, whose every record would have read `arm_row_missing`.
+        #
+        # All three are emitted at ATTRACTIVENESS_FEED_TOP_N, so the slot is
+        # count-matched by construction (champion-challenger-policy.md §4) and
+        # `per_arm_width` resolves them all to the same 60.
+        tech_score_cut: (tech_score_cut,),
+        momzero_cut: (momzero_cut,),
+        mom121_cut: (mom121_cut,),
     }
     # Where each arm's RANK order lives in the membership artifact. The cut's
     # own `tickers` list is alphabetical for every cut, so it is never it.
@@ -1336,8 +1361,41 @@ def _load_cut_specs(
         FEED_CUT_NAME: ("ranks", "attractiveness_rank"),
         PREDICTOR_UNIVERSE_CUT: ("ranks", "attractiveness_rank"),
         CHAMPION_CUT: ("scanner_ranks", "tech_score_rank"),
+        tech_score_cut: (TECH_SCORE_RANKS_FIELD, "tech_score_rank"),
+        # The two momentum arms rank on a composite the membership artifact does
+        # NOT publish a rank table for: their `tickers` are written by
+        # `_top_n`, which sorts alphabetically (set semantics). There is
+        # therefore no order to correlate, and naming a table that cannot rank
+        # them makes `_rank_order` return `rank_ordered=False` — a MISSING
+        # rank-IC rather than a Spearman against the alphabet.
+        #
+        # This is a real limitation, stated rather than papered over: these two
+        # arms are scored on `topn_alpha_vs_population` (the slot's primary
+        # metric, which needs only the picked SET) and carry no rank-IC.
+        # Publishing momzero/mom121 rank tables is the follow-on that would
+        # give them one.
+        momzero_cut: ("__no_rank_table__", "attractiveness_rank"),
+        mom121_cut: ("__no_rank_table__", "attractiveness_rank"),
     }
-    hists = {name: SpecHistory(name=name, kind="challenger") for name in aliases}
+    # §3: the champion is scored on the same axis as the challengers, and a
+    # leaderboard whose champion field is null is a broken leaderboard — for a
+    # slot that HAS a champion. The funnel stages genuinely have none (see this
+    # producer's docstring); the slot arms do, and it is resolved from the live
+    # pointer rather than hardcoded, so the row cannot go stale against a
+    # promotion (§7.5).
+    try:
+        champion_arm = live_cut_champion(bucket=bucket, s3_client=s3)
+    except Exception as exc:  # noqa: BLE001 — observe-only; an unreadable pointer must not stop scoring
+        logger.warning(
+            "[leaderboard] cut champion pointer unreadable (%s) — every arm is "
+            "scored as a challenger this cycle; no arm is silently dropped.",
+            exc,
+        )
+        champion_arm = None
+    hists = {
+        name: SpecHistory(name=name, kind="champion" if name == champion_arm else "challenger")
+        for name in aliases
+    }
     widths: dict[str, int] = {}
     for d in dates:
         doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d)) or {}
@@ -1398,9 +1456,30 @@ def build_cuts_leaderboard(
     width against the population, which is the only comparison that means
     anything for a funnel stage.
 
-    Every arm is ``kind="challenger"`` with no champion: they are not competing.
-    ``topn_alpha_vs_champion`` is therefore null throughout, by construction and
-    not by failure.
+    The board carries TWO kinds of arm and they must not be read as one set
+    (alpha-engine-config-I8026):
+
+    * the funnel's **stages** — ``attractiveness_top_20`` and the gate cut.
+      These are not competing and no champion sits among them; asking whether
+      the head beats the body it is the head OF is incoherent.
+    * the universe-cut **slot's arms** — ``attractiveness_top_60`` (the live
+      champion), ``tech_score_top_60`` (the other member of
+      ``PROMOTABLE_CUTS``), and the two attractiveness challengers
+      ``attractiveness_momzero_top_60`` / ``attractiveness_mom121_top_60``.
+      These ARE competing, all four at width 60, and
+      ``cut_promotion.decide_cut_champion`` decides between the first two from
+      this board.
+
+    ``kind="champion"`` is set on whichever arm ``live_cut_champion()`` names,
+    resolved from the pointer rather than hardcoded so the row cannot go stale
+    against a promotion (§7.5). Every other row is ``kind="challenger"``.
+
+    ``topn_alpha_vs_champion`` is null throughout regardless: each arm is scored
+    in its own single-arm pass (see below), so no pass ever holds two arms to
+    difference. The slot's primary metric is ``topn_alpha_vs_population``, which
+    is comparable across arms precisely because they are count-matched — that is
+    the comparison a promotion consumer reads, and it is by construction, not by
+    failure.
 
     OBSERVE-ONLY + FAIL-SOFT, same contract as the sibling producers.
     """
@@ -1413,7 +1492,17 @@ def build_cuts_leaderboard(
         dates = [d for d in dates if len(d) == 10 and d[4] == "-"]
         arms, widths = _load_cut_specs(s3, bucket, dates)
         if not arms:
-            return {"status": "unmeasurable", "reason": "no membership cuts readable"}
+            # WRITE the unmeasurable verdict rather than returning it only to
+            # the caller (champion-challenger-policy.md §7.2, ARCHITECTURE §133):
+            # a board that stops appearing and a board that reports "nothing was
+            # scorable" are the same S3 state to every consumer, and
+            # `cut_promotion` renders the first as `board_missing` — a hold whose
+            # stated reason is wrong.
+            return _unmeasurable_result(
+                s3, bucket, date_str, leaderboard_id="cuts",
+                output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
+                reason="no membership cuts readable", write=write,
+            )
         try:
             realized_by_horizon, horizon_notes, population_by_horizon = (
                 _resolve_realized_returns_by_horizon(
@@ -1437,8 +1526,17 @@ def build_cuts_leaderboard(
             width = widths.get(arm.name) or 0
             if width <= 0:
                 continue
+            # The champion arm is handed in as the champion for its OWN pass, so
+            # the board's top-level `champion` names the arm actually serving.
+            # A leaderboard whose champion field is null, for a slot that has
+            # one, is a broken leaderboard (§3) — and this board is the input
+            # `cut_promotion` reads. The funnel stages have no champion and
+            # every one of them still passes `None`.
+            is_champion = arm.kind == "champion"
             scored = score_multi_horizon(
-                None, [arm], realized_by_horizon,
+                arm if is_champion else None,
+                [] if is_champion else [arm],
+                realized_by_horizon,
                 top_n=width, horizons_days=horizons,
                 min_dates_for_inference=slot.min_dates_for_inference,
                 horizon_notes=horizon_notes,
@@ -1461,7 +1559,11 @@ def build_cuts_leaderboard(
                     target["specs"].extend(block.get("specs", []))
 
         if merged is None:
-            return {"status": "unmeasurable", "reason": "no cut had a usable width"}
+            return _unmeasurable_result(
+                s3, bucket, date_str, leaderboard_id="cuts",
+                output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
+                reason="no cut had a usable width", write=write,
+            )
         # Continuity (champion-challenger-policy.md §3): the top level carries
         # the primary horizon's rows. Same row dicts, distinct list.
         primary_block = merged["horizons"][0]
@@ -1481,10 +1583,31 @@ def build_cuts_leaderboard(
         _annotate_arm_measurement_gaps("cuts", merged["horizons"], arms, date_str)
         merged["leaderboard_id"] = "cuts"
         merged["date"] = date_str
+        # `merged` is seeded from whichever arm happened to be scored first, so
+        # its top-level `champion` is that pass's value. Name the champion from
+        # the arm set instead — null only when no arm carries the kind, which is
+        # the funnel-stages-only case and an unreadable pointer (both logged).
+        merged["champion"] = next((a.name for a in arms if a.kind == "champion"), None)
         # The slot-level top_n is meaningless here and must not be read as one.
         merged["top_n"] = None
         merged["per_arm_width"] = True
         merged["widths"] = widths
+        # config-I5195, mirroring the scanner producer: zero scored cohorts is
+        # EXPECTED while cohorts are immature and a DEFECT once they should have
+        # matured. Both render as n_dates=0, which is how the original defect
+        # survived four weeks of empty weekly artifacts. Immaturity stays
+        # status="ok" and self-resolves; overdue escalates and alerts.
+        overdue = (
+            _overdue_zero_cohort_reason(dates, horizon_days, date_str)
+            if not merged.get("n_dates")
+            else None
+        )
+        if overdue:
+            return _unmeasurable_result(
+                s3, bucket, date_str, leaderboard_id="cuts",
+                output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
+                reason=overdue, write=write,
+            )
         key = _write_leaderboard(s3, bucket, _CUTS_OUTPUT.format(date=date_str), merged) if write else None
         return {"status": "ok", "key": key, "leaderboard": merged}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path

@@ -491,8 +491,17 @@ bad write away from feeding the sector teams something nobody chose.
 
 DEFAULT_CUT_CHAMPION = "attractiveness_top_60"
 """The standing champion, per Brian's ruling 2026-08-20. Serves whenever the
-pointer is absent or unreadable — the momentum-free 6-pillar composite, which
-is what fed the predictor and the evidence layers already."""
+pointer is absent or unreadable — the 6-pillar attractiveness composite, which
+is what fed the predictor and the evidence layers already.
+
+The pillar WEIGHTS this cut ranks by are not a property of this constant: they
+are read per-run from ``config/factor_attractiveness_weights.json`` via
+``universe_board._load_pillar_weights``. This docstring said "momentum-free"
+between 2026-08-17 and 2026-08-21, when that file carried momentum 0.0; Brian's
+ruling 2026-08-21 (alpha-engine-config-I7988) restored equal weight and moved
+the momentum-zero composite to the ``attractiveness_momzero_top_60`` shadow arm.
+Naming a weighting here at all was the mistake — the weighting is configuration
+and this is a cut name, so the two go stale on different clocks."""
 
 
 def live_cut_champion(*, bucket: str | None = None, s3_client: Any = None) -> str:
