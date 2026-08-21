@@ -87,7 +87,7 @@ def live_router_resolution(monkeypatch):
     inherited across test modules via a plain import."""
     import krepis.router as _kr
 
-    def fake_resolve_structured(group, *, exec_context=None, wire="openai"):
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
         return {
             "schema_version": 2,
             "group": group,

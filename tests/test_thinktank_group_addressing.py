@@ -124,8 +124,15 @@ class TestGroupAddressedClient:
         seen = {}
         monkeypatch.setenv("LITELLM_MASTER_KEY", "consumer-test")
 
-        def _resolve(group, *, exec_context=None, wire="openai"):
-            seen.update(group=group, exec_context=exec_context, wire=wire)
+        # `requires` is part of resolve_group_structured's signature since
+        # krepis v0.59.22 (alpha-engine-config-I7904 — capability-aware
+        # selection). A double that omits it does not merely miss the new
+        # argument, it TypeErrors the moment any caller passes one, so the
+        # double must track the real signature.
+        def _resolve(group, *, exec_context=None, wire="openai", requires=()):
+            seen.update(
+                group=group, exec_context=exec_context, wire=wire, requires=requires
+            )
             return _fake_route()
 
         monkeypatch.setattr(_kr, "resolve_group_structured", _resolve)
@@ -133,7 +140,12 @@ class TestGroupAddressedClient:
         ThinktankClient(settings=_settings(tier), run_id="r")._llm_client_for(
             tier, callsite_id="thinktank-thesis"
         )
-        assert seen == {"group": "med", "exec_context": "ec2", "wire": "openai"}
+        assert seen == {
+            "group": "med",
+            "exec_context": "ec2",
+            "wire": "openai",
+            "requires": (),
+        }
 
     def test_structured_outputs_requirement_survives_group_addressing(
         self, monkeypatch
