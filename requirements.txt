@@ -42,6 +42,18 @@ agentevals~=0.0
 # Data
 yfinance~=1.6.0
 requests-ratelimiter~=0.10
+# alpha-engine-config-I7982: scoring/universe_board.py::_read_parquet calls
+# pd.read_parquet(..., engine="pyarrow") on the Lambda's live path, but
+# pyarrow was NEVER a declared dependency here — it only ever arrived
+# transitively via edgartools (itself unpinned to a pyarrow release). A
+# routine dependency-bump build was free to resolve a pyarrow wheel
+# incompatible with this image's numpy pin, and did: the scanner board
+# published 0-of-903-names coverage on 21 of 23 metric fields for four
+# straight days (2026-08-17..08-20) with the only symptom a swallowed,
+# argument-free WARN (see the fixed-in-the-same-PR exception log). A
+# capability this repo calls directly belongs in its own dependency graph,
+# not borrowed from another package's transitive closure.
+pyarrow>=17.0  # floor matches edgartools' own pin so both resolve one wheel
 pandas~=2.2
 numpy~=2.5
 requests~=2.34
