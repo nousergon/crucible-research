@@ -27,6 +27,7 @@ at all, so a deferred removal there would never reach traffic.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,40 @@ def test_direct_helper_never_defers_publish() -> None:
     assert "--missing-ok" in helper_body
 
 
+def test_direct_helper_asserts_the_function_is_unaliased() -> None:
+    """The claim this helper CAN make, and must, or the deploy dies.
+
+    krepis enumerates aliases to decide whether a $LATEST edit reaches
+    traffic, and this deploy role holds no `lambda:ListAliases`. 0.59.24 skips
+    that enumeration only under `--defer-publish` — precisely the claim this
+    helper cannot make, since nothing here publishes or promotes afterwards.
+    So the alerts convergence raised and took the whole deploy with it, twice,
+    with krepis 0.59.24 installed (runs 32512239555 and 32514368875,
+    alpha-engine-config-I8037).
+
+    `--no-alias` (krepis>=0.59.25) is the assertion that IS true of
+    FUNCTION_ALERTS: it serves traffic from $LATEST and has no alias, so alias
+    state cannot change the outcome. It belongs on THIS helper only — the
+    deferred one makes a different claim about a function that does have an
+    alias, and a caller asserting neither still enumerates and still refuses.
+    """
+    helper_body = _CODE.split("_converge_lambda_env_direct()", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "--no-alias" in helper_body, (
+        "the direct helper does not assert --no-alias; krepis will enumerate "
+        "aliases and the deploy role cannot, so the deploy fails"
+    )
+    deferred_body = _CODE.split("_converge_lambda_env_deferred()", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "--no-alias" not in deferred_body, (
+        "the deferred helper handles ALIAS-PINNED functions — asserting they "
+        "have no alias would be false, and would suppress the pin check that "
+        "protects them"
+    )
+
+
 def test_alerts_uses_the_direct_helper() -> None:
     call_index = _CODE.index('_converge_lambda_env_direct "$FUNCTION_ALERTS"')
     deployed_index = _CODE.index(
@@ -162,8 +197,34 @@ def test_krepis_pin_does_not_need_the_deploy_role_to_list_aliases() -> None:
     )
     version = line.split("==", 1)[1].split()[0].strip()
     parts = tuple(int(p) for p in version.split("."))
-    assert parts >= (0, 59, 24), (
-        f"requirements.txt pins krepis {version}; --defer-publish needs >= "
-        f"0.59.24 or the deploy fails on lambda:ListAliases and leaves a "
-        f"PARTIAL deploy (alpha-engine-config-I8030)"
+    assert parts >= (0, 59, 25), (
+        f"requirements.txt pins krepis {version}; the deferred sites need "
+        f">= 0.59.24 and the alerts site's `--no-alias` needs >= 0.59.25, or "
+        f"the deploy fails on lambda:ListAliases — as a PARTIAL deploy at the "
+        f"deferred sites (alpha-engine-config-I8030) and as an outright red "
+        f"deploy at the alerts site (alpha-engine-config-I8037)"
+    )
+
+
+def test_the_deploy_workflow_installs_a_krepis_that_can_run_the_cli() -> None:
+    """The workflow's own `pip install krepis>=X` is the interpreter that runs
+    `python3 -m krepis.aws remove-lambda-env` in the deploy steps, so ITS
+    resolved version is what decides whether the convergence works —
+    `requirements.txt` governs the Lambda images, not the runner.
+
+    That floor read `>=0.7.0` while the step needed 0.59.25. It resolved a new
+    enough krepis by luck, because a bare `>=` with no ceiling installs the
+    latest. A floor that states nothing about what the step needs is the same
+    shape as alpha-engine-config-I7989, where a stale generator floor let two
+    routers break on one merge (alpha-engine-config-I8037).
+    """
+    wf = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+    body = wf.read_text(encoding="utf-8")
+    m = re.search(r'pip install "krepis>=(\d+)\.(\d+)\.(\d+)"', body)
+    assert m, "the deploy workflow does not pin a krepis floor for the CLI"
+    parts = tuple(int(g) for g in m.groups())
+    assert parts >= (0, 59, 25), (
+        f"deploy.yml installs krepis>={'.'.join(str(x) for x in parts)}; the "
+        "alerts convergence passes --no-alias, which needs >= 0.59.25 or the "
+        "step exits 2 on an unknown flag (alpha-engine-config-I8037)"
     )
