@@ -243,6 +243,12 @@ def test_a_substrate_frozen_for_months_degrades_loudly_without_halting(
     assert bundle.stale_sources() == ["regime_substrate"]
     assert len(freshness_alerts) == 1
     assert freshness_alerts[0]["severity"] == "error"
+    # detail.source must resolve to a class the fleet alert-class registry
+    # actually declares (nousergon-data/infrastructure/overseer/playbooks.yaml
+    # ``research_thinktank_daily_alerts`` / ``research_thinktank_daily``) —
+    # alpha-engine-config-I7740, operator ruling 2026-08-21. An unrouted
+    # source string is untriageable by construction.
+    assert freshness_alerts[0]["source"] == "research:thinktank_daily"
     assert any(
         f"{REGIME_SUBSTRATE_PREFIX}/" in rec.message and rec.levelname == "ERROR"
         for rec in caplog.records
@@ -258,6 +264,7 @@ def test_a_missing_substrate_is_undated_not_silently_fresh(freshness_alerts):
     assert bundle.freshness["regime_substrate"].status == "undated"
     assert bundle.stale_sources() == ["regime_substrate"]
     assert len(freshness_alerts) == 1
+    assert freshness_alerts[0]["source"] == "research:thinktank_daily"
 
 
 @mock_aws
@@ -299,6 +306,8 @@ def test_stale_news_aggregates_trip_the_daily_tolerance(freshness_alerts):
     # The weekly leg is unaffected — the two legs are judged independently.
     assert bundle.freshness["regime_substrate"].is_fresh
     assert bundle.stale_sources() == ["news_aggregates"]
+    assert len(freshness_alerts) == 1
+    assert freshness_alerts[0]["source"] == "research:thinktank_daily"
 
 
 # ── the durable record ───────────────────────────────────────────────────────
