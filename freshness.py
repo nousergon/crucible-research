@@ -15,7 +15,10 @@ Two live instances motivated this module:
   (``ArchiveManager.save_macro_report``) call-site-less since the multi-agent
   graph retired. Think Tank read it daily and reconciled its themes against a
   five-month-old macro backdrop, silently, while being scored as the shadow
-  arm of the producer leaderboard.
+  arm of the producer leaderboard. RESOLVED 2026-08-21 (alpha-engine-config
+  -I2638, Brian ruling): both the writer and the read are retired, and Think
+  Tank self-anchors on the regime substrate + news aggregates instead. This
+  primitive is what made the 158-day freeze visible in the first place.
 - ``decision_artifacts/{Y}/{M}/{D}/`` captures — frozen at 2026-07-11 for the
   retired graph's agents, yet the weekly rationale-clustering rollup kept
   writing freshly-dated ``_analysis/{agent_id}/{YYYY-WW}.json`` and emitting
