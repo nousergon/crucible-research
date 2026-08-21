@@ -1,0 +1,226 @@
+{
+  "_fixture_note": "STRUCTURE of the real s3://alpha-engine-research/research/cuts_leaderboard/2026-08-19.json (written 2026-08-19 05:58 UTC by scanner Lambda v339). Arm names, kinds, horizon blocks, statuses, row COUNTS and cohort counts are verbatim; every measured metric value is nulled because this repo is public and live realized-alpha numbers are private-tier (AGENTS.md placement). The duplicate-row invariant this fixture exercises is purely structural, so nulling the metrics removes nothing the guard reads. The guard was also run against the UNREDACTED object in-session; see crucible-research-PR for the output (alpha-engine-config-I8026 D3, champion-challenger-policy.md \u00a77.4).",
+  "benchmark_ticker": "SPY",
+  "champion": null,
+  "date": "2026-08-19",
+  "horizon_days": 21,
+  "horizons": [
+    {
+      "horizon_days": 21,
+      "n_dates": 8,
+      "reason": null,
+      "specs": [
+        {
+          "confidence": "ok",
+          "kind": "challenger",
+          "n_dates_scored": 8,
+          "name": "attractiveness_top_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_20",
+          "realized_rank_ic": null,
+          "top_n": 20,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_20",
+          "realized_rank_ic": null,
+          "top_n": 20,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "scanner_gate_baseline_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "scanner_gate_baseline_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        }
+      ],
+      "status": "ok"
+    },
+    {
+      "horizon_days": 126,
+      "n_dates": 0,
+      "reason": "no cohort date has aged 126 trading sessions yet \u2014 the 126-session horizon is not yet measurable for any arm. This is immaturity, not a result: every spec row is reported confidence=insufficient rather than as a zero.",
+      "specs": [
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_20",
+          "realized_rank_ic": null,
+          "top_n": 20,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "scanner_gate_baseline_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        }
+      ],
+      "status": "immature"
+    },
+    {
+      "horizon_days": 252,
+      "n_dates": 0,
+      "reason": "no cohort date has aged 252 trading sessions yet \u2014 the 252-session horizon is not yet measurable for any arm. This is immaturity, not a result: every spec row is reported confidence=insufficient rather than as a zero.",
+      "specs": [
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "attractiveness_top_20",
+          "realized_rank_ic": null,
+          "top_n": 20,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        },
+        {
+          "confidence": "insufficient",
+          "kind": "challenger",
+          "n_dates_scored": 0,
+          "name": "scanner_gate_baseline_60",
+          "realized_rank_ic": null,
+          "top_n": 60,
+          "topn_alpha_vs_benchmark": null,
+          "topn_alpha_vs_champion": null,
+          "topn_alpha_vs_population": null
+        }
+      ],
+      "status": "immature"
+    }
+  ],
+  "horizons_days": [
+    21,
+    126,
+    252
+  ],
+  "leaderboard_id": "cuts",
+  "min_dates_for_inference": 5,
+  "n_dates": 8,
+  "per_arm_width": true,
+  "specs": [
+    {
+      "confidence": "ok",
+      "kind": "challenger",
+      "n_dates_scored": 8,
+      "name": "attractiveness_top_60",
+      "realized_rank_ic": null,
+      "top_n": 60,
+      "topn_alpha_vs_benchmark": null,
+      "topn_alpha_vs_champion": null,
+      "topn_alpha_vs_population": null
+    },
+    {
+      "confidence": "insufficient",
+      "kind": "challenger",
+      "n_dates_scored": 0,
+      "name": "attractiveness_top_20",
+      "realized_rank_ic": null,
+      "top_n": 20,
+      "topn_alpha_vs_benchmark": null,
+      "topn_alpha_vs_champion": null,
+      "topn_alpha_vs_population": null
+    },
+    {
+      "confidence": "insufficient",
+      "kind": "challenger",
+      "n_dates_scored": 0,
+      "name": "attractiveness_top_20",
+      "realized_rank_ic": null,
+      "top_n": 20,
+      "topn_alpha_vs_benchmark": null,
+      "topn_alpha_vs_champion": null,
+      "topn_alpha_vs_population": null
+    },
+    {
+      "confidence": "insufficient",
+      "kind": "challenger",
+      "n_dates_scored": 0,
+      "name": "scanner_gate_baseline_60",
+      "realized_rank_ic": null,
+      "top_n": 60,
+      "topn_alpha_vs_benchmark": null,
+      "topn_alpha_vs_champion": null,
+      "topn_alpha_vs_population": null
+    },
+    {
+      "confidence": "insufficient",
+      "kind": "challenger",
+      "n_dates_scored": 0,
+      "name": "scanner_gate_baseline_60",
+      "realized_rank_ic": null,
+      "top_n": 60,
+      "topn_alpha_vs_benchmark": null,
+      "topn_alpha_vs_champion": null,
+      "topn_alpha_vs_population": null
+    }
+  ],
+  "top_n": null,
+  "widths": {
+    "attractiveness_top_20": 20,
+    "attractiveness_top_60": 60,
+    "scanner_gate_baseline_60": 60
+  }
+}

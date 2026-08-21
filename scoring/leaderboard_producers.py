@@ -105,8 +105,10 @@ from scoring.leaderboard_scoring import (
     HORIZON_IMMATURE,
     HORIZON_OK,
     HORIZON_UNMEASURABLE,
+    LeaderboardIntegrityError,
     SpecDay,
     SpecHistory,
+    duplicate_arm_rows,
     population_return_from_panel,
     score_multi_horizon,
     slot_spec,
@@ -905,7 +907,71 @@ def _cohort_dates(s3: Any, bucket: str, prefix: str, depth: int) -> list[str]:
 # ── Public producers (fail-soft) ──────────────────────────────────────────────
 
 
+def _duplicate_rows_result(
+    s3: Any,
+    bucket: str,
+    date_str: str,
+    *,
+    leaderboard_id: str,
+    output_tmpl: str,
+    horizon_days: int,
+    board: dict,
+    write: bool,
+) -> dict | None:
+    """``None`` when the board is clean; a written ``unmeasurable`` verdict when
+    it reports an arm more than once.
+
+    Why an explicit verdict and not a silent de-duplication: the merge defect
+    that produced the live duplicates is fixed (``crucible-research#658``), so
+    a duplicate arriving now means a producer fault of unknown shape. Quietly
+    collapsing the rows would hide it and hand every consumer a board it cannot
+    tell from a healthy one — the fleet's dominant bug class (AGENTS.md
+    fail-loud; champion-challenger-policy.md §7.2).
+
+    Why not simply refuse to write: a board that stops appearing renders in
+    ``cut_promotion`` as ``board_missing``, a hold whose stated reason is wrong.
+    The artifact must exist and must SAY what is wrong with it.
+    """
+    dupes = duplicate_arm_rows(board)
+    if not dupes:
+        return None
+    return _unmeasurable_result(
+        s3,
+        bucket,
+        date_str,
+        leaderboard_id=leaderboard_id,
+        output_tmpl=output_tmpl,
+        horizon_days=horizon_days,
+        reason=(
+            f"duplicate_arm_rows: {', '.join(dupes)} — the board reports at "
+            "least one arm more than once on a surface, so no consumer can say "
+            "which row is that arm's (alpha-engine-config-I7645/I8026). The "
+            "rows are NOT silently merged: a duplicate after the "
+            "crucible-research#658 fix is a producer fault, not the known one."
+        ),
+        write=write,
+    )
+
+
 def _write_leaderboard(s3: Any, bucket: str, key: str, leaderboard: dict) -> str:
+    """Write a board — and REFUSE to write one that reports an arm twice.
+
+    The single choke point every board passes through, so the invariant cannot
+    be forgotten by a producer added later (alpha-engine-config-I8026 D3). The
+    producers call :func:`duplicate_arm_rows` themselves first and turn a hit
+    into a written ``unmeasurable`` verdict; this raise is the backstop for the
+    path that does not, and it lands inside each producer's observe-only
+    try/except, so it alerts rather than reddening the live pipeline.
+    """
+    dupes = duplicate_arm_rows(leaderboard)
+    if dupes:
+        raise LeaderboardIntegrityError(
+            f"refusing to write {key}: duplicate arm rows {', '.join(dupes)}. "
+            "A board that reports one arm twice cannot say which number is the "
+            "arm's, and every consumer of it — cut_promotion's decision, the "
+            "console pane, any mean over the rows — reads a reweighted arm as a "
+            "result (alpha-engine-config-I7645/I8026)."
+        )
     s3.put_object(
         Bucket=bucket,
         Key=key,
@@ -1264,6 +1330,12 @@ def build_scanner_leaderboard(
                 reason=overdue,
                 write=write,
             )
+        defective = _duplicate_rows_result(
+            s3, bucket, date_str, leaderboard_id="scanner",
+            output_tmpl=_SCANNER_OUTPUT, horizon_days=horizon_days, board=leaderboard, write=write,
+        )
+        if defective:
+            return defective
         key = _write_leaderboard(s3, bucket, _SCANNER_OUTPUT.format(date=date_str), leaderboard) if write else None
         return {"status": "ok", "key": key, "leaderboard": leaderboard}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
@@ -1623,6 +1695,12 @@ def build_cuts_leaderboard(
                 output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
                 reason=overdue, write=write,
             )
+        defective = _duplicate_rows_result(
+            s3, bucket, date_str, leaderboard_id="cuts",
+            output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days, board=merged, write=write,
+        )
+        if defective:
+            return defective
         key = _write_leaderboard(s3, bucket, _CUTS_OUTPUT.format(date=date_str), merged) if write else None
         return {"status": "ok", "key": key, "leaderboard": merged}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
@@ -1751,6 +1829,12 @@ def build_producer_leaderboard(
                 reason=overdue,
                 write=write,
             )
+        defective = _duplicate_rows_result(
+            s3, bucket, date_str, leaderboard_id="producer",
+            output_tmpl=_PRODUCER_OUTPUT, horizon_days=horizon_days, board=leaderboard, write=write,
+        )
+        if defective:
+            return defective
         key = _write_leaderboard(s3, bucket, _PRODUCER_OUTPUT.format(date=date_str), leaderboard) if write else None
         return {"status": "ok", "key": key, "leaderboard": leaderboard}
     except Exception as exc:  # noqa: BLE001 — observe-only, must never raise into live path
