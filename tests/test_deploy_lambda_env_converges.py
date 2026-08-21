@@ -5,7 +5,11 @@ traffic.
 alpha-engine-config-I7925. This repo's nine research Lambdas were among the
 eleven fleet-wide carrying a `GITHUB_TOKEN` set by hand and refreshed by
 nothing — live-only state that no repo, IaC file or script here ever wrote.
-That token expired 2026-06-03; on 2026-08-21 a first-party dependency picked
+The environment carried a STALE COPY of the credential — set from an
+older SSM parameter version and never re-derived on deploy — that GitHub
+rejected while the SSM parameter's own value remained valid the whole
+time (alpha-engine-config-I7968 tracks the mis-attribution). On
+2026-08-21 a first-party dependency picked
 it up out of site-packages, sent it to GitHub, got a 401, and halted the
 preopen trading pipeline 3.4 seconds after start (alpha-engine-config-I7924).
 `alpha-engine-predictor-inference` (crucible-predictor) was the one of eleven
