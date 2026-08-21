@@ -300,13 +300,27 @@ _converge_lambda_env_deferred() {
 # For functions with NO alias/version promotion (FUNCTION_ALERTS): the edit
 # reaches traffic directly, so --defer-publish is wrong here — there is no
 # later publish step to carry it.
+#
+# --no-alias is the claim that IS true here (krepis>=0.59.25,
+# alpha-engine-config-I8037). Without it, krepis enumerates aliases to decide
+# whether a $LATEST edit reaches traffic, and this deploy role holds no
+# `lambda:ListAliases` — so this call raised and took the whole deploy with it,
+# twice, on runs 32512239555 and 32514368875, with krepis 0.59.24 installed.
+# 0.59.24 only skips the enumeration under --defer-publish, which is exactly
+# the claim this helper cannot make.
+#
+# The flag is an assertion about THIS function: it serves traffic from $LATEST
+# and has no alias, so alias state cannot change the outcome. It is not a
+# general softening — a caller that asserts nothing still enumerates and still
+# refuses, which is why the deferred helper above keeps its own flag rather
+# than borrowing this one.
 _converge_lambda_env_direct() {
   local fn="$1"
   echo "  Converging Lambda environment on $fn (removing denied keys)..."
   aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
   python3 -m krepis.aws remove-lambda-env \
     --function-name "$fn" --region "$REGION" \
-    --missing-ok \
+    --no-alias --missing-ok \
     "${LAMBDA_ENV_DENIED_KEYS[@]/#/--unset=}"
 }
 

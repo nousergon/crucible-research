@@ -100,14 +100,23 @@ jobs:
       # runner's environment resolved krepis anyway, but that was never a
       # guaranteed/verified mechanism (config#1545) — crucible-predictor and
       # crucible-evaluator hit exactly this gap as a hard `ModuleNotFoundError`
-      # on 2026-07-01. Pin matches requirements.txt's `krepis>=0.7.0` floor.
+      # on 2026-07-01.
+      #
+      # The floor below is NOT requirements.txt's historical `>=0.7.0` any
+      # more (alpha-engine-config-I8037). THIS interpreter is the one that
+      # runs `python3 -m krepis.aws remove-lambda-env` in the deploy steps, so
+      # the version it resolves is the version that decides whether the alerts
+      # convergence works. It happened to resolve a new enough krepis while
+      # the floor said 0.7.0, which is a floor that states nothing about what
+      # the step needs — the same shape as alpha-engine-config-I7989, where a
+      # stale generator floor let two routers break on a merge.
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Install krepis (runner-side canary + alert CLI)
-        run: pip install "krepis>=0.7.0"
+        run: pip install "krepis>=0.59.25"
 
       - name: Deploy main Lambda (alpha-engine-research-runner)
         working-directory: alpha-engine-research
