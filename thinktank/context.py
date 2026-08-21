@@ -203,7 +203,7 @@ def load_context(store: Any) -> ContextBundle:
         cadence=REGIME_SUBSTRATE_CADENCE,
         on_stale="degrade",
         degraded_reason=_ANCHOR_DEGRADED_REASON,
-        source="crucible-research.thinktank.context",
+        source="research:thinktank_daily",
     )
 
     for name, present in (
@@ -226,7 +226,7 @@ def load_context(store: Any) -> ContextBundle:
         cadence=NEWS_AGGREGATES_CADENCE,
         on_stale="degrade",
         degraded_reason=_ANCHOR_DEGRADED_REASON,
-        source="crucible-research.thinktank.context",
+        source="research:thinktank_daily",
     )
 
     bundle.insider_by_ticker = _load_insider_transactions(store)
