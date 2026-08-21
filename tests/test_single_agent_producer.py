@@ -172,7 +172,7 @@ def _patch_router(monkeypatch, *, route=None, captured=None):
 
     the_route = route or _fake_route()
 
-    def fake_resolve_structured(group, *, exec_context=None, wire="openai"):
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
         if captured is not None:
             captured.append(
                 {"group": group, "exec_context": exec_context, "wire": wire}
