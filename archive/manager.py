@@ -276,9 +276,14 @@ class ArchiveManager:
 
         self._s3_put(key, json.dumps(history, indent=2))
 
-    def save_macro_report(self, run_date: str, macro_report: str) -> None:
-        self._s3_put("archive/macro/macro_report.md", macro_report)
-        self._s3_put(f"archive/macro/history/{run_date}/macro_report.md", macro_report)
+    # ``save_macro_report`` was retired 2026-08-21 (alpha-engine-config-I2638,
+    # Brian ruling). It lost its only call site when the multi-agent graph left
+    # the weekly SF, so ``archive/macro/macro_report.md`` froze at 2026-03-16
+    # while its one remaining consumer — Think Tank's theme reconciliation —
+    # kept reading it as "the weekly macro report" for 158 days. Think Tank now
+    # self-anchors on the regime substrate + news aggregates
+    # (``thinktank/context.py``); a dead writer kept "in case" is what let the
+    # artifact look like a live contract.
 
     def save_consolidated_report(self, run_date: str, report: str) -> None:
         self._s3_put(f"consolidated/{run_date}/morning.md", report)

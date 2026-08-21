@@ -5,7 +5,8 @@ plus institutional substrate feeds (Brian, 2026-07-13):
 - scanner attractiveness board  → ``scanner/universe/latest.json``
 - weekly signals                → ``signals/latest.json`` (sector_ratings,
   market_regime, per-ticker stances)
-- weekly macro report           → ``archive/macro/macro_report.md``
+- weekly regime substrate       → ``regime/`` (HMM posterior, composite
+  intensity, BOCPD change signal, guardrails — the macro ANCHOR)
 - daily news aggregates         → ``data/news_aggregates`` (substrate reader)
 - insider transactions          → ``data/insider_transactions`` (90d rollup)
 - analyst revisions             → ``data/analyst_revisions`` (consensus deltas)
@@ -17,14 +18,32 @@ which sources were present (surfaced in thesis ``sources_used`` and the run
 manifest's ``context_sources_present``), and a WARN is logged per miss.
 
 PRESENCE IS NOT FRESHNESS (alpha-engine-config-I2638). Absence was handled
-from the start; staleness was not. ``archive/macro/macro_report.md`` last
-changed 2026-03-16 — its producer (``ArchiveManager.save_macro_report``) lost
-its only call site when the multi-agent graph retired — and this module read
-it happily every day since, so Think Tank reconciled its themes to a
-five-month-old macro backdrop while its output looked current. Every dated
-context source is now checked through ``freshness.assert_upstream_fresh``
-and every non-fresh verdict is recorded on ``ContextBundle.freshness``, which
-the run manifest and the theme artifacts both carry.
+from the start; staleness was not. Every dated context source is checked
+through ``freshness.assert_upstream_fresh`` and every non-fresh verdict is
+recorded on ``ContextBundle.freshness``, which the run manifest and the theme
+artifacts both carry.
+
+MACRO ANCHOR — ``regime/``, NOT ``archive/macro/macro_report.md``
+(Brian ruling 2026-08-21, resolving the open sub-question named inline in
+alpha-engine-config-I2638). The Markdown macro report's producer
+(``ArchiveManager.save_macro_report``) lost its only call site when the
+multi-agent graph retired, so the object froze at 2026-03-16 and Think Tank
+reconciled its themes against a five-month-old backdrop for 158 days. The
+freshness primitive made that visible; the ruling removes the source rather
+than resurrecting a retired agent path. Think Tank now self-anchors on two
+inputs that have live producers:
+
+- the weekly ``RegimeSubstrate`` Lambda's artifact (HMM posterior + composite
+  intensity z + BOCPD change signal + guardrail flags + raw macro features),
+  read through ``nousergon_lib.eval_artifacts`` and dated in-band by its own
+  ``calendar_date`` — no object-metadata inference needed; and
+- the daily news aggregates, already loaded here and already feeding the
+  intraweek ``developments`` leg via ``analyst.sweep``.
+
+Both are freshness-checked. Neither may silently freeze the way the Markdown
+report did: a substrate whose ``calendar_date`` stops moving trips the weekly
+tolerance, and a news table whose ``aggregate_date`` stops moving trips the
+daily one.
 """
 
 from __future__ import annotations
@@ -39,24 +58,35 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_BOARD_KEY = "scanner/universe/latest.json"
 SIGNALS_LATEST_KEY = "signals/latest.json"
-MACRO_REPORT_KEY = "archive/macro/macro_report.md"
 
-#: The macro report is a weekly-SF artifact, so a healthy one is at most 7
-#: days old; ``weekly`` tolerance (10d) leaves room for one skipped run.
-MACRO_REPORT_CADENCE = "weekly"
+#: The regime substrate's canonical S3 prefix. ``regime/latest.json`` is a
+#: pure pointer sidecar; the payloads live at ``regime/{YYMMDDHHMM}.json``.
+#: Resolution is delegated to ``nousergon_lib.eval_artifacts`` so this
+#: consumer shares the producer's addressing convention rather than
+#: re-deriving it (shared-code-policy — second adoption of the same read).
+REGIME_SUBSTRATE_PREFIX = "regime"
 
-#: Why Think Tank DEGRADES rather than raises on a stale macro report: the
+#: The substrate is written by the Saturday SF's ``RegimeSubstrate`` state,
+#: so a healthy one is at most 7 days old; ``weekly`` tolerance (10d) leaves
+#: room for one skipped run.
+REGIME_SUBSTRATE_CADENCE = "weekly"
+
+#: News aggregates are a daily producer. They are the intraweek half of the
+#: macro anchor (the substrate is the weekly half), so their staleness is
+#: load-bearing and gets its own verdict rather than riding on presence.
+NEWS_AGGREGATES_CADENCE = "daily"
+
+#: Why Think Tank DEGRADES rather than raises on a stale macro anchor: the
 #: daily shadow run's contract with the trading day is explicitly
 #: non-blocking, so a hard stop here would take the challenger arm offline
-#: over an input whose replacement is an unratified design fork
-#: (alpha-engine-config-I2638 — "TT self-anchoring on RegimeSubstrate + news
-#: aggregates" proposed, never ruled). The failure mode accepted is therefore
-#: "themes reconciled against an out-of-date macro backdrop"; the surfaces
-#: that record it are the ops alert raised by the primitive, the run
-#: manifest's ``context_source_freshness``, and ``ThemeThesis.stale_inputs``
-#: on every theme written — plus the banner injected into the macro prompt so
-#: the model itself is told how old the report is.
-_MACRO_DEGRADED_REASON = (
+#: over an input whose own producer has independent weekly-SF monitoring.
+#: The failure mode accepted is "themes reconciled against an out-of-date
+#: macro backdrop"; the surfaces that record it are the ops alert raised by
+#: the primitive, the run manifest's ``context_source_freshness``, and
+#: ``ThemeThesis.stale_inputs`` on every theme written — plus the banner
+#: injected into the macro prompt so the model itself is told how old the
+#: anchor is.
+_ANCHOR_DEGRADED_REASON = (
     "think tank's daily shadow run is non-blocking by contract; a stale macro "
     "anchor degrades the themes it must not halt the run. Recorded on the run "
     "manifest (context_source_freshness), on every ThemeThesis (stale_inputs), "
@@ -115,7 +145,8 @@ class ContextBundle:
 
     board: dict | None = None
     signals: dict | None = None
-    macro_report_md: str | None = None
+    #: Latest weekly regime-substrate payload — Think Tank's macro anchor.
+    regime_substrate: dict | None = None
     news_by_ticker: dict[str, dict] = field(default_factory=dict)
     insider_by_ticker: dict[str, dict] = field(default_factory=dict)
     analyst_by_ticker: dict[str, dict] = field(default_factory=dict)
@@ -160,24 +191,25 @@ def load_context(store: Any) -> ContextBundle:
 
     bundle.board = store.get_json(UNIVERSE_BOARD_KEY)
     bundle.signals = store.get_json(SIGNALS_LATEST_KEY)
-    bundle.macro_report_md = store.get_text(MACRO_REPORT_KEY)
+    bundle.regime_substrate = _load_regime_substrate(store)
 
-    # The macro report carries no in-band date, so object metadata is the only
-    # as-of signal. A missing/unreadable LastModified yields an ``undated``
-    # verdict, which is loud — never silently fresh.
-    bundle.freshness["macro_report"] = assert_upstream_fresh(
-        MACRO_REPORT_KEY,
-        as_of=_macro_report_as_of(store),
-        cadence=MACRO_REPORT_CADENCE,
+    # The substrate dates ITSELF (``calendar_date``), so unlike the retired
+    # Markdown macro report there is no object-metadata inference here. A
+    # payload that cannot be read, or one carrying no usable date, yields an
+    # ``undated`` verdict — loud, never silently fresh.
+    bundle.freshness["regime_substrate"] = assert_upstream_fresh(
+        f"{REGIME_SUBSTRATE_PREFIX}/",
+        as_of=_regime_substrate_as_of(bundle.regime_substrate),
+        cadence=REGIME_SUBSTRATE_CADENCE,
         on_stale="degrade",
-        degraded_reason=_MACRO_DEGRADED_REASON,
+        degraded_reason=_ANCHOR_DEGRADED_REASON,
         source="crucible-research.thinktank.context",
     )
 
     for name, present in (
         ("universe_board", bundle.board is not None),
         ("signals", bundle.signals is not None),
-        ("macro_report", bundle.macro_report_md is not None),
+        ("regime_substrate", bundle.regime_substrate is not None),
     ):
         bundle.sources_present[name] = present
         if not present:
@@ -185,6 +217,17 @@ def load_context(store: Any) -> ContextBundle:
 
     bundle.news_by_ticker = _load_news(store)
     bundle.sources_present["news_aggregates"] = bool(bundle.news_by_ticker)
+    # The intraweek half of the macro anchor. Checked even when EMPTY: an
+    # absent news table is ``undated``, which is the loud reading — a macro
+    # anchor with no live intraweek leg must not look healthy.
+    bundle.freshness["news_aggregates"] = assert_upstream_fresh(
+        "data/news_aggregates",
+        as_of=_news_aggregates_as_of(bundle.news_by_ticker),
+        cadence=NEWS_AGGREGATES_CADENCE,
+        on_stale="degrade",
+        degraded_reason=_ANCHOR_DEGRADED_REASON,
+        source="crucible-research.thinktank.context",
+    )
 
     bundle.insider_by_ticker = _load_insider_transactions(store)
     bundle.sources_present["insider_transactions"] = bool(bundle.insider_by_ticker)
@@ -225,21 +268,62 @@ def load_context(store: Any) -> ContextBundle:
     return bundle
 
 
-def _macro_report_as_of(store: Any) -> Any | None:
-    """LastModified of the macro report, or None when it cannot be read.
+def _load_regime_substrate(store: Any) -> dict | None:
+    """Latest regime-substrate payload, or None when it cannot be read.
 
-    ``None`` is NOT an absence of a problem — it produces an ``undated``
-    verdict, which the primitive treats as not-fresh and alerts on.
+    Swallowed failure mode: the substrate is unreachable (missing sidecar,
+    malformed pointer, absent artifact body, parse or S3 error). Swallowed
+    because Think Tank's daily shadow run is non-blocking by contract and the
+    substrate Lambda carries its own weekly-SF freshness monitoring. The
+    recording surfaces are this WARN, the ``undated`` freshness verdict the
+    caller derives from the ``None`` (alerted + stamped on every theme), and
+    ``sources_present["regime_substrate"]`` on the run manifest.
     """
-    getter = getattr(store, "last_modified", None)
-    if getter is None:
-        logger.error(
-            "thinktank context: store %s exposes no last_modified() — macro "
-            "report freshness is UNCHECKABLE, recording as undated",
-            type(store).__name__,
+    try:
+        from nousergon_lib.eval_artifacts import load_latest_eval_artifact
+
+        return load_latest_eval_artifact(
+            store.s3, bucket=store.bucket, prefix=REGIME_SUBSTRATE_PREFIX
         )
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        logger.warning("thinktank context: regime substrate unreadable: %s", exc)
         return None
-    return getter(MACRO_REPORT_KEY)
+
+
+def _regime_substrate_as_of(substrate: dict | None) -> Any | None:
+    """The substrate's own as-of date, or None (⇒ ``undated``, never fresh).
+
+    ``calendar_date`` is the dual-tracked wall-clock date the producer stamps
+    (``DATE_CONVENTIONS.md``); ``model_metadata.written_at`` is the fallback
+    for a payload predating that field. Deliberately NOT derived from the S3
+    object's ``LastModified``: a re-upload of an old payload would read as
+    fresh, which is the exact failure this consumer just came out of.
+    """
+    if not isinstance(substrate, dict):
+        return None
+    stamped = substrate.get("calendar_date")
+    if stamped:
+        return stamped
+    meta = substrate.get("model_metadata")
+    if isinstance(meta, dict):
+        return meta.get("written_at")
+    return None
+
+
+def _news_aggregates_as_of(news_by_ticker: dict[str, dict]) -> Any | None:
+    """Newest ``aggregate_date`` across the loaded news rows, or None.
+
+    None (no rows, or no row carrying a date) is ``undated`` — the loud
+    reading. An empty news table is unobserved, not calm.
+    """
+    dates = [
+        row.get("aggregate_date")
+        for row in news_by_ticker.values()
+        if row.get("aggregate_date")
+    ]
+    if not dates:
+        return None
+    return max(str(d) for d in dates)
 
 
 def _load_news(store: Any) -> dict[str, dict]:
