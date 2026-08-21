@@ -95,6 +95,7 @@ from typing import Any
 from scoring.leaderboard_scoring import (
     HORIZON_OK,
     LONG_HORIZONS_DAYS,
+    duplicate_arm_rows,
     slot_spec,
 )
 from scoring.universe_membership import (
@@ -383,6 +384,32 @@ def decide_cut_champion(
             defect=defect,
         )
 
+    # ── WHOLE-BOARD integrity runs BEFORE the registry check ───────────────
+    # A duplicate arm row is a PRODUCER fault, and a producer fault is true
+    # whether or not a decision was available to take. Ordering this after the
+    # `len(slot.arms) < 2` hold below made a defective board render as the quiet
+    # `no_promotable_challenger` — a benign-looking verdict that fails no run and
+    # names no defect — the moment alpha-engine-config-I8060 left the slot with a
+    # single promotable arm. That is this module's own stated worse failure:
+    # "a defect that also erases the evidence of itself".
+    #
+    # Guarded on `board` being present so it cannot mask the registry condition
+    # when there is no artifact at all — which is what the ordering below was
+    # protecting, and which still holds.
+    if board:
+        _early_dupes = duplicate_arm_rows(board)
+        if _early_dupes:
+            return hold(
+                REASON_BOARD_DEFECTIVE,
+                f"cuts leaderboard {decided_on} reports duplicate arm rows "
+                f"({', '.join(_early_dupes)}) — including on surfaces this engine "
+                "does not decide from. A board that counts any arm twice cannot be "
+                f"shown to have counted the others once. {champion_before!r} holds "
+                "and the run fails loud. Reported ahead of any registry-shape hold: "
+                "a producer fault is true whether or not a decision was available.",
+                defect=f"duplicate arm rows: {', '.join(_early_dupes)}",
+            )
+
     # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───
     # Brian ruling 2026-08-21: `tech_score_top_60` is observe-only until it has
     # weeks of measured performance. With one promotable arm there is nothing to
@@ -432,6 +459,31 @@ def decide_cut_champion(
             "is a pre-multi-horizon artifact shape and the engine will not read a "
             "top-level block whose horizon it cannot verify.",
             defect="cuts_leaderboard missing 'horizons'",
+        )
+
+    # WHOLE-BOARD integrity, before any row is read. The per-arm duplicate
+    # check below covers `slot.arms` in the decision block only, which is
+    # exactly the surface the live duplicates were NOT on: the 2026-08-18 and
+    # 08-19 artifacts doubled `attractiveness_top_20` and
+    # `scanner_gate_baseline_60` — two funnel STAGES — in the 21d block, a
+    # horizon this engine structurally never reads. So a board known to be
+    # defective produced a decision record that said nothing about it, for two
+    # cycles (alpha-engine-config-I8026 deliverable 3).
+    #
+    # A duplicate anywhere is a producer fault of unknown shape, so it
+    # disqualifies the board rather than only the rows it touched: the engine
+    # cannot establish that the rows it DOES read came from the pass it thinks
+    # they did.
+    board_dupes = duplicate_arm_rows(board)
+    if board_dupes:
+        return hold(
+            REASON_BOARD_DEFECTIVE,
+            f"cuts leaderboard {decided_on} reports duplicate arm rows "
+            f"({', '.join(board_dupes)}) — including on surfaces this engine "
+            "does not decide from. A board that counts any arm twice cannot be "
+            f"shown to have counted the others once. {champion_before!r} holds "
+            "and the run fails loud.",
+            defect=f"duplicate arm rows: {', '.join(board_dupes)}",
         )
 
     block = _block_for(board, slot.decision_horizon_days)

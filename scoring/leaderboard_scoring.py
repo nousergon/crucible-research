@@ -51,6 +51,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from statistics import fmean
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,62 @@ MIN_DATES_FOR_INFERENCE = 5
 CONFIDENCE_OK = "ok"
 CONFIDENCE_THIN = "thin"
 CONFIDENCE_INSUFFICIENT = "insufficient"
+
+
+class LeaderboardIntegrityError(RuntimeError):
+    """A leaderboard artifact violates a structural invariant every consumer
+    assumes, so it must not be written or decided on.
+
+    Distinct from ``unmeasurable`` on purpose (champion-challenger-policy.md
+    §8): ``unmeasurable`` says the measurement could not be taken, this says
+    the artifact does not mean what its shape claims.
+    """
+
+
+def duplicate_arm_rows(board: Mapping[str, Any]) -> list[str]:
+    """Every ``(surface, arm)`` a board reports MORE THAN ONCE.
+
+    One row per arm per horizon is the invariant every consumer of these
+    boards reads on: ``cut_promotion._rows_for`` cannot say which of two rows
+    is the arm's, the console pane renders an arm twice, and a mean-of-means
+    over a doubled row silently reweights it.
+
+    It is checked on the ARTIFACT rather than only in the producer's unit
+    tests because that is where it was actually observed. The merge defect
+    that created it was fixed in ``crucible-research#658``
+    (alpha-engine-config-I7645) on 2026-08-18 20:26 UTC, and
+    ``research/cuts_leaderboard/2026-08-19.json`` — written 2026-08-19 05:58
+    UTC by scanner Lambda version 339, published 2026-08-18 00:04 UTC, i.e.
+    20 hours BEFORE that merge — still carried ``attractiveness_top_20`` and
+    ``scanner_gate_baseline_60`` twice in its 21-session block and at its top
+    level. Every unit test passed on the merged code the whole time. A guard
+    that lives only in the test suite cannot see a board produced by a
+    deployment that predates it; one that reads the emitted artifact can
+    (alpha-engine-config-I8026 deliverable 3).
+
+    Returns descriptors like ``"21d:attractiveness_top_20x2"`` — empty when
+    the board is clean. Pure: no I/O, no raising, so both the producer (which
+    turns a hit into an ``unmeasurable`` verdict) and the consumer (which
+    turns it into a written ``hold``) can call it before deciding what to do.
+    """
+    found: list[str] = []
+
+    def _scan(surface: str, rows: Any) -> None:
+        counts: dict[str, int] = {}
+        for row in rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            name = row.get("name")
+            if name is None:
+                continue
+            counts[str(name)] = counts.get(str(name), 0) + 1
+        found.extend(f"{surface}:{n}x{c}" for n, c in sorted(counts.items()) if c > 1)
+
+    for block in board.get("horizons") or []:
+        if isinstance(block, Mapping):
+            _scan(f"{block.get('horizon_days')}d", block.get("specs"))
+    _scan("top_level", board.get("specs"))
+    return found
 
 
 @dataclass(frozen=True)
