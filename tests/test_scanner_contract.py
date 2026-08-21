@@ -212,12 +212,31 @@ def test_the_feed_cut_declares_its_consumers():
 
 def test_only_count_matched_arms_may_hold_the_feed():
     """The pointer is writable by an automated promotion engine, so the set of
-    values it may take is closed and both members are 60 wide."""
-    from scoring.universe_membership import DEFAULT_CUT_CHAMPION, PROMOTABLE_CUTS
+    values it may take is closed and every member is 60 wide.
+
+    The SET shrank on 2026-08-21 (Brian ruling, alpha-engine-config-I8060):
+    `tech_score_top_60` is observe-only until it has weeks of measured
+    performance. This test pins the closed-and-count-matched property, which is
+    what the contract guarantees, rather than a specific membership — the
+    membership moves on a ruling and the property must not.
+    """
+    from scoring.universe_membership import (
+        DEFAULT_CUT_CHAMPION,
+        OBSERVE_ONLY_CUTS,
+        PROMOTABLE_CUTS,
+        SLOT_ARMS,
+    )
 
     assert DEFAULT_CUT_CHAMPION in PROMOTABLE_CUTS
-    assert set(PROMOTABLE_CUTS) == {"attractiveness_top_60", "tech_score_top_60"}
+    assert PROMOTABLE_CUTS == ("attractiveness_top_60",)
     assert all(name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}") for name in PROMOTABLE_CUTS)
+    # Count-matching holds across the WHOLE slot, so an observe-only arm can be
+    # promoted later without re-baselining its history against a new width.
+    assert all(name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}") for name in SLOT_ARMS)
+    # Ineligible must not mean unmeasured: every arm is in exactly one bucket.
+    assert not set(PROMOTABLE_CUTS) & set(OBSERVE_ONLY_CUTS)
+    assert set(SLOT_ARMS) == set(PROMOTABLE_CUTS) | set(OBSERVE_ONLY_CUTS)
+    assert "tech_score_top_60" in OBSERVE_ONLY_CUTS
 
 
 def test_tech_score_cut_flags_when_it_equals_the_live_cut():

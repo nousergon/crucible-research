@@ -1387,6 +1387,7 @@ def _load_cut_specs(
         GATE_BASELINE_CUT,
         GATE_LEGACY_CUT,
         MOMZERO_CUT_PREFIX,
+        OBSERVE_ONLY_CUTS,
         PREDICTOR_UNIVERSE_CUT,
         TECH_SCORE_CUT_PREFIX,
         TECH_SCORE_RANKS_FIELD,
@@ -1396,6 +1397,20 @@ def _load_cut_specs(
     tech_score_cut = f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
     momzero_cut = f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
     mom121_cut = f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+    # The slot's arm set is the REGISTRY's, not this module's. An arm that the
+    # registry declares and the board does not score is the registered-but-
+    # unscored rumour champion-challenger-policy.md §3 warns about, and
+    # non-promotability must never quietly become non-measurement
+    # (alpha-engine-config-I8060).
+    if set(OBSERVE_ONLY_CUTS) != {tech_score_cut, momzero_cut, mom121_cut}:
+        raise RuntimeError(
+            f"the cuts board scores {sorted((tech_score_cut, momzero_cut, mom121_cut))} "
+            f"but the registry declares OBSERVE_ONLY_CUTS={sorted(OBSERVE_ONLY_CUTS)} — "
+            "an arm in one and not the other is either unscored or unregistered. "
+            "Raised rather than asserted: `python -O` strips an assert, and this "
+            "is the check that keeps a registry edit from silently dropping an "
+            "arm off the measurement surface (alpha-engine-config-I8060)."
+        )
 
     # Each arm, and the membership keys it may appear under, newest name first.
     # The gate cut was renamed by crucible-research-PR648, then again by

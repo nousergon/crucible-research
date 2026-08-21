@@ -817,13 +817,40 @@ def test_every_promotable_cut_basis_has_a_full_universe_rank_table():
 
 
 def test_a_promotable_arm_without_its_rank_table_is_a_red_run():
-    """The guard, not the happy path: strip the table and the producer refuses
-    to publish the artifact."""
+    """The guard, not the happy path: strip the PROMOTABLE arm's table and the
+    producer refuses to publish the artifact.
+
+    Scoped to the promotable arm deliberately (alpha-engine-config-I8060). The
+    rationale is that the champion pointer can hand a promotable arm the funnel
+    at any time, so its rank ceiling must resolve on the morning the promotion
+    lands. `tech_score_top_60` became observe-only on 2026-08-21 and can no
+    longer be handed anything, so it is recorded rather than raised on — see the
+    test below.
+    """
     m = _membership(gate_eligible_tech_scores=_gate_eligible())
-    m.pop(TECH_SCORE_RANKS_FIELD)
+    m.pop("ranks", None)
     m.pop("rank_tables")
     with pytest.raises(UniverseMembershipError, match="I7843"):
         assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)
+
+
+def test_an_observe_only_arm_without_its_rank_table_is_recorded_not_raised(caplog):
+    """Non-promotable must not decay into unmeasured without anyone deciding it.
+
+    Losing the table costs the arm its rank-IC and nothing live, so redding a
+    Scanner run over it is the wrong trade — but the loss has to be VISIBLE
+    (champion-challenger-policy.md §3).
+    """
+    import logging
+
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    m.pop(TECH_SCORE_RANKS_FIELD)
+    m["rank_tables"] = {
+        b: e for b, e in (m.get("rank_tables") or {}).items() if "tech_score" not in b
+    }
+    with caplog.at_level(logging.WARNING):
+        assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)  # no raise
+    assert any("observe-only arm" in r.getMessage() for r in caplog.records), caplog.text
 
 
 def test_the_tech_table_covers_the_universe_not_the_cut():

@@ -28,7 +28,7 @@ weekly, and the champion is what the sector teams research.**
 | cut name | `attractiveness_top_60` | `tech_score_top_60` |
 | ranks over | the full scored universe | the momentum-path-eligible universe |
 | ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | `tech_score_rank` — RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted |
-| momentum | **excluded.** The momentum pillar's weight lives in `s3://{bucket}/config/factor_attractiveness_weights.json` and is zero, per Brian's ruling 2026-08-17 (`alpha-engine-config-I7580`): the top-60 must capture ~1-year attractive names, not short-term movers. | **included.** `momentum_20d` is one of the five equally-weighted `tech_score` terms. |
+| momentum | **included, at 1/6.** The momentum pillar's weight lives in `s3://{bucket}/config/factor_attractiveness_weights.json`. It was set to ZERO on 2026-08-17 (`alpha-engine-config-I7580`) and Brian REVERSED that on 2026-08-21 (`I7988`): equal weight is the champion again and the momentum-zero composite runs as the `attractiveness_momzero_top_60` shadow arm, so the question is measured before it is adopted rather than after. | **included.** `momentum_20d` is one of the five equally-weighted `tech_score` terms. |
 | width | 60 | 60 — count-matched, so a win is never confounded with breadth |
 | graded on | `topn_alpha_vs_population` at 21 / 126 / 252 sessions, against the population it narrowed — never against SPY (`alpha-engine-config-I7576`) | same |
 
@@ -42,6 +42,19 @@ which arm is live. `universe_membership.live_cut_champion()` reads it;
 standing champion. A pointer naming anything outside `PROMOTABLE_CUTS` **raises**
 — a promotion engine that believes one arm is live while the funnel serves
 another is the exact drift this contract exists to prevent.
+
+**`tech_score_top_60` is OBSERVE-ONLY as of 2026-08-21** (Brian ruling,
+`alpha-engine-config-I8060`). `PROMOTABLE_CUTS` is `("attractiveness_top_60",)`
+and `OBSERVE_ONLY_CUTS` carries `tech_score_top_60` plus the two attractiveness
+challengers. All four are scored every cycle at 21 / 126 / 252 — non-promotable
+is not non-measured — but only the promotable set may hold the pointer, and
+`live_cut_champion` refuses the rest regardless of what the promotion engine
+believes. With one promotable arm there is nothing to decide, so the engine
+writes `reason_code: "no_promotable_challenger"` every cycle rather than falling
+through to a comparison it did not make. The arm was made promotable on
+2026-08-20 and first emitted the same day, so it has never had a scored cohort;
+it returns to `PROMOTABLE_CUTS` on a ruling once it has weeks of measured
+performance, which is a one-line registry edit.
 
 **Fixed consumers, not subject to promotion:** `attractiveness_top_20` is the
 predictor's daily universe (`PREDICTOR_UNIVERSE_CUT`, explicitly ruled unchanged
