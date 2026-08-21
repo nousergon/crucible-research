@@ -566,6 +566,131 @@ def test_scanner_tickers_none_skips_the_check():
     assert board["universe_count"] == 3
 
 
+# ── 8. Producer-side metric coverage floor (alpha-engine-config-I7982) ───────
+#
+# Reproduces the 2026-08-17..08-20 shape: the feature-parquet read failed
+# (technical_df/fundamental_df both absent → _index_parquet returns {} for
+# every ticker), so every _TECHNICAL_METRICS/_FUNDAMENTAL_METRICS field is
+# null for the whole universe, while current_price/rsi_14 (fallback to the
+# scanner-eval row) stay populated and attractiveness_score still computes —
+# nothing else in the pipeline notices.
+
+
+def _scanner_evals_n(n: int) -> list[dict]:
+    """A >=20-name universe (the floor's exemption threshold) — one AAPL-
+    shaped passer repeated under distinct tickers, all carrying their own
+    gate-input values so gate_stage/attractiveness compute normally."""
+    return [
+        {
+            "ticker": f"T{i:03d}",
+            "sector": "Information Technology",
+            "tech_score": 72.0,
+            "current_price": 100.0 + i,
+            "avg_volume_20d": 10_000_000.0,
+            "atr_pct": 1.5,
+            "price_vs_ma200": 0.10,
+            "focus_score": 80.0,
+            "focus_stance": "momentum",
+            "quant_filter_pass": 1,
+            "filter_fail_reason": None,
+        }
+        for i in range(n)
+    ]
+
+
+def test_metric_coverage_floor_raises_on_total_parquet_read_failure():
+    """technical_df/fundamental_df both an empty (no ``ticker`` column)
+    DataFrame — exactly what ``_index_parquet`` produces when
+    ``_read_parquet`` returns None, the effect of the 2026-08-17 pyarrow-
+    import failure — on a 25-name universe must raise, not silently publish
+    an all-null board. (Passing an explicit empty frame here, not None,
+    keeps the test hermetic — None would make build_universe_board attempt
+    its own S3 read via the default boto3 client.)"""
+    import pytest
+
+    with pytest.raises(ValueError, match="metric coverage floor breached"):
+        build_universe_board(
+            "2026-08-20",
+            _scanner_evals_n(25),
+            factor_profiles={},
+            classification={},
+            technical_df=pd.DataFrame(),
+            fundamental_df=pd.DataFrame(),
+            gate_config=_GATE_CONFIG,
+        )
+
+
+def test_metric_coverage_floor_exempts_small_universe():
+    """A < 20 name universe (e.g. an early/degraded scanner run) is exempt —
+    zero coverage there is plausibly a genuine small-population data gap,
+    not this failure class, and the floor must not manufacture a second
+    outage on top of one."""
+    board = build_universe_board(
+        "2026-08-20",
+        _scanner_evals_n(5),
+        factor_profiles={},
+        classification={},
+        technical_df=pd.DataFrame(),
+        fundamental_df=pd.DataFrame(),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == 5
+
+
+def test_metric_coverage_floor_passes_on_healthy_parquet_reads():
+    """The floor must not false-positive on the ordinary healthy case: a
+    >=20-name universe with real technical_df/fundamental_df coverage."""
+    n = 20
+    technical_rows = [
+        {
+            "ticker": f"T{i:03d}",
+            "rsi_14": 50.0,
+            "momentum_20d": 0.01,
+            "return_60d": 0.02,
+            "return_120d": 0.03,
+            "realized_vol_20d": 0.2,
+            "atr_14_pct": 0.015,
+            "dist_from_52w_high": -0.05,
+            "price_vs_ma200": 0.1,
+            "beta_60d": 1.0,
+            "avg_volume_20d_raw": 10_000_000.0,
+        }
+        for i in range(n)
+    ]
+    fundamental_rows = [{"ticker": f"T{i:03d}", "market_cap_raw": 1e10} for i in range(n)]
+    board = build_universe_board(
+        "2026-08-20",
+        _scanner_evals_n(n),
+        factor_profiles={},
+        classification={},
+        technical_df=pd.DataFrame(technical_rows),
+        fundamental_df=pd.DataFrame(fundamental_rows),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == n
+    assert all(s["metrics"]["avg_volume"] is not None for s in board["stocks"])
+
+
+def test_read_parquet_logs_the_real_exception_not_a_content_free_warning(caplog):
+    """alpha-engine-config-I7982: _read_parquet's except used to discard the
+    exception entirely (bare `except Exception:`), which is why a 4-day
+    total-coverage collapse produced only a content-free WARN in production.
+    A broken S3 client (raises inside get_object) must now surface the real
+    exception text in the log record."""
+    import logging
+
+    from scoring.universe_board import _read_parquet
+
+    class _BrokenS3:
+        def get_object(self, **kwargs):
+            raise RuntimeError("distinctive-injected-failure-i7982")
+
+    with caplog.at_level(logging.WARNING):
+        result = _read_parquet("technical", "2026-08-20", None, _BrokenS3())
+    assert result is None
+    assert any("distinctive-injected-failure-i7982" in rec.message for rec in caplog.records)
+
+
 # ── config-I7272: the excluded count is PUBLISHED, even at zero ──────────────
 
 
