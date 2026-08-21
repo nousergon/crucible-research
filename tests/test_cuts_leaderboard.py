@@ -190,10 +190,30 @@ def test_all_three_arms_present_at_every_horizon(built):
         assert names == {FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, CHAMPION_CUT}
 
 
-def test_no_champion_so_vs_champion_is_null_by_construction(built):
-    """These arms are not competing — a null here is the design, not a miss."""
+def test_champion_names_the_live_cut_and_vs_champion_stays_null(built):
+    """The board names the arm that is actually serving, and still holds no
+    arm-vs-arm difference.
+
+    Before alpha-engine-config-I8026 this asserted ``champion is None``, on the
+    reading that the board's arms are funnel STAGES and stages do not compete.
+    That was true of the three arms the board then carried, and it stopped
+    being true when the universe-cut slot's arms joined them: the slot has a
+    champion, ``cut_promotion.decide_cut_champion`` decides from this board,
+    and §3 calls a null champion field on a slot that has one a broken
+    leaderboard.
+
+    ``topn_alpha_vs_champion`` stays null regardless — each arm is scored in
+    its own single-arm pass, so no pass ever holds two arms to difference. The
+    comparison a consumer reads is ``topn_alpha_vs_population``, which is
+    legitimate here because the slot arms are count-matched at 60.
+    """
     lb = out_lb(built)
-    assert lb["champion"] is None
+    assert lb["champion"] == FEED_CUT_NAME
+    champion_rows = [
+        r for block in lb["horizons"] for r in block["specs"] if r["name"] == FEED_CUT_NAME
+    ]
+    assert champion_rows, "the champion arm must still carry a scored row (§3)"
+    assert all(r["kind"] == "champion" for r in champion_rows)
     for block in lb["horizons"]:
         for row in block["specs"]:
             assert row["topn_alpha_vs_champion"] is None
@@ -535,3 +555,179 @@ def test_an_overdue_arm_alerts_but_an_immature_arm_does_not(built_with_gap):
     messages = [call.kwargs.get("message", "") for call in alert.call_args_list]
     assert any(CHAMPION_CUT in m for m in messages)
     assert not any(PREDICTOR_UNIVERSE_CUT in m for m in messages)
+
+
+# ── The universe-cut SLOT's arms (alpha-engine-config-I8026) ─────────────────
+#
+# RED on origin/main at 869a95c4: `_load_cut_specs` resolved its arm list from
+# three constants — the funnel's stages — so `tech_score_top_60`,
+# `attractiveness_momzero_top_60` and `attractiveness_mom121_top_60` appeared
+# on no board anywhere, and `cut_promotion.decide_cut_champion` read a board
+# that had never carried one of the two arms it compares. Every one of these
+# tests fails there: the rows do not exist.
+
+from scoring.cut_promotion import (  # noqa: E402
+    CUT_PROMOTION_SLOT,
+    REASON_ARM_ROW_MISSING,
+    decide_cut_champion,
+)
+from scoring.universe_membership import (  # noqa: E402
+    ATTRACTIVENESS_FEED_TOP_N,
+    CHALLENGER_CUT_PREFIX,
+    MOMZERO_CUT_PREFIX,
+    PROMOTABLE_CUTS,
+    TECH_SCORE_CUT_PREFIX,
+    TECH_SCORE_RANKS_FIELD,
+)
+
+TECH_CUT = f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+MOMZERO_CUT = f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+MOM121_CUT = f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+
+# Each slot arm picks a different 60 — a real comparison, not four clones.
+TECH = [f"H{i:03d}" for i in range(60)]
+MOMZERO = FEED[:30] + [f"Z{i:03d}" for i in range(30)]
+MOM121 = FEED[:10] + [f"M{i:03d}" for i in range(50)]
+SLOT_UNIVERSE = sorted(set(FEED + GATE + TECH + MOMZERO + MOM121))
+
+
+class _SlotS3(_S3):
+    """Membership carrying the funnel's stages AND the slot's four arms."""
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            body = json.dumps({
+                "cuts": {
+                    FEED_CUT_NAME: {"tickers": FEED},
+                    PREDICTOR_UNIVERSE_CUT: {"tickers": CHAMP},
+                    CHAMPION_CUT: {"tickers": GATE},
+                    TECH_CUT: {"tickers": TECH},
+                    MOMZERO_CUT: {"tickers": MOMZERO},
+                    MOM121_CUT: {"tickers": MOM121},
+                },
+                # Only the tech_score arm publishes a rank table; the two
+                # momentum arms deliberately do not (see the loader's comment).
+                TECH_SCORE_RANKS_FIELD: {
+                    t: {"tech_score_rank": i + 1} for i, t in enumerate(TECH)
+                },
+            }).encode()
+            return {"Body": _Body(body)}
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+
+@pytest.fixture
+def slot_built():
+    s3 = _SlotS3()
+    # Returns VARY by ticker here, unlike the funnel-stage fixture above. A
+    # constant panel makes every rank-IC null for want of variance, which would
+    # hide the difference this fixture exists to show: an arm WITH a rank table
+    # gets a real rank-IC, an arm without one gets a missing value.
+    realized = {
+        d: {t: 0.01 + (i * 1e-4) for i, t in enumerate(SLOT_UNIVERSE)} | {"SPY": 0.005}
+        for d in DATES
+    }
+    population = dict.fromkeys(DATES, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: realized, 252: realized},
+            {},
+            {21: population, 126: population, 252: population},
+        ),
+    ):
+        out = build_cuts_leaderboard(s3, "b", "2026-07-03")
+    return out, s3
+
+
+def test_loader_reads_the_slot_arms_too():
+    arms, widths = _load_cut_specs(_SlotS3(), "b", DATES)
+    names = {a.name for a in arms}
+    assert {TECH_CUT, MOMZERO_CUT, MOM121_CUT} <= names
+    # §4: the slot is count-matched by construction — every arm at 60.
+    for arm in (FEED_CUT_NAME, TECH_CUT, MOMZERO_CUT, MOM121_CUT):
+        assert widths[arm] == ATTRACTIVENESS_FEED_TOP_N, arm
+
+
+def test_every_promotable_arm_reaches_every_horizon(slot_built):
+    """The failure this exists for: `cut_promotion` decides between the two
+    members of PROMOTABLE_CUTS at 126 sessions, and one of them was on no
+    board at any horizon."""
+    lb = out_lb(slot_built)
+    for block in lb["horizons"]:
+        names = [r["name"] for r in block["specs"]]
+        for arm in PROMOTABLE_CUTS:
+            assert arm in names, (block["horizon_days"], arm)
+        # §3 + the I7645 regression: exactly one row per arm per horizon.
+        assert len(names) == len(set(names)), (block["horizon_days"], names)
+
+
+def test_the_shadow_arms_are_scored_not_merely_registered(slot_built):
+    """An arm that writes shadow output but is scored nowhere is a rumour
+    (champion-challenger-policy.md §3)."""
+    lb = out_lb(slot_built)
+    block = next(b for b in lb["horizons"] if b["horizon_days"] == 21)
+    rows = {r["name"]: r for r in block["specs"]}
+    for arm in (MOMZERO_CUT, MOM121_CUT):
+        assert rows[arm]["topn_alpha_vs_population"] is not None, arm
+        assert rows[arm]["n_dates_scored"] == len(DATES), arm
+
+
+def test_momentum_arms_report_a_missing_rank_ic_not_an_alphabetical_one(slot_built):
+    """Their membership carries no rank table, so there is no order to
+    correlate. A number here would be a Spearman against the alphabet."""
+    lb = out_lb(slot_built)
+    block = next(b for b in lb["horizons"] if b["horizon_days"] == 21)
+    rows = {r["name"]: r for r in block["specs"]}
+    for arm in (MOMZERO_CUT, MOM121_CUT):
+        assert rows[arm]["realized_rank_ic"] is None, arm
+    # The tech_score arm DOES publish one, so its rank-IC is real.
+    assert rows[TECH_CUT]["realized_rank_ic"] is not None
+
+
+def test_board_names_the_serving_arm_as_champion(slot_built):
+    lb = out_lb(slot_built)
+    assert lb["champion"] == FEED_CUT_NAME
+    block = next(b for b in lb["horizons"] if b["horizon_days"] == 21)
+    kinds = {r["name"]: r["kind"] for r in block["specs"]}
+    assert kinds[FEED_CUT_NAME] == "champion"
+    assert kinds[TECH_CUT] == "challenger"
+
+
+def test_promotion_engine_no_longer_holds_on_a_missing_arm_row(slot_built):
+    """End to end: the decision this board exists to feed can now be reached.
+
+    The engine may still HOLD — the 126-session cohort is immature in this
+    fixture and that is correct — but it must no longer hold because an arm it
+    compares has no row at all, which is what a board without `tech_score_top_60`
+    forced on every single evaluation."""
+    lb = out_lb(slot_built)
+    decision = decide_cut_champion(
+        board=lb, champion_before=FEED_CUT_NAME, decided_on="2026-07-03",
+    )
+    assert decision.reason_code != REASON_ARM_ROW_MISSING, decision.reason
+    assert set(decision.arms) == set(CUT_PROMOTION_SLOT.arms)
+
+
+def test_unreadable_membership_writes_the_verdict_instead_of_going_silent():
+    """§7.2 / ARCHITECTURE §133: an unmeasurable cycle is a written verdict.
+
+    A board that stops appearing and a board reporting "nothing was scorable"
+    are the same S3 state to every consumer, and `cut_promotion` renders the
+    first as `board_missing` — a hold whose stated reason is wrong. RED before
+    alpha-engine-config-I8026: this path returned the dict to its caller and
+    wrote nothing.
+    """
+
+    class _EmptyS3(_S3):
+        def get_object(self, Bucket, Key):  # noqa: N803
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+    s3 = _EmptyS3()
+    out = build_cuts_leaderboard(s3, "b", "2026-07-03")
+    assert out["status"] == "unmeasurable"
+    written = s3.written.get("research/cuts_leaderboard/2026-07-03.json")
+    assert written is not None, "the verdict must reach S3, not just the caller"
+    assert written["status"] == "unmeasurable"
+    assert "no membership cuts readable" in written["unmeasurable_reason"]
