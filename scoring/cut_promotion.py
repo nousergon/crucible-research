@@ -100,6 +100,7 @@ from scoring.leaderboard_scoring import (
 from scoring.universe_membership import (
     CUT_CHAMPION_POINTER_KEY,
     DEFAULT_CUT_CHAMPION,
+    OBSERVE_ONLY_CUTS,
     PROMOTABLE_CUTS,
     _bucket,
     _client,
@@ -128,6 +129,7 @@ REASON_BOARD_UNMEASURABLE = "board_unmeasurable"
 REASON_HORIZON_IMMATURE = "decision_horizon_immature"
 REASON_HORIZON_UNMEASURABLE = "decision_horizon_unmeasurable"
 REASON_ARM_ROW_MISSING = "arm_row_missing"
+REASON_NO_PROMOTABLE_CHALLENGER = "no_promotable_challenger"
 REASON_ARM_METRIC_MISSING = "arm_metric_missing"
 REASON_INSUFFICIENT_DATES = "insufficient_dates"
 REASON_MARGIN_NOT_MET = "margin_not_met"
@@ -142,6 +144,7 @@ HOLD_REASON_CODES: tuple[str, ...] = (
     REASON_HORIZON_IMMATURE,
     REASON_HORIZON_UNMEASURABLE,
     REASON_ARM_ROW_MISSING,
+    REASON_NO_PROMOTABLE_CHALLENGER,
     REASON_ARM_METRIC_MISSING,
     REASON_INSUFFICIENT_DATES,
     REASON_MARGIN_NOT_MET,
@@ -207,13 +210,19 @@ class CutPromotionSlot:
     # loop, and the cooldown already bounds oscillation.
     promotion_margin: float
     cooldown_days: int
-    # §4 count-matching: both arms are 60 by construction.
+    # Arms that are SCORED every cycle but cannot hold the feed. Declared here
+    # so a reader of this row can tell "measured and ineligible" from "not
+    # measured at all" without going to another module (ARCHITECTURE §140).
+    observe_only_arms: tuple[str, ...]
+    # §4 count-matching: every arm of the slot, promotable or not, is 60 by
+    # construction.
     count_matched_width: int
 
 
 CUT_PROMOTION_SLOT = CutPromotionSlot(
     slot_id="scanner_cut",
     arms=PROMOTABLE_CUTS,
+    observe_only_arms=OBSERVE_ONLY_CUTS,
     default_champion=DEFAULT_CUT_CHAMPION,
     leaderboard_id="cuts",
     primary_metric="topn_alpha_vs_population",
@@ -372,6 +381,31 @@ def decide_cut_champion(
             last_promoted_on=last_promoted_on,
             corroborating=corroborating,
             defect=defect,
+        )
+
+    # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───
+    # Brian ruling 2026-08-21: `tech_score_top_60` is observe-only until it has
+    # weeks of measured performance. With one promotable arm there is nothing to
+    # decide, and the engine must SAY so rather than fall through to the
+    # comparison path and report `champion_already_leads` — which is a claim
+    # about evidence, made where no comparison happened. Two states that mean
+    # different things must not render identically (§3).
+    #
+    # This is checked before the board, deliberately: it is true of the REGISTRY
+    # and does not depend on any evidence, so a missing board must not mask it.
+    # The record is still written on every evaluation, so "the engine is armed
+    # and waiting" stays visible instead of looking like a dead loop.
+    if len(slot.arms) < 2:
+        observe = ", ".join(slot.observe_only_arms) or "none"
+        return hold(
+            REASON_NO_PROMOTABLE_CHALLENGER,
+            f"the scanner-cut slot has one promotable arm ({champion_before!r}) "
+            f"and no promotable challenger, so there is no decision to take on "
+            f"{decided_on}. Observe-only arms, scored every cycle and ineligible "
+            f"to hold the feed: {observe}. Restoring one of them to "
+            f"PROMOTABLE_CUTS is a one-line registry edit and is the ONLY thing "
+            "standing between this hold and a live decision — the evidence is "
+            "accumulating either way.",
         )
 
     if not board:
@@ -649,6 +683,7 @@ def run_cut_promotion(
     bucket: str | None = None,
     s3_client: Any = None,
     leaderboard: dict | None = None,
+    slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
 ) -> dict:
     """Decide and WRITE, unconditionally. Returns the written document.
 
@@ -675,6 +710,7 @@ def run_cut_promotion(
         champion_before=champion_before,
         decided_on=decided_on,
         last_promoted_on=last_promoted_on,
+        slot=slot,
     )
     doc = decision.to_document(leaderboard_key=key if board is not None else None)
 

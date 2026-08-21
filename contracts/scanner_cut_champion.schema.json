@@ -53,9 +53,10 @@
         "margin_not_met",
         "cooldown_active",
         "corroborating_horizon_disagrees",
-        "board_defective"
+        "board_defective",
+        "no_promotable_challenger"
       ],
-      "description": "Machine-readable outcome. 'promoted' is the only value permitted alongside decision='promote'. decision_horizon_immature is the EXPECTED steady state until a 126-session cohort matures for both arms and must not alert; board_defective and decision_horizon_unmeasurable are defects and do."
+      "description": "Machine-readable outcome. 'promoted' is the only value permitted alongside decision='promote'. decision_horizon_immature is the EXPECTED steady state until a 126-session cohort matures for every promotable arm and must not alert; board_defective and decision_horizon_unmeasurable are defects and do. no_promotable_challenger means the SLOT has one promotable arm, so no comparison was possible — it is a registry state, not an evidence state, it is the expected steady value while tech_score_top_60 is observe-only (Brian ruling 2026-08-21, alpha-engine-config-I8060), and it must not alert. Added under schema_version 1 because it names a condition no existing slug covered: every other hold says something about the evidence, and this one says a comparison never happened."
     },
     "horizon_days": {
       "const": 126,
@@ -76,8 +77,8 @@
     },
     "arms": {
       "type": "object",
-      "required": ["attractiveness_top_60", "tech_score_top_60"],
-      "description": "Both arms, ALWAYS, including on a hold and including when an arm scored nothing — champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted. n_dates_scored is the measurability surface: it is 0 at rollout and climbing it past min_dates_for_inference is the precondition for any promotion.",
+      "required": ["attractiveness_top_60"],
+      "description": "Every PROMOTABLE arm, ALWAYS — including on a hold and including when an arm scored nothing (champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted). n_dates_scored is the measurability surface: it is 0 at rollout and climbing it past min_dates_for_inference is the precondition for any promotion. `required` names only attractiveness_top_60 because PROMOTABLE_CUTS shrank to it on 2026-08-21 (alpha-engine-config-I8060); tech_score_top_60 remains valid here and records written while it was promotable still validate. OBSERVE-ONLY arms are deliberately NOT carried in this block — this record is about the decision, and their evidence lives on research/cuts_leaderboard/{date}.json, which scores every arm of the slot. The reason string names them so a reader is not left inferring they went away.",
       "additionalProperties": {
         "type": "object",
         "required": ["n_dates_scored", "confidence", "topn_alpha_vs_population_mean", "present"],

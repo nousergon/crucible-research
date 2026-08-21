@@ -480,14 +480,44 @@ CUT_CHAMPION_POINTER_KEY = "config/scanner_cut_champion.json"
 
 PROMOTABLE_CUTS: tuple[str, ...] = (
     "attractiveness_top_60",
-    "tech_score_top_60",
 )
 """The arms eligible to hold the feed. Count-matched at 60 by construction.
 
 A closed set, deliberately: the pointer is writable by an automated promotion
 engine, and an unvalidated pointer is an arbitrary-cut-selection primitive one
 bad write away from feeding the sector teams something nobody chose.
+
+**Brian ruling 2026-08-21 (alpha-engine-config-I8060): `tech_score_top_60` is
+OBSERVE-ONLY until it has weeks of measured performance.** It was made
+promotable on 2026-08-20 (I7823) and first emitted the same day, so it has
+never had a scored cohort; arming an automatic pointer write before any
+evidence exists puts the whole gate on a floor nobody has watched hold. It
+stays fully scored — see :data:`OBSERVE_ONLY_CUTS` — and returns here by
+amending this tuple, which is the only edit required.
 """
+
+OBSERVE_ONLY_CUTS: tuple[str, ...] = (
+    f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
+    f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
+    f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
+)
+"""Arms that are SCORED every cycle but cannot hold the feed.
+
+champion-challenger-policy.md §3 makes measurement unconditional: promotion
+changes which arm is consumed and changes nothing about what is measured. So
+non-promotability is declared HERE, as a state, rather than left to be inferred
+from absence from :data:`PROMOTABLE_CUTS` — ARCHITECTURE §140, a disposition
+that is only an inference is not a state. `_load_cut_specs` reads this tuple, so
+an arm added here is scored by construction and cannot become the registered-
+but-unscored rumour §3 warns about.
+
+Count-matched at :data:`ATTRACTIVENESS_FEED_TOP_N` with the promotable arm, so
+promoting one later needs no re-baselining of its history.
+"""
+
+SLOT_ARMS: tuple[str, ...] = PROMOTABLE_CUTS + OBSERVE_ONLY_CUTS
+"""Every arm of the universe-cut slot, promotable or not. The scoring surface
+resolves its arm list from this so the board and the registry cannot drift."""
 
 DEFAULT_CUT_CHAMPION = "attractiveness_top_60"
 """The standing champion, per Brian's ruling 2026-08-20. Serves whenever the
@@ -1157,6 +1187,29 @@ def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) ->
     """
     cuts = membership.get("cuts") or {}
     index = _rank_table_index(membership)
+
+    # An OBSERVE-ONLY arm gets the same check, RECORDED rather than raised
+    # (alpha-engine-config-I8060). Its basis losing its table costs the arm its
+    # rank-IC on the leaderboard and nothing live, so redding a Scanner run over
+    # it would be the wrong trade — but a measurement quietly disappearing must
+    # still be visible, or "non-promotable" decays into "unmeasured" without
+    # anyone deciding it (champion-challenger-policy.md §3).
+    for cut_name in OBSERVE_ONLY_CUTS:
+        cut = cuts.get(cut_name)
+        if cut is None:
+            continue
+        basis = str(cut.get("basis"))
+        entry = index.get(basis)
+        if not entry or not membership.get(entry[0]):
+            logger.warning(
+                "[universe_membership] %s: observe-only arm %r is ranked by %r, "
+                "for which this artifact emits no full-universe rank table "
+                "(it emits one for %s). The arm is still scored on "
+                "topn_alpha_vs_population; its rank-IC will read MISSING until "
+                "the table returns (alpha-engine-config-I8060).",
+                run_date, cut_name, basis, sorted(index),
+            )
+
     for cut_name in PROMOTABLE_CUTS:
         cut = cuts.get(cut_name)
         if cut is None:
