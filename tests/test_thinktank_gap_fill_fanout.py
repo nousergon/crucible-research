@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from types import SimpleNamespace
 
 import boto3
@@ -186,7 +187,34 @@ def _seed_read_side(s3, *, signals_date="2026-06-28"):
             }
         ),
     )
-    s3.put_object(Bucket=BUCKET, Key="archive/macro/macro_report.md", Body=b"# Macro\nSteady.")
+    # Think Tank's macro anchor: the weekly regime substrate (dated artifact +
+    # pointer sidecar) rather than the retired archive/macro/macro_report.md
+    # (alpha-engine-config-I2638). Dated TODAY so these runs exercise the fresh
+    # path — the degraded path has its own suite.
+    substrate_key = "regime/2608150900.json"
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=substrate_key,
+        Body=json.dumps(
+            {
+                "calendar_date": date.today().isoformat(),
+                "trading_day": date.today().isoformat(),
+                "run_id": "2608150900",
+                "hmm": {
+                    "probs": {"bear": 0.1, "neutral": 0.3, "bull": 0.6},
+                    "argmax": "bull",
+                    "weeks_in_current_state": 3,
+                },
+                "composite": {"intensity_z": 0.4, "implied_severity": "calm"},
+                "guardrails": {"active_severity_floor": None},
+            }
+        ),
+    )
+    s3.put_object(
+        Bucket=BUCKET,
+        Key="regime/latest.json",
+        Body=json.dumps({"artifact_key": substrate_key}),
+    )
 
 
 def _client(backend, run_id="run") -> ThinktankClient:
