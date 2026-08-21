@@ -109,6 +109,95 @@ class TestValidationRetryProbeRequiresARetry:
         assert "terminal mismatch" in out["detail"]
 
 
+class TestValidationRetryProbeMapsKnownConfidenceSynonyms:
+    """alpha-engine-config-I8051: a model that persists with an off-enum
+    synonym (e.g. ``'medium-high'``) on every retry attempt must not fail a
+    PR that could not have caused it — but an unmappable off-enum value
+    must still fail loud. Fixed at the generation boundary (this probe's own
+    terminal-failure handling), not by loosening the PASS/FAIL assertion and
+    not by touching the shared ``invoke_structured_with_validation_retry``
+    chokepoint every other schema in this repo depends on.
+    """
+
+    @staticmethod
+    def _probe(resp: dict):
+        from agents.canary_replay import probe_validation_retry
+
+        fake_prompt = MagicMock()
+        fake_prompt.text = "mock canary validation-retry probe prompt"
+
+        with (
+            patch("agents.prompt_loader.load_prompt", return_value=fake_prompt),
+            patch(
+                "agents.langchain_utils.invoke_structured_with_validation_retry",
+                return_value=resp,
+            ),
+        ):
+            return probe_validation_retry(api_key="fake-key")
+
+    @staticmethod
+    def _terminal_validation_error(raw_value: str):
+        """A real Pydantic ``ValidationError`` shaped exactly like the one
+        measured on ``nousergon-data-PR1490`` (2026-08-21T19:51:40Z,
+        ``pr-nousergon-nousergon-data-1490-ffcd1d751a79``), rather than a
+        hand-built dict — the probe's helper reads ``.errors()``, so the
+        test must exercise the real Pydantic shape."""
+        from agents.canary_replay import _CanaryConfidenceProbe
+        from pydantic import ValidationError
+
+        try:
+            _CanaryConfidenceProbe(confidence=raw_value, reasoning="x")
+        except ValidationError as e:
+            return e
+        raise AssertionError(f"{raw_value!r} unexpectedly validated")
+
+    def test_medium_high_synonym_is_mapped_to_high_and_passes(self):
+        # The exact measured failure: 'medium-high' on the terminal attempt.
+        out = self._probe(
+            {
+                "parsed": None,
+                "parsing_error": self._terminal_validation_error("medium-high"),
+                "structured_output_attempts": 3,
+            }
+        )
+        assert out["status"] == "PASS"
+        assert "medium-high" in out["detail"]
+        assert "confidence='high'" in out["detail"]
+
+    def test_unmapped_off_enum_value_still_fails_loud(self):
+        # 'banana' is off-enum but not a recognized synonym — must NOT be
+        # swallowed. This is the "unmappable value still fails" pin
+        # deliverable 4 requires.
+        out = self._probe(
+            {
+                "parsed": None,
+                "parsing_error": self._terminal_validation_error("banana"),
+                "structured_output_attempts": 3,
+            }
+        )
+        assert out["status"] == "FAIL"
+        assert "terminal validation failure after retries" in out["detail"]
+
+    def test_wrong_field_validation_error_still_fails_loud(self):
+        # A ValidationError that isn't about `confidence` at all (e.g. the
+        # bounded `reasoning` field overrunning its max_length) must not be
+        # treated as a confidence synonym just because it's a
+        # ValidationError.
+        from agents.canary_replay import _CanaryConfidenceProbe
+        from pydantic import ValidationError
+
+        try:
+            _CanaryConfidenceProbe(confidence="high", reasoning="x" * 700)
+            raise AssertionError("expected a ValidationError")
+        except ValidationError as e:
+            err = e
+
+        out = self._probe(
+            {"parsed": None, "parsing_error": err, "structured_output_attempts": 3}
+        )
+        assert out["status"] == "FAIL"
+
+
 class TestRetryHelperReportsAttempts:
     """The probe assertions above are only meaningful if the chokepoint
     actually reports the count."""

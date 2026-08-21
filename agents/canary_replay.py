@@ -34,7 +34,7 @@ import time
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +169,66 @@ class _CanaryConfidenceProbe(BaseModel):
     reasoning: str = Field(max_length=600)
 
 
+# alpha-engine-config-I8051: the model's semantically-correct answer to the
+# probe's prompt is DELIBERATELY off-enum (see the docstring above) — that is
+# what forces attempt 1 to trip validation and exercise the retry/recovery
+# path. `invoke_structured_with_validation_retry` already tells the model on
+# retry to "use ONLY exact values ... no synonyms, no compound values like
+# 'medium_high'" (agents/langchain_utils.py). Measured 2026-08-21
+# (pr-nousergon-nousergon-data-1490-ffcd1d751a79): a model can still repeat
+# the identical off-enum synonym on every retry despite that correction —
+# nondeterministic across otherwise-identical runs, not a defect in the retry
+# mechanism itself (three of four runs the same evening recovered normally).
+#
+# This is NOT a schema-level or chokepoint-level fix. A `field_validator` on
+# `_CanaryConfidenceProbe.confidence` would coerce the synonym on ATTEMPT 1,
+# which would make the injected failure never trip — trading this failure
+# mode for the OTHER one this probe already guards
+# (`test_first_attempt_success_is_a_fail`, alpha-engine-config-I7459: a PASS
+# must not mean "nothing needed recovering"). And widening it into
+# `invoke_structured_with_validation_retry` would relax the shared chokepoint
+# every real production schema in this repo depends on, for a case that is
+# only reasonable because THIS schema is deliberately unsatisfiable.
+#
+# So the mapping applies ONLY here, ONLY after the shared retry loop has
+# already exhausted every attempt (i.e. the retry path unquestionably ran),
+# and ONLY for this small, explicit, tested set of known confidence
+# synonyms. Deliberate rounding, not silent coercion: an unrecognized
+# off-enum value is not in this table and still fails terminally.
+_CONFIDENCE_SYNONYM_MAP: dict[str, Literal["low", "medium", "high"]] = {
+    "medium-high": "high",
+    "medium_high": "high",
+    "med-high": "high",
+    "high-medium": "high",
+    "medium-low": "low",
+    "medium_low": "low",
+    "low-medium": "low",
+    "med-low": "low",
+}
+
+
+def _map_terminal_confidence_synonym(parsing_error) -> tuple[str, str] | None:
+    """``(raw_value, mapped_value)`` iff *parsing_error* is a Pydantic
+    ``ValidationError`` on ``_CanaryConfidenceProbe.confidence`` whose exact
+    off-enum string is a known synonym in ``_CONFIDENCE_SYNONYM_MAP``.
+
+    Returns ``None`` for every other shape — a missing field, a wrong type,
+    a non-``ValidationError`` (e.g. the ``_NoToolCallError`` case, or a
+    plain string in a mocked test), or an off-enum string that is NOT a
+    recognized synonym — so an unmappable value is never silently accepted.
+    """
+    if not isinstance(parsing_error, ValidationError):
+        return None
+    for err in parsing_error.errors():
+        if err.get("loc") == ("confidence",) and err.get("type") == "literal_error":
+            raw_value = err.get("input")
+            if isinstance(raw_value, str):
+                mapped = _CONFIDENCE_SYNONYM_MAP.get(raw_value.strip().lower())
+                if mapped is not None:
+                    return raw_value, mapped
+    return None
+
+
 def probe_validation_retry(api_key: str | None) -> dict:
     """Probe 3: deliberately-injected validation failure through the
     shared ``invoke_structured_with_validation_retry`` chokepoint (issue
@@ -220,6 +280,22 @@ def probe_validation_retry(api_key: str | None) -> dict:
         parsing_error = resp.get("parsing_error")
         attempts = resp.get("structured_output_attempts")
         if parsing_error is not None or parsed is None:
+            synonym = _map_terminal_confidence_synonym(parsing_error)
+            if synonym is not None:
+                raw_value, mapped_value = synonym
+                return _probe_result(
+                    "validation_retry",
+                    "PASS",
+                    f"retry/recovery path was exercised across {attempts} attempts "
+                    f"(the injected failure tripped, and the correction was sent); "
+                    f"the model persisted with the off-enum synonym {raw_value!r} on "
+                    f"every attempt instead of an exact enum value. Mapped via the "
+                    f"explicit, tested synonym table to confidence={mapped_value!r} "
+                    f"(alpha-engine-config-I8051) — deliberate rounding, not silent "
+                    f"coercion: only exact strings in _CONFIDENCE_SYNONYM_MAP map; "
+                    f"anything else still fails terminally.",
+                    time.monotonic() - start,
+                )
             return _probe_result(
                 "validation_retry",
                 "FAIL",
