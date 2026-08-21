@@ -247,6 +247,7 @@ def probe_validation_retry(api_key: str | None) -> dict:
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
+        _NoToolCallError,
         bind_structured_output,
         invoke_structured_with_validation_retry,
         make_agent_llm,
@@ -280,6 +281,45 @@ def probe_validation_retry(api_key: str | None) -> dict:
         parsing_error = resp.get("parsing_error")
         attempts = resp.get("structured_output_attempts")
         if parsing_error is not None or parsed is None:
+            if isinstance(parsing_error, _NoToolCallError):
+                # alpha-engine-config-I8051 follow-up (measured on THIS PR's
+                # own canary run, 20:54Z on fix/i8051-canary-confidence-
+                # synonym-map): a third, distinct terminal outcome — the model
+                # declined to call the tool on EVERY attempt, including after
+                # invoke_structured_with_validation_retry's retry sent the
+                # explicit "Your prior response did not call the required
+                # tool ... CALL THE TOOL" correction (I7459's _NoToolCallError
+                # retry path). There is nothing to map here (no off-enum value
+                # was ever returned to round), so this is NOT the confidence-
+                # synonym case above, and it is NOT a schema-shape
+                # ValidationError either — reporting it with the generic
+                # "terminal validation failure after retries" wording used
+                # below would misattribute a declined tool call as a schema
+                # violation, which is its own reporting defect class.
+                #
+                # Still a genuine FAIL, not a silent pass or a swallowed
+                # third status: tool_choice stays "auto" at this call site
+                # (see bind_structured_output's docstring — a FORCED
+                # tool_choice 400'd against the live router edge at this
+                # exact "high"-tier call path on 2026-08-16, and this repo's
+                # LLM calls are provider-routed through krepis.router /
+                # litellm rather than native Anthropic, so Anthropic's
+                # documented "adaptive thinking supports forced tool use"
+                # does not establish what the CURRENT router-resolved
+                # backend accepts). Retrying an unforced generation is
+                # already the retry/recovery mechanism this probe exists to
+                # measure, and it failed to elicit ANY structured output —
+                # arguably a harder failure than an off-enum synonym.
+                return _probe_result(
+                    "validation_retry",
+                    "FAIL",
+                    f"model declined to call the required tool on every "
+                    f"attempt ({attempts} total, including retries sent with "
+                    f"an explicit 'call the tool' correction) — no "
+                    f"structured output was ever returned to validate, let "
+                    f"alone map to a confidence synonym.",
+                    time.monotonic() - start,
+                )
             synonym = _map_terminal_confidence_synonym(parsing_error)
             if synonym is not None:
                 raw_value, mapped_value = synonym
