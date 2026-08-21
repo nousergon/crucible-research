@@ -45,7 +45,7 @@ requests-ratelimiter~=0.10
 pandas~=2.2
 numpy~=2.5
 requests~=2.34
-feedparser~=6.0.13
+feedparser~=6.0.14
 beautifulsoup4~=4.15
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
 # resolution could read local files under the old resolve_entities=True
