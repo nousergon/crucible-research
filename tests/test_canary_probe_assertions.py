@@ -142,8 +142,9 @@ class TestValidationRetryProbeMapsKnownConfidenceSynonyms:
         ``pr-nousergon-nousergon-data-1490-ffcd1d751a79``), rather than a
         hand-built dict — the probe's helper reads ``.errors()``, so the
         test must exercise the real Pydantic shape."""
-        from agents.canary_replay import _CanaryConfidenceProbe
         from pydantic import ValidationError
+
+        from agents.canary_replay import _CanaryConfidenceProbe
 
         try:
             _CanaryConfidenceProbe(confidence=raw_value, reasoning="x")
@@ -183,8 +184,9 @@ class TestValidationRetryProbeMapsKnownConfidenceSynonyms:
         # bounded `reasoning` field overrunning its max_length) must not be
         # treated as a confidence synonym just because it's a
         # ValidationError.
-        from agents.canary_replay import _CanaryConfidenceProbe
         from pydantic import ValidationError
+
+        from agents.canary_replay import _CanaryConfidenceProbe
 
         try:
             _CanaryConfidenceProbe(confidence="high", reasoning="x" * 700)
