@@ -296,7 +296,7 @@ pytest-asyncio~=1.4
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
 # same-major (1.x) patch/minor bump, no API changes used by this repo.
-python-dotenv~=1.2.2
+python-dotenv~=1.2.3
 # moto: mocked S3 for decision_capture integration tests
 moto~=5.2
 
