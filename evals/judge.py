@@ -82,8 +82,8 @@ from krepis.judge import encode_custom_id as _lib_encode_custom_id
 from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
 from krepis.judge import render_rubric as _lib_render_rubric
 from krepis.llm import LLMClient
-from krepis.llm_errors import PermanentContractError
 from krepis.llm_config import ModelSpec
+from krepis.llm_errors import PermanentContractError
 from nousergon_lib.decision_capture import DecisionArtifact
 from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
