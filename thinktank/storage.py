@@ -46,17 +46,6 @@ class ThinktankStore:
             raise
         return obj["Body"].read().decode("utf-8")
 
-    def last_modified(self, key: str) -> Any | None:
-        """``LastModified`` of one key, or ``None`` when absent/unreadable.
-
-        Some upstreams (``archive/macro/macro_report.md``) carry no in-band
-        date, so object metadata is the ONLY as-of signal a staleness check
-        can use.
-        """
-        from freshness import s3_last_modified
-
-        return s3_last_modified(self.s3, bucket=self.bucket, key=key)
-
     def list_keys(self, prefix: str) -> list[str]:
         keys: list[str] = []
         paginator = self.s3.get_paginator("list_objects_v2")
