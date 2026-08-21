@@ -256,6 +256,56 @@ _apply_deploy_stamp_env() {
   python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set ALPHA_ENGINE_CODE_SHA="$GIT_SHA" --set DEPLOY_STAMP_DIRTY="$GIT_TREE_DIRTY" --region "$REGION"
 }
 
+# ── Lambda environment convergence (alpha-engine-config-I7925) ──────────────
+#
+# This repo's nine research Lambdas were among the eleven fleet-wide carrying
+# a `GITHUB_TOKEN` set by hand and refreshed by nothing — the environment is
+# LIVE-ONLY state that no repo, IaC file or script here ever wrote. That
+# token expired 2026-06-03; on 2026-08-21 a first-party dependency picked it
+# up out of site-packages, sent it to GitHub, got a 401, and halted the
+# preopen trading pipeline (alpha-engine-config-I7924). This applier is the
+# same convergence `crucible-predictor-PR535` shipped for
+# `alpha-engine-predictor-inference` (the one of eleven that broke),
+# propagated here for the other nine.
+#
+# DENY-LIST, deliberately, not an allow-list: these functions carry
+# operator-set flags and provider keys codified nowhere, and asserting a
+# complete key set would delete them. The allow-list end state is tracked
+# separately (alpha-engine-config-I7958).
+#
+# Read-modify-write via the shared `krepis.aws remove-lambda-env` CLI — a
+# bare `aws lambda update-function-configuration --environment` REPLACES the
+# whole variable map.
+LAMBDA_ENV_DENIED_KEYS=(GITHUB_TOKEN)
+
+# For alias-pinned functions: this edits $LATEST only (--defer-publish), on
+# purpose. Each caller publishes a version and moves the `live` alias itself
+# immediately afterward, so the removal reaches traffic through that same
+# promotion. Placed after publish-version it would be a silent no-op on the
+# alias (L4497, the same property crucible-predictor-PR535 pins).
+_converge_lambda_env_deferred() {
+  local fn="$1"
+  echo "  Converging Lambda environment on $fn (removing denied keys, deferred to next publish)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws remove-lambda-env \
+    --function-name "$fn" --region "$REGION" \
+    --defer-publish --missing-ok \
+    "${LAMBDA_ENV_DENIED_KEYS[@]/#/--unset=}"
+}
+
+# For functions with NO alias/version promotion (FUNCTION_ALERTS): the edit
+# reaches traffic directly, so --defer-publish is wrong here — there is no
+# later publish step to carry it.
+_converge_lambda_env_direct() {
+  local fn="$1"
+  echo "  Converging Lambda environment on $fn (removing denied keys)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws remove-lambda-env \
+    --function-name "$fn" --region "$REGION" \
+    --missing-ok \
+    "${LAMBDA_ENV_DENIED_KEYS[@]/#/--unset=}"
+}
+
 _apply_router_env() {
   local fn="$1"
   echo "  Applying router addressing to $fn (merge, not replace)..."
@@ -536,6 +586,7 @@ build_and_deploy_main() {
   _apply_router_env "$FUNCTION_MAIN"
   _apply_cost_sink_env "$FUNCTION_MAIN"
   _apply_deploy_stamp_env "$FUNCTION_MAIN"
+  _converge_lambda_env_deferred "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
@@ -735,6 +786,7 @@ build_and_deploy_alerts() {
       --region "$REGION" > /dev/null
   fi
   _apply_deploy_stamp_env "$FUNCTION_ALERTS"
+  _converge_lambda_env_direct "$FUNCTION_ALERTS"
   echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
@@ -785,6 +837,8 @@ deploy_eval_judge() {
   _apply_cost_sink_env "$FUNCTION_EVAL_JUDGE"
 
   _apply_deploy_stamp_env "$FUNCTION_EVAL_JUDGE"
+
+  _converge_lambda_env_deferred "$FUNCTION_EVAL_JUDGE"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
@@ -850,6 +904,8 @@ deploy_eval_rolling_mean() {
   _apply_cost_sink_env "$FUNCTION_EVAL_ROLLING_MEAN"
 
   _apply_deploy_stamp_env "$FUNCTION_EVAL_ROLLING_MEAN"
+
+  _converge_lambda_env_deferred "$FUNCTION_EVAL_ROLLING_MEAN"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" 2>/dev/null || sleep 5
@@ -928,6 +984,8 @@ deploy_rationale_clustering() {
   _apply_cost_sink_env "$FUNCTION_RATIONALE_CLUSTERING"
 
   _apply_deploy_stamp_env "$FUNCTION_RATIONALE_CLUSTERING"
+
+  _converge_lambda_env_deferred "$FUNCTION_RATIONALE_CLUSTERING"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
@@ -1013,6 +1071,8 @@ _deploy_image_shared_lambda() {
   _apply_cost_sink_env "$fn_name"
 
   _apply_deploy_stamp_env "$fn_name"
+
+  _converge_lambda_env_deferred "$fn_name"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5
