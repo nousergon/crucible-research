@@ -269,7 +269,7 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # lambda/ now calls in a `finally`. 0.59.7 emits the four cost-contract
 # columns and has no way to WRITE them — a frozen Lambda container never
 # runs the atexit hook the sink otherwise relies on.
-krepis==0.59.22  # pinned per §139 — first-party/fast-moving deps are pinned, never floored (alpha-engine-config-I7635)
+krepis==0.59.23  # pinned per §139 — first-party/fast-moving deps are pinned, never floored (alpha-engine-config-I7635); bumped for krepis.aws remove-lambda-env (krepis-PR175, alpha-engine-config-I7925)
 # (alpha-engine-config-I7393): schema_version / run_id / agent_id / model_name
 # first ship in 0.59.7 (krepis-PR154). nousergon-lib's transparency_inventory
 # `cost_telemetry` row asserts all four present, and this repo is the ONLY
@@ -296,7 +296,7 @@ pytest-asyncio~=1.4
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
 # same-major (1.x) patch/minor bump, no API changes used by this repo.
-python-dotenv~=1.2.2
+python-dotenv~=1.2.3
 # moto: mocked S3 for decision_capture integration tests
 moto~=5.2
 
