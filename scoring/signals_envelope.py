@@ -137,6 +137,36 @@ CONTRACT_NAME = "signals"
 
 DEFAULT_BUCKET = "alpha-engine-research"
 
+# ── Composite weights (alpha-engine-config-I7678) ────────────────────────────
+# This producer emits a QUANT-ONLY composite: ``score == quant_score`` on every
+# row, because ``qual_score`` has had no producer since the six-team + CIO
+# research graph was retired 2026-07-12 (config#1580).
+#
+# ``DECLARED_COMPOSITE_WEIGHTS`` is therefore set to the composite that ACTUALLY
+# RUNS, not to the aspirational 50/50 quant/qual blend the backtester's
+# ``weight_optimizer`` had been proposing against an absent input for nine
+# consecutive weeks. A declared vector that silently differs from the effective
+# one is the defect I7678 closes; the effective vector is DERIVED per run from
+# the rows actually built (``compute_composite_weights``) and stamped onto the
+# envelope, so a reader never has to infer the running rule.
+DECLARED_COMPOSITE_WEIGHTS: dict[str, float] = {"quant": 1.0, "qual": 0.0}
+
+_COMPOSITE_SUB_SCORES: tuple[str, ...] = ("quant", "qual")
+
+# Arming gate (I7678 deliverable 4; champion-challenger-policy §6). If a qual
+# producer reappears and starts populating a ``qual_score`` on the board, its
+# weight must NOT take effect on the first run that emits it — swapping the
+# scoring rule is a promotion, and a promotion is measured, never silent.
+#
+# Two explicit, reviewed steps are required to restore the blend, in this order:
+#   1. flip ``QUAL_COMPOSITE_ARMED`` to True (this admits the sub-score at all);
+#   2. give ``DECLARED_COMPOSITE_WEIGHTS["qual"]`` a non-zero weight justified
+#      on live qual data.
+# Until BOTH happen, a board carrying ``qual_score`` changes no live score, and
+# the stamped effective weights keep reading ``qual: 0.0``.
+QUAL_COMPOSITE_ARMED: bool = False
+
+
 UNIVERSE_BOARD_DATED_TPL = "scanner/universe/{date}/universe.json"
 UNIVERSE_BOARD_LATEST_KEY = "scanner/universe/latest.json"
 
@@ -443,12 +473,102 @@ def build_sector_modifiers(sectors: list[str]) -> dict[str, float]:
     return dict.fromkeys(sectors, 1.0)
 
 
+def _admit_qual(stock: dict) -> float | None:
+    """Return the board's ``qual_score`` only when the qual half is ARMED.
+
+    The suppression is deliberate and load-bearing: a qual producer
+    reappearing must not change a single live score on the first run that
+    emits one (I7678 deliverable 4). Unarmed, this returns ``None`` however
+    well-populated the board is, so ``_composite_score`` degrades to the
+    quant-only composite that runs today.
+    """
+    if not QUAL_COMPOSITE_ARMED:
+        return None
+    raw = stock.get("qual_score")
+    if raw is None:
+        return None
+    return float(raw)
+
+
+def _composite_score(quant: float | None, qual: float | None) -> float | None:
+    """Blend the admitted sub-scores under ``DECLARED_COMPOSITE_WEIGHTS``.
+
+    Renormalises over the sub-scores that are BOTH present and carry a
+    non-zero declared weight, so an absent (or zero-weighted) half is never
+    silently treated as a zero score. With today's ``{quant: 1.0, qual: 0.0}``
+    this is exactly ``score == quant_score`` — the identity the live artifact
+    already exhibits on 903/903 rows.
+    """
+    parts = [
+        (DECLARED_COMPOSITE_WEIGHTS[sub], value)
+        for sub, value in (("quant", quant), ("qual", qual))
+        if value is not None and DECLARED_COMPOSITE_WEIGHTS[sub] > 0.0
+    ]
+    total = sum(w for w, _ in parts)
+    if not parts or total <= 0.0:
+        # No weighted sub-score survived. Preserve the historical shape
+        # (a null score for a name the board could not score) rather than
+        # inventing a zero — the executor reads a null as "no opinion".
+        return None
+    return sum(w * v for w, v in parts) / total
+
+
+def compute_composite_weights(entries: list[dict]) -> dict[str, Any]:
+    """Declared vs EFFECTIVE composite weights for this run, plus coverage.
+
+    Stamped onto the envelope so the weight vector that actually produced
+    ``score`` is legible beside the declared one on the artifact itself
+    (I7678 deliverable 2). ``effective`` renormalises ``declared`` over the
+    sub-scores that are non-zero-weighted AND populated on at least one row;
+    ``coverage`` is the raw non-null count per sub-score, so a half that has
+    quietly lost its producer shows as ``0`` rather than being inferable only
+    by reading every row.
+
+    Raises when NO sub-score is populated — an envelope whose every score is
+    unattributable is a producer bug, not a run with no opinion.
+    """
+    n = len(entries)
+    coverage = {
+        sub: sum(
+            1 for e in entries
+            if (e.get("sub_scores") or {}).get(sub) is not None
+        )
+        for sub in _COMPOSITE_SUB_SCORES
+    }
+    weighted = {
+        sub: DECLARED_COMPOSITE_WEIGHTS[sub]
+        for sub in _COMPOSITE_SUB_SCORES
+        if DECLARED_COMPOSITE_WEIGHTS[sub] > 0.0 and coverage[sub] > 0
+    }
+    total = sum(weighted.values())
+    if n and total <= 0.0:
+        raise ValueError(
+            "signals_envelope: no weighted sub-score is populated on any of "
+            f"{n} universe rows (coverage={coverage}, declared="
+            f"{DECLARED_COMPOSITE_WEIGHTS}) — refusing to publish an envelope "
+            "whose scores no declared weight explains (no-silent-fails)."
+        )
+    effective = {
+        sub: round(weighted.get(sub, 0.0) / total, 6) if total else 0.0
+        for sub in _COMPOSITE_SUB_SCORES
+    }
+    return {
+        "declared": dict(DECLARED_COMPOSITE_WEIGHTS),
+        "effective": effective,
+        "coverage": coverage,
+        "n": n,
+        "qual_armed": QUAL_COMPOSITE_ARMED,
+    }
+
+
 def _build_universe_entry(stock: dict) -> dict[str, Any] | None:
     ticker = stock.get("ticker")
     if not ticker:
         return None
     sector = stock.get("sector") or "Unknown"
-    score = stock.get("attractiveness_score")
+    quant = stock.get("attractiveness_score")
+    qual = _admit_qual(stock)
+    score = _composite_score(quant, qual)
     quality_pillar = (stock.get("pillars") or {}).get("quality")
     return {
         "ticker": ticker,
@@ -465,10 +585,10 @@ def _build_universe_entry(stock: dict) -> dict[str, Any] | None:
         # stance_source_provenance grader (config#859) can tell agentic
         # picks apart from this producer's quant-only rows.
         "stance_source": "quant_envelope_producer",
-        "quant_score": score,
-        "qual_score": None,
+        "quant_score": quant,
+        "qual_score": qual,
         "factor_quality_score": quality_pillar,
-        "sub_scores": {"quant": score, "qual": None},
+        "sub_scores": {"quant": quant, "qual": qual},
     }
 
 
@@ -527,6 +647,10 @@ def build_signals_envelope(
         # matches the multi-agent producer's own `signals[ticker] = {...}`
         # shape for byte-for-byte parity with today's consumers).
         "signals": {e["ticker"]: e for e in universe},
+        # I7678: the weight vector that actually produced ``score`` this run,
+        # beside the declared one. Additive optional field — the signals v1
+        # contract is additive-only with ``additionalProperties: true``.
+        "composite_weights": compute_composite_weights(universe),
     }
 
     validate_contract(CONTRACT_NAME, envelope)
