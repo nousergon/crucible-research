@@ -83,6 +83,7 @@ from krepis.judge import parse_batch_tool_result as _lib_parse_batch_tool_result
 from krepis.judge import render_rubric as _lib_render_rubric
 from krepis.llm import LLMClient
 from krepis.llm_config import ModelSpec
+from krepis.llm_errors import PermanentContractError
 from nousergon_lib.decision_capture import DecisionArtifact
 from nousergon_lib.eval_artifacts import (
     eval_artifact_key,
@@ -970,6 +971,16 @@ def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
     spec, route = resolve_group_spec(
         JUDGE_MODEL_GROUP,
         exec_context=JUDGE_EXEC_CONTEXT,
+        # THE call shape this judge cannot do without (alpha-engine-config-I7904).
+        # Every request below forces a tool call, and `low`'s declared primary
+        # refuses one outright — a permanent 400, identical on all three
+        # attempts, that the router then failed over and reported as a rate
+        # limit on a different model. Declaring the requirement is what makes
+        # the registry pick a member that accepts the shape; it is a FACT about
+        # this call, never a preference about which model runs, and the
+        # `requires_forced_tool_call: true` row this module already carries in
+        # LLM_CALLSITE_REGISTRY.yaml is the same fact stated for the audit.
+        requires=("tool_choice",),
         # This call builds an LLMClient on the openai transport (forced
         # tool_choice below, in `_call_openrouter_judge_llm`). Asking for
         # the anthropic wire could hand it a URL its transport cannot speak.
@@ -1094,6 +1105,14 @@ def _call_openrouter_judge_llm(
                     "tool_choice": {"type": "function", "function": {"name": tool_name}},
                 },
             )
+        except PermanentContractError:
+            # A 4xx that REFUSES the request shape. Identical on every attempt
+            # by definition, so the retry budget below can only turn one loud,
+            # correct error into three and delay it (alpha-engine-config-I7904:
+            # this loop spent all three attempts on the same 400). Raised
+            # unchanged — krepis has already put the rejecting model's own
+            # message first, which is the part that was being lost.
+            raise
         except Exception as exc:  # noqa: BLE001 — transport error, bounded retry below
             last_error = exc
             logger.warning(
