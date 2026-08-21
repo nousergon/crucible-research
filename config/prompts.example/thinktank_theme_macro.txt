@@ -2,8 +2,8 @@
 Maintain the house MACRO/REGIME thesis. Mode: {mode}
 
 Modes:
-- seed: no prior theme exists — derive the initial thesis from the weekly
-  macro report and market regime below.
+- seed: no prior theme exists — derive the initial thesis from the macro
+  anchor and market regime below.
 - update: intraweek maintenance — fold today's developments into the prior
   theme. Set material_change=true ONLY if the developments genuinely alter
   positioning-relevant conclusions (a scheduled data print that lands in-line
@@ -14,10 +14,14 @@ Modes:
   change_summary and defer to the weekly view unless the divergence is
   driven by information newer than the weekly run.
 
+Any block below may be prefixed with a STALE-INPUT banner. When it is,
+that input is a DATED reference, not current conditions — say so rather
+than asserting a picture you were not given current evidence for.
+
 Market regime (weekly pipeline): {market_regime}
 
-Weekly macro report:
-{macro_report}
+Macro anchor (weekly quantitative regime substrate + daily news backdrop):
+{macro_anchor}
 
 Prior theme (JSON):
 {prior_theme}
