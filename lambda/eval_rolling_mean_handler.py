@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 # Repo root on sys.path so ``from evals.rolling_mean import ...``
 # resolves under Lambda's task layout.
@@ -58,6 +58,45 @@ setup_logging(
 logger = logging.getLogger(__name__)
 
 _init_done = False
+
+
+def _emit_producer_failure_alert(*, producer: str, artifact: str, exc: BaseException) -> None:
+    """Put a secondary-producer failure on the machine-readable alert bus.
+
+    This handler carries four best-effort aggregations whose failure must not
+    sink the rolling mean (the primary deliverable). That carve-out is
+    legitimate; recording the failure ONLY in a WARN log is not — a human-only
+    signal is invisible (``observability-policy.md`` §7.3), and it is exactly
+    what let the ``agent_quality`` date-type bug run for two months with eight
+    report-card components reading N/A (alpha-engine-config-I8177).
+
+    Best-effort by construction: alerting must never itself sink the handler,
+    so a failure to publish is logged and swallowed here — that is the ONE
+    place a swallow is correct, because the condition it would hide is already
+    on the ERROR log the caller wrote before calling in.
+
+    ``dedup_key`` is stable per producer per ISO week: one alert per weekly
+    cycle no matter how many times the Lambda is retried, and it re-fires the
+    following week if the producer is still broken (never latches shut).
+    """
+    try:
+        from krepis import alerts
+
+        week = datetime.now(UTC).strftime("%G-W%V")
+        alerts.publish(
+            f"{producer} producer failed — {artifact} will not be written this "
+            f"cycle and its report-card components grade N/A-MISSING-INPUT. "
+            f"{type(exc).__name__}: {exc}",
+            severity="error",
+            source="crucible-research/eval_rolling_mean_handler",
+            dedup_key=f"eval-rolling-mean-producer-failure-{producer}-{week}",
+            dedup_window_min=None,
+        )
+    except Exception:  # noqa: BLE001 — see docstring: alerting never sinks the handler
+        logger.exception(
+            "[eval_rolling_mean_handler] could not publish the %s producer-failure "
+            "alert; the ERROR log above is the surviving record", producer,
+        )
 
 
 def _ensure_init() -> None:
@@ -181,11 +220,16 @@ def _run(event, context):
             calibration["n_cells_sufficient"],
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
-        logger.warning(
-            "[eval_rolling_mean_handler] calibration κ report failed (non-fatal): %s",
-            exc,
+        logger.error(
+            "[eval_rolling_mean_handler] calibration κ report FAILED: %s",
+            exc, exc_info=True,
         )
         calibration = {"status": "ERROR", "error": str(exc)}
+        _emit_producer_failure_alert(
+            producer="calibration_kappa",
+            artifact="the eval-judge calibration κ report",
+            exc=exc,
+        )
 
     # Statistical control bands on the judge-score series (L4578(e)).
     # Reads the rolling-mean series this run just emitted and runs the
@@ -214,11 +258,16 @@ def _run(event, context):
             control_bands["breach_count"],
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
-        logger.warning(
-            "[eval_rolling_mean_handler] control bands failed (non-fatal): %s",
-            exc,
+        logger.error(
+            "[eval_rolling_mean_handler] control bands FAILED: %s",
+            exc, exc_info=True,
         )
         control_bands = {"status": "ERROR", "error": str(exc)}
+        _emit_producer_failure_alert(
+            producer="control_bands",
+            artifact="the per-combo control-band breach emits",
+            exc=exc,
+        )
 
     # Agent-quality report-card artifact (config#1149 Batch A). THIRD secondary
     # observability aggregation hung off this weekly eval Lambda — same trigger
@@ -232,6 +281,20 @@ def _run(event, context):
     # day (signals + output key), run_date = calendar day (cost + eval partitions).
     # Best-effort: a failure MUST NOT sink the rolling mean (primary deliverable);
     # recorded as an `agent_quality` field per [[feedback_no_silent_fails]].
+    #
+    # alpha-engine-config-I8177: this block previously passed
+    # `dual.trading_day` / `dual.calendar_date` — which `now_dual()` returns as
+    # ISO **strings** — into a producer annotated `date`. Annotations are
+    # unenforced at runtime, so every Saturday from 2026-06-23 (the wiring
+    # merge, #304) to 2026-08-22 the producer died on `'str' object has no
+    # attribute 'isoformat'` and `agent_quality.json` never landed on ANY date.
+    # Eight report-card components (agent_validation_failure_rate,
+    # cost_per_signal, retry_storm_count, agent_latency_p95,
+    # judge_rubric_distribution, judge_rubric_pass_rate, signal_volume_adequacy,
+    # judge_outcome_ic) read N/A-MISSING-INPUT for two months as a result.
+    # `build_agent_quality` now normalizes both carriers at its own boundary;
+    # the explicit `date.fromisoformat` here states the contract at the call
+    # site too, so a reader does not have to trust the coercion to see it.
     agent_quality: dict
     try:
         import boto3
@@ -243,7 +306,9 @@ def _run(event, context):
         dual = now_dual()
         s3c = boto3.client("s3")
         artifact = build_agent_quality(
-            s3c, bucket, dual.trading_day, run_date=dual.calendar_date,
+            s3c, bucket,
+            date.fromisoformat(dual.trading_day),
+            run_date=date.fromisoformat(dual.calendar_date),
         )
         key = write_agent_quality(s3c, bucket, artifact)
         graded = sorted(k for k, v in artifact.items() if isinstance(v, dict) and "value" in v)
@@ -253,10 +318,25 @@ def _run(event, context):
             key, len(graded), ",".join(graded) or "(none — no signals/evals this run)",
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
-        logger.warning(
-            "[eval_rolling_mean_handler] agent_quality build failed (non-fatal): %s", exc,
+        # The primary deliverable (the rolling mean) still survives a failure
+        # here — but the failure MUST NOT be invisible. Recording it only in a
+        # WARN log and a return-value field nothing consumes is what let the
+        # date-type bug above run unnoticed for two months
+        # (observability-policy.md §7.3: a human-only signal is invisible;
+        # the fleet rule forbids graceful-degrade on a PRODUCER/writer).
+        # ERROR severity + a weekly-stable dedup key: one alert per cycle, not
+        # one per retry, and it re-fires every week the producer stays broken.
+        logger.error(
+            "[eval_rolling_mean_handler] agent_quality build FAILED — "
+            "backtest/{date}/agent_quality.json will not exist this cycle and "
+            "its 8 report-card components grade N/A: %s", exc, exc_info=True,
         )
         agent_quality = {"status": "ERROR", "error": str(exc)}
+        _emit_producer_failure_alert(
+            producer="agent_quality",
+            artifact="backtest/{date}/agent_quality.json",
+            exc=exc,
+        )
 
     # Research producer champion/challenger leaderboard (config#1223 B4 / #1221
     # shared scorer). FOURTH secondary observability aggregation hung off this
@@ -295,11 +375,16 @@ def _run(event, context):
             producer_leaderboard["n_dates"],
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
-        logger.warning(
-            "[eval_rolling_mean_handler] producer_leaderboard build failed (non-fatal): %s",
-            exc,
+        logger.error(
+            "[eval_rolling_mean_handler] producer_leaderboard build FAILED: %s",
+            exc, exc_info=True,
         )
         producer_leaderboard = {"status": "ERROR", "error": str(exc)}
+        _emit_producer_failure_alert(
+            producer="producer_leaderboard",
+            artifact="the research producer champion/challenger leaderboard",
+            exc=exc,
+        )
 
     result = {
         "status": status,

@@ -53,7 +53,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from datetime import UTC
+from datetime import UTC, datetime
 from datetime import date as date_type
 from typing import Any
 
@@ -277,12 +277,37 @@ def _load_evals(s3: Any, bucket: str, run_date: date_type) -> list[dict]:
     return artifacts
 
 
+def _coerce_date(value: date_type | str, field: str) -> date_type:
+    """Normalize a fleet date carrier to ``datetime.date``, or fail loud.
+
+    Accepts a ``date`` (returned unchanged) or an ISO ``YYYY-MM-DD`` string
+    (as produced by ``krepis.dates.now_dual()``). Anything else raises
+    ``TypeError`` naming the field and the offending type — a caller passing
+    a ``datetime`` or an epoch int is a real contract violation and must not
+    be silently reinterpreted.
+    """
+    if isinstance(value, date_type) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return date_type.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"build_agent_quality({field}=...): expected an ISO YYYY-MM-DD "
+                f"date string, got {value!r}"
+            ) from exc
+    raise TypeError(
+        f"build_agent_quality({field}=...): expected datetime.date or an ISO "
+        f"YYYY-MM-DD string, got {type(value).__name__}"
+    )
+
+
 def build_agent_quality(
     s3: Any,
     bucket: str,
-    target_date: date_type,
+    target_date: date_type | str,
     *,
-    run_date: date_type | None = None,
+    run_date: date_type | str | None = None,
     cw: Any = None,
     outcomes_conn: Any = None,
 ) -> dict:
@@ -293,8 +318,23 @@ def build_agent_quality(
     partitions. ``outcomes_conn`` is an optional open research.db connection
     for the ``judge_outcome_ic`` block (injected in tests / ``--db``); when
     None the block pulls the ``research.db`` S3 snapshot itself.
+
+    Both dates accept either a ``datetime.date`` or a fleet-canonical ISO
+    ``YYYY-MM-DD`` string and are normalized here, at the boundary
+    (alpha-engine-config-I8177). The fleet's canonical date carrier —
+    ``krepis.dates.now_dual()`` — returns a ``DualDate`` whose
+    ``trading_day`` / ``calendar_date`` are ISO **strings**, and EVERY
+    artifact-write site is instructed to call it. A producer that accepted
+    only ``date`` therefore swam against the convention, and the mismatch
+    was invisible: annotations are unenforced at runtime, so the weekly
+    Lambda passed strings straight through and this function died on
+    ``'str' object has no attribute 'isoformat'`` every Saturday from
+    2026-06-23 to 2026-08-22 while its caller swallowed the exception.
+    Normalizing here makes every current and future ``now_dual()`` caller
+    correct by construction rather than one call site at a time.
     """
-    run_date = run_date or target_date
+    target_date = _coerce_date(target_date, "target_date")
+    run_date = _coerce_date(run_date, "run_date") if run_date is not None else target_date
     date_str = target_date.isoformat()
     result: dict[str, Any] = {"status": "ok", "date": date_str, "run_date": run_date.isoformat()}
 
