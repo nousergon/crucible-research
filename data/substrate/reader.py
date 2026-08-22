@@ -5,7 +5,7 @@ Wave 1 PR F of the institutional data-revamp arc (plan doc:
 
 Producer parquets (written by alpha-engine-data Wave 1 PRs):
 
-  s3://alpha-engine-research/data/news_aggregates/{date}.parquet
+  s3://alpha-engine-research/data/news_aggregates_daily/{date}.parquet
     rows: ticker, aggregate_date, schema_version,
           n_articles, n_articles_trusted_weighted,
           n_articles_by_source_json,
@@ -61,7 +61,26 @@ DEFAULT_S3_BUCKET = "alpha-engine-research"
 
 # Default key prefixes — must match the producer-side writers in
 # alpha-engine-data. Pinning here as a single source of truth.
-NEWS_AGGREGATES_PREFIX = "data/news_aggregates"
+# ``data/news_aggregates`` (full signals universe, 168h) was the Saturday
+# producer. It was RETIRED on 2026-07-30 by nousergon-data#1168 — the weekly
+# RAG chain stopped filling the corpus and now only verifies it
+# (config-I5702; rag-corpus-policy.md §2.3, "a decision pipeline may verify
+# corpus freshness; it may never fill the corpus"). Its last write is
+# 2026-07-30T17:57:29Z and nothing has written it since.
+#
+# The live producer is ``collectors/daily_news.py`` in nousergon-data, which
+# writes ``data/news_aggregates_daily`` every weekday through the SAME
+# ``data.derived.news_aggregates.aggregate_and_write`` writer — identical row
+# schema, identical ``latest.json`` sidecar shape, ``schema_version: 1`` on
+# both. Repointed 2026-08-22 (alpha-engine-config-I8174): reading the retired
+# prefix had the Think Tank anchored to 2026-07-30 news for 23 days and
+# aborting its daily run on the resulting stale-input verdict.
+#
+# Coverage note: the daily slice is the decision-set universe (125 rows on
+# 2026-08-22) against the retired weekly artifact's full-universe 155. Fresh
+# and narrower beats stale and wider — but it IS narrower, so a consumer that
+# needs the full signals universe must say so rather than assume it.
+NEWS_AGGREGATES_PREFIX = "data/news_aggregates_daily"
 INSIDER_TRANSACTIONS_PREFIX = "data/insider_transactions"
 ANALYST_REVISIONS_PREFIX = "data/analyst_revisions"
 INST_OWNERSHIP_PREFIX = "data/inst_ownership"
