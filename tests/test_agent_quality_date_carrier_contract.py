@@ -30,13 +30,13 @@ actually broke rather than at a convenient one.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import boto3
 import pytest
+from krepis.dates import now_dual
 from moto import mock_aws
 
-from krepis.dates import now_dual
 from scripts.build_agent_quality import _coerce_date, build_agent_quality
 
 _BUCKET = "alpha-engine-research"
@@ -111,7 +111,7 @@ def test_garbage_string_raises_naming_the_field() -> None:
 def test_datetime_is_rejected_not_silently_truncated() -> None:
     """A ``datetime`` is a different quantity; truncating it hides a real bug."""
     with pytest.raises(TypeError, match="target_date"):
-        _coerce_date(datetime(2026, 6, 12, 13, 0, tzinfo=timezone.utc), "target_date")
+        _coerce_date(datetime(2026, 6, 12, 13, 0, tzinfo=UTC), "target_date")
 
 
 @pytest.mark.parametrize("bad", [None, 20260612, 1749686400.0, ["2026-06-12"]])

@@ -53,9 +53,8 @@ import logging
 import os
 import sys
 from collections import Counter
-from datetime import UTC
+from datetime import UTC, datetime
 from datetime import date as date_type
-from datetime import datetime
 from typing import Any
 
 import boto3
