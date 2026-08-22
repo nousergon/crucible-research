@@ -66,6 +66,31 @@ class TestTheProbeHasItsOwnBudget:
         assert "max_tokens=_CANARY_PROBE_MAX_TOKENS" in src
 
 
+class TestTheProbeForcesReasoningHeadroom:
+    """Still failing after this issue's first fix (8192 + a bounded
+    `reasoning` field) — measured 2026-08-22 truncating intermittently on
+    `nousergon-data-PR1508` with `crucible-research` main unchanged. The
+    `high` tier load-balances across registry entries, and a pool member
+    that thinks without declaring `reasoning` gets no headroom under the
+    default (non-forced) path — exactly a coin-flip against which member
+    served the call. This probe must not depend on that registry fact.
+    """
+
+    def test_the_probe_forces_reasoning_headroom(self):
+        src = inspect.getsource(_module().probe_validation_retry)
+        assert "force_reasoning_headroom=True" in src
+
+    def test_forcing_headroom_does_not_touch_any_other_caller(self):
+        """Default stays False — every other `make_agent_llm` call site keeps
+        its prior (registry-driven) behaviour."""
+        import inspect as _inspect
+
+        from agents.langchain_utils import make_agent_llm
+
+        sig = _inspect.signature(make_agent_llm)
+        assert sig.parameters["force_reasoning_headroom"].default is False
+
+
 class TestReasoningIsBounded:
     def test_the_field_carries_a_length_bound(self):
         """On the SCHEMA, not only in the prompt: a prompt instruction is

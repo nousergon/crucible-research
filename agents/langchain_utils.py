@@ -349,7 +349,7 @@ def _log_route(route: dict, *, model_class: str) -> None:
 REASONING_OUTPUT_HEADROOM_TOKENS = 16384
 
 
-def _with_reasoning_headroom(spec, *, model_class: str) -> int:
+def _with_reasoning_headroom(spec, *, model_class: str, force: bool = False) -> int:
     """The caller's answer budget plus a thinking allowance, when the resolved
     model thinks.
 
@@ -357,9 +357,21 @@ def _with_reasoning_headroom(spec, *, model_class: str) -> int:
     model does not reason (or the entry does not say so), and ``{"exclude":
     True}`` means reasoning is turned OFF for this entry — neither gets
     headroom, because neither spends output tokens before answering.
+
+    ``force=True`` (alpha-engine-config-I7589) skips that registry read
+    entirely and always adds the headroom. It exists for a caller whose OWN
+    prompt is what makes the model reason at length regardless of what the
+    routed pool member declares — a "high"-tier call load-balances across
+    registry entries, and an entry that reasons without having `reasoning`
+    set on it produces exactly the "identical input, coin-flip result"
+    truncation this headroom was built to close (I7005's own diagnosis).
+    Free to over-apply: the doc above notes this is costed on tokens actually
+    emitted, not on the ceiling, so a forced allowance that goes unused on a
+    non-reasoning pool member costs nothing.
     """
     reasoning = getattr(spec, "reasoning", None)
-    if not reasoning or (isinstance(reasoning, dict) and reasoning.get("exclude")):
+    reasons = force or (bool(reasoning) and not (isinstance(reasoning, dict) and reasoning.get("exclude")))
+    if not reasons:
         return spec.max_tokens
 
     effective = spec.max_tokens + REASONING_OUTPUT_HEADROOM_TOKENS
@@ -367,12 +379,13 @@ def _with_reasoning_headroom(spec, *, model_class: str) -> int:
     # for, and a budget that differs from the one in the logs is the exact
     # defect the `resolve_group_spec(max_tokens=...)` comment above warns about.
     log.info(
-        "[agent_route:%s] reasoning model %s — max_tokens %d + %d headroom = %d",
+        "[agent_route:%s] reasoning model %s — max_tokens %d + %d headroom = %d%s",
         model_class,
         spec.model,
         spec.max_tokens,
         REASONING_OUTPUT_HEADROOM_TOKENS,
         effective,
+        " (forced)" if force else "",
     )
     return effective
 
@@ -383,9 +396,15 @@ def make_agent_llm(
     max_tokens: int,
     api_key: str | None = None,
     callbacks: list | None = None,
+    force_reasoning_headroom: bool = False,
     **extra,
 ):
     """Return a chat model for *model_class* ("low"/"med"/"high"/"ultra").
+
+    ``force_reasoning_headroom`` (alpha-engine-config-I7589): apply the
+    ``REASONING_OUTPUT_HEADROOM_TOKENS`` allowance unconditionally instead of
+    only when the resolved registry entry declares ``reasoning``. Default
+    False — this changes behaviour only for a caller that opts in.
 
     The class is resolved to a model, an endpoint and a credential by
     ``krepis.router.resolve_group_spec`` — the registry decides all three; this
@@ -443,7 +462,9 @@ def make_agent_llm(
         # guess made for a different model — the registry owns it.
         kwargs.setdefault("extra_body", {})["reasoning"] = spec.reasoning
 
-    effective_max_tokens = _with_reasoning_headroom(spec, model_class=model_class)
+    effective_max_tokens = _with_reasoning_headroom(
+        spec, model_class=model_class, force=force_reasoning_headroom
+    )
 
     return ChatOpenAI(
         model=spec.model,
