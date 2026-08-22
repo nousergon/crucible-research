@@ -7,7 +7,7 @@ plus institutional substrate feeds (Brian, 2026-07-13):
   market_regime, per-ticker stances)
 - weekly regime substrate       → ``regime/`` (HMM posterior, composite
   intensity, BOCPD change signal, guardrails — the macro ANCHOR)
-- daily news aggregates         → ``data/news_aggregates`` (substrate reader)
+- daily news aggregates         → ``data/news_aggregates_daily`` (substrate reader)
 - insider transactions          → ``data/insider_transactions`` (90d rollup)
 - analyst revisions             → ``data/analyst_revisions`` (consensus deltas)
 - institutional ownership (13F) → ``data/inst_ownership`` (QoQ deltas)
@@ -52,6 +52,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from data.substrate.reader import NEWS_AGGREGATES_PREFIX
 from freshness import FreshnessVerdict, assert_upstream_fresh
 
 logger = logging.getLogger(__name__)
@@ -220,8 +221,12 @@ def load_context(store: Any) -> ContextBundle:
     # The intraweek half of the macro anchor. Checked even when EMPTY: an
     # absent news table is ``undated``, which is the loud reading — a macro
     # anchor with no live intraweek leg must not look healthy.
+    # Identity comes from the reader's own constant, never a restated
+    # literal: this artifact was checked under ``data/news_aggregates`` for
+    # 23 days after that prefix's producer was retired, and a duplicated
+    # string is what let the label outlive the key (alpha-engine-config-I8174).
     bundle.freshness["news_aggregates"] = assert_upstream_fresh(
-        "data/news_aggregates",
+        NEWS_AGGREGATES_PREFIX,
         as_of=_news_aggregates_as_of(bundle.news_by_ticker),
         cadence=NEWS_AGGREGATES_CADENCE,
         on_stale="degrade",
