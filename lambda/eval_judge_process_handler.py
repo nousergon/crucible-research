@@ -282,31 +282,65 @@ def _run(event, context):
     }
 
     # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
-    # §2.3a rescope). This handler's own event carries no run_date — only
-    # batch_id/plan_s3_key — so the run_date is recovered from
-    # plan_s3_key's own {date} path segment
+    # §2.3a rescope). This handler's own event carries no `run_date` field —
+    # only batch_id/plan_s3_key — so the execution run_date is recovered
+    # from plan_s3_key's own {date} path segment
     # ("decision_artifacts/_eval_batch_plans/{date}/{batch_id}.json",
-    # written verbatim by eval_judge_submit_handler). OBSERVE MODE ONLY —
-    # never enables enforcement, never raises.
-    try:
+    # written verbatim by eval_judge_submit_handler from the SAME execution's
+    # `date` value — alpha-engine-config-I8155). OBSERVE MODE ONLY — never
+    # enables enforcement, never raises out of this handler.
+    _execution_run_date = None
+    if plan_s3_key:
         _plan_key_parts = plan_s3_key.split("/")
-        _run_date_for_coverage = _plan_key_parts[2] if len(_plan_key_parts) > 2 else None
-        if _run_date_for_coverage:
+        _execution_run_date = (
+            _plan_key_parts[2] if len(_plan_key_parts) > 2 else None
+        )
+
+    if not _execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument.
+        logger.error(
+            "[eval_judge_process_handler] stage-coverage assertion SKIPPED "
+            "for EvalJudgeProcess: could not recover execution run_date "
+            "from plan_s3_key=%r (execution identity absent)", plan_s3_key,
+        )
+        result["stage_coverage"] = {
+            "stage": "EvalJudgeProcess",
+            "status": "UNMEASURED",
+            "reason": f"execution run_date absent from plan_s3_key={plan_s3_key!r}",
+        }
+    else:
+        try:
             from krepis.stage_coverage import assert_stage_coverage
 
             result["stage_coverage"] = assert_stage_coverage(
-                "EvalJudgeProcess", run_date=_run_date_for_coverage,
+                "EvalJudgeProcess", run_date=_execution_run_date,
                 window_start=_started,
             )
-        else:
-            logger.info(
-                "[eval_judge_process_handler] could not recover run_date "
-                "from plan_s3_key=%r — skipping stage-coverage assertion "
-                "(config-I7214)", plan_s3_key,
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+            # the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "EvalJudgeProcess",
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[eval_judge_process_handler] stage-coverage assertion "
+                "raised for EvalJudgeProcess: %s: %s",
+                type(exc).__name__, exc,
             )
-    except ImportError as exc:
-        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-        # the handler's own outcome is unchanged (config-I7214).
-        logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "EvalJudgeProcess",
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
 
     return result

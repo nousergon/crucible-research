@@ -148,6 +148,15 @@ def _run(event, context):
     )
 
     bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+    # alpha-engine-config-I8155: `$.eval_cadence.eval_date` (delivered here as
+    # `date`) is States.ArrayGetItem(States.StringSplit($$.Execution.StartTime,
+    # 'T'), 0) — the date part of the SF execution's own start time, computed
+    # independently of (but identical in value to) $.run_date. Captured here,
+    # BEFORE the business-logic fallback below, so stage_coverage never
+    # receives a fabricated `datetime.date.today()` substitute — that
+    # fallback exists for `build_batch_plan`'s own needs, not for coverage
+    # attribution.
+    execution_run_date = event.get("date") or None
     date = event.get("date") or str(datetime.date.today())
 
     # ── Shell-run dry path ───────────────────────────────────────────
@@ -253,15 +262,50 @@ def _run(event, context):
     # §2.3a rescope): the assertion lives in the stage's own handler,
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
-    try:
-        from krepis.stage_coverage import assert_stage_coverage
-
-        result["stage_coverage"] = assert_stage_coverage(
-            _stage_name, run_date=date, window_start=_started,
+    if not execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument.
+        logger.error(
+            "[eval_judge_submit_handler] stage-coverage assertion SKIPPED "
+            "for %s: no execution run_date on this event (execution "
+            "identity absent)", _stage_name,
         )
-    except ImportError as exc:
-        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-        # the handler's own outcome is unchanged (config-I7214).
-        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": _stage_name,
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+        }
+    else:
+        try:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                _stage_name, run_date=execution_run_date, window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+            # the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": _stage_name,
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Both are
+            # library-internal contract failures, not stage failures — log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[eval_judge_submit_handler] stage-coverage assertion "
+                "raised for %s: %s: %s", _stage_name, type(exc).__name__, exc,
+            )
+            result["stage_coverage"] = {
+                "stage": _stage_name,
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
 
     return result

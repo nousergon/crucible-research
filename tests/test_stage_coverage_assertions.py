@@ -243,7 +243,18 @@ class TestScannerCoverage:
         stub_stage_coverage.assert_called_once()
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "Scanner"
-        assert kwargs["run_date"] == "2026-05-29"  # normalized to trading day
+        # alpha-engine-config-I8155: stage_coverage groups a run's verdicts
+        # by the execution's OWN run_date — the un-normalized event value,
+        # not `resolve_trading_day`'s output (2026-05-29). Passing the
+        # normalized trading day filed this stage's verdict under the WRONG
+        # prefix on the 2026-08-22 weekly run.
+        assert kwargs["run_date"] == "2026-05-30"
+        assert kwargs["run_date"] != "2026-05-29"
+        # And the trading-day normalization still happened for everything
+        # else the handler does with `date` — the summary/`result["date"]`
+        # key is the TRADING day, unchanged by this fix.
+        assert result["summary"] is not None
+        stub_stage_coverage.assert_called_once()
         assert kwargs["window_start"] is not None
 
     def test_missing_lib_module_does_not_change_outcome(self, scanner_mod, absent_stage_coverage):
@@ -261,7 +272,30 @@ class TestScannerCoverage:
         ):
             result = scanner_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        # alpha-engine-config-I8155: an unavailable lib now degrades to a
+        # recorded UNMEASURED verdict rather than silently omitting the key.
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "Scanner"
+
+    def test_contract_error_from_lib_degrades_to_unmeasured_without_raising(
+        self, scanner_mod, stub_stage_coverage,
+    ):
+        # alpha-engine-config-I8155: the krepis landing this arc makes
+        # run_date a required, contract-enforced kwarg — simulate its
+        # raising and assert the handler still returns OK.
+        stub_stage_coverage.side_effect = TypeError("run_date is required")
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("data.scanner_orchestrator.build_candidates_artifact", return_value=_ok_scanner_artifact()),
+            patch(
+                "data.scanner_orchestrator.write_candidates_artifact",
+                return_value="candidates/2026-05-30/candidates.json",
+            ),
+            patch("boto3.client", return_value=MagicMock()),
+        ):
+            result = scanner_mod.handler({"run_date": "2026-05-30"}, context=None)
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
 
 
 # ── SignalsEnvelope ──────────────────────────────────────────────────────
@@ -287,6 +321,31 @@ class TestSignalsEnvelopeCoverage:
         assert args[0] == "SignalsEnvelope"
         assert kwargs["run_date"] == "2026-07-14"
 
+    def test_verdict_uses_execution_run_date_not_trading_day_on_a_weekend_cycle(
+        self, signals_envelope_mod, stub_stage_coverage,
+    ):
+        # alpha-engine-config-I8155: a Saturday weekly-SF cycle passes a
+        # CALENDAR run_date; `resolve_trading_day` normalizes the handler's
+        # own `run_date` local to the prior Friday for every artifact key,
+        # but stage_coverage must still see the un-normalized 2026-08-08
+        # (Saturday) — that's the key one execution's verdicts share.
+        with (
+            patch.object(signals_envelope_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch("scoring.signals_envelope.read_universe_board", return_value=_board()),
+            patch("scoring.signals_envelope.read_regime_substrate", return_value=None),
+            patch("scoring.signals_envelope.build_signals_envelope", return_value=_envelope("2026-08-07")),
+            patch(
+                "scoring.signals_envelope.write_envelope",
+                return_value=("signals/2026-08-07/signals.json", "signals/latest.json"),
+            ),
+        ):
+            result = signals_envelope_mod.handler({"run_date": "2026-08-08"}, context=None)
+        assert result["status"] == "OK"
+        args, kwargs = stub_stage_coverage.call_args
+        assert kwargs["run_date"] == "2026-08-08"
+        assert kwargs["run_date"] != "2026-08-07"  # the normalized trading day
+
     def test_missing_lib_module_does_not_change_outcome(self, signals_envelope_mod, absent_stage_coverage):
         with (
             patch.object(signals_envelope_mod, "_ensure_init"),
@@ -301,7 +360,8 @@ class TestSignalsEnvelopeCoverage:
         ):
             result = signals_envelope_mod.handler({"run_date": "2026-07-14"}, context=None)
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "SignalsEnvelope"
 
 
 # ── ChallengerShadow (handler.py::_run_challengers_only) ────────────────
@@ -335,7 +395,11 @@ class TestChallengerShadowCoverage:
         assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "ChallengerShadow"
-        assert kwargs["run_date"] == "2026-05-29"  # the trading day, not the calendar date
+        # alpha-engine-config-I8155: the execution's own un-normalized
+        # run_date (event['date']), not the trading day the rest of the
+        # handler normalizes to for population/signals lookups.
+        assert kwargs["run_date"] == "2026-05-30"
+        assert kwargs["run_date"] != "2026-05-29"  # the normalized trading day
 
     def test_missing_lib_module_does_not_change_outcome(self, runner_mod, absent_stage_coverage):
         archive = MagicMock()
@@ -352,7 +416,8 @@ class TestChallengerShadowCoverage:
         ):
             result = runner_mod._run_challengers_only({"mode": "challengers_only", "date": "2026-05-30"})
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "ChallengerShadow"
 
 
 # ── EvalJudgeSubmit{FirstSaturday,Weekly} — one Lambda, two stages ──────
@@ -396,7 +461,18 @@ class TestEvalJudgeSubmitCoverage:
     def test_missing_lib_module_does_not_change_outcome(self, submit_mod, absent_stage_coverage):
         result = self._invoke(submit_mod, {"date": "2026-05-16", "force_sonnet_pass": False})
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "EvalJudgeSubmitWeekly"
+
+    def test_no_fabricated_date_when_event_date_absent(self, submit_mod, stub_stage_coverage):
+        # alpha-engine-config-I8155: the handler's own business-logic
+        # fallback (`date = event.get("date") or str(datetime.date.today())`)
+        # must never leak into the coverage assertion — a genuinely absent
+        # execution identity records UNMEASURED, not today's wall-clock date.
+        result = self._invoke(submit_mod, {"force_sonnet_pass": False})
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        stub_stage_coverage.assert_not_called()
 
 
 # ── EvalJudgePoll ────────────────────────────────────────────────────────
@@ -433,7 +509,10 @@ class TestEvalJudgePollCoverage:
             ),
         ):
             result = poll_mod.handler({"batch_id": "msgbatch_123"}, context=None)
-        assert "stage_coverage" not in result
+        # alpha-engine-config-I8155: skipped for absent execution identity,
+        # but the skip is now RECORDED as UNMEASURED rather than omitted.
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "EvalJudgePoll"
         stub_stage_coverage.assert_not_called()
 
     def test_missing_lib_module_does_not_change_outcome(self, poll_mod, absent_stage_coverage):
@@ -449,7 +528,7 @@ class TestEvalJudgePollCoverage:
                 {"batch_id": "msgbatch_123", "submit_iso": "2026-05-16T22:30:00Z"},
                 context=None,
             )
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
         assert result["processing_status"] == "ended"
 
 
@@ -501,7 +580,19 @@ class TestEvalJudgeProcessCoverage:
             },
         )
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "EvalJudgeProcess"
+
+    def test_no_assertion_without_recoverable_plan_s3_key(self, process_mod, stub_stage_coverage):
+        # alpha-engine-config-I8155: no fabricated run_date when the
+        # execution identity can't be recovered from plan_s3_key at all.
+        result = self._invoke(
+            process_mod,
+            {"batch_id": "msgbatch_123", "plan_s3_key": "too/short.json"},
+        )
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        stub_stage_coverage.assert_not_called()
 
 
 # ── EvalRollingMean ──────────────────────────────────────────────────────
@@ -540,7 +631,19 @@ class TestEvalRollingMeanCoverage:
     def test_missing_lib_module_does_not_change_outcome(self, rolling_mean_mod, absent_stage_coverage):
         result = self._invoke(rolling_mean_mod, {"end_time_iso": "2026-06-06T00:00:00Z"})
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "EvalRollingMean"
+
+    def test_no_fabricated_date_when_end_time_iso_absent(self, rolling_mean_mod, stub_stage_coverage):
+        # alpha-engine-config-I8155: this handler used to fall back to its
+        # OWN invocation time (`_started`, via `datetime.now(UTC)`) when
+        # `end_time_iso` was absent — exactly the forbidden fabrication
+        # class. A genuinely absent execution identity must record
+        # UNMEASURED instead, never a wall-clock substitute.
+        result = self._invoke(rolling_mean_mod, {})
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        stub_stage_coverage.assert_not_called()
 
 
 # ── RationaleClustering ──────────────────────────────────────────────────
@@ -579,7 +682,21 @@ class TestRationaleClusteringCoverage:
         ):
             result = clustering_mod.handler({"end_time_iso": "2026-05-09T00:00:00Z"}, context=None)
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "RationaleClustering"
+
+    def test_no_fabricated_date_when_end_time_iso_absent(self, clustering_mod, stub_stage_coverage):
+        # alpha-engine-config-I8155: same forbidden-fabrication class as
+        # EvalRollingMean — `_started` (this handler's own invocation time)
+        # must never substitute for a genuinely-absent end_time_iso.
+        with (
+            patch.object(clustering_mod, "_ensure_init"),
+            patch("evals.rationale_clustering.compute_and_emit", return_value=_clustering_summary()),
+        ):
+            result = clustering_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        stub_stage_coverage.assert_not_called()
 
 
 # ── AggregateCosts ───────────────────────────────────────────────────────
@@ -648,7 +765,8 @@ class TestAggregateCostsCoverage:
         ):
             result = aggregate_costs_mod.handler({"date": "2026-05-25"}, context=None)
         assert result["status"] == "OK"
-        assert "stage_coverage" not in result
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "AggregateCosts"
 
 
 # ── Cross-cutting: enforcement never enabled, totality ───────────────────
