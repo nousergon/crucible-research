@@ -143,6 +143,12 @@ def probe_thesis_update(am, tickers: list[dict]) -> dict:
 # nowhere to land, and `invoke_structured_with_validation_retry` correctly
 # reported StructuredOutputTruncationError rather than letting a partial
 # tool-call surface downstream as a confusing Pydantic shape error.
+#
+# 8192 stopped being enough on its own (still measured intermittently
+# truncating 2026-08-22, after this budget and the `reasoning` field's
+# `max_length` below both shipped) — see `probe_validation_retry`'s
+# `force_reasoning_headroom=True` for the durable fix. Raising this constant
+# again would only move the same boundary a third time.
 _CANARY_PROBE_MAX_TOKENS = 8192
 
 
@@ -261,6 +267,20 @@ def probe_validation_retry(api_key: str | None) -> dict:
             model_class=CANARY_PROBE_CLASS,
             max_tokens=_CANARY_PROBE_MAX_TOKENS,
             api_key=api_key,
+            # alpha-engine-config-I7589: this probe's whole job is to make the
+            # model argue its way to a non-conforming answer, so it is the ONE
+            # call in this repo where "did the routed pool member declare
+            # `reasoning`" is not a safe proxy for "will it spend output
+            # tokens thinking before it answers" — the `high` class
+            # load-balances across registry entries, and a member that thinks
+            # without declaring it produced the exact "identical input,
+            # coin-flip result" failure measured 2026-08-22 (two truncations
+            # against `nousergon-data-PR1508`, six passes the day before, no
+            # change on either side). Forcing the headroom removes the
+            # dependency on that per-entry registry fact instead of trusting
+            # it — free to over-apply per `_with_reasoning_headroom`'s own
+            # doc: unused headroom costs nothing.
+            force_reasoning_headroom=True,
         )
         structured_llm = bind_structured_output(
             llm, _CanaryConfidenceProbe, include_raw=True

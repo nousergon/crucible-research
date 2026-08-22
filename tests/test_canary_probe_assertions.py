@@ -407,3 +407,34 @@ class TestReasoningHeadroom:
             "the caller's number must keep meaning 'answer tokens' — headroom is "
             "added, not substituted"
         )
+
+    def test_force_adds_headroom_even_when_the_registry_says_no_reasoning(self):
+        """alpha-engine-config-I7589: a load-balanced tier can route to a pool
+        member that thinks without the registry entry saying so. `force=True`
+        must not trust `spec.reasoning` at all."""
+        from agents.langchain_utils import (
+            REASONING_OUTPUT_HEADROOM_TOKENS,
+            _with_reasoning_headroom,
+        )
+
+        got = _with_reasoning_headroom(
+            self._spec(None), model_class="high", force=True
+        )
+        assert got == 4096 + REASONING_OUTPUT_HEADROOM_TOKENS
+
+    def test_force_adds_headroom_even_over_an_explicit_exclude(self):
+        from agents.langchain_utils import (
+            REASONING_OUTPUT_HEADROOM_TOKENS,
+            _with_reasoning_headroom,
+        )
+
+        got = _with_reasoning_headroom(
+            self._spec({"exclude": True}), model_class="high", force=True
+        )
+        assert got == 4096 + REASONING_OUTPUT_HEADROOM_TOKENS
+
+    def test_no_force_keeps_prior_behaviour(self):
+        """Default (`force=False`) must not change any existing caller."""
+        from agents.langchain_utils import _with_reasoning_headroom
+
+        assert _with_reasoning_headroom(self._spec(None), model_class="low") == 4096
