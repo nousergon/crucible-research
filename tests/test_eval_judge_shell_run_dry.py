@@ -225,9 +225,9 @@ class TestRationaleClusteringDry:
                 {"end_time_iso": "2026-05-16T00:00:00Z", DRY_FLAG: True},
                 context=None,
             )
-        # compute_and_emit reads decision_artifacts/, S3-persists
-        # _analysis/ JSON (the documented un-gated gap), and emits CW —
-        # must never be called on the dry path.
+        # compute_and_emit is a RETIRED no-op stub (alpha-engine-config-
+        # I8173) but must still never be CALLED on the dry path — the
+        # shell-run guarantee is "no compute_and_emit call at all."
         cae.assert_not_called()
         assert result["status"] == "OK"
         assert result["dry_run"] is True

@@ -179,3 +179,77 @@ def test_the_dead_weekly_launcher_and_its_box_entrypoint_are_gone():
             "data_manifest.py's case, had zero callers after PR685. Re-adding "
             "one needs its consumer named first."
         )
+
+
+# ── decision_artifacts/{date}/{agent} reader, RETIRED (I8173) ─────────────
+#
+# Unlike the two revives above, this one has NO repoint target: all six
+# `decision_artifacts/{date}/{agent}` families the multi-agent research
+# graph ever produced lost their sole writer to the same PR685 deletion,
+# and the I8173 sweep found none alive under a new path. The correct
+# outcome is the opposite of a repoint — the reader is gone, not redirected.
+#
+# Proved RED against the pre-fix tree (evals/rationale_clustering.py before
+# this change): `compute_and_emit` called `_list_artifact_keys_in_window`,
+# which called `s3.get_paginator("list_objects_v2")` against
+# `decision_artifacts/{Y}/{M}/{D}/` every invocation, regardless of whether
+# any of the six families had written anything in 42 days.
+
+
+def test_compute_and_emit_makes_no_s3_calls_for_any_client():
+    """Structural guard, independent of the behavioral test in
+    test_rationale_clustering.py::TestComputeAndEmit — any S3 client
+    object, real or mock, must see zero method calls."""
+    from unittest.mock import MagicMock
+
+    from evals.rationale_clustering import compute_and_emit
+
+    s3 = MagicMock()
+    compute_and_emit(s3_client=s3, cloudwatch_client=MagicMock())
+    assert s3.method_calls == [], (
+        f"compute_and_emit made S3 calls it should not: {s3.method_calls}. "
+        "alpha-engine-config-I8173: every decision_artifacts/{date}/{agent} "
+        "family lost its producer to I7827/PR685 — the reader must be gone, "
+        "not merely tolerant of an empty result."
+    )
+
+
+def test_the_s3_read_helpers_no_longer_exist():
+    """The pre-fix pipeline's private S3-listing/loading/persisting/emitting
+    helpers must be gone from the module, not merely unused — a present-but-
+    dead helper is exactly the "capability while doing nothing" shape
+    `champion-challenger-policy.md` §6 forbids."""
+    import evals.rationale_clustering as mod
+
+    removed = (
+        "_list_artifact_keys_in_window",
+        "_agent_id_from_key",
+        "_capture_date_from_key",
+        "_newest_capture_date",
+        "_corpus_freshness",
+        "_load_artifact",
+        "_build_per_agent_output",
+        "_persist_analysis",
+        "_emit_concentration_metric",
+    )
+    present = [name for name in removed if hasattr(mod, name)]
+    assert not present, (
+        f"retired S3-read helper(s) still present: {present} — "
+        "alpha-engine-config-I8173 deliverable 1 requires the reader GONE, "
+        "not merely uncalled"
+    )
+
+
+def test_no_module_still_imports_freshness_for_decision_artifact_capture():
+    """`freshness.assert_upstream_fresh` must not be imported by
+    ``evals/rationale_clustering.py`` any more — the stale-input check this
+    issue retires was that exact call, over that exact prefix."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1] / "evals" / "rationale_clustering.py"
+    ).read_text(encoding="utf-8")
+    assert "assert_upstream_fresh" not in src.split('"""', 2)[-1], (
+        "evals/rationale_clustering.py still calls assert_upstream_fresh "
+        "outside its own docstring — the retired stale-input check is back"
+    )

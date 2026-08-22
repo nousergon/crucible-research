@@ -110,7 +110,11 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # (backtester evaluator email) graceful-degrades, so not a load-bearing
     # freshness SLA.
     "evals/perturbation.py": 1,
-    "evals/rationale_clustering.py": 1,
+    # evals/rationale_clustering.py's one PUT site (_persist_analysis, writing
+    # decision_artifacts/_analysis/{agent_id}/{week}.json) was removed
+    # alpha-engine-config-I8173: the module no longer reads, clusters, or
+    # persists anything for the six retired decision_artifacts/{date}/{agent}
+    # families (producer deleted I7827/PR685). No replacement PUT site.
     "evals/rolling_mean.py": 1,
     # Saturday-SF team-accuracy producer (config#1422) — single fixed-key
     # overwrite (config/team_accuracy.json). Registered in

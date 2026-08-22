@@ -153,8 +153,9 @@ def dry_process_result(batch_id: str | None = None) -> dict[str, Any]:
 
 def dry_clustering_result() -> dict[str, Any]:
     """rationale_clustering dry return — boot/import done; returns
-    BEFORE ``compute_and_emit`` (which reads decision_artifacts/,
-    persists ``_analysis/`` JSON, and emits the CW metric). ``status:
+    BEFORE ``compute_and_emit``, which is now itself a no-op RETIRED
+    stub (alpha-engine-config-I8173: every decision_artifacts/{date}/{agent}
+    family it used to read lost its producer to I7827/PR685). ``status:
     OK`` is what the SF treats as success.
     """
     return {

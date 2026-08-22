@@ -1,4 +1,5 @@
-"""Cross-week rationale clustering for agent-justification.
+"""Cross-week rationale clustering for agent-justification — RETIRED
+(alpha-engine-config-I8173).
 
 Per ROADMAP P0 "Cross-week rationale clustering for agent-justification":
 
@@ -6,51 +7,57 @@ Per ROADMAP P0 "Cross-week rationale clustering for agent-justification":
   with only numerics swapped is a deterministic rule wearing an agent
   costume. The ``reasoning_complexity`` rubric dim scores per-call
   complexity but cannot detect this multi-week pattern. This module
-  closes that gap.
+  closed that gap for the six agent families the retired multi-agent
+  research graph produced.
 
-Pipeline:
+Retirement (alpha-engine-config-I8173, ruled 2026-08-22):
 
-  1. Read ``decision_artifacts/{YYYY}/{MM}/{DD}/{agent_id}/*.json`` for
-     a trailing N-week window (default 8 weeks ≈ 8 Saturdays).
-  2. Extract per-agent rationale strings — different fields per agent_id
-     family (sector_quant pulls per-pick ``quant_rationale``; sector_qual
-     pulls ``bull_case``; sector_peer_review pulls per-pick ``rationale``;
-     macro_economist pulls regime call text; ic_cio pulls per-decision
-     ``rationale``; thesis_update:* pulls ``bull_case``).
-  3. Cluster rationales using TF-IDF char n-grams + cosine-similarity
-     greedy agglomerative merge. **Why TF-IDF char n-grams over semantic
-     embeddings**: we want STRUCTURAL similarity ("same template, different
-     numbers"), not SEMANTIC similarity ("both talk about momentum").
-     A semantic embedding would say "yes, all sector_quant rationales are
-     about quantitative analysis" and miss the template-detection signal.
-     Char n-grams catch the skeleton — "P/E of {N} is below sector median
-     of {M}" matches whether N=12, M=18 or N=25, M=30 — exactly the
-     rule-in-LLM-costume pattern this module exists to detect.
-  4. Compute per-agent ``rationale_template_concentration`` =
-     (sum of top-3 cluster sizes) / total rationales. >70% indicates
-     template-generation.
-  5. Emit CloudWatch metric ``agent_rationale_template_concentration``
-     dimensioned by ``judged_agent_id``.
-  6. Persist per-agent analysis output to
-     ``decision_artifacts/_analysis/{agent_id}/{YYYY-WW}.json``.
+  This module used to (1) read
+  ``decision_artifacts/{YYYY}/{MM}/{DD}/{agent_id}/*.json`` for a trailing
+  N-week window, (2) extract + cluster rationales per agent family, and
+  (3) persist ``decision_artifacts/_analysis/{agent_id}/{YYYY-WW}.json`` +
+  emit the ``agent_rationale_template_concentration`` CloudWatch metric.
 
-Corpus freshness (alpha-engine-config-I2638):
+  All six agent families in ``RETIRED_AGENT_FAMILIES`` below were produced
+  by exactly one writer — the retired multi-agent research graph's
+  ``_capture_if_enabled`` capture hook — deleted in
+  alpha-engine-config-I7827 / crucible-research-PR685 (the graph itself,
+  alpha-engine-config-I7817). Last write across all six families:
+  **2026-07-11**. Verified empty 2026-08-22:
+  ``aws s3 ls s3://alpha-engine-research/decision_artifacts/2026/08/22/``
+  returns nothing for any of the six families.
 
-  The window is a trailing one, so a corpus that STOPPED being written keeps
-  producing output — with a smaller and smaller sample — until it silently
-  falls out of the window entirely. Measured 2026-08-15: every
-  ``sector_quant`` capture was frozen at 2026-07-11 (the multi-agent graph
-  retired), and this module still wrote a freshly-dated
-  ``_analysis/sector_quant/2026-W33.json`` and stamped a CloudWatch datapoint
-  at today's timestamp. A template-concentration figure computed over a dead
-  corpus is a claim about July presented as a claim about this week.
+  Measured 2026-08-15 (the bug this module's freshness check was ADDED to
+  catch, alpha-engine-config-I2638): every ``sector_quant`` capture was
+  frozen at 2026-07-11, and this module still wrote a freshly-dated
+  ``_analysis/sector_quant/2026-W33.json`` and stamped a CloudWatch
+  datapoint at today's timestamp — a template-concentration figure
+  computed over a dead corpus, presented as a claim about the current
+  week. Widening the freshness tolerance would not have fixed this: the
+  producer is gone permanently, not merely late. **Brian ruled: retire
+  the stale-input check AND the live reader — do not re-publish the
+  42-day-old captures, do not revive the producer.**
 
-  Every agent's corpus is therefore checked through
-  ``freshness.assert_upstream_fresh`` before its analysis is written. The
-  verdict rides on the persisted payload (``upstream_freshness``), on the
-  summary (``agents_stale_corpus``), and on its own CloudWatch metric
-  (``..._corpus_age_days``) so the dashboard can see the anchor age next to
-  the value it explains.
+  ``compute_and_emit`` therefore no longer lists, reads, clusters,
+  persists or emits anything for ``decision_artifacts/{date}/{agent}/``.
+  It short-circuits and returns a ``status: "retired"`` summary naming
+  the six families and the retiring issues — a future reader (of the SF
+  summary, of this module, or of the S3 prefix) can tell "deliberately
+  retired" from "producer broke" without re-deriving the history above.
+  ``extract_rationales`` / ``cluster_rationales`` / ``compute_concentration``
+  (the pure per-agent-parsing + TF-IDF clustering primitives) are left
+  intact and unit-tested: per alpha-engine-config-I8173 deliverable 4, if
+  a sweep ever finds one of these families alive again under a NEW path,
+  this module resumes its captures rather than staying suppressed.
+
+  Sweep result (I8173 deliverable 3): the fleet's only OTHER
+  ``freshness.assert_upstream_fresh`` call sites are the two in
+  ``thinktank/context.py`` (``regime_substrate``, ``news_aggregates``) —
+  both verified live 2026-08-22 (``regime_substrate`` last wrote
+  2026-08-22T17:17Z; ``news_aggregates`` was repointed at the live daily
+  producer by alpha-engine-config-I8174/crucible-research-PR725). No
+  other prefix orphaned by I7827/I7817 was left asserting freshness
+  anywhere in ``crucible-research`` or ``crucible-dashboard``.
 
 Composes with:
 
@@ -70,19 +77,12 @@ better C-level inner loop.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
-from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
-
-import boto3
-from botocore.config import Config as _BotoConfig
-
-from freshness import FreshnessVerdict, assert_upstream_fresh
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,37 @@ DEFAULT_CAPTURE_PREFIX = "decision_artifacts"
 DEFAULT_ANALYSIS_PREFIX = "decision_artifacts/_analysis"
 
 DEFAULT_WINDOW_DAYS = 56
+
+RETIRED_AGENT_FAMILIES: frozenset[str] = frozenset(
+    {
+        "ic_cio",
+        "macro_economist",
+        "sector_peer_review",
+        "sector_qual",
+        "sector_quant",
+        "thesis_update",
+    }
+)
+"""Every ``decision_artifacts/{date}/{agent}`` family this module ever read
+— the complete set ``extract_rationales`` had a branch for. The sole
+producer for all six was the retired multi-agent research graph's
+``_capture_if_enabled`` capture hook, deleted in
+alpha-engine-config-I7827 / crucible-research-PR685 (the graph itself,
+alpha-engine-config-I7817). Last write: 2026-07-11; verified empty
+2026-08-22. This is the written rationale alpha-engine-config-I8173
+deliverable 2 requires: naming the retiring change here, on the constant
+``compute_and_emit`` cites in its retirement summary, so a future reader
+sees an explicit RETIRED marker rather than an empty result
+indistinguishable from "producer broke"."""
+
+_RETIRED_REASON = (
+    "producer deleted alpha-engine-config-I7827 / crucible-research-PR685 "
+    "(the retired multi-agent research graph's decision-capture hook); "
+    "agent retirement sweep alpha-engine-config-I7817; last write "
+    "2026-07-11, verified empty 2026-08-22 "
+    "(alpha-engine-config-I8173 — do not re-publish the stale captures, "
+    "do not revive the producer)"
+)
 
 # Per-agent scope cap — bounds clustering wall-clock on agents with
 # unusually large rationale corpora (e.g. a quant agent that ran 50
@@ -135,27 +166,6 @@ that minor wording variation within a template (one extra adjective,
 slight reordering) still merges. Calibrate against real corpus once
 4+ weeks accumulated; v1 default."""
 
-#: Captures are produced by the Saturday weekly run, so a live agent's newest
-#: capture is at most ~7 days old. ``weekly`` tolerance (10d) absorbs one
-#: skipped Saturday; anything beyond it is a frozen producer, not a hiccup.
-CORPUS_CADENCE = "weekly"
-
-#: Why this DEGRADES rather than raises: this module runs as one stage of the
-#: weekly SF over ALL agent corpora at once. A retired agent's frozen captures
-#: are an expected, permanent condition, and raising on them would fail the
-#: stage for every live agent alongside it — trading one silent defect for a
-#: loud outage on unrelated work. The failure mode accepted is "an analysis
-#: artifact is written from a corpus that stopped moving"; the surfaces that
-#: record it are the ops alert from the primitive, the ``upstream_freshness``
-#: block on the persisted artifact itself, the ``agents_stale_corpus`` entry in
-#: the SF summary, and the ``_corpus_age_days`` CloudWatch metric.
-_CORPUS_DEGRADED_REASON = (
-    "weekly SF stage spans every agent corpus; a retired agent's frozen "
-    "captures must not fail the stage for live agents. Recorded on the "
-    "persisted _analysis payload (upstream_freshness), the SF summary "
-    "(agents_stale_corpus), a CloudWatch corpus-age metric, and an ops alert."
-)
-
 MIN_RATIONALES_FOR_CLUSTERING = 5
 """Below this count, clustering output is statistically meaningless —
 emit metric as None (skip) rather than report a noisy value."""
@@ -164,17 +174,6 @@ CHAR_NGRAM_RANGE = (3, 5)
 """Character n-gram range for TF-IDF. 3-5 catches morphological
 patterns ("the P/E", "ratio of") and short skeletal templates without
 exploding feature dimensionality."""
-
-DEFAULT_LOAD_WORKERS = 32
-"""Thread-pool width for the S3 artifact fetch stage. The 2026-07-03
-weekly run timed out at 900s with 240MB/1024MB memory used and zero
-log lines for 15 minutes: the serial per-key ``get_object`` loop
-(~33k keys × ~27ms RTT) exceeded the whole Lambda budget before
-clustering — the only CPU-heavy stage — ever ran (config#1650 item 3).
-The load is network-bound, so threads are the right lever; the default
-S3 client's connection pool is sized to match in ``compute_and_emit``
-(injected clients manage their own pool)."""
-
 
 # ── Per-agent rationale extraction ───────────────────────────────────────
 
@@ -449,254 +448,6 @@ def compute_concentration(
     return sum(sizes[:top_k]) / total
 
 
-# ── S3 corpus reading ────────────────────────────────────────────────────
-
-
-def _list_artifact_keys_in_window(
-    s3: Any,
-    *,
-    bucket: str,
-    capture_prefix: str,
-    end_date: datetime,
-    window_days: int,
-) -> list[str]:
-    """List every captured-artifact key under
-    ``{capture_prefix}/{Y}/{M}/{D}/`` for each day in the trailing
-    ``window_days`` ending at ``end_date``. Excludes ``_eval/``,
-    ``_eval_judge_only/``, ``_analysis/``, ``_cost/`` subtrees so we
-    only ingest production captures.
-    """
-    paginator = s3.get_paginator("list_objects_v2")
-    keys: list[str] = []
-
-    # List per-day to keep the prefix tight (one listing per day rather
-    # than one global listing across the whole bucket).
-    for day_offset in range(window_days):
-        day = end_date - timedelta(days=day_offset)
-        prefix = (
-            f"{capture_prefix}/{day.strftime('%Y')}/"
-            f"{day.strftime('%m')}/{day.strftime('%d')}/"
-        )
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if not key.endswith(".json"):
-                    continue
-                if "/_eval/" in key or "/_eval_judge_only/" in key:
-                    continue
-                if "/_analysis/" in key or "/_cost/" in key:
-                    continue
-                if "/_cost_raw/" in key:
-                    continue
-                keys.append(key)
-
-    return keys
-
-
-def _agent_id_from_key(key: str) -> str | None:
-    """Extract ``agent_id`` from an S3 key shaped
-    ``decision_artifacts/{Y}/{M}/{D}/{agent_id}/{run_id}.json``.
-    Returns None on unexpected layout (defensive)."""
-    parts = key.split("/")
-    # Find the last directory before the filename — that's the agent_id.
-    if len(parts) < 2:
-        return None
-    return parts[-2]
-
-
-def _capture_date_from_key(key: str) -> datetime | None:
-    """Extract the capture date from
-    ``{prefix}/{Y}/{M}/{D}/{agent_id}/{run_id}.json``. Returns None on an
-    unexpected layout — which becomes an ``undated`` freshness verdict, never
-    a silently-fresh one."""
-    parts = key.split("/")
-    if len(parts) < 5:
-        return None
-    year, month, day = parts[-5], parts[-4], parts[-3]
-    try:
-        return datetime(int(year), int(month), int(day), tzinfo=UTC)
-    except ValueError:
-        return None
-
-
-def _newest_capture_date(keys: list[str]) -> datetime | None:
-    """Newest parseable capture date across ``keys``; None when there are no
-    keys or none parse."""
-    dates = [d for d in (_capture_date_from_key(k) for k in keys) if d is not None]
-    return max(dates) if dates else None
-
-
-def _corpus_freshness(
-    artifact: str, keys: list[str], *, checked_at: datetime, alert: bool = True
-) -> FreshnessVerdict:
-    """Freshness of one capture corpus, from its newest key's date.
-
-    ``alert=False`` for the whole-corpus rollup whenever per-agent verdicts
-    exist: the per-agent artifact is the causal key (one frozen producer, one
-    notification), and alerting on both would page twice for one cause
-    (observability-policy §7.2a).
-    """
-    return assert_upstream_fresh(
-        artifact,
-        as_of=_newest_capture_date(keys),
-        cadence=CORPUS_CADENCE,
-        checked_at=checked_at,
-        on_stale="degrade",
-        degraded_reason=_CORPUS_DEGRADED_REASON,
-        source="crucible-research.evals.rationale_clustering",
-        alert=alert,
-    )
-
-
-def _load_artifact(s3: Any, *, bucket: str, key: str) -> dict[str, Any]:
-    """Load and JSON-parse one captured artifact. Returns the raw dict
-    rather than the typed ``DecisionArtifact`` model — we only need
-    ``agent_id`` and ``agent_output``, and tolerating schema drift
-    (additive-only fields) is preferable to hard-failing the whole
-    weekly clustering run on one stale artifact."""
-    raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-    return json.loads(raw)
-
-
-# ── Per-agent analysis output ────────────────────────────────────────────
-
-
-def _build_per_agent_output(
-    agent_id: str,
-    rationales: list[str],
-    clusters: list[list[int]],
-    concentration: float,
-    *,
-    window_start: datetime,
-    window_end: datetime,
-    freshness: FreshnessVerdict | None = None,
-    representatives_per_cluster: int = 3,
-) -> dict[str, Any]:
-    """Render the persisted per-agent analysis JSON. Includes cluster
-    sizes + top-N representatives per cluster so dashboard consumers
-    can show "what does this agent's #1 pattern look like?" without
-    re-reading the source captures."""
-    # Sort clusters by size descending so top_k clusters appear first.
-    sorted_clusters = sorted(clusters, key=len, reverse=True)
-    cluster_summaries: list[dict[str, Any]] = []
-    for cluster in sorted_clusters:
-        reps = [
-            rationales[idx][:500]  # truncate each rep to 500 chars for readability
-            for idx in cluster[:representatives_per_cluster]
-        ]
-        cluster_summaries.append(
-            {
-                "size": len(cluster),
-                "fraction": len(cluster) / len(rationales) if rationales else 0.0,
-                "representatives": reps,
-            }
-        )
-
-    return {
-        "schema_version": 1,
-        "agent_id": agent_id,
-        "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
-        "n_rationales": len(rationales),
-        "n_clusters": len(clusters),
-        "top3_concentration": concentration,
-        "clusters": cluster_summaries,
-        "computed_at": datetime.now(UTC).isoformat(),
-        # The artifact is dated ``computed_at``; its INPUT may be much older.
-        # Without this block the two are indistinguishable to any reader.
-        # ``None`` only when the caller passed no verdict at all, which is
-        # itself an unobserved state and reads as such.
-        "upstream_freshness": freshness.as_record() if freshness is not None else None,
-        "degraded": bool(freshness is not None and not freshness.is_fresh),
-    }
-
-
-def _persist_analysis(
-    s3: Any,
-    *,
-    bucket: str,
-    analysis_prefix: str,
-    agent_id: str,
-    end_date: datetime,
-    payload: dict[str, Any],
-) -> str:
-    """Write per-agent analysis JSON to
-    ``{analysis_prefix}/{agent_id}/{YYYY-WW}.json``. ISO week is the
-    natural cadence (one analysis per Saturday SF run)."""
-    iso_year, iso_week, _ = end_date.isocalendar()
-    key = f"{analysis_prefix}/{agent_id}/{iso_year}-W{iso_week:02d}.json"
-    body = json.dumps(payload, indent=2).encode("utf-8")
-    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
-    return key
-
-
-# ── CloudWatch metric emission ───────────────────────────────────────────
-
-
-def _emit_concentration_metric(
-    cw: Any,
-    *,
-    namespace: str,
-    metric_name: str,
-    agent_id: str,
-    concentration: float,
-    n_rationales: int,
-    timestamp: datetime,
-    freshness: FreshnessVerdict | None = None,
-) -> None:
-    """One datapoint per agent_id. Dimensioned by ``judged_agent_id``
-    to match ``agent_quality_score`` so the dashboard can join on the
-    same dim. ``n_rationales`` published as a separate metric so the
-    operator can see when concentration is reported on a thin sample."""
-    cw.put_metric_data(
-        Namespace=namespace,
-        MetricData=[
-            {
-                "MetricName": metric_name,
-                "Dimensions": [
-                    {"Name": "judged_agent_id", "Value": agent_id},
-                ],
-                "Value": float(concentration),
-                "Unit": "None",
-                "Timestamp": timestamp,
-            },
-            {
-                "MetricName": f"{metric_name}_n_rationales",
-                "Dimensions": [
-                    {"Name": "judged_agent_id", "Value": agent_id},
-                ],
-                "Value": float(n_rationales),
-                "Unit": "Count",
-                "Timestamp": timestamp,
-            },
-            # Age of the corpus the concentration figure was computed over, on
-            # the same dimension and in the same call as the figure it
-            # explains. An undated corpus publishes the sentinel -1 rather than
-            # nothing: a metric that goes silent renders as "no data", and no
-            # data is never green (observability-policy §8.3).
-            *(
-                [
-                    {
-                        "MetricName": f"{metric_name}_corpus_age_days",
-                        "Dimensions": [
-                            {"Name": "judged_agent_id", "Value": agent_id}
-                        ],
-                        "Value": float(
-                            freshness.age_days
-                            if freshness is not None and freshness.age_days is not None
-                            else -1.0
-                        ),
-                        "Unit": "Count",
-                        "Timestamp": timestamp,
-                    }
-                ]
-                if freshness is not None
-                else []
-            ),
-        ],
-    )
-
-
 # ── Top-level pipeline ───────────────────────────────────────────────────
 
 
@@ -715,285 +466,59 @@ def compute_and_emit(
     emit_metrics: bool = True,
     max_rationales_per_agent: int = DEFAULT_MAX_RATIONALES_PER_AGENT,
 ) -> dict[str, Any]:
-    """Read captured artifacts in the trailing window, cluster
-    rationales per ``agent_id``, persist per-agent analysis JSON, and
-    emit CloudWatch concentration metrics.
+    """RETIRED (alpha-engine-config-I8173) — see the module docstring.
 
-    Returns a summary dict suitable for SF inspection. Per-agent
-    failures are logged + accumulated rather than raised, matching
-    the eval orchestrator's "observability of observability" pattern.
+    Used to read ``{capture_prefix}/{Y}/{M}/{D}/{agent_id}/*.json`` in the
+    trailing window, cluster rationales per ``agent_id``, persist per-agent
+    analysis JSON, and emit CloudWatch concentration metrics. Every agent
+    family it ever read (``RETIRED_AGENT_FAMILIES``) lost its sole producer
+    to alpha-engine-config-I7827 / crucible-research-PR685; the sweep for
+    this issue found no other family alive under a new path
+    (alpha-engine-config-I8173 deliverable 4). A consumer silently drawing
+    conclusions from the resulting 42-day-frozen corpus is worse than one
+    that does nothing, so this now performs **no S3 listing, no S3 read, no
+    clustering, no S3 persist, and no CloudWatch emission** — ``bucket``,
+    ``capture_prefix``, ``analysis_prefix``, ``namespace``, ``metric_name``,
+    ``similarity_threshold``, ``s3_client``, ``cloudwatch_client``,
+    ``emit_metrics`` and ``max_rationales_per_agent`` are accepted only to
+    keep the call signature stable for ``lambda/rationale_clustering_handler.py``
+    and are otherwise unused.
 
-    Agents with fewer than ``MIN_RATIONALES_FOR_CLUSTERING`` rationales
-    in the window are skipped (concentration on a thin sample is
-    statistically meaningless); the summary records them under
-    ``skipped_thin_sample``.
+    Returns a summary dict shaped like the live pipeline's used to be
+    (``load_failures`` / ``cluster_failures`` stay present and empty so the
+    handler's ``has_failures`` check keeps working), plus an explicit
+    ``status: "retired"`` and ``retired_agent_families`` / ``retired_reason``
+    so a future reader of the SF summary — or a re-registration of this
+    stage — can tell "deliberately retired" from "producer broke" without
+    re-deriving the history in the module docstring.
     """
-    s3 = s3_client or boto3.client(
-        "s3",
-        config=_BotoConfig(max_pool_connections=DEFAULT_LOAD_WORKERS * 2),
-    )
-    cw = cloudwatch_client or (boto3.client("cloudwatch") if emit_metrics else None)
     end = end_time or datetime.now(UTC)
     window_start = end - timedelta(days=window_days)
 
-    keys = _list_artifact_keys_in_window(
-        s3,
-        bucket=bucket,
-        capture_prefix=capture_prefix,
-        end_date=end,
-        window_days=window_days,
-    )
-
     logger.info(
-        "[rationale_clustering] discovered %d artifacts in window=[%s, %s]",
-        len(keys), window_start.isoformat(), end.isoformat(),
+        "[rationale_clustering] RETIRED — no decision_artifacts read "
+        "performed for families=%s (alpha-engine-config-I8173: producer "
+        "retired by alpha-engine-config-I7827/crucible-research-PR685, "
+        "agent retirement sweep alpha-engine-config-I7817)",
+        sorted(RETIRED_AGENT_FAMILIES),
     )
 
-    # Whole-corpus freshness. An EMPTY window yields an ``undated`` verdict —
-    # the case where per-agent checks below would say nothing at all, because
-    # there are no agents left to iterate. Zero artifacts is the loudest form
-    # of a frozen upstream, and it previously produced a summary that looked
-    # like a clean run with nothing to do.
-    corpus_verdict = _corpus_freshness(
-        f"{capture_prefix}/ (all agents)",
-        keys,
-        checked_at=end,
-        # Alert here only when there are no keys at all — with keys present the
-        # per-agent verdicts below carry the notification, one per frozen
-        # producer. With none, nothing downstream would speak.
-        alert=not keys,
-    )
-
-    # Group keys by agent_id, chronologically. Keys embed zero-padded
-    # Y/M/D so a lexicographic sort IS date order (same-day ordering is
-    # immaterial). Chronological order matters twice: the key-level cap
-    # below keeps the most-recent tail, and the post-load rationale cap
-    # slices ``[-max:]`` — both assume oldest-first lists. (The listing
-    # itself iterates newest-day-first, which previously made the
-    # post-load "most-recent" cap actually keep the OLDEST tail.)
-    keys_by_agent: dict[str, list[str]] = defaultdict(list)
-    for key in keys:
-        agent_id = _agent_id_from_key(key)
-        if agent_id is None:
-            continue
-        keys_by_agent[agent_id].append(key)
-
-    # Key-level scope cap — fetch at most ``max_rationales_per_agent``
-    # most-recent artifacts per agent BEFORE any get_object call. The
-    # corpus grows every day; without a pre-fetch bound the load stage
-    # eventually re-times-out no matter how parallel it is. An artifact
-    # typically yields ≥1 rationale, so N keys keep the post-load cap
-    # near-saturated; that cap still applies afterwards because one
-    # artifact can yield MANY rationales. Cap firings are logged AND
-    # reported in the summary (no silent caps).
-    # Per-agent corpus freshness, computed from the DISCOVERED keys (before
-    # any cap): the cap changes what is clustered, never how old the corpus is.
-    agent_freshness: dict[str, FreshnessVerdict] = {
-        agent_id: _corpus_freshness(
-            f"{capture_prefix}/*/{agent_id}", agent_keys, checked_at=end
-        )
-        for agent_id, agent_keys in sorted(keys_by_agent.items())
-    }
-    agents_stale_corpus = [
-        v.as_record() for _, v in sorted(agent_freshness.items()) if not v.is_fresh
-    ]
-
-    agents_key_capped: list[dict[str, Any]] = []
-    fetch_list: list[tuple[str, str]] = []
-    for agent_id in sorted(keys_by_agent):
-        agent_keys = sorted(keys_by_agent[agent_id])
-        if len(agent_keys) > max_rationales_per_agent:
-            agents_key_capped.append(
-                {
-                    "agent_id": agent_id,
-                    "discovered_keys": len(agent_keys),
-                    "fetched_keys": max_rationales_per_agent,
-                }
-            )
-            logger.warning(
-                "[rationale_clustering] agent %s keys capped %d → %d "
-                "(pre-fetch scope cap — bounds S3 load wall-clock, "
-                "config#1650 item 3)",
-                agent_id, len(agent_keys), max_rationales_per_agent,
-            )
-            agent_keys = agent_keys[-max_rationales_per_agent:]
-        fetch_list.extend((agent_id, k) for k in agent_keys)
-
-    # Parallel fetch. boto3 clients are thread-safe, and ``pool.map``
-    # preserves input order so ``by_agent`` stays chronological per
-    # agent. Per-key failures keep the existing fail-soft accounting
-    # (WARN + load_failures) — one stale artifact must not fail the
-    # weekly clustering run.
-    by_agent: dict[str, list[str]] = defaultdict(list)
-    load_failures: list[dict[str, str]] = []
-
-    def _fetch(
-        item: tuple[str, str],
-    ) -> tuple[str, str, dict[str, Any] | None, str | None]:
-        item_agent_id, item_key = item
-        try:
-            artifact = _load_artifact(s3, bucket=bucket, key=item_key)
-            return item_agent_id, item_key, artifact, None
-        except Exception as exc:  # noqa: BLE001
-            return item_agent_id, item_key, None, str(exc)
-
-    with ThreadPoolExecutor(max_workers=DEFAULT_LOAD_WORKERS) as pool:
-        for agent_id, key, artifact, error in pool.map(_fetch, fetch_list):
-            if error is not None:
-                load_failures.append({"key": key, "error": error})
-                logger.warning(
-                    "[rationale_clustering] load failure key=%s err=%s",
-                    key, error,
-                )
-                continue
-            rationales = extract_rationales(
-                artifact.get("agent_id", agent_id),
-                artifact.get("agent_output") or {},
-            )
-            by_agent[agent_id].extend(rationales)
-
-    # Cluster + emit per agent.
-    per_agent_summary: list[dict[str, Any]] = []
-    skipped_thin: list[dict[str, Any]] = []
-    cluster_failures: list[dict[str, str]] = []
-    truncated_agents: list[dict[str, int]] = []  # scope-cap audit
-
-    for agent_id, rationales in sorted(by_agent.items()):
-        if len(rationales) < MIN_RATIONALES_FOR_CLUSTERING:
-            skipped_thin.append(
-                {"agent_id": agent_id, "n_rationales": len(rationales)}
-            )
-            continue
-        # Scope cap — Counterfactual Lambda #228 precedent. Truncate to
-        # the N most-recent rationales (preserves clustering signal on
-        # the trailing-edge corpus; the older tail informs less than
-        # recent template-drift).
-        if len(rationales) > max_rationales_per_agent:
-            truncated_agents.append({
-                "agent_id": agent_id,
-                "original_n": len(rationales),
-                "capped_n": max_rationales_per_agent,
-            })
-            logger.warning(
-                "[rationale_clustering] agent %s rationales capped %d → %d "
-                "(scope-cap fired — bound clustering wall-clock per "
-                "alpha-engine-backtester #228 precedent)",
-                agent_id, len(rationales), max_rationales_per_agent,
-            )
-            rationales = rationales[-max_rationales_per_agent:]
-
-        try:
-            clusters = cluster_rationales(
-                rationales, similarity_threshold=similarity_threshold,
-            )
-            concentration = compute_concentration(clusters, top_k=3)
-        except Exception as exc:  # noqa: BLE001
-            cluster_failures.append({"agent_id": agent_id, "error": str(exc)})
-            logger.exception(
-                "[rationale_clustering] cluster failure agent=%s",
-                agent_id,
-            )
-            continue
-
-        verdict = agent_freshness.get(agent_id)
-        payload = _build_per_agent_output(
-            agent_id, rationales, clusters, concentration,
-            window_start=window_start, window_end=end,
-            freshness=verdict,
-        )
-
-        try:
-            analysis_key = _persist_analysis(
-                s3,
-                bucket=bucket,
-                analysis_prefix=analysis_prefix,
-                agent_id=agent_id,
-                end_date=end,
-                payload=payload,
-            )
-        except Exception as exc:  # noqa: BLE001
-            cluster_failures.append(
-                {"agent_id": agent_id, "stage": "persist", "error": str(exc)}
-            )
-            logger.exception(
-                "[rationale_clustering] persist failure agent=%s",
-                agent_id,
-            )
-            continue
-
-        if cw is not None:
-            try:
-                _emit_concentration_metric(
-                    cw,
-                    namespace=namespace,
-                    metric_name=metric_name,
-                    agent_id=agent_id,
-                    concentration=concentration,
-                    n_rationales=len(rationales),
-                    timestamp=end,
-                    freshness=verdict,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Metric emission is observability of observability —
-                # don't fail the run if CloudWatch hiccups.
-                cluster_failures.append(
-                    {
-                        "agent_id": agent_id,
-                        "stage": "metric_emit",
-                        "error": str(exc),
-                    }
-                )
-                logger.warning(
-                    "[rationale_clustering] metric emission failed agent=%s err=%s",
-                    agent_id, exc,
-                )
-
-        per_agent_summary.append(
-            {
-                "agent_id": agent_id,
-                "n_rationales": len(rationales),
-                "n_clusters": len(clusters),
-                "top3_concentration": concentration,
-                "analysis_key": analysis_key,
-                "corpus_age_days": (
-                    round(verdict.age_days, 2)
-                    if verdict is not None and verdict.age_days is not None
-                    else None
-                ),
-                "corpus_freshness": verdict.status if verdict is not None else "undated",
-            }
-        )
-
-        logger.info(
-            "[rationale_clustering] agent=%s n=%d clusters=%d top3_conc=%.3f",
-            agent_id, len(rationales), len(clusters), concentration,
-        )
-
-    summary = {
+    return {
+        "status": "retired",
+        "retired_agent_families": sorted(RETIRED_AGENT_FAMILIES),
+        "retired_reason": _RETIRED_REASON,
         "window_start": window_start.isoformat(),
         "window_end": end.isoformat(),
-        "artifacts_discovered": len(keys),
-        "agents_analyzed": len(per_agent_summary),
-        "agents_skipped_thin_sample": skipped_thin,
-        "load_failures": load_failures,
-        "cluster_failures": cluster_failures,
-        "agents_truncated_by_scope_cap": truncated_agents,
-        "agents_key_capped": agents_key_capped,
-        "artifacts_fetched": len(fetch_list),
+        "artifacts_discovered": 0,
+        "agents_analyzed": 0,
+        "agents_skipped_thin_sample": [],
+        "load_failures": [],
+        "cluster_failures": [],
+        "agents_truncated_by_scope_cap": [],
+        "agents_key_capped": [],
+        "artifacts_fetched": 0,
         "max_rationales_per_agent": max_rationales_per_agent,
-        "corpus_freshness": corpus_verdict.as_record(),
-        "agents_stale_corpus": agents_stale_corpus,
-        "per_agent": per_agent_summary,
+        "corpus_freshness": None,
+        "agents_stale_corpus": [],
+        "per_agent": [],
     }
-
-    logger.info(
-        "[rationale_clustering] done agents=%d skipped=%d load_fail=%d "
-        "cluster_fail=%d stale_corpora=%d",
-        len(per_agent_summary),
-        len(skipped_thin),
-        len(load_failures),
-        len(cluster_failures),
-        len(agents_stale_corpus),
-    )
-
-    return summary
