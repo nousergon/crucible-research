@@ -180,6 +180,63 @@ def _resolve_composite_defs() -> dict[str, list[tuple[str, float, bool]]]:
 
 _COMPOSITE_DEFS = _resolve_composite_defs()
 
+
+# ── Momentum-horizon challenger (alpha-engine-config-I7538) ─────────────────
+# The champion `momentum_score` puts 0.30 on `momentum_20d` and 0.10 on
+# `momentum_5d` — 40% of the pillar at horizons of one month or less. That is
+# the window where cross-sectional momentum REVERSES rather than persists
+# (Jegadeesh 1990), and it carries no 12-1 skip-month term at all: the horizon
+# the Jegadeesh-Titman premium is actually defined over. `return_120d` is
+# 6-month INCLUDING the most recent month, so it is itself contaminated by the
+# reversal effect.
+#
+# That matters because attractiveness ranks the FULL ~903-name universe and its
+# top-20 is the champion cut feeding the predictor. The scanner's objective is
+# names attractive over ~1 year.
+#
+# Measured on the 2026-08-14 snapshot over 901 names (Spearman):
+#     mom_12_1_pct vs momentum_20d   -0.14
+#     mom_12_1_pct vs return_60d     -0.03
+#     mom_12_1_pct vs return_120d    +0.46
+# The long-horizon factor is not a stronger version of the short-horizon ones;
+# it points the other way. So this is a genuine fork, not a tuning nudge.
+#
+# This definition differs from the champion in `momentum_score` ONLY. Every
+# other pillar is the champion's, by construction rather than by copy (see
+# below) — an arm that varied two things at once could not attribute its own
+# result. champion-challenger-policy.md §4: hold everything constant except
+# the thing under test.
+_CHALLENGER_MOMENTUM_DEF: list[tuple[str, float, bool]] = [
+    ("mom_12_1_pct", 0.40, False),       # 12-1 skip-month — the RSTR horizon
+    ("return_120d", 0.25, False),        # 6-month
+    ("dist_from_52w_high", 0.20, False),  # 12-month proximity-to-high
+    ("return_60d", 0.15, False),         # 3-month, retained at reduced weight
+]
+"""Challenger `momentum_score` components. `momentum_5d` and `momentum_20d`
+are dropped outright rather than down-weighted: a reduced weight on a term
+pointing the wrong way still points the wrong way, and the experiment is
+cleaner if the arms disagree about the horizon rather than about its size."""
+
+
+CHALLENGER_PROFILE_PREFIX = "factors/profiles_shadow/mom121"
+"""S3 prefix for the challenger arm's profiles. Kept OUT of
+`factors/profiles/` so no champion consumer can pick it up by listing, and so
+`latest.json` stays unambiguously the champion's."""
+
+
+def challenger_composite_defs() -> dict[str, list[tuple[str, float, bool]]]:
+    """The champion definitions with `momentum_score` swapped for the 12-1 one.
+
+    Derived from `_COMPOSITE_DEFS` at call time rather than frozen as a
+    literal, so a future change to any OTHER pillar automatically applies to
+    both arms. A frozen copy would silently turn this into a two-variable
+    experiment the first time someone retuned `value_score`.
+    """
+    defs = {name: list(components) for name, components in _COMPOSITE_DEFS.items()}
+    defs["momentum_score"] = list(_CHALLENGER_MOMENTUM_DEF)
+    return defs
+
+
 # Derived raw factor columns — computed by ``_add_derived_factors`` before
 # the percentile-rank step. Each entry is (output_col, fn) where fn takes
 # the merged dataframe and returns the new Series. Listed separately so the
@@ -321,6 +378,7 @@ def compute_factor_composites(
     fundamental_df: pd.DataFrame,
     sector_map: dict[str, str],
     inst_ownership_df: pd.DataFrame | None = None,
+    composite_defs: dict[str, list[tuple[str, float, bool]]] | None = None,
 ) -> pd.DataFrame:
     """Compute the 6 factor composites per ticker.
 
@@ -384,7 +442,9 @@ def compute_factor_composites(
     #   sustainable_growth_rate = roe × (1 - payout_ratio)
     merged = _add_derived_factors(merged)
 
-    for composite, components in _COMPOSITE_DEFS.items():
+    defs = composite_defs or _COMPOSITE_DEFS
+
+    for composite, components in defs.items():
         # Compute within-sector percentile rank for each component
         component_ranks: list[tuple[str, float, pd.Series]] = []
         for factor_col, weight, invert in components:
@@ -413,7 +473,7 @@ def compute_factor_composites(
         merged[composite] = composite_vals
         merged[f"{composite[:-6]}_n"] = composite_n  # quality_n, momentum_n, etc.
 
-    keep_cols = ["ticker", "sector"] + list(_COMPOSITE_DEFS.keys()) + [f"{c[:-6]}_n" for c in _COMPOSITE_DEFS.keys()]
+    keep_cols = ["ticker", "sector"] + list(defs.keys()) + [f"{c[:-6]}_n" for c in defs.keys()]
     return merged[keep_cols].copy()
 
 
@@ -422,6 +482,8 @@ def write_factor_profiles_to_s3(
     run_date: str,
     bucket: str | None = None,
     provenance: dict | None = None,
+    key_prefix: str = "factors/profiles",
+    write_latest: bool = True,
 ) -> str:
     """Write factor profiles to S3 as `{date}/by_ticker.json`.
 
@@ -439,12 +501,19 @@ def write_factor_profiles_to_s3(
     to be recoverable from an artifact rather than inferred from the
     calendar (principles §1, transparency).
 
+    ``key_prefix`` / ``write_latest`` exist for the observe-only challenger
+    arm (alpha-engine-config-I7538), which writes the identical payload shape
+    under its own prefix. ``write_latest=False`` for a shadow arm is
+    deliberate: `latest.json` is the champion's cache-warm pointer, and a
+    shadow write landing there would silently hand every champion consumer
+    the challenger's scores.
+
     Returns the S3 key written.
     """
     import boto3
 
     bucket = bucket or os.environ.get("S3_BUCKET", "alpha-engine-research")
-    key = f"factors/profiles/{run_date}/by_ticker.json"
+    key = f"{key_prefix}/{run_date}/by_ticker.json"
 
     # Convert to {ticker: {field: value}} dict, dropping NaN scores
     payload: dict[str, dict] = {}
@@ -466,14 +535,15 @@ def write_factor_profiles_to_s3(
     if provenance is not None:
         s3.put_object(
             Bucket=bucket,
-            Key=f"factors/profiles/{run_date}/provenance.json",
+            Key=f"{key_prefix}/{run_date}/provenance.json",
             Body=json.dumps(provenance, indent=2),
             ContentType="application/json",
         )
 
     # Also write `latest.json` sidecar for cache-warm convenience
-    latest_key = "factors/profiles/latest.json"
-    s3.put_object(Bucket=bucket, Key=latest_key, Body=body, ContentType="application/json")
+    if write_latest:
+        latest_key = f"{key_prefix}/latest.json"
+        s3.put_object(Bucket=bucket, Key=latest_key, Body=body, ContentType="application/json")
 
     logger.info(
         "Factor profiles written to s3://%s/%s (%d tickers, %d composite columns)",
@@ -782,6 +852,41 @@ def compute_and_write_factor_profiles(
         sector_map=sector_map,
         inst_ownership_df=inst_ownership_df,
     )
+
+    # Momentum-horizon challenger arm (alpha-engine-config-I7538). Same inputs,
+    # same sector map, same 13F snapshot, same code path — only the
+    # `momentum_score` component definition differs. Computed here rather than
+    # in a separate job so the two arms are guaranteed to see byte-identical
+    # inputs; scoring them off different snapshots would confound the horizon
+    # question with a data-vintage difference.
+    #
+    # Fail-soft, unlike the champion write above: this is OBSERVE-only shadow
+    # substrate and must never be able to red a Scanner run whose champion
+    # output is fine. A failure here means the challenger cut is absent from
+    # the membership artifact, which `build_universe_membership` records as a
+    # miss for that arm rather than substituting champion scores.
+    try:
+        challenger_profiles = compute_factor_composites(
+            technical_df=technical_df,
+            fundamental_df=fundamental_df,
+            sector_map=sector_map,
+            inst_ownership_df=inst_ownership_df,
+            composite_defs=challenger_composite_defs(),
+        )
+        write_factor_profiles_to_s3(
+            challenger_profiles,
+            run_date_str,
+            bucket=bucket,
+            key_prefix=CHALLENGER_PROFILE_PREFIX,
+            write_latest=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only arm, never reds the run
+        logger.warning(
+            "[factor_scoring] mom121 challenger profiles not written (%s) — "
+            "the challenger cut will be ABSENT from this cycle's membership "
+            "artifact and recorded as a miss for that arm (I7538)",
+            exc,
+        )
 
     return write_factor_profiles_to_s3(
         profiles,

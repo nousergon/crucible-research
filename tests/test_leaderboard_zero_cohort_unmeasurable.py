@@ -47,7 +47,7 @@ def _no_matured_cohorts():
     case. An immature cohort is covered in test_leaderboard_realized_returns."""
     with (
         patch("scoring.leaderboard_producers._cohort_dates", return_value=["2026-06-01", "2026-06-10"]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={}),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({}, {}, {})),
         patch("scoring.leaderboard_producers._get_json", return_value=None),
     ):
         yield
@@ -91,11 +91,16 @@ def test_no_cohorts_at_all_is_its_own_reason():
 
 def test_a_measurable_leaderboard_still_reports_ok():
     """The guard must not swallow real results — n_dates > 0 stays ok."""
-    scored = {"leaderboard_id": "x", "n_dates": 3, "specs": [{"name": "a"}]}
+    scored = {
+        "leaderboard_id": "x",
+        "n_dates": 3,
+        "specs": [{"name": "a"}],
+        "horizons": [{"horizon_days": 21, "status": "ok", "reason": None, "n_dates": 3, "specs": [{"name": "a"}]}],
+    }
     with (
         patch("scoring.leaderboard_producers._cohort_dates", return_value=["2026-07-02"]),
-        patch("scoring.leaderboard_producers._resolve_realized_returns", return_value={"2026-07-02": {}}),
-        patch("scoring.leaderboard_producers.score_leaderboard", return_value=scored),
+        patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({21: {"2026-07-02": {}}}, {}, {})),
+        patch("scoring.leaderboard_producers.score_multi_horizon", return_value=scored),
         patch("scoring.leaderboard_producers._get_json", return_value=None),
     ):
         res = build_producer_leaderboard(_FakeS3(), "bkt", "2026-07-29", write=False)

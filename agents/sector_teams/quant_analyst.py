@@ -14,15 +14,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
-from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_anthropic_safe,
     invoke_react_with_recovery,
     is_step_budget_exhausted_sentinel,
     make_agent_llm,
     make_tool_use_repair_hook,
 )
+from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
+from agents.langchain_utils import get_final_text as _get_final_text
 from agents.langchain_utils import serialize_transcript as _serialize_transcript
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
@@ -348,7 +349,7 @@ def run_quant_analyst(
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
         # accumulates into the active ``track_llm_cost`` frame opened
-        # by the outer ``sector_team_node`` in research_graph.py.
+        # by the outer ``sector_team_node`` in the retired research graph.
         result = invoke_react_with_recovery(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
@@ -409,7 +410,8 @@ def run_quant_analyst(
                 f"[quant:{team_id}] ReAct loop produced empty final_text — "
                 f"nothing to extract structured picks from. tool_calls={len(tool_calls)}"
             )
-        structured_llm = llm.with_structured_output(
+        structured_llm = bind_structured_output(
+            llm,
             QuantAnalystOutput,
             include_raw=True,
         )

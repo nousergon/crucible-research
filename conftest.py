@@ -18,6 +18,9 @@ which happens during test collection before per-test fixtures fire.
 from __future__ import annotations
 
 import os
+import sys
+import types
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -68,3 +71,187 @@ def _clear_arctic_union_cache():
     _ARCTIC_UNION_CACHE.clear()
     yield
     _ARCTIC_UNION_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _stage_coverage_absent_unless_stubbed(monkeypatch):
+    """Default-deny the config-I7214 stage-coverage primitive in tests.
+
+    Every weekly-SF-backed handler in ``lambda/`` calls
+    ``krepis.stage_coverage.assert_stage_coverage`` immediately before it
+    returns. That function builds its OWN boto3 S3 and CloudWatch clients
+    and reads a registry object out of S3 — it does not inherit a test's
+    ``patch("boto3.client")``. So the moment krepis 0.59.4 actually
+    published the module, EVERY handler test that runs a handler end to
+    end began issuing live AWS calls; on the CI runner (no credentials,
+    no route) those retried until the job wedged and the runner was killed
+    (run 31817900321 — cancelled after 2m30s with no test output past
+    collection, which reads as infrastructure flakiness rather than as the
+    test defect it is).
+
+    ``None`` in ``sys.modules`` forces the handler's lazy import to raise
+    ``ImportError`` deterministically. That keeps the suite hermetic AND
+    makes "the lib is missing" a SIMULATED precondition rather than an
+    ambient property of whatever krepis is installed — the assumption that
+    silently expired under this suite.
+
+    ``stub_stage_coverage`` overrides this for tests that need to see a
+    verdict land (monkeypatch reverts LIFO at teardown).
+    """
+    monkeypatch.setitem(sys.modules, "krepis.stage_coverage", None)
+    yield
+
+
+@pytest.fixture
+def stub_stage_coverage(monkeypatch, _stage_coverage_absent_unless_stubbed):
+    """Simulate ``krepis.stage_coverage`` being present.
+
+    The primitive lives in krepis (relocated from an initial
+    ``nousergon_lib.stage_coverage`` landing — nousergon-lib-PR314 merged,
+    PR315 removes the duplicate — because half its callers are bash
+    launchers invoking ``python -m krepis.stage_coverage`` and krepis is
+    published rather than git-pinned). It ships from krepis 0.59.4, which
+    this repo's ``requirements.txt`` floor now requires.
+
+    Tests that need to see a verdict land in a handler's payload use this
+    fixture to inject a fake submodule into ``sys.modules`` ahead of the
+    handler's lazy import, so the import succeeds and returns a
+    controllable mock — a fake rather than the real module because the
+    real one talks to S3 and CloudWatch. Returns the mock so a test can
+    assert on call args (stage name, run_date, window_start) or set
+    ``side_effect``/``return_value``.
+    """
+    mock_assert = MagicMock(return_value={"status": "COVERED", "stage": "stub"})
+    fake_module = types.ModuleType("krepis.stage_coverage")
+    fake_module.assert_stage_coverage = mock_assert
+    monkeypatch.setitem(sys.modules, "krepis.stage_coverage", fake_module)
+    yield mock_assert
+
+
+@pytest.fixture
+def live_router_resolution():
+    """Opt OUT of the autouse resolver stub below.
+
+    Requested by tests whose subject IS ``resolve_group_spec`` — they fake
+    krepis' registry read (``resolve_group_structured``) and assert on the spec
+    the REAL resolver builds from it, which the stub would replace wholesale.
+    Still hermetic: no network, no registry file, no credential.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _router_resolution_is_stubbed_unless_a_test_says_otherwise(monkeypatch, request):
+    """No unit test performs a LIVE router group resolution.
+
+    ``agents.langchain_utils.make_agent_llm`` resolves every capability class
+    through ``krepis.router.resolve_group_spec`` (alpha-engine-config-I7005).
+    That resolver health-probes the local egress proxy and the router edge, and
+    on a CI runner neither exists and no consumer credential is resolvable — so
+    it correctly FAILS CLOSED with ``ValueError: No model in group 'low' is
+    reachable ...`` (model-router-policy R20). Nine tests that only ever wanted
+    a stand-in chat model went red on that, and every one of them would have
+    been asserting the runner's network rather than the code under test.
+
+    So the resolution is stubbed for the whole suite, at the seam the factory
+    actually imports. The fake returns a router-edge route, which is also what
+    keeps ``_assert_routed_through_the_proxy`` satisfied from any declared
+    context.
+
+    This does NOT weaken the guards on the factory itself: every property of
+    the real resolution — that the client is bound to the returned spec, that
+    the context is declared and passed verbatim, that a direct-provider route
+    raises, that a resolver failure propagates — is asserted in
+    ``tests/test_agent_llm_factory.py``, which installs its OWN resolver per
+    test. A later ``monkeypatch``/``patch`` of the same attribute wins over
+    this one and is restored to it at teardown, so opting out is just patching.
+    """
+    if "live_router_resolution" in request.fixturenames:
+        yield
+        return
+
+    try:
+        import krepis.router as krepis_router
+    except ImportError:
+        yield
+        return
+
+    from krepis.llm_config import ModelSpec
+
+    def _stub_spec(max_tokens):
+        """A REAL ``ModelSpec``, not a duck type.
+
+        ``agents.langchain_utils`` reads four attributes off it, but the same
+        resolver serves ``producers/single_agent.py``, which hands the spec
+        straight to ``krepis.llm.LLMClient`` — that reads
+        ``supports_automatic_prefix_caching`` and would ``AttributeError`` on a
+        hand-rolled stand-in. Constructing the real dataclass keeps the stub
+        honest about the contract every consumer of the resolver actually has.
+        """
+        return ModelSpec(
+            provider="litellm_proxy",
+            model="stub-model",
+            max_tokens=max_tokens if max_tokens is not None else 4096,
+            base_url="https://router.invalid/v1",
+            api_key_env=None,  # placeholder auth: no credential to resolve
+            registry_id="litellm:group:stub",
+        )
+
+    def _stub_resolve(group, *, exec_context=None, wire=None, max_tokens=None, **kw):
+        route = {
+            "route": "litellm_proxy",
+            "registry_id": f"litellm:group:{group}",
+            "primary_registry_id": f"litellm:group:{group}",
+            "deployment_id": f"{group}-stub",
+            "provider": "litellm",
+            "api_base_url": "https://router.invalid/v1",
+            # Echo the DECLARED context (R29) rather than inventing one, so a
+            # test that declares `lambda` still exercises the guard's
+            # non-laptop branch.
+            "exec_context": exec_context or "laptop",
+            "skipped_entries": [],
+        }
+        return _stub_spec(max_tokens), route
+
+    monkeypatch.setattr(krepis_router, "resolve_group_spec", _stub_resolve, raising=True)
+    yield
+
+
+@pytest.fixture
+def live_freshness_alerts():
+    """Opt OUT of the autouse alert stub below.
+
+    Requested by the one test whose subject IS the publish path — it fakes
+    ``ops_alerts`` to raise and asserts the transport failure is swallowed
+    without losing the detection. Still hermetic: nothing leaves the process.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def freshness_alerts(monkeypatch, request):
+    """No unit test publishes a REAL upstream-staleness alert.
+
+    ``freshness.assert_upstream_fresh`` notifies through
+    ``ops_alerts.publish_ops_alert`` → ``krepis.alerts.publish`` (SNS) +
+    flow-doctor (Telegram). Consumers call it on every load, so leaving it
+    live would page the operator from the test suite and make hermeticity
+    depend on which credentials happen to be absent.
+
+    The seam replaced is ``freshness._publish``, i.e. the transport only —
+    the detection, the ERROR log, the raise/degrade decision and the verdict
+    a consumer persists are all still exercised for real. Yields the list of
+    ``{"verdict", "source", "severity"}`` records so a test can assert that
+    staleness DID alert.
+    """
+    published: list[dict] = []
+    if "live_freshness_alerts" in request.fixturenames:
+        return published
+
+    def _record(verdict, *, source, severity):
+        published.append({"verdict": verdict, "source": source, "severity": severity})
+
+    import freshness
+
+    monkeypatch.setattr(freshness, "_publish", _record)
+    return published

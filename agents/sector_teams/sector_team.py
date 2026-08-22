@@ -20,6 +20,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_structured_with_validation_retry,
     make_agent_llm,
 )
@@ -39,7 +40,7 @@ from config import (
 
 # Per-sub-agent cost-tracker scopes. Each sub-agent call below opens its
 # own ``track_llm_cost`` frame keyed by the SAME agent_id the paired
-# ``_capture_if_enabled`` call in ``research_graph.sector_team_node`` uses
+# ``_capture_if_enabled`` call in the retired research graph's ``sector_team_node`` uses
 # (``sector_quant:{team_id}`` etc.), so the metadata stash + per-call
 # JSONL stream attribute to the canonical split families rather than the
 # legacy combined ``sector_team:{team_id}`` aggregate. PER_STOCK_MODEL is
@@ -602,7 +603,7 @@ def _update_thesis_for_held_stock(
     produce an outcome *distribution* rather than one deterministic point.
     """
     # Defer-import to avoid module-init cycle (sector_team is imported by
-    # research_graph during cost-tracker setup).
+    # the retired research graph during cost-tracker setup).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     # Held-stock thesis update is single-ticker BUT narrative-rich: the
@@ -726,7 +727,8 @@ def _update_thesis_for_held_stock(
     #   are never persisted), so an SF redrive re-attempts only it.
     from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-    structured_llm = llm.with_structured_output(
+    structured_llm = bind_structured_output(
+        llm,
         HeldThesisUpdateLLMOutput,
         include_raw=True,
     )

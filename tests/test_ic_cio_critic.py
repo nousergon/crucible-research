@@ -75,7 +75,7 @@ class _FakeLLM:
     def __init__(self, verdict):
         self._verdict = verdict
 
-    def with_structured_output(self, _schema):
+    def with_structured_output(self, _schema, **_kwargs):
         return _FakeStructuredLLM(self._verdict)
 
 

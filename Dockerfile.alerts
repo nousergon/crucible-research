@@ -12,8 +12,17 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # `alpha_engine_lib.logging.setup_logging`, which has been stable since
 # v0.1.0 — but moving the alerts pin in lockstep avoids two-track lib
 # state across this repo's Lambda images.
+# Install git — required for the ``pip install git+https://...`` below.
+# The ``public.ecr.aws/lambda/python`` base image does NOT ship git, so
+# without this the pip step dies with "Cannot find command 'git'" before
+# installing anything. The sibling ``Dockerfile`` has carried this line
+# since it hit the same failure; this file never got it, which is why the
+# alerts Lambda could not build at all (alpha-engine-config-I7840).
+# ``microdnf`` is the AL2023 minimal package manager.
+RUN microdnf install -y git && microdnf clean all
+
 COPY requirements-alerts.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[flow_doctor] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3" && \
+RUN pip install --no-cache-dir "nousergon-lib[flow-doctor] @ git+https://github.com/nousergon/nousergon-lib@v0.124.79" && \
     pip install --no-cache-dir -r requirements-alerts.txt && \
     rm -rf /root/.cache/pip
 

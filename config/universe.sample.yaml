@@ -122,23 +122,14 @@ llm:
   max_tokens_strategic: 4096
   concurrent_agents: 10
 
-  # DIRECT-MODE fallback models. Used ONLY when router_base_url is unset (see
-  # below), and by the call sites not yet migrated to class addressing
-  # (ic_cio, canary_replay). These stay concrete model ids on purpose: while a
-  # site still talks to Anthropic directly, a class name here would be sent as
-  # a model name and rejected.
-  per_stock_model: claude-haiku-4-5-20251001
-  strategic_model: claude-sonnet-4-6
-
-  # Where class names are resolved. LEAVE UNSET to keep talking to Anthropic
-  # directly with the *_model ids above — that is the pre-migration behaviour
-  # and the default, so no deployment changes behaviour until it opts in.
+  # There is deliberately NO model id, endpoint or credential name here.
   #
-  # Set it to gain the platform (registry routing, fallback chains, and — only
-  # where the endpoint is a local proxy — DLP scanning):
-  #   host running the LiteLLM router : http://127.0.0.1:8980/v1
-  #   Lambda / EC2 (no local router)  : the OpenRouter base url
-  # The endpoint is a DEPLOYMENT fact; the class is not. Same split thinktank
-  # already uses via ProviderSpec.base_url.
-  # router_base_url: http://127.0.0.1:8980/v1
-  router_key_secret: LITELLM_MASTER_KEY
+  # per_stock_model / strategic_model / router_base_url / router_key_secret
+  # were removed in alpha-engine-config-I7005: each was a routing fact held at
+  # model-router-policy §2 layer 5, which a consumer must not hold. The class
+  # above is resolved to a model, an endpoint and a credential by
+  # krepis.router.resolve_group_spec() against LLM_MODEL_REGISTRY.yaml.
+  #
+  # Where the process is running is a DEPLOYMENT fact and lives in the
+  # deployment's own environment, not here: KREPIS_EXEC_CONTEXT (declared,
+  # never inferred), KREPIS_LITELLM_PROXY_URL, KREPIS_ROUTER_CREDENTIAL_SECRET.

@@ -80,6 +80,32 @@ def _valid_tool_args() -> dict:
     return llm_output.model_dump()
 
 
+@pytest.fixture(autouse=True)
+def live_router_resolution(monkeypatch):
+    """See tests/test_eval_judge.py's fixture of the same name for the
+    full rationale — duplicated here because pytest fixtures are not
+    inherited across test modules via a plain import."""
+    import krepis.router as _kr
+
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
+        return {
+            "schema_version": 2,
+            "group": group,
+            "route": "litellm_proxy",
+            "provider": "litellm",
+            "deployment_id": group,
+            "api_base_url": "https://router.invalid/v1",
+            "auth_token_type": "litellm_master_key",
+            "registry_id": f"litellm:group:{group}",
+            "primary_registry_id": "deepseek-v4-flash",
+            "params": {},
+        }
+
+    monkeypatch.setattr(_kr, "resolve_group_structured", fake_resolve_structured)
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "router-test-key")
+    return True
+
+
 class TestEvaluateArtifactOpenRouter:
     def test_unmapped_agent_raises(self):
         from evals.judge import evaluate_artifact_openrouter
@@ -114,22 +140,24 @@ class TestEvaluateArtifactOpenRouter:
         assert result.overall_reasoning == "Solid grounding; regime engagement weakest."
         # Only one call — first attempt succeeded.
         assert fake_client.chat.completions.create.call_count == 1
-        # base_url must resolve to the OpenRouter endpoint.
+        # base_url must resolve to the router edge stub, no longer a direct
+        # OpenRouter link (alpha-engine-config-I6559, I6367 ruling).
         mock_llm_cls.assert_called_once()
-        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://openrouter.ai/api/v1"
+        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://router.invalid/v1"
+        # `api_key` is a test seam only — forwarded verbatim, unresolved by
+        # this module. Production leaves it None; the router resolves the
+        # credential BY NAME at call time.
         assert mock_llm_cls.call_args.kwargs["api_key"] == "sk-or-test"
         # reasoning={"exclude": True} is forwarded per the documented
-        # truncation-avoidance default.
+        # truncation-avoidance default. No `usage: {include: True}` opt-in
+        # (alpha-engine-config-I6559): that was an OpenRouter-provider-
+        # specific extra krepis's _openai_extra_body() added only for
+        # provider=="openrouter" — the provider is now the router-edge
+        # custom provider, not "openrouter" literal.
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
         assert call_kwargs["extra_body"] == {
             # Truncation-avoidance default, forwarded from the ModelSpec.
             "reasoning": {"exclude": True},
-            # OpenRouter usage-accounting opt-in, added by krepis's
-            # _openai_extra_body() since alpha-engine-config#5223. It is what
-            # populates LLMResult.usage.provider_cost_usd — the field the
-            # migrated judge now reads for per-call cost, replacing the raw
-            # `usage.cost` read it did against a bare OpenAI client.
-            "usage": {"include": True},
         }
 
     def test_leak_guard_trips_then_recovers_on_retry(self):
@@ -226,13 +254,29 @@ class TestEvaluateArtifactOpenRouter:
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
         assert isinstance(result, RubricEvalArtifact)
 
-    def test_missing_api_key_raises(self, monkeypatch):
+    def test_reads_no_openrouter_key(self, monkeypatch):
+        """Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent
+        directly linked to OpenRouter. This call site used to RAISE when no
+        OpenRouter API key was resolvable — the key was load-bearing. Since
+        alpha-engine-config-I6559 it must run without one: the credential is
+        named by the registry and resolved by krepis at call time, so
+        ``config.OPENROUTER_API_KEY`` being absent is irrelevant."""
+        import config
         from evals import judge as judge_mod
 
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        artifact = _make_artifact("sector_quant:technology")
-        with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-            judge_mod.evaluate_artifact_openrouter(artifact, api_key=None)
+        monkeypatch.setattr(config, "OPENROUTER_API_KEY", "", raising=False)
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _openai_response(
+            finish_reason="tool_calls",
+            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
+        )
+        with _patch_llm_client(judge_mod, fake_client):
+            artifact = _make_artifact("sector_quant:technology")
+            result = judge_mod.evaluate_artifact_openrouter(artifact, api_key=None)
+
+        assert isinstance(result, RubricEvalArtifact)
 
     def test_empty_agent_output_short_circuits_without_api_call(self):
         from evals import judge as judge_mod

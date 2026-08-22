@@ -18,7 +18,7 @@ eval_judge / scanner / rationale_clustering). Two invocation sources
    — a narrow, reactive top-up: once the fresh weekly scan lands, shore
    up whatever of the CURRENT top-60 the daily cadence hasn't caught up
    to yet. Sized to the exact measured gap (see ``thinktank/run.py``'s
-   ``GAP_FILL_TOP_N``/``gap_fill_only``), never a fixed constant, never
+   the declared coverage window/``gap_fill_only``), never a fixed constant, never
    padded with stale-refill — kept small and bounded regardless of how
    large the full-universe backlog gets.
 
@@ -168,6 +168,44 @@ def _ensure_init() -> None:
 
 @monitor_handler
 def handler(event, context):
+    """Entry point. Runs the handler, then flushes cost telemetry.
+
+    The `finally` is the whole point (alpha-engine-config-I7423).
+    `krepis.cost_sink.S3JsonlCostSink` buffers to 200 records per
+    `(date, callsite_id)` group and otherwise relies on an `atexit` hook —
+    and **an AWS Lambda container is FROZEN between invocations, not exited,
+    so `atexit` never runs.** A handler finishing below the threshold writes
+    nothing at all, and the container may be reclaimed hours later without
+    ever reaching interpreter shutdown.
+
+    Measured 2026-08-15 on weekly-SF execution `watch-rerun-2026-08-15-2`:
+    `AggregateCosts` reported `single-agent-quant` among `2 stage(s) ran and
+    emitted no cost record ... Observed producers: (none)`. The env wiring was
+    correct, the sink was constructed, the records were priced and accepted,
+    and every one of them died in memory.
+
+    Applied to EVERY handler in this directory rather than to the ones known
+    to call an LLM today: `flush_default_sink` returns 0 when no sink is
+    configured and never raises, so the uniform rule costs nothing and leaves
+    no per-handler judgment call for the next producer to get wrong.
+    """
+    try:
+        return _run(event, context)
+    finally:
+        try:
+            from krepis.cost_sink import flush_default_sink
+
+            _n = flush_default_sink()
+            if _n:
+                logger.info("cost sink flushed: %d object(s)", _n)
+        except ImportError as exc:
+            # Loud, not silent: the image's krepis pin predates the function
+            # (floor is >=0.59.8). Cost records for this invocation are lost,
+            # and AggregateCosts' fan-in coverage check will name this stage.
+            logger.error("cost-sink flush unavailable — records lost: %s", exc)
+
+
+def _run(event, context):
     """Run the daily think-tank cycle. Raises on failure (see module doc)."""
     from evals.lambda_dry import is_dry
 
@@ -195,7 +233,7 @@ def handler(event, context):
 
     # Saturday SF gap-fill mode: shores up whatever of the CURRENT top-60
     # the daily cadence hasn't caught up to yet, sized to the exact
-    # measured gap (thinktank/run.py's GAP_FILL_TOP_N/gap_fill_only) —
+    # measured gap (thinktank/run.py's declared window/gap_fill_only) —
     # never a fixed constant, never padded with stale-refill (that's the
     # daily job's role). Runs observe-only — writes to thinktank/ S3
     # prefix for validation tracking; does NOT gate the Predictor.

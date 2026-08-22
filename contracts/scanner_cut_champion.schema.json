@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nousergon/crucible-research/contracts/scanner_cut_champion.schema.json",
+  "title": "scanner cut champion pointer + apply-audit record (v1)",
+  "description": "FROZEN contract for the scanner-cut champion/challenger slot's decision record (alpha-engine-config-I7826). ONE document shape written to THREE keys by crucible-research/scoring/cut_promotion.py::run_cut_promotion on EVERY weekly evaluation, promote or hold: config/scanner_cut_champion.json (the live pointer, read by scoring/universe_membership.py::live_cut_champion / resolve_feed_cut), config/apply_audit/scanner_cut_champion/{date}.json (immutable dated history) and config/apply_audit/scanner_cut_champion/latest.json (freshness/liveness proxy). One shape rather than a separate pointer schema and audit schema on purpose: the pointer IS the latest decision record, and two shapes would let the two surfaces disagree about what was decided. Written unconditionally because champion-challenger-policy.md §3 forbids silent absence and a genuine outcome rendering identically — a pointer that stops being written must not read as a pointer that decided to hold (the config#2054 lesson, whose fix on the sibling producer-champion slot is config/apply_audit/producer_champion/). Additive-only evolution: consumers MUST tolerate unknown extra fields; any rename or removal, and any new reason_code slug meaning a condition an existing slug already covered, requires a schema_version bump.",
+  "type": "object",
+  "required": [
+    "schema_version", "producer", "slot_id", "decided_on", "decision",
+    "champion", "champion_before", "reason", "reason_code", "horizon_days",
+    "primary_metric", "arms", "hysteresis"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "producer": { "const": "crucible-research/scoring/cut_promotion.py" },
+    "slot_id": { "const": "scanner_cut" },
+    "generated_at": {
+      "type": "string",
+      "description": "UTC ISO-8601 write time. Distinct from decided_on: a re-run on the same trading day rewrites the same dated key with a later generated_at."
+    },
+    "decided_on": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Trading-day-normalised scanner run date — matches the dated audit key and the cuts leaderboard consulted."
+    },
+    "decision": {
+      "enum": ["promote", "hold"],
+      "description": "promote = the pointer moved this evaluation (champion != champion_before). hold = it did not, for the reason in reason_code. A hold is an OUTCOME and is always written; it is never expressed as the absence of a record."
+    },
+    "champion": {
+      "enum": ["attractiveness_top_60", "tech_score_top_60"],
+      "description": "The cut the sector-team feed resolves from until the next evaluation. MUST be a member of scoring/universe_membership.py::PROMOTABLE_CUTS — live_cut_champion() raises on anything else rather than serving the default, because a promotion engine that believes one arm is live while the funnel serves another is the 2026-07-22 drift (alpha-engine-config-I7808)."
+    },
+    "champion_before": {
+      "enum": ["attractiveness_top_60", "tech_score_top_60"],
+      "description": "The validated champion read at the start of this evaluation, or DEFAULT_CUT_CHAMPION (attractiveness_top_60) when no pointer had ever been written. Equal to champion on every hold."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prose, for the human reconstructing the decision from this artifact alone (principles.md §2.1). Names the horizon, the shortfall, and what holds."
+    },
+    "reason_code": {
+      "enum": [
+        "promoted",
+        "champion_already_leads",
+        "board_missing",
+        "board_unmeasurable",
+        "decision_horizon_immature",
+        "decision_horizon_unmeasurable",
+        "arm_row_missing",
+        "arm_metric_missing",
+        "insufficient_dates",
+        "margin_not_met",
+        "cooldown_active",
+        "corroborating_horizon_disagrees",
+        "board_defective",
+        "no_promotable_challenger"
+      ],
+      "description": "Machine-readable outcome. 'promoted' is the only value permitted alongside decision='promote'. decision_horizon_immature is the EXPECTED steady state until a 126-session cohort matures for every promotable arm and must not alert; board_defective and decision_horizon_unmeasurable are defects and do. no_promotable_challenger means the SLOT has one promotable arm, so no comparison was possible — it is a registry state, not an evidence state, it is the expected steady value while tech_score_top_60 is observe-only (Brian ruling 2026-08-21, alpha-engine-config-I8060), and it must not alert. Added under schema_version 1 because it names a condition no existing slug covered: every other hold says something about the evidence, and this one says a comparison never happened."
+    },
+    "horizon_days": {
+      "const": 126,
+      "description": "The decision horizon, in trading sessions. 126 ≈ 6 months — the shorter of the two horizons matching the scanner's ~1-year objective, so it matures first and 252 serves as the corroborating veto. 21 is STRUCTURALLY EXCLUDED (cut_promotion.py::forbidden_horizons_days, asserted at import): a −0.264 IC at 21 days drove a live change that nine years of history inverted at 126–252 days (alpha-engine-config-I7580), and promoting weekly on that block reproduces the error on a schedule."
+    },
+    "primary_metric": {
+      "const": "topn_alpha_vs_population",
+      "description": "Each arm is graded against the population it narrowed, never against SPY (alpha-engine-config-I7576). Pinned to the cuts slot's own primary_metric at import."
+    },
+    "last_promoted_on": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "decided_on of the most recent promote decision, carried forward across holds. Null until the first promotion. The §5.2 cooldown is measured from it."
+    },
+    "leaderboard_key": {
+      "type": ["string", "null"],
+      "description": "The research/cuts_leaderboard/{date}.json the decision was taken from, so the numbers below can be joined back to their source. Null only when no board was available (reason_code=board_missing)."
+    },
+    "arms": {
+      "type": "object",
+      "required": ["attractiveness_top_60"],
+      "description": "Every PROMOTABLE arm, ALWAYS — including on a hold and including when an arm scored nothing (champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted). n_dates_scored is the measurability surface: it is 0 at rollout and climbing it past min_dates_for_inference is the precondition for any promotion. `required` names only attractiveness_top_60 because PROMOTABLE_CUTS shrank to it on 2026-08-21 (alpha-engine-config-I8060); tech_score_top_60 remains valid here and records written while it was promotable still validate. OBSERVE-ONLY arms are deliberately NOT carried in this block — this record is about the decision, and their evidence lives on research/cuts_leaderboard/{date}.json, which scores every arm of the slot. The reason string names them so a reader is not left inferring they went away.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["n_dates_scored", "confidence", "topn_alpha_vs_population_mean", "present"],
+        "properties": {
+          "n_dates_scored": { "type": "integer", "minimum": 0 },
+          "confidence": { "enum": ["ok", "thin", "insufficient"] },
+          "topn_alpha_vs_population_mean": { "type": ["number", "null"] },
+          "t_stat": { "type": ["number", "null"] },
+          "present": {
+            "type": "boolean",
+            "description": "False when the arm had no row on the board at the decision horizon — distinct from a row present with a null metric."
+          }
+        }
+      }
+    },
+    "hysteresis": {
+      "type": "object",
+      "required": ["promotion_margin", "cooldown_days", "min_dates_for_inference"],
+      "description": "The §5.2 parameters this evaluation applied, recorded with the decision so a past record stays interpretable after the registry changes. Source of truth is cut_promotion.py::CUT_PROMOTION_SLOT.",
+      "properties": {
+        "promotion_margin": { "type": "number", "minimum": 0 },
+        "cooldown_days": { "type": "integer", "minimum": 0 },
+        "corroborating_horizon_days": { "type": "integer" },
+        "min_dates_for_inference": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "corroborating": {
+      "type": ["object", "null"],
+      "description": "What the 252-session horizon said. It holds a VETO and never a vote: it can block a promotion the 126 block proposes, never propose one. Null when no comparison reached that stage; 'disagrees': false with a 'note' when the block was absent, immature, or below min_dates_for_inference — an unmeasured gate is reported, never counted as a pass (§5.1)."
+    },
+    "defect": {
+      "type": ["string", "null"],
+      "description": "Set when the board could not be honestly interpreted (missing horizons list, no decision-horizon block, duplicate rows for one arm). The record is written FIRST and run_cut_promotion then raises CutPromotionError — a defect must never erase the evidence of itself."
+    }
+  }
+}

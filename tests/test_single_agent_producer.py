@@ -98,9 +98,19 @@ def test_run_injects_assess_fn(monkeypatch):
 
     import data.fetchers.price_fetcher as pf
     import data.scanner_orchestrator as so
+    import scoring.universe_membership as um
+
+    # The feed is the champion CUT, not candidates.json
+    # (alpha-engine-config-I7823). Unpatched, this reaches S3 — which is the
+    # point: the producer no longer has a fail-soft empty-list path to fall
+    # into when the artifact is missing.
+    monkeypatch.setattr(um, "resolve_feed_cut", lambda **kw: (
+        ["AAA", "BBB"],
+        {"cut": "attractiveness_top_60", "run_date": "2026-06-19",
+         "cut_effective_date": "2026-06-19", "basis": "attractiveness_rank", "size": 2},
+    ))
 
     am = MagicMock()
-    am.load_candidates_json.return_value = {"scanner_tickers": ["AAA", "BBB"]}
     am.load_population.return_value = []
     am.load_latest_theses.return_value = {}
     monkeypatch.setattr(pf, "fetch_sp500_sp400_with_sectors",
@@ -162,7 +172,7 @@ def _patch_router(monkeypatch, *, route=None, captured=None):
 
     the_route = route or _fake_route()
 
-    def fake_resolve_structured(group, *, exec_context=None, wire="openai"):
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
         if captured is not None:
             captured.append(
                 {"group": group, "exec_context": exec_context, "wire": wire}
@@ -180,7 +190,7 @@ class _FakeAgentPrompt:
         return {}
 
 
-def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch):
+def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch, live_router_resolution):
     import agents.prompt_loader as prompt_loader
 
     monkeypatch.setattr(prompt_loader, "load_prompt", lambda name: _FakeAgentPrompt())
@@ -255,7 +265,7 @@ def test_assess_candidates_addresses_the_high_group_non_strict(monkeypatch):
     assert spec.structured_outputs is False
 
 
-def test_assess_candidates_reads_no_openrouter_key(monkeypatch):
+def test_assess_candidates_reads_no_openrouter_key(monkeypatch, live_router_resolution):
     """Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent
     directly linked to OpenRouter. This call site used to RAISE when
     config.OPENROUTER_API_KEY was empty — the key was load-bearing. It must

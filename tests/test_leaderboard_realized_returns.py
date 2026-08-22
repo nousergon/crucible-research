@@ -179,7 +179,7 @@ def test_unmeasurable_leaderboard_is_written_labelled_and_alerted() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
             side_effect=LeaderboardUnmeasurableError("horizon 21 > retention 7"),
         ),
         patch(
@@ -221,8 +221,8 @@ def test_unmeasurable_is_not_confusable_with_an_immature_cohort() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
-            return_value={},
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+            return_value=({}, {}, {}),
         ),
         patch(
             "scoring.leaderboard_producers.publish_observe_alert",
@@ -253,8 +253,8 @@ def test_zero_cohorts_past_the_horizon_escalates_to_unmeasurable() -> None:
             return_value=(None, []),
         ),
         patch(
-            "scoring.leaderboard_producers._resolve_realized_returns",
-            return_value={},
+            "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+            return_value=({}, {}, {}),
         ),
         patch("scoring.leaderboard_producers.publish_observe_alert") as alert,
     ):
@@ -337,3 +337,113 @@ def test_malformed_pointer_does_not_yield_a_junk_champion_name() -> None:
         for bad in ({"champion": ""}, {"champion": None}, {"champion": 7}, {}):
             s3 = _s3_returning({"config/producer_champion.json": bad})
             assert _resolve_champion_name(s3, "b") is None, bad
+
+
+# ── 5. The panel is sized to the COHORT, the calendar to the HORIZON ─────────
+#
+# alpha-engine-config-I7812. The scanner Lambda died at its 450s ceiling on
+# 2026-08-20 and lost `research/cuts_leaderboard/2026-08-20.json`, the sole
+# evidence input to the weekly promotion engine. Measured live 2026-08-20 over
+# the 905-symbol universe library, cohort earliest 2026-06-26:
+#
+#     before   414.8 s   353,413 panel rows   window 2025-01-28..2026-08-19
+#     after      77.9 s    40,750 panel rows   window 2026-06-16..2026-08-19
+#                                              calendar 2025-03-24..2026-08-19
+#
+# The property under test is not the speed — it is that the two windows stay
+# SEPARATE. Collapse them either way and something breaks silently: widen the
+# prices back and the Lambda times out again; narrow the calendar and a
+# truncated ArcticDB renders as "nothing has matured yet", which is I5195.
+
+
+class _RecordingLoader:
+    """Stands in for ``load_universe_ohlcv``, recording each call's window."""
+
+    def __init__(self, sessions: int = 500):
+        import pandas as pd
+
+        self.calls: list[dict] = []
+        self._index = pd.bdate_range(end="2026-08-20", periods=sessions)
+
+    def __call__(self, bucket, *, symbols=None, lookback_days, columns=None):
+        import pandas as pd
+
+        self.calls.append({"symbols": symbols, "lookback_days": lookback_days})
+        start = self._index[-1] - pd.Timedelta(days=lookback_days)
+        idx = self._index[self._index >= start]
+        names = symbols if symbols is not None else ["AAA", "BBB", "SPY"]
+        return {t: pd.DataFrame({"Close": [100.0] * len(idx)}, index=idx) for t in names}
+
+
+def _entry_dates() -> list[str]:
+    import pandas as pd
+
+    return [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-06-26", "2026-08-19")]
+
+
+def test_prices_cover_the_cohort_and_the_calendar_covers_the_horizon():
+    from scoring.leaderboard_producers import _closes_panel_from_arcticdb
+
+    pytest.importorskip("pandas")
+    loader = _RecordingLoader()
+    with patch("nousergon_lib.arcticdb.load_universe_ohlcv", loader):
+        panel = _closes_panel_from_arcticdb("b", _entry_dates(), 252, None)
+
+    assert len(loader.calls) == 2
+    prices, calendar = loader.calls
+    # Prices: the full universe over the cohort's span, NOT the horizon. The
+    # cohort starts 2026-06-26, so the window is well under 252*2+10 = 514.
+    assert prices["symbols"] is None
+    assert prices["lookback_days"] < 200
+    # Calendar: the benchmark alone, wide enough to answer "can the SOURCE
+    # serve 252 sessions".
+    assert calendar["symbols"] == ["SPY"]
+    assert calendar["lookback_days"] == 252 * 2 + 10
+    # And the merged panel must be capable at 252 — the assert that used to be
+    # satisfied by reading 905 tickers over the same window.
+    assert len(panel) >= 252
+
+
+def test_only_the_benchmark_is_read_over_the_wide_window():
+    """The ragged half of the panel carries ONE ticker, deliberately.
+
+    A date holding some-but-not-all of the universe is a wrong cross-section,
+    not a small one — every population metric computed on it would be quietly
+    biased toward whichever names happened to be read.
+    """
+    from scoring.leaderboard_producers import _closes_panel_from_arcticdb
+
+    pytest.importorskip("pandas")
+    entries = _entry_dates()
+    with patch("nousergon_lib.arcticdb.load_universe_ohlcv", _RecordingLoader()):
+        panel = _closes_panel_from_arcticdb("b", entries, 252, None)
+
+    # The price window is the cohort span PLUS the boundary margin, so the
+    # universe-bearing half starts slightly before the earliest entry date.
+    # Everything before THAT is the calendar half.
+    first_priced = min(d for d in panel if "AAA" in panel[d])
+    assert first_priced < min(entries), "the boundary margin did not apply"
+    calendar_half = [d for d in panel if d < first_priced]
+    assert calendar_half, "the calendar half of the panel is missing"
+    for d in calendar_half:
+        assert set(panel[d]) == {"SPY"}
+    for d in (d for d in panel if d >= first_priced):
+        assert set(panel[d]) == {"AAA", "BBB", "SPY"}
+
+
+def test_a_calendar_read_with_no_benchmark_raises():
+    """No benchmark history means no session calendar, which means no horizon's
+    capability can be judged. That is unmeasurable, not empty."""
+    from scoring.leaderboard_producers import _closes_panel_from_arcticdb
+
+    pytest.importorskip("pandas")
+    full = _RecordingLoader()
+
+    def _no_benchmark(bucket, *, symbols=None, lookback_days, columns=None):
+        if symbols == ["SPY"]:
+            return {}
+        return full(bucket, symbols=symbols, lookback_days=lookback_days, columns=columns)
+
+    with patch("nousergon_lib.arcticdb.load_universe_ohlcv", _no_benchmark):
+        with pytest.raises(LeaderboardUnmeasurableError, match="session calendar"):
+            _closes_panel_from_arcticdb("b", _entry_dates(), 252, None)

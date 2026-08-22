@@ -7,14 +7,60 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # after the lib-public flip (PR #103/#105) failed at the lib-install
 # step. ``microdnf`` is the AL2023 minimal package manager; ``-y``
 # auto-confirms. Image-size impact: ~25MB for git + git-core deps.
+# krepis>=0.59.15 (krepis-PR95, nous-ergon-ops-I738) added an in-process
+# DLP scan hook to LLMClient (session_dlp.py) that shells out to gitleaks
+# on every call and fails CLOSED (raises LLMError) when the binary is
+# missing from PATH or the config directory is absent. This image's
+# handler.py/thinktank_handler.py/eval_judge_*_handler.py/
+# perturbation_battery_handler.py all make LIVE Anthropic/OpenRouter calls
+# through evals/judge.py, producers/single_agent.py and thinktank/client.py
+# (each constructs krepis.llm.LLMClient directly) — a real production
+# path, not a test double. requirements.txt pins `krepis>=0.43.0` with no
+# ceiling, so a fresh build resolves the DLP-hook version. Pinned version
+# + sha256 mirror krepis's own working CI step (test.yml) — do not
+# re-derive. No `sudo` needed: Docker RUN executes as root by default (no
+# USER directive in this image). `/opt/llm-routing` is session_dlp.py's
+# first standard-path fallback (before its final Lambda-bundled-package
+# fallback), so no `KREPIS_GITLEAKS_DIR` override is needed.
+# alpha-engine-config-I7744 — `tar` and `gzip` are NOT in
+# public.ecr.aws/lambda/python:3.12, and the gitleaks step below untars a
+# .tar.gz. It ran BEFORE the only microdnf install in this file, so it exited
+# 127 (command not found) and the whole Docker build failed. MEASURED: every
+# Deploy run on `main` since 2026-08-18T20:26 failed here — six consecutive — so
+# alpha-engine-research-runner had not been redeployed for a day and nothing
+# said so, the deploy workflow's own red being its only surface.
+#
+# MEASURED in the base image, which is why this installs two packages and not
+# three: `curl` and `sha256sum` are present (/usr/bin/curl, /usr/bin/sha256sum);
+# `tar` and `gzip` are not. Do NOT add `curl` here — the image ships
+# `curl-minimal`, and the full `curl` package CONFLICTS with it, which fails the
+# build in a second, more confusing way.
+#
+# Installed as its own layer rather than folded into the `microdnf install -y
+# git` below, because that one runs after the step that needs these.
+RUN microdnf install -y tar gzip && microdnf clean all
+
+RUN set -euo pipefail && \
+    GITLEAKS_VERSION="8.30.1" && \
+    GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" && \
+    curl -sSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" && \
+    echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks && \
+    chmod +x /tmp/gitleaks && \
+    mv /tmp/gitleaks /usr/local/bin/gitleaks && \
+    rm -f /tmp/gitleaks.tar.gz && \
+    gitleaks version && \
+    mkdir -p /opt/llm-routing && \
+    printf '[extend]\nuseDefault = true\n' > /opt/llm-routing/gitleaks-egress.toml
+
 RUN microdnf install -y git && microdnf clean all
 
 # Bake the source commit SHA into the image so the decision-capture provenance
 # stamp (``DecisionArtifact.code_sha``, L4567 sub-item 1b / #781) records the
 # exact deployed code that produced each decision — the SOTA run=code+data
-# reproducibility contract. ``graph/research_graph.py`` reads this at capture
-# time via ``os.environ.get("ALPHA_ENGINE_CODE_SHA")``; without it the stamp is
-# permanently ``None`` in prod. Passed by ``infrastructure/deploy.sh`` via
+# reproducibility contract. ``producers/experiment_record.py`` reads this at
+# capture time via ``os.environ.get("ALPHA_ENGINE_CODE_SHA")``; without it the
+# stamp is permanently ``None`` in prod. Passed by ``infrastructure/deploy.sh`` via
 # ``--build-arg GIT_SHA=<sha>`` (CI uses ``$GITHUB_SHA``; local dev falls back
 # to ``git rev-parse HEAD``). The build-arg default is left empty so a raw
 # ``docker build`` that forgets to pass it stamps a falsy value (env-var-absent
@@ -42,7 +88,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow_doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.79" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
@@ -81,7 +127,6 @@ COPY thinktank/ ${LAMBDA_TASK_ROOT}/thinktank/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
-COPY data_manifest.py ${LAMBDA_TASK_ROOT}/
 COPY dry_run.py ${LAMBDA_TASK_ROOT}/
 COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # observe_alerts.py is a repo-ROOT single-file module imported TRANSITIVELY
@@ -90,6 +135,7 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # instance of the #340 packaging class (config#1683). The packaging guard
 # (tests/test_dockerfile_packaging.py) now walks the transitive import graph
 # so any new root module/package missing a COPY fails CI.
+COPY freshness.py ${LAMBDA_TASK_ROOT}/
 COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
 COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
 

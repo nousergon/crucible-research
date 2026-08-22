@@ -38,7 +38,9 @@ daily EventBridge cadence (``research/thinktank.yaml``'s ``daily_new_names``,
 still steps 1-8 above unmodified) grows coverage toward the full
 ``rank_ceiling=150`` universe day by day and handles staleness refresh
 gradually. Saturday's job is narrower and reactive: once the fresh weekly
-scan lands, shore up whatever of the CURRENT top-``GAP_FILL_TOP_N`` (60)
+scan lands, shore up whatever of the CURRENT coverage window (the cut
+``universe_membership`` declares under ``funnel.advances_to.
+thinktank_coverage_window``, at the width that artifact declares — 60 today)
 the daily cadence hasn't caught up to yet — sized to the exact measured
 gap (``coverage_gap.uncovered_count``), never a fixed constant, and never
 padded with stale-refill picks (that's the daily job's role). Keeps the
@@ -61,12 +63,21 @@ from datetime import UTC, datetime
 
 from nousergon_lib.dates import now_dual
 
-from thinktank import EVENTS_KEY_TMPL, MANIFEST_KEY_TMPL
+from thinktank import (
+    CHALLENGER_SELECTION_LATEST_KEY,
+    EVENTS_KEY_TMPL,
+    MANIFEST_KEY_TMPL,
+)
 from thinktank.analyst import build_thesis, sweep, triage
-from thinktank.challenger_selection import write_challenger_selection
+from thinktank.challenger_selection import (
+    POINTER_LAG_ERROR_DAYS,
+    challenger_pointer_lag,
+    write_challenger_selection,
+)
 from thinktank.client import ThinktankClient
 from thinktank.context import ContextBundle, load_context
 from thinktank.costs import BudgetGuard
+from thinktank.feed import FeedWindow, load_feed_window, unjoinable_ranked_names
 from thinktank.ledger import (
     load_ledger,
     record_sweep,
@@ -83,12 +94,13 @@ from thinktank.themes import ThemeKeeper
 logger = logging.getLogger(__name__)
 
 
-GAP_FILL_TOP_N = 60
-"""Rank window the Saturday SF's gap-fill mode shores up — the "current
-scanner top-60" window, independent of the daily cadence's rank_ceiling
-(150). Shared with ``_compute_coverage_gap``'s default so the reported
-gap and the actual gap-fill selection are always computed over the same
-window."""
+# The gap-fill window's WIDTH is no longer a constant here
+# (alpha-engine-config-I7842): the producer declares it as
+# ``cuts[<window>].size`` in ``universe_membership/latest.json`` and it is read
+# off ``thinktank.feed.FeedWindow.size``. A consumer hardcoding 60 while the
+# producer declares 60 is the same duplicated-truth defect as re-deriving the
+# ranking, one level down: the two agree until the producer changes its width,
+# and then nothing says which one is right.
 
 
 def _checkpoint_thesis_write(
@@ -196,14 +208,47 @@ def run_daily(
 
     ctx = load_context(store)
     manifest.context_sources_present = dict(ctx.sources_present)
+    # Durable record of the freshness decision for every dated input
+    # (alpha-engine-config-I2638). Written BEFORE any work so it survives an
+    # aborted run too — the failure path writes the same telemetry as the
+    # success path (observability-policy §3.1).
+    manifest.context_source_freshness = ctx.freshness_records()
+    manifest.degraded_inputs = ctx.stale_sources()
+    if manifest.degraded_inputs:
+        logger.error(
+            "think tank run %s is DEGRADED — stale/undated inputs: %s",
+            run_id,
+            ", ".join(manifest.degraded_inputs),
+        )
     if ctx.board is None:
         raise RuntimeError(
             "universe board (scanner/universe/latest.json) is missing — the "
             "think tank has no intake without it; aborting loudly."
         )
 
+    # The scanner's declared contract — window membership, order, and the basis
+    # both are expressed in (alpha-engine-config-I7842). Read once per run and
+    # threaded everywhere a rank is needed, so this run has exactly one opinion
+    # about who is in the universe and in what order.
+    #
+    # ``minimum_rank_coverage``: only the daily cadence asks about ranks beyond
+    # the window (rank_ceiling / exit_rank), so only it requires the rank table
+    # to reach that far. gap_fill and operator-refresh work inside the window
+    # and must not be refused for a coverage they never use.
+    window = load_feed_window(
+        store,
+        minimum_rank_coverage=(
+            None if (gap_fill_only or refresh_tickers is not None) else (settings.exit_rank or settings.rank_ceiling)
+        ),
+    )
+    manifest.feed_window = dict(window.provenance)
+
     ledger = load_ledger(store)
-    manifest.coverage_gap = _compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N)
+    manifest.coverage_gap = _compute_coverage_gap(window, ledger)
+    if refresh_tickers is None and not gap_fill_only:
+        manifest.coverage_gap["unjoinable_ranked_names"] = unjoinable_ranked_names(
+            window, ctx.board, settings.rank_ceiling
+        )
     if refresh_tickers is not None:
         # Operator-refresh mode ({"refresh_tickers": [...]} event / backfill):
         # re-underwrite ONLY the named covered tickers — no intake, no sweep,
@@ -220,10 +265,11 @@ def run_daily(
         # cadence (settings.daily_new_names/day) already grows coverage
         # toward the full rank_ceiling=150 universe and handles staleness
         # refresh gradually — this mode's ONLY job is shoring up whatever
-        # of the CURRENT scanner top-60 the daily cadence hasn't caught up
+        # of the CURRENT declared coverage window the daily cadence hasn't
+        # caught up
         # to yet by the time the fresh weekly board lands. Sized to the
         # EXACT current gap (manifest.coverage_gap, computed just above
-        # against the same GAP_FILL_TOP_N window) rather than a fixed
+        # against the same declared window) rather than a fixed
         # constant — a small, data-driven weekly patch, not a bulk
         # re-cover pass. skip_stale_refill=True: staleness refresh is the
         # daily job's role, not this one's — padding this run's budget
@@ -235,8 +281,9 @@ def run_daily(
         new_rows, refresh = select_intake(
             ledger,
             ctx.board,
+            window,
             daily_new_names=gap_count,
-            rank_ceiling=GAP_FILL_TOP_N,
+            rank_ceiling=window.size,
             skip_stale_refill=True,
         )
     else:
@@ -248,6 +295,7 @@ def run_daily(
         new_rows, refresh = select_intake(
             ledger,
             ctx.board,
+            window,
             daily_new_names=settings.daily_new_names,
             rank_ceiling=settings.rank_ceiling,
             exit_rank=settings.exit_rank,
@@ -338,7 +386,7 @@ def run_daily(
             exc,
         )
         try:
-            _terminal_writes(store, ledger, client, themes, ctx, manifest, aborted=True, **terminal_kwargs)
+            _terminal_writes(store, ledger, client, themes, ctx, manifest, window, aborted=True, **terminal_kwargs)
         except Exception:
             # The abort path's own writes failed. Recorded loudly and swallowed
             # so the ORIGINAL cause is what propagates — chaining a secondary
@@ -350,7 +398,7 @@ def run_daily(
             )
         raise
 
-    _terminal_writes(store, ledger, client, themes, ctx, manifest, **terminal_kwargs)
+    _terminal_writes(store, ledger, client, themes, ctx, manifest, window, **terminal_kwargs)
 
     logger.info(
         "thinktank run %s done: +%d theses (%d event updates), swept %d, "
@@ -486,9 +534,7 @@ def _build_and_sweep(
                 # on the event row, and the escalation proceeds — so the
                 # failure is visible on the manifest rather than absorbed.
                 try:
-                    decision = triage(
-                        store, client, ctx, assessment=a, trading_day=trading_day
-                    )
+                    decision = triage(store, client, ctx, assessment=a, trading_day=trading_day)
                     escalated = decision.escalate
                     triage_reason = decision.reason
                 except Exception as exc:  # noqa: BLE001 — see fail-open note above
@@ -609,6 +655,7 @@ def _build_and_sweep(
         theses_written.append(thesis)
         manifest.theses_written += 1
 
+
 def _terminal_writes(
     store: ThinktankStore,
     ledger: CoverageLedger,
@@ -616,6 +663,7 @@ def _terminal_writes(
     themes: ThemeKeeper,
     ctx: ContextBundle,
     manifest: RunManifest,
+    window: FeedWindow,
     *,
     guard: BudgetGuard,
     run_id: str,
@@ -672,10 +720,11 @@ def _terminal_writes(
         trading_day=trading_day,
         calendar_date=calendar_date,
         board_date=(ctx.board or {}).get("as_of"),
-        coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
+        coverage_gap=_compute_coverage_gap(window, ledger),
         update_latest_pointer=not aborted,
     )
     manifest.challenger_selection_written = not aborted
+    _record_pointer_lag(store, manifest, trading_day=trading_day)
     if event_rows:
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
@@ -696,29 +745,81 @@ def _terminal_writes(
     client.flush_sft(store.s3, store.bucket, trading_day)
 
 
-def _compute_coverage_gap(
-    board: dict | None,
-    ledger: CoverageLedger,
-    *,
-    top_n: int = 60,
-) -> dict:
-    """What % of scanner top-N have fresh Think Tank coverage?
+def _record_pointer_lag(store: ThinktankStore, manifest: RunManifest, *, trading_day: str) -> None:
+    """Publish how stale ``challenger_selection/latest.json`` is, as a number,
+    on EVERY run (alpha-engine-config-I7232).
+
+    The pointer is withheld on the abort path by design — but the dated key is
+    still written, so the directory keeps advancing daily while the pointer
+    freezes. Measured 2026-08-13: ``latest.json`` was byte-identical to the
+    08-10 object while 08-11 and 08-12 sat beside it, and the only way to see
+    that was to compare the pointer against the newest dated key, which nothing
+    did. To every consumer resolving the arm through the pointer — including
+    ``crucible-executor``'s ``thinktank_coverage`` champion arm — a frozen
+    pointer and a healthy one are the same object.
+
+    This is the run stating its own pointer's lag into the manifest, so the
+    staleness is a published value rather than a comparison nobody performs.
+    It is written on the healthy path too, where it is 0: a component emitting
+    nothing is not healthy, it is unobserved (``principles.md`` §2.7).
+
+    Called from ``_terminal_writes``, which runs on the success path AND from
+    the abort handler, so there is no run shape that skips it.
+    """
+    pointer_day, lag = challenger_pointer_lag(store, trading_day=trading_day)
+    manifest.challenger_selection_pointer_trading_day = pointer_day
+    manifest.challenger_selection_pointer_lag_days = lag
+
+    if pointer_day is None:
+        logger.error(
+            "[thinktank] %s does not exist — this arm has no end-to-end "
+            "health signal at all, which is a stronger statement than a stale "
+            "one and must not read as 'nothing to report'.",
+            CHALLENGER_SELECTION_LATEST_KEY,
+        )
+        return
+    if lag <= 0:
+        logger.info(
+            "[thinktank] challenger-selection pointer lag: %d day(s) (pointer trading_day=%s)",
+            lag,
+            pointer_day,
+        )
+        return
+    logger.log(
+        logging.ERROR if lag >= POINTER_LAG_ERROR_DAYS else logging.WARNING,
+        "[thinktank] challenger-selection pointer is STALE by %d day(s): %s "
+        "carries trading_day=%s while this run is %s. The dated key for this "
+        "run WAS written, so the directory listing looks healthy — any "
+        "consumer resolving the arm through the pointer (crucible-executor "
+        "champion arm thinktank_coverage) is reading a %d-day-old selection "
+        "(alpha-engine-config-I7232).",
+        lag,
+        CHALLENGER_SELECTION_LATEST_KEY,
+        pointer_day,
+        trading_day,
+        lag,
+    )
+
+
+def _compute_coverage_gap(window: FeedWindow, ledger: CoverageLedger) -> dict:
+    """What % of the DECLARED coverage window has fresh Think Tank coverage?
 
     Emitted in every run manifest so downstream consumers (dashboard,
     report card) can track coverage-health trends without re-querying
     the board + ledger themselves.
+
+    Takes the window rather than the board (alpha-engine-config-I7842). This
+    function used to re-sort ``board["stocks"]`` by ``attractiveness_score``
+    itself — a SECOND opinion about the same ranking ``select_intake`` was
+    forming independently, so the reported gap and the set actually gap-filled
+    could have diverged with nothing comparing them. Both now read one window.
+
+    ``cut``/``basis`` are carried into the metric so a reader can tell which
+    arm's 60 the percentage is over: the same number against a different
+    champion is a different measurement, and rendering them identically is how
+    a cutover goes unnoticed.
     """
-    if not board:
-        return {"error": "universe_board_missing"}
-    stocks = board.get("stocks", [])
-    if not stocks:
-        return {"top_n": top_n, "covered_pct": 0, "total_covered": len(ledger.covered()), "uncovered_count": top_n}
-    sorted_stocks = sorted(
-        stocks,
-        key=lambda s: s.get("attractiveness_score", 0) or 0,
-        reverse=True,
-    )
-    top_tickers = {s["ticker"] for s in sorted_stocks[:top_n] if s.get("ticker")}
+    top_tickers = set(window.tickers)
     # covered(), not entries: a de-covered name keeps its entry and its whole
     # thesis history, so len(entries) stopped being a coverage count
     # (config-I6648).
@@ -726,12 +827,15 @@ def _compute_coverage_gap(
     covered_in_top = covered & top_tickers
     pct = round(len(covered_in_top) / max(len(top_tickers), 1) * 100, 1)
     return {
-        "top_n": top_n,
+        "top_n": window.size,
+        "cut": window.cut,
+        "basis": window.basis,
+        "cut_effective_date": window.provenance.get("cut_effective_date"),
         "total_in_top": len(top_tickers),
         "covered_in_top": len(covered_in_top),
         "covered_pct": pct,
         "uncovered_count": len(top_tickers) - len(covered_in_top),
-        "total_covered": len(ledger.covered()),
+        "total_covered": len(covered),
     }
 
 

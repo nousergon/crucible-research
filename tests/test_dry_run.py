@@ -129,32 +129,11 @@ class TestInstallRestore:
             setattr(mod, attr, sentinel)
             self._sentinels[(mod_path, attr)] = sentinel
 
-        # Fake graph.research_graph with the late-bound names
-        if "graph" not in sys.modules:
-            sys.modules["graph"] = types.ModuleType("graph")
-            self._created_modules.append("graph")
-        gm = types.ModuleType("graph.research_graph")
-        for name in (
-            "run_macro_agent_with_reflection",
-            "run_sector_team",
-            "run_cio",
-            "archive_writer",
-            "email_sender",
-        ):
-            sentinel = MagicMock(name=f"graph.research_graph.{name}.original")
-            setattr(gm, name, sentinel)
-            self._sentinels[("graph.research_graph", name)] = sentinel
-        # If a REAL graph.research_graph is already imported, snapshot it
-        # for restore (don't evict it on teardown — that breaks later
-        # tests' monkeypatches of its module globals). Only schedule a
-        # pop if there was nothing here before.
-        if "graph.research_graph" in sys.modules:
-            self._saved_sys_modules["graph.research_graph"] = sys.modules[
-                "graph.research_graph"
-            ]
-        else:
-            self._created_modules.append("graph.research_graph")
-        sys.modules["graph.research_graph"] = gm
+        # The fake ``graph.research_graph`` shell that used to be built here
+        # is gone with the module itself (alpha-engine-config-I7827):
+        # ``dry_run._GRAPH_NAME_PATCHES`` is now empty, so there are no
+        # late-bound names to sentinel. The agent-module patches above are
+        # unchanged and are what the stub installer still acts on.
 
     def teardown_method(self):
         # Restore real-module attributes BEFORE popping the shells —
@@ -179,6 +158,7 @@ class TestInstallRestore:
         archive = MagicMock()
         archive.upload_db = MagicMock(name="orig_upload_db")
         archive.write_signals_json = MagicMock(name="orig_write_signals_json")
+        archive.write_shadow_signals_json = MagicMock(name="orig_write_shadow")
 
         restore = dr.install_dry_run_stubs(archive)
 
@@ -189,9 +169,13 @@ class TestInstallRestore:
                 f"{mod_path}.{attr} not patched"
             )
 
-        # Archive methods patched
+        # Archive methods patched — including the LIVE producer path's write
+        # method (``write_shadow_signals_json``, added alpha-engine-config-I7827:
+        # the stub set previously covered only what the champion graph wrote
+        # through, leaving ``producers/`` unsuppressed under stub install).
         assert archive.upload_db.__name__ == "<lambda>"
         assert archive.write_signals_json.__name__ == "<lambda>"
+        assert archive.write_shadow_signals_json.__name__ == "<lambda>"
 
         restore()
 
@@ -318,60 +302,12 @@ class TestBuildAfterInstallContract:
         )
 
 
-class TestGraphModuleGuard:
-    """If graph.research_graph isn't in sys.modules, late-bound name
-    patches log a warning instead of raising. The handler imports the
-    graph module before invoking the gate, so this is a defensive check."""
-
-    def test_skips_late_bound_patches_when_graph_absent(self, caplog):
-        # Make sure agents/* shells exist so agent patches succeed
-        for mod_path in [
-            "agents",
-            "agents.macro_agent",
-            "agents.sector_teams",
-            "agents.sector_teams.quant_analyst",
-            "agents.sector_teams.qual_analyst",
-            "agents.sector_teams.peer_review",
-            "agents.sector_teams.sector_team",
-            "agents.investment_committee",
-            "agents.investment_committee.ic_cio",
-        ]:
-            if mod_path not in sys.modules:
-                sys.modules[mod_path] = types.ModuleType(mod_path)
-        for mod_path, attr in [
-            ("agents.macro_agent", "run_macro_agent_with_reflection"),
-            ("agents.macro_agent", "run_macro_agent"),
-            ("agents.sector_teams.quant_analyst", "run_quant_analyst"),
-            ("agents.sector_teams.qual_analyst", "run_qual_analyst"),
-            ("agents.sector_teams.peer_review", "run_peer_review"),
-            ("agents.sector_teams.sector_team", "run_sector_team"),
-            ("agents.investment_committee.ic_cio", "run_cio"),
-        ]:
-            setattr(sys.modules[mod_path], attr, MagicMock())
-
-        # Ensure graph.research_graph is NOT in sys.modules — but SAVE
-        # the real module first and RESTORE it in a finally. Popping
-        # without restoring evicts the real, already-imported module:
-        # later test modules that did ``from graph.research_graph import
-        # _build_signals_payload`` at collection time keep a function
-        # whose ``__globals__`` is the orphaned old module, while their
-        # ``monkeypatch.setattr("graph.research_graph.<FLAG>", ...)``
-        # patches a DIFFERENT (re-imported) module object — so the patch
-        # silently doesn't take effect. That was the order-dependent
-        # gate-flag leak documented in
-        # tests/test_regime_stage_b_graph_topology.py.
-        _saved_rg = sys.modules.pop("graph.research_graph", None)
-        try:
-            dr = _import_dry_run()
-            import logging
-            with caplog.at_level(logging.WARNING):
-                restore = dr.install_dry_run_stubs(None)
-                restore()
-
-            # Should have warned about graph.research_graph absence
-            warnings_text = " ".join(r.message for r in caplog.records)
-            assert "graph.research_graph" in warnings_text
-            assert "not in sys.modules" in warnings_text
-        finally:
-            if _saved_rg is not None:
-                sys.modules["graph.research_graph"] = _saved_rg
+# ── TestGraphModuleGuard DELETED (alpha-engine-config-I7827) ──────────────
+# It asserted that a late-bound patch whose target module is absent from
+# ``sys.modules`` logs a warning instead of raising. The only such target was
+# ``graph.research_graph``, deleted with the retired champion arm, so
+# ``_GRAPH_NAME_PATCHES`` is empty and the warning can no longer fire for any
+# input — the test could only have passed by re-creating the very module whose
+# absence it was asserting. The loop and its warning are kept in dry_run.py
+# because the mechanism is still correct for the next module that binds an
+# agent name at import time; the first such module re-earns this test.

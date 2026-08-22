@@ -41,6 +41,48 @@ ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FUNCTION_MAIN}"
 
 TARGET="${1:-both}"
 
+# ── Deploy stamp: what commit is this function actually running? ─────────────
+#
+# alpha-engine-config-I7840. Until now the only stamp was the Docker ENV
+# ``ALPHA_ENGINE_CODE_SHA`` baked by ``--build-arg GIT_SHA`` (Dockerfile L69).
+# Runtime code can read it, but nothing OUTSIDE the function can: an image ENV
+# is not surfaced by ``lambda get-function-configuration``, so answering "is
+# this Lambda behind main?" required invoking it. That is why the 2026-08-18
+# scanner ran two days of pre-fix code with nobody able to see it (I7645 →
+# I7819 → I7840): the fact existed and was unreadable.
+#
+# Setting the SAME name as a function-level environment variable makes it
+# readable without a redeploy and without an invoke. Same name deliberately —
+# a second stamp key would be a fork, and the two would diverge in exactly the
+# direction that produces a confident wrong answer. The function-level value
+# overrides the image ENV with an identical value for the main image, and
+# supplies one for the image-shared Lambdas and for the alerts image, which
+# has no GIT_SHA build-arg at all.
+#
+# Resolved ONCE here, at global scope, rather than inside build_and_deploy_main:
+# deploy.yml invokes this script once PER TARGET, so `deploy.sh scanner` never
+# enters the main build path and would otherwise stamp nothing.
+GIT_SHA="${GITHUB_SHA:-$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse HEAD 2>/dev/null || echo '')}"
+if [[ ! "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: could not resolve a 40-hex commit SHA to stamp this deploy with." >&2
+  echo "  GITHUB_SHA='${GITHUB_SHA:-<unset>}' and 'git rev-parse HEAD' gave '${GIT_SHA}'." >&2
+  echo "  Refusing to publish an UNSTAMPED function: an unstamped deploy is exactly" >&2
+  echo "  the invisible state alpha-engine-config-I7840 exists to remove, and the" >&2
+  echo "  drift detector would report it as unmeasured forever." >&2
+  exit 1
+fi
+
+# A deploy built from a working tree with uncommitted changes carries a SHA
+# that does NOT describe the running code. Stamping the SHA alone would make
+# the drift detector report `in_sync` about code that exists nowhere in git.
+# Say so instead. Empty `git status --porcelain` output means clean.
+if [ -n "$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." status --porcelain 2>/dev/null)" ]; then
+  GIT_TREE_DIRTY="true"
+  echo "WARNING: deploying from a DIRTY working tree — functions will be stamped DEPLOY_STAMP_DIRTY=true."
+else
+  GIT_TREE_DIRTY="false"
+fi
+
 
 # ── Lambda existence check (fail-loud on non-NotFound errors) ────────────────
 #
@@ -155,6 +197,133 @@ _verify_live_alias() {
 # into a file and merged by python, never printed, never passed on a command
 # line. Do NOT trace this script (see AGENTS.md: a shell trace expands the
 # variable JSON).
+# -- Cost-sink addressing for EVERY research Lambda (config-I7179) ----------
+#
+# Measured 2026-08-13: every per-call cost record in
+# decision_artifacts/_cost_raw/ came from ONE producer -- the Think Tank,
+# which left the weekly pipeline on 2026-08-10 -- while every LLM-calling
+# stage of that pipeline was attributed to nothing. The cause was not a
+# broken writer: `krepis.llm.LLMClient` only emitted when a call site
+# remembered to pass `cost_sink=`, so coverage equalled the set of authors
+# who thought about it, and decayed with every stage added.
+#
+# krepis>=0.57.0 inverts that: a client with no `cost_sink` argument
+# resolves one from KREPIS_COST_SINK_BUCKET + KREPIS_COST_SINK_PREFIX.
+# Setting them here makes emission a property of the DEPLOYMENT, so a new
+# Lambda -- or a new LLM call inside an existing one -- emits by
+# construction and cannot silently reproduce the gap.
+#
+# Applied to EVERY function this script publishes, not to a hand-picked
+# subset. A function that makes no LLM call simply never emits; picking
+# the subset by hand is the same judgement that produced the gap.
+#
+# ORDERING IS LOAD-BEARING: a published Lambda version snapshots the
+# environment, and the `live` alias points at a published version. This
+# must run BEFORE `publish-version` or the alias serves a version without
+# the variables, while `get-function-configuration` on $LATEST shows them
+# set -- a deploy-path defect that is invisible in every file.
+#
+# Merge, never replace: `krepis.aws merge-lambda-env` is read-modify-write
+# and preserves the provider keys, RAG_DATABASE_URL and LangSmith config
+# that exist only on the live functions. It echoes key NAMES only.
+_apply_cost_sink_env() {
+  local fn="$1"
+  echo "  Applying cost-sink addressing to $fn (merge, not replace)..."
+  python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set KREPIS_COST_SINK_BUCKET="$BUCKET" --set KREPIS_COST_SINK_PREFIX=decision_artifacts/_cost_raw --region "$REGION"
+}
+
+# ── Deploy stamp applier (alpha-engine-config-I7840) ─────────────────────────
+#
+# Merge, never replace — same read-modify-write CLI as the cost-sink applier,
+# so provider keys, RAG_DATABASE_URL and LangSmith config that exist only on
+# the live functions survive.
+#
+# ORDERING IS LOAD-BEARING, twice over:
+#   1. This must run BEFORE `publish-version`, or the `live` alias serves a
+#      version whose environment has no stamp while `$LATEST` shows one — the
+#      deploy-path defect that is invisible in every file (config#2766), and
+#      the drift detector reads the ALIAS, not $LATEST.
+#   2. It must WAIT first. `_apply_cost_sink_env` runs immediately before it
+#      and leaves the function in LastUpdateStatus=InProgress for a few
+#      seconds; a configuration update issued inside that window fails with
+#      ResourceConflictException, which under `set -euo pipefail` aborts the
+#      whole deploy (observed live on the router-env applier, deploy runs
+#      30866612804 / 30867141385, 2026-08-04).
+_apply_deploy_stamp_env() {
+  local fn="$1"
+  echo "  Stamping $fn with ALPHA_ENGINE_CODE_SHA=$GIT_SHA (dirty=$GIT_TREE_DIRTY, merge not replace)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws merge-lambda-env --function-name "$fn" --set ALPHA_ENGINE_CODE_SHA="$GIT_SHA" --set DEPLOY_STAMP_DIRTY="$GIT_TREE_DIRTY" --region "$REGION"
+}
+
+# ── Lambda environment convergence (alpha-engine-config-I7925) ──────────────
+#
+# This repo's nine research Lambdas were among the eleven fleet-wide carrying
+# a `GITHUB_TOKEN` set by hand and refreshed by nothing — the environment is
+# LIVE-ONLY state that no repo, IaC file or script here ever wrote. That
+# environment carried a STALE COPY of the credential — set from an older
+# SSM parameter version and never re-derived on deploy — that GitHub
+# rejected while the SSM parameter's own value remained valid the whole
+# time (alpha-engine-config-I7968 tracks the mis-attribution). On
+# 2026-08-21 a first-party dependency picked that stale copy up
+# up out of site-packages, sent it to GitHub, got a 401, and halted the
+# preopen trading pipeline (alpha-engine-config-I7924). This applier is the
+# same convergence `crucible-predictor-PR535` shipped for
+# `alpha-engine-predictor-inference` (the one of eleven that broke),
+# propagated here for the other nine.
+#
+# DENY-LIST, deliberately, not an allow-list: these functions carry
+# operator-set flags and provider keys codified nowhere, and asserting a
+# complete key set would delete them. The allow-list end state is tracked
+# separately (alpha-engine-config-I7958).
+#
+# Read-modify-write via the shared `krepis.aws remove-lambda-env` CLI — a
+# bare `aws lambda update-function-configuration --environment` REPLACES the
+# whole variable map.
+LAMBDA_ENV_DENIED_KEYS=(GITHUB_TOKEN)
+
+# For alias-pinned functions: this edits $LATEST only (--defer-publish), on
+# purpose. Each caller publishes a version and moves the `live` alias itself
+# immediately afterward, so the removal reaches traffic through that same
+# promotion. Placed after publish-version it would be a silent no-op on the
+# alias (L4497, the same property crucible-predictor-PR535 pins).
+_converge_lambda_env_deferred() {
+  local fn="$1"
+  echo "  Converging Lambda environment on $fn (removing denied keys, deferred to next publish)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws remove-lambda-env \
+    --function-name "$fn" --region "$REGION" \
+    --defer-publish --missing-ok \
+    "${LAMBDA_ENV_DENIED_KEYS[@]/#/--unset=}"
+}
+
+# For functions with NO alias/version promotion (FUNCTION_ALERTS): the edit
+# reaches traffic directly, so --defer-publish is wrong here — there is no
+# later publish step to carry it.
+#
+# --no-alias is the claim that IS true here (krepis>=0.59.25,
+# alpha-engine-config-I8037). Without it, krepis enumerates aliases to decide
+# whether a $LATEST edit reaches traffic, and this deploy role holds no
+# `lambda:ListAliases` — so this call raised and took the whole deploy with it,
+# twice, on runs 32512239555 and 32514368875, with krepis 0.59.24 installed.
+# 0.59.24 only skips the enumeration under --defer-publish, which is exactly
+# the claim this helper cannot make.
+#
+# The flag is an assertion about THIS function: it serves traffic from $LATEST
+# and has no alias, so alias state cannot change the outcome. It is not a
+# general softening — a caller that asserts nothing still enumerates and still
+# refuses, which is why the deferred helper above keeps its own flag rather
+# than borrowing this one.
+_converge_lambda_env_direct() {
+  local fn="$1"
+  echo "  Converging Lambda environment on $fn (removing denied keys)..."
+  aws lambda wait function-updated --function-name "$fn" --region "$REGION" 2>/dev/null || sleep 5
+  python3 -m krepis.aws remove-lambda-env \
+    --function-name "$fn" --region "$REGION" \
+    --no-alias --missing-ok \
+    "${LAMBDA_ENV_DENIED_KEYS[@]/#/--unset=}"
+}
+
 _apply_router_env() {
   local fn="$1"
   echo "  Applying router addressing to $fn (merge, not replace)..."
@@ -348,13 +517,15 @@ build_and_deploy_main() {
   # falls back to `git rev-parse HEAD`. Empty (not "unknown") when neither
   # resolves, so graph/research_graph.py's `os.environ.get(...) or None` read
   # records None rather than a misleading literal. Mirrors the predictor wire-in.
-  GIT_SHA="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo '')}"
-  echo "  Stamping image with GIT_SHA=${GIT_SHA:-<unset>}"
+  # GIT_SHA is resolved once at global scope (see the deploy-stamp block near
+  # the top) so every target stamps the same value, not just this one.
+  echo "  Stamping image with GIT_SHA=${GIT_SHA}"
 
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false \
     --build-arg "GIT_SHA=${GIT_SHA}" \
+    --label "org.opencontainers.image.revision=${GIT_SHA}" \
     -t "$FUNCTION_MAIN:latest" .
 
   # Only remove staged files — never touch a local dev checkout that
@@ -431,6 +602,9 @@ build_and_deploy_main() {
   echo "  $FUNCTION_MAIN deployed (container image)."
 
   _apply_router_env "$FUNCTION_MAIN"
+  _apply_cost_sink_env "$FUNCTION_MAIN"
+  _apply_deploy_stamp_env "$FUNCTION_MAIN"
+  _converge_lambda_env_deferred "$FUNCTION_MAIN"
 
   # Publish version and update 'live' alias
   echo "  Publishing Lambda version..."
@@ -455,18 +629,30 @@ build_and_deploy_main() {
 
   # Canary invocation
   #
-  # Use ``dry_run_llm: true`` — the flag the handler actually recognizes
-  # (lambda/handler.py:191). Earlier versions sent ``{"dry_run": true}``,
-  # which the handler silently ignored, leaving the canary running in
-  # full production mode (real LLM calls, real S3 writes, real email).
-  # That misfired on 2026-05-04 when a config-changed deploy landed
-  # inside the 5:40-5:55 PT weekday gate window in
-  # ``_is_scheduled_run_time()`` and produced a real ``signals.json`` +
-  # research email outside the intended Saturday cadence. The
-  # ``dry_run_llm`` path installs full stubs (no LLM, no S3, no email)
-  # before the graph runs, so a future deploy landing in the gate
-  # window stays a no-op.
-  echo "  Running canary (dry_run_llm=true)..."
+  # WHAT IT EXERCISES (changed by alpha-engine-config-I7827): the LIVE
+  # producer path -- ``producers/boot_check.py::run_live_producer_boot_check``
+  # imports every producer the weekly SF's ChallengerShadow stage will build
+  # (derived from ``producers/registry.py``, so a newly-registered arm is
+  # covered the day it lands) and drives the shared signals-payload assembly
+  # on a synthetic in-memory state.
+  #
+  # Until 2026-08-20 it called ``graph.research_graph.build_graph()`` instead:
+  # a producer RETIRED 2026-07-12 and with no invoker in production since the
+  # weekly SF dropped its ``Research`` state on 2026-07-14. The deploy's own
+  # safety check was smoke-testing dead code and NOT smoke-testing the path
+  # that runs, so a deploy that broke ``producers/`` passed this canary green.
+  #
+  # WHY THE PAYLOAD IS ``dry_run_llm`` AND NOT ``dry_run`` -- unchanged, and
+  # orthogonal to the above. ``dry_run_llm`` is the flag the handler actually
+  # recognizes. Earlier versions sent ``{"dry_run": true}``, which the handler
+  # silently ignored, leaving the canary running in full production mode (real
+  # LLM calls, real S3 writes, real email). That misfired on 2026-05-04 when a
+  # config-changed deploy landed inside the 5:40-5:55 PT weekday gate window
+  # and produced a real ``signals.json`` + research email outside the intended
+  # Saturday cadence. The ``dry_run_llm`` path still installs full stubs (no
+  # LLM, no S3, no email, no DB) around the check, and the check itself
+  # performs no I/O at all, so a deploy landing at any hour stays a no-op.
+  echo "  Running canary (dry_run_llm=true, live producer path)..."
   CANARY_OUT=$(mktemp)
   if ! python3 -m krepis.aws invoke-canary \
       --function-name "${FUNCTION_MAIN}:live" \
@@ -559,6 +745,7 @@ build_and_deploy_alerts() {
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false \
+    --label "org.opencontainers.image.revision=${GIT_SHA}" \
     -f Dockerfile.alerts \
     -t "$FUNCTION_ALERTS:latest" .
 
@@ -616,6 +803,8 @@ build_and_deploy_alerts() {
       --memory-size 256 \
       --region "$REGION" > /dev/null
   fi
+  _apply_deploy_stamp_env "$FUNCTION_ALERTS"
+  _converge_lambda_env_direct "$FUNCTION_ALERTS"
   echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
@@ -662,6 +851,12 @@ deploy_eval_judge() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
+
+  _apply_cost_sink_env "$FUNCTION_EVAL_JUDGE"
+
+  _apply_deploy_stamp_env "$FUNCTION_EVAL_JUDGE"
+
+  _converge_lambda_env_deferred "$FUNCTION_EVAL_JUDGE"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
@@ -723,6 +918,12 @@ deploy_eval_rolling_mean() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_ROLLING_MEAN deployed (CMD=eval_rolling_mean_handler.handler)."
+
+  _apply_cost_sink_env "$FUNCTION_EVAL_ROLLING_MEAN"
+
+  _apply_deploy_stamp_env "$FUNCTION_EVAL_ROLLING_MEAN"
+
+  _converge_lambda_env_deferred "$FUNCTION_EVAL_ROLLING_MEAN"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" 2>/dev/null || sleep 5
@@ -797,6 +998,12 @@ deploy_rationale_clustering() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_RATIONALE_CLUSTERING deployed (CMD=rationale_clustering_handler.handler)."
+
+  _apply_cost_sink_env "$FUNCTION_RATIONALE_CLUSTERING"
+
+  _apply_deploy_stamp_env "$FUNCTION_RATIONALE_CLUSTERING"
+
+  _converge_lambda_env_deferred "$FUNCTION_RATIONALE_CLUSTERING"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" 2>/dev/null || sleep 5
@@ -878,6 +1085,12 @@ _deploy_image_shared_lambda() {
       --region "$REGION" > /dev/null
   fi
   echo "  $fn_name deployed (CMD=${handler_module}.handler timeout=${timeout_s}s memory=${memory_mb}MB)."
+
+  _apply_cost_sink_env "$fn_name"
+
+  _apply_deploy_stamp_env "$fn_name"
+
+  _converge_lambda_env_deferred "$fn_name"
 
   echo "  Publishing Lambda version..."
   aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5
@@ -1021,7 +1234,7 @@ deploy_perturbation_battery() {
 
 case "$TARGET" in
   main)                  build_and_deploy_main ;;
-  alerts)                build_and_deploy_alerts ;;  # ci-deploy-guard: manual — alerts Lambda deployed on demand, not on every merge
+  alerts)                build_and_deploy_alerts ;;
   eval_judge)            deploy_eval_judge ;;
   eval_judge_batch)      deploy_eval_judge_batch ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;

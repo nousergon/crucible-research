@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from graph.research_graph import _build_signals_payload  # noqa: E402
+from scoring.signals_payload import _build_signals_payload  # noqa: E402
 
 # ── Contract field sets (MUST match PIPELINE_CONTRACT.yaml boundary `signals`) ──
 

@@ -4,7 +4,9 @@ institutional data-revamp arc (Wave 1).
 The producer side lives in alpha-engine-data. Canonical-shape S3
 layout (post-#234; legacy ``{date}``-keyed fallback retired 2026-05-19):
 
-  - news_aggregates/{run_id}_result.parquet  +  news_aggregates/latest.json
+  - news_aggregates_daily/{run_id}_result.parquet  +  news_aggregates_daily/latest.json
+    (``news_aggregates/`` — the Saturday full-universe artifact — was
+    retired 2026-07-30 by nousergon-data#1168; see reader.py)
   - insider_transactions/{run_id}_result.parquet  +  insider_transactions/latest.json
   - analyst_revisions/{run_id}_result.parquet  +  analyst_revisions/latest.json
   - analyst_snapshots/{ticker}/{run_id}.json  +  analyst_snapshots/{ticker}/latest.json

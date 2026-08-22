@@ -1,0 +1,189 @@
+"""The cut named "scanner" is not the funnel (alpha-engine-config-I7578).
+
+Brian ruling 2026-08-17: only the funnel-60 advances to the top-20 and to Think
+Tank. The funnel INVARIANT already enforced that (I6630). What was unguarded is
+the NAMING — the 60-wide cut that feeds nothing was the one whose name said
+"scanner", and it was read backwards three times, each caught by hand.
+
+Measured 2026-08-17 on the live artifact: the two 60-wide cuts overlap on 12 of
+60, and the champion 20 overlaps the gate cut on 3 of 20. Near-disjoint sets,
+and only one of them advances.
+
+RED on origin/main at aff64bd8: every test here except the alias ones fails,
+because neither the new cut name, the `feed_cut` field, the `funnel` block nor
+the routing guard exists.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scoring.universe_membership import (  # noqa: E402
+    CHAMPION_CUT,
+    FEED_CUT_NAME,
+    GATE_BASELINE_CUT,
+    GATE_LEGACY_CUT,
+    PREDICTOR_UNIVERSE_CUT,
+    UniverseMembershipError,
+    assert_gate_cut_feeds_nothing_live,
+    build_universe_membership,
+)
+
+GATE = [f"G{i:03d}" for i in range(60)]
+ATTRACTIVENESS = {f"T{i:03d}": float(1000 - i) for i in range(200)}
+
+
+@pytest.fixture
+def membership():
+    return build_universe_membership(
+        "2026-08-18", scanner_tickers=GATE, attractiveness=ATTRACTIVENESS,
+    )
+
+
+# ── The rename ───────────────────────────────────────────────────────────────
+
+
+def test_gate_cut_name_contains_baseline():
+    """Reading this name as the funnel must require ignoring a word."""
+    assert "baseline" in GATE_BASELINE_CUT
+
+
+def test_gate_cut_is_emitted_under_the_new_name(membership):
+    cut = membership["cuts"][CHAMPION_CUT]
+    # NOT "scanner_gate", NOT "scanner_gate_baseline_60" (alpha-engine-config-I7818
+    # renamed it again — see below), NOT "scanner_candidates". The live cut is
+    # ranked by the scanner slot's champion arm and has been since the
+    # 2026-07-22 cutover; the old basis, together with a docstring calling this
+    # cut a tech_score ranking, is what let three separate labels outlive the
+    # ranking they named (alpha-engine-config-I7808, SCANNER_CONTRACT.md §2).
+    assert cut["basis"] == "scanner_champion_rank"
+    assert cut["size"] == 60
+    # It feeds the SECTOR TEAMS — via candidates.json rather than via this
+    # artifact — and none of the attractiveness consumers. "Feeds nothing" was
+    # true only of the predictor/RAG/Think Tank family, and reading it as
+    # "feeds nothing at all" is the misreading this spells out.
+    # Feeds NOTHING as of Brian's ruling 2026-08-20: the sector teams moved to
+    # the champion CUT (universe_membership.resolve_feed_cut), so this artifact
+    # is the scanner slot's champion-ARM output and a measurement input only
+    # (alpha-engine-config-I7823).
+    assert cut["feeds"] == []
+    role = cut["role"].lower()
+    assert "feeds nothing" in role
+    assert "champion cut" in role
+
+
+def test_baseline_alias_still_emitted_and_marked_deprecated(membership):
+    """alpha-engine-config-I7818: ``scanner_gate_baseline_60`` is now the
+    deprecated alias for :data:`CHAMPION_CUT`, emitted for one window. A
+    consumer pinned on it must break loudly at a stated date, never silently
+    read a missing key as an empty cut. Known live reader:
+    crucible-dashboard/loaders/universe_churn.py (migrated to CHAMPION_CUT in
+    the same change)."""
+    legacy = membership["cuts"][GATE_BASELINE_CUT]
+    assert legacy["deprecated_alias_for"] == CHAMPION_CUT
+    assert legacy["removal_tracked_by"]
+
+
+def test_scanner_candidates_is_retired_and_no_longer_emitted(membership):
+    """alpha-engine-config-I7818: the I7578 alias's deprecation window is
+    closed. Emitting it forever would make "one deprecation window" a
+    fiction."""
+    assert GATE_LEGACY_CUT not in membership["cuts"]
+
+
+def test_alias_and_canonical_carry_identical_membership(membership):
+    """An alias that could drift from its target is a second source of truth."""
+    a = membership["cuts"][CHAMPION_CUT]
+    b = membership["cuts"][GATE_BASELINE_CUT]
+    assert a["tickers"] == b["tickers"]
+    assert a["size"] == b["size"]
+    assert a["basis"] == b["basis"]
+
+
+# ── The funnel, stated in the artifact ───────────────────────────────────────
+
+
+def test_feed_cut_is_named_at_the_top_level(membership):
+    assert membership["feed_cut"] == FEED_CUT_NAME
+
+
+def test_funnel_block_states_the_whole_chain(membership):
+    f = membership["funnel"]
+    assert f["population"] == len(ATTRACTIVENESS)
+    assert f["feed_cut"] == {"name": FEED_CUT_NAME, "size": 60}
+    assert f["champion_cut"] == {"name": PREDICTOR_UNIVERSE_CUT, "size": 20}
+
+
+def test_funnel_names_all_three_live_consumers(membership):
+    """Brian's ruling in one place: the top-20 goes to the predictor, and the
+    SAME 60 is both the RAG scope and Think Tank's window."""
+    advances = membership["funnel"]["advances_to"]
+    assert advances["predictor_universe"] == PREDICTOR_UNIVERSE_CUT
+    assert advances["rag_corpus_scope"] == FEED_CUT_NAME
+    assert advances["thinktank_coverage_window"] == FEED_CUT_NAME
+
+
+def test_funnel_says_which_cuts_feed_nothing(membership):
+    assert set(membership["funnel"]["feeds_nothing_live"]) == {
+        CHAMPION_CUT, GATE_BASELINE_CUT,
+    }
+
+
+def test_every_name_in_the_funnel_block_is_a_real_cut(membership):
+    """A funnel block naming a cut the artifact does not carry is a map to a
+    place that does not exist."""
+    cuts = membership["cuts"]
+    f = membership["funnel"]
+    for name in (f["feed_cut"]["name"], f["champion_cut"]["name"],
+                 *f["advances_to"].values(), *f["feeds_nothing_live"]):
+        assert name in cuts, name
+
+
+# ── The guard: the gate cut may never be wired to a live consumer ────────────
+
+
+@pytest.mark.parametrize("field", ["predictor_universe_cut", "feed_cut"])
+@pytest.mark.parametrize("gate_name", [CHAMPION_CUT, GATE_BASELINE_CUT])
+def test_routing_a_live_consumer_at_the_gate_cut_raises(membership, field, gate_name):
+    """This is the check whose absence produced I6630 — the RAG corpus scoped
+    to the gate cut against a champion drawn from the rank, overlapping 2 of
+    20, with nothing asserting the two were related."""
+    broken = {**membership, field: gate_name}
+    with pytest.raises(UniverseMembershipError, match="feeds nothing live"):
+        assert_gate_cut_feeds_nothing_live(broken, "2026-08-18")
+
+
+def test_routing_a_funnel_consumer_at_the_gate_cut_raises(membership):
+    broken = {
+        **membership,
+        "funnel": {
+            **membership["funnel"],
+            "advances_to": {**membership["funnel"]["advances_to"],
+                            "rag_corpus_scope": CHAMPION_CUT},
+        },
+    }
+    with pytest.raises(UniverseMembershipError, match="feeds nothing live"):
+        assert_gate_cut_feeds_nothing_live(broken, "2026-08-18")
+
+
+def test_the_real_artifact_passes_the_guard(membership):
+    assert_gate_cut_feeds_nothing_live(membership, "2026-08-18")
+
+
+# ── The property the ruling is actually about ────────────────────────────────
+
+
+def test_only_the_feed_cut_advances(membership):
+    """The champion is the head of the feed cut, and the gate cut is not
+    involved in either."""
+    cuts = membership["cuts"]
+    champion = set(cuts[PREDICTOR_UNIVERSE_CUT]["tickers"])
+    feed = set(cuts[FEED_CUT_NAME]["tickers"])
+    gate = set(cuts[CHAMPION_CUT]["tickers"])
+    assert champion <= feed
+    assert not (champion & gate)

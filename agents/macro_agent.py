@@ -15,6 +15,7 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_anthropic_safe,
     make_agent_llm,
 )
@@ -299,7 +300,7 @@ def run_macro_agent(
       sector_modifiers: dict[str, float]
     """
     # Defer-import the cost-telemetry callback so this module's import
-    # path stays leaf-side of graph/* (research_graph imports macro_agent).
+    # path stays leaf-side of graph/* (the retired research graph imports macro_agent).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     llm = make_agent_llm(
@@ -377,7 +378,9 @@ def run_macro_agent(
     # field directly. include_raw=True captures parse failures as a
     # ``parsing_error`` rather than raising; the strict-mode gate below raises
     # explicitly to match the "no silent fallbacks" rule.
-    structured_llm = llm.with_structured_output(MacroEconomistRawOutput, include_raw=True)
+    structured_llm = bind_structured_output(
+        llm, MacroEconomistRawOutput, include_raw=True
+    )
     # ALL-AGENTS-STRICT (Brian, 2026-05-16): the macro economist is one
     # of the agents in scope. Deadline-bounded (~75 min) 429 retry so
     # an org TPM ceiling is ridden out; if it persists past the
@@ -441,7 +444,7 @@ def run_macro_agent(
             validated_ratings[sector] = {"rating": rating, "rationale": rationale}
 
     # Build macro_json in the dict shape downstream consumers expect
-    # (graph/research_graph.py merge_results, archive_writer, consolidator).
+    # (the retired research graph's merge_results, archive_writer, consolidator).
     macro_json = {
         "market_regime": parsed.market_regime,
         "sector_modifiers": dict(parsed.sector_modifiers),
@@ -466,13 +469,13 @@ def run_macro_agent(
         # ``_PROMPT_TEMPLATE.format(...)``) — this is what was handed to
         # ``HumanMessage(content=prompt)`` above, not the raw template.
         # Threaded back up through ``run_macro_agent_with_reflection`` so
-        # ``research_graph.py``'s ``track_llm_cost`` scope can stamp it
+        # The retired research graph's ``track_llm_cost`` scope can stamp it
         # onto ``FullPromptContext.user_prompt`` instead of falling back
         # to the unsubstituted ``LoadedPrompt.text`` template body. The
         # critic prompt (``run_macro_critic``) is a refinement pass, not
         # the canonical decision prompt, so it's intentionally excluded —
         # mirrors the existing ModelMetadata prompt_id/version comment
-        # in research_graph.py's macro call site.
+        # in the retired research graph's macro call site.
         "rendered_prompt": prompt,
     }
 
@@ -597,7 +600,7 @@ def run_macro_critic(
     # raises on parse failure; lax mode keeps the silent-accept fallback
     # because the critic is an editorial gate — accepting the initial macro
     # classification is the conservative behavior on critic failure.
-    structured_llm = llm.with_structured_output(MacroCriticOutput)
+    structured_llm = bind_structured_output(llm, MacroCriticOutput)
     try:
         # Deadline-bounded 429 retry (all-agents-strict): the critic is
         # part of the macro agent. A 429 rides out the ~75-min window;

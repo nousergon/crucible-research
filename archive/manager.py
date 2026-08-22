@@ -276,9 +276,14 @@ class ArchiveManager:
 
         self._s3_put(key, json.dumps(history, indent=2))
 
-    def save_macro_report(self, run_date: str, macro_report: str) -> None:
-        self._s3_put("archive/macro/macro_report.md", macro_report)
-        self._s3_put(f"archive/macro/history/{run_date}/macro_report.md", macro_report)
+    # ``save_macro_report`` was retired 2026-08-21 (alpha-engine-config-I2638,
+    # Brian ruling). It lost its only call site when the multi-agent graph left
+    # the weekly SF, so ``archive/macro/macro_report.md`` froze at 2026-03-16
+    # while its one remaining consumer — Think Tank's theme reconciliation —
+    # kept reading it as "the weekly macro report" for 158 days. Think Tank now
+    # self-anchors on the regime substrate + news aggregates
+    # (``thinktank/context.py``); a dead writer kept "in case" is what let the
+    # artifact look like a live contract.
 
     def save_consolidated_report(self, run_date: str, report: str) -> None:
         self._s3_put(f"consolidated/{run_date}/morning.md", report)
@@ -343,6 +348,13 @@ class ArchiveManager:
         run_time as a column name across multiple tables).
         """
         payload = {"date": trading_date, "run_date": generated_at, **signals}
+        # Write-site refusals before ANY put — see scoring/promotion_guards.py.
+        # alpha-engine-config-I7856: the stub-quarantine guard lost its only
+        # importer when the research graph was deleted, and this write site
+        # never had one.
+        from scoring.promotion_guards import assert_promotable
+
+        assert_promotable(payload, surface=f"signals/{trading_date}/signals.json")
         body = json.dumps(payload, indent=2, default=str)
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
@@ -380,15 +392,21 @@ class ArchiveManager:
         :meth:`write_signals_json` so a leaderboard can read champion + every
         shadow uniformly. Returns the S3 key."""
         payload = {"date": trading_date, "run_date": generated_at, **signals}
-        body = json.dumps(payload, indent=2, default=str)
         key = f"signals_shadow/{producer_name}/{trading_date}/signals.json"
+        # The shadow key is where the LIVE LLM-backed challengers (Think Tank)
+        # land, so it is the write site most exposed to a synthetic marker —
+        # guarded identically to the champion key (alpha-engine-config-I7856).
+        from scoring.promotion_guards import assert_promotable
+
+        assert_promotable(payload, surface=key)
+        body = json.dumps(payload, indent=2, default=str)
         self._s3_put(key, body)
         return key
 
     # ── Per-sector-team run persistence (resumability) ────────────────────────
     #
     # The Research Lambda runs the LangGraph stateless (no checkpointer —
-    # see graph/research_graph.py build_graph()). A re-invocation
+    # see the retired research graph's build_graph()). A re-invocation
     # (e.g. an SF retry after a 429) would re-dispatch all 6 sector
     # teams via Send() and re-pay every Haiku call. To make a re-run
     # reuse teams that already succeeded, each team's full output is

@@ -72,6 +72,8 @@ import logging
 import os
 import sys
 import tempfile
+import time
+from datetime import UTC, datetime
 
 # Repo root on sys.path so ``from scoring.signals_envelope import ...``
 # resolves under Lambda's task layout. Mirrors the existing shared-image
@@ -121,8 +123,53 @@ def _ensure_init() -> None:
 
 @monitor_handler
 def handler(event, context):
+    """Entry point. Runs the handler, then flushes cost telemetry.
+
+    The `finally` is the whole point (alpha-engine-config-I7423).
+    `krepis.cost_sink.S3JsonlCostSink` buffers to 200 records per
+    `(date, callsite_id)` group and otherwise relies on an `atexit` hook —
+    and **an AWS Lambda container is FROZEN between invocations, not exited,
+    so `atexit` never runs.** A handler finishing below the threshold writes
+    nothing at all, and the container may be reclaimed hours later without
+    ever reaching interpreter shutdown.
+
+    Measured 2026-08-15 on weekly-SF execution `watch-rerun-2026-08-15-2`:
+    `AggregateCosts` reported `single-agent-quant` among `2 stage(s) ran and
+    emitted no cost record ... Observed producers: (none)`. The env wiring was
+    correct, the sink was constructed, the records were priced and accepted,
+    and every one of them died in memory.
+
+    Applied to EVERY handler in this directory rather than to the ones known
+    to call an LLM today: `flush_default_sink` returns 0 when no sink is
+    configured and never raises, so the uniform rule costs nothing and leaves
+    no per-handler judgment call for the next producer to get wrong.
+    """
+    try:
+        return _run(event, context)
+    finally:
+        try:
+            from krepis.cost_sink import flush_default_sink
+            _n = flush_default_sink()
+            if _n:
+                logger.info("cost sink flushed: %d object(s)", _n)
+        except ImportError as exc:
+            # Loud, not silent: the image's krepis pin predates the function
+            # (floor is >=0.59.8). Cost records for this invocation are lost,
+            # and AggregateCosts' fan-in coverage check will name this stage.
+            logger.error("cost-sink flush unavailable — records lost: %s", exc)
+
+
+def _run(event, context):
     """Build + write the no-agent signals envelope. Raises on failure (see
     module doc's RAISE contract)."""
+    # Wall-clock start for the research health stamp's duration_seconds
+    # (config-I6053). Taken before the dry-path return so the field measures
+    # the same span the retired runner's stamp measured — the whole handler.
+    _health_start = time.time()
+    # Captured at entry, before any work — an artifact older than this is a
+    # leftover from a previous cycle, not this run's output (config-I7214).
+    _started = datetime.now(UTC)
+
     from evals.lambda_dry import is_dry
 
     # Shell-run dry path — boot + imports above already exercised the
@@ -259,7 +306,7 @@ def handler(event, context):
     # ── Ported secondary artifacts (config-I3290) ─────────────────────────
     # research_consolidated_morning + scanner_universe_trajectory used to be
     # written from inside the old multi-agent archive_writer node
-    # (graph/research_graph.py), which config#2515 removed from the weekly
+    # (the retired research graph), which config#2515 removed from the weekly
     # SF entirely. Both artifacts still have live consumers (dashboard
     # Research Briefing Archive / Attractiveness Trends views, the
     # backtester's attractiveness_eval IC grading) so they are ported here
@@ -302,13 +349,134 @@ def handler(event, context):
                 dedup_key=f"trajectory_write_fail:{run_date}",
             )
 
+        # ── Research module health stamp (config-I6053 / config-I6344) ────
+        # REPOINTED WRITER, not a new artifact. `health/research.json` had
+        # exactly one writer — nousergon_lib.health.write_health(
+        # module_name="research") inside crucible-research
+        # `lambda/handler.py::handler()`, downstream of the multi-agent
+        # Research graph that nousergon-data#814 (config-I2515) removed from
+        # the weekly SF on 2026-07-14. No SF state invokes that path any more
+        # (`alpha-engine-research-runner:live` is invoked only with
+        # `mode="challengers_only"` by ChallengerShadow, and by the deploy
+        # canary with `dry_run_llm=true`), so the stamp froze at
+        # 2026-07-21T12:49Z carrying `{"status": "failed", "error": "[Errno 28]
+        # No space left on device"}` — the last real full_run, which failed.
+        #
+        # That is ARCHITECTURE §128's exact shape one layer up: retiring a
+        # producer leaves every consumer's read path working, so the dashboard
+        # health checker kept succeeding on a file that had stopped changing.
+        # It is ALSO now load-bearing on the weekly SF's terminal status:
+        # config-I6891 (shipped 2026-08-12) routes any degraded run through
+        # CheckDegradedOutcome -> WriteCompletionMarkerDegraded -> DegradedRun,
+        # a Fail state, and `SaturdayHealthCheck` exits non-zero on any stale
+        # entry — so a dead health stamp now FAILS the whole weekly run.
+        #
+        # The fix is the repoint the ARTIFACT_REGISTRY row's own comment names
+        # as the correct option (config-I6344): the champion scanner ->
+        # signals-envelope -> predictor path owns research-module health now.
+        # This handler is the right writer of the three because the stamp's
+        # declared required deliverable IS `signals`, and this handler is the
+        # sole producer of `signals/{date}/signals.json` + `signals/latest.json`
+        # since the cutover. Deleting the row instead was rejected: the four
+        # health_* rows are a lockstep contract (nousergon_lib.health.
+        # REGISTRY_HEALTH_ARTIFACTS + validate_artifact_registry.py +
+        # the dashboard alignment tests), and research is DECOMPOSED, not
+        # retired — a live capability whose freshness detector we would be
+        # deleting rather than repairing (principles.md §2.7).
+        #
+        # Gated to a real production cycle: `target == "production"` (the
+        # enclosing branch) AND `not preflight` — the Friday-PM shell run
+        # threads preflight=true and must never stamp research health fresh
+        # off a transport smoke, which is the false-green this stamp exists
+        # to make impossible.
+        #
+        # Fail-soft with an alert, mirroring the two secondary artifacts
+        # above: signals.json is already persisted, so sinking the run on an
+        # observability write would trade the primary deliverable for the
+        # stamp. Never silent — the alert is the recording surface.
+        if not preflight:
+            try:
+                from nousergon_lib.health import Deliverable, write_health
+
+                write_health(
+                    module_name="research",
+                    deliverables=[
+                        Deliverable(name="signals", required=True, produced=True),
+                    ],
+                    run_date=run_date,
+                    duration_seconds=time.time() - _health_start,
+                    summary={
+                        "producer": "signals_envelope_handler",
+                        "universe_count": len(envelope["universe"]),
+                        "market_regime": envelope["market_regime"],
+                        "dated_key": dated_key,
+                    },
+                    bucket=bucket,
+                    s3_client=s3,
+                )
+            except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+                logger.warning(
+                    "[signals_envelope_handler] research health stamp write "
+                    "FAILED (non-fatal — signals.json unaffected): %s", e,
+                )
+                from observe_alerts import publish_observe_alert
+                publish_observe_alert(
+                    f"research health stamp write FAILED for {run_date} "
+                    f"(non-fatal, signals.json already persisted). "
+                    f"health/research.json will read stale to "
+                    f"SaturdayHealthCheck: {e}",
+                    source="signals_envelope_handler:health",
+                    dedup_key=f"research_health_write_fail:{run_date}",
+                )
+
+            # ── Flow-doctor end-of-run heartbeat (config#646) ─────────────
+            # REPOINTED WRITER, exactly like the health stamp above.
+            # `_flow_doctor/heartbeat/research/{date}.json` had one producer —
+            # `lambda/handler.py::_emit_flow_doctor_heartbeat` — deleted with the
+            # research graph in crucible-research-PR685. Measured 2026-08-20:
+            # `_flow_doctor/heartbeat/` holds backtester, data-collector, executor
+            # and predictor-inference, and NO research row has ever existed there.
+            #
+            # The console Flow-Doctor pane discovers flows from what is present in
+            # S3 (crucible-dashboard `list_flow_doctor_heartbeat_flows`), so the
+            # research producer does not render as broken — it does not render at
+            # all. That is `principles.md` §2.7's UNREPORTED state: four of the
+            # five producers report and the fifth is silently absent from the list
+            # nobody counts.
+            #
+            # Gated identically to the health stamp — production target, not
+            # preflight — because a heartbeat off a Friday transport smoke is the
+            # same false-green the stamp's gate exists to prevent. `emit_heartbeat`
+            # soft-fails internally and the `hasattr` guard keeps a version-skewed
+            # lib pin from AttributeError-ing at end-of-run (the lib deploys
+            # independently of this image), mirroring the predictor's call site.
+            try:
+                from nousergon_lib.logging import get_flow_doctor
+
+                fd = get_flow_doctor()
+                if fd and hasattr(fd, "emit_heartbeat"):
+                    fd.emit_heartbeat(bucket=bucket)
+            except Exception as e:  # noqa: BLE001 — secondary observability, never fatal
+                logger.warning(
+                    "[signals_envelope_handler] flow-doctor heartbeat write "
+                    "FAILED (non-fatal — signals.json unaffected): %s", e,
+                )
+                from observe_alerts import publish_observe_alert
+                publish_observe_alert(
+                    f"flow-doctor heartbeat write FAILED for {run_date} "
+                    f"(non-fatal, signals.json already persisted). The console "
+                    f"Flow-Doctor pane will not list the research producer: {e}",
+                    source="signals_envelope_handler:flow_doctor_heartbeat",
+                    dedup_key=f"flow_doctor_heartbeat_write_fail:{run_date}",
+                )
+
     logger.info(
         "[signals_envelope_handler] done run_date=%s target=%s dated_key=%s "
         "universe=%d market_regime=%s",
         run_date, target, dated_key,
         len(envelope["universe"]), envelope["market_regime"],
     )
-    return {
+    result = {
         "status": "OK",
         "dated_key": dated_key,
         "latest_key": latest_key,
@@ -316,3 +484,20 @@ def handler(event, context):
         "market_regime": envelope["market_regime"],
         "target": target,
     }
+
+    # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    # §2.3a rescope): the assertion lives in the stage's own handler,
+    # immediately before it returns, rather than a separate end-of-run SF
+    # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            "SignalsEnvelope", run_date=run_date, window_start=_started,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+
+    return result

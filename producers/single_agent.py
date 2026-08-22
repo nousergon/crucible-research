@@ -102,7 +102,7 @@ def build_single_agent_signals(
 ) -> dict:
     """Build a conforming signals.json from the single agent's qual assessments
     + deterministic quant. Pure function (no I/O / no LLM) → unit-testable."""
-    from graph.research_graph import _build_signals_payload
+    from scoring.signals_payload import _build_signals_payload
 
     pop_tickers = {p["ticker"] for p in population}
     assess_by_ticker = {a["ticker"]: a for a in assessments}
@@ -262,30 +262,40 @@ def assess_candidates(
 
     ``client_factory`` is the krepis.llm.LLMClient test seam: a callable
     ``(spec, api_key) -> transport_client``. Production leaves it unset.
-    ``cost_sink`` is the shared ``S3JsonlCostSink`` (or any callable) —
-    when omitted, a process-local sink writing to
-    ``decision_artifacts/_cost_raw`` is constructed so this challenger
-    never silently skips cost emission (alpha-engine-config-I5206)."""
-    from krepis.cost_sink import S3JsonlCostSink
+    ``cost_sink`` is a test seam (any callable taking a record dict). When
+    omitted, ``LLMClient`` resolves the PROCESS-DEFAULT sink from the
+    environment — the one ``krepis.cost_sink.flush_default_sink()`` can reach
+    at the end of a Lambda invocation (alpha-engine-config-I7423). This
+    function must NOT construct its own; see the note at the call site."""
     from krepis.llm import LLMClient
     from krepis.router import resolve_group_spec
 
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
+    from config import MAX_TOKENS_STRATEGIC
 
     loaded = load_prompt(_PROMPT_NAME)
     prompt = (
         loaded.text + "\n\n## Candidates\n" + _format_candidate_block(scanner_tickers, technical_scores, sector_map)
     )
-    # Default sink so a production call without an injected sink still
-    # emits. The sink never raises on a failed PUT, so constructing one
-    # in tests is harmless (they either inject their own or ignore S3).
-    if cost_sink is None:
-        cost_sink = S3JsonlCostSink(
-            bucket=S3_BUCKET,
-            prefix="decision_artifacts/_cost_raw",
-            register_atexit=True,
-        )
+    # NO private sink (alpha-engine-config-I7423). `LLMClient` resolves
+    # `krepis.cost_sink.default_sink_from_env()` when `cost_sink is None`, and
+    # that PROCESS-DEFAULT sink is the one `flush_default_sink()` can reach.
+    #
+    # Constructing a private `S3JsonlCostSink` here shadowed it: the records
+    # went into an instance nothing else held a reference to, whose only exit
+    # path was `register_atexit=True` — and an AWS Lambda container is FROZEN
+    # between invocations, not exited, so `atexit` never runs.
+    #
+    # Measured 2026-08-16 on weekly-SF execution `watch-rerun-2026-08-16-1`,
+    # AFTER the handler-level flush shipped: `ChallengerShadow` made a real
+    # DeepSeek call (`input_tokens=4296 output_tokens=7906`), wrote both
+    # shadow signal sets, and `AggregateCosts` still reported
+    # `1 stage(s) ran and emitted no cost record: single-agent-quant`. The
+    # `cost sink: process default active` line never appeared in the log,
+    # because the default sink was never constructed at all.
+    #
+    # `cost_sink` stays a parameter: it is the test seam, and an explicit
+    # injection still wins.
     # The registry decides model, endpoint and credential; this module decides
     # only which capability tier it wants and where it is running. krepis
     # resolves the credential by NAME at call time, so no key is read here —
@@ -365,9 +375,24 @@ def run_single_agent_producer(
     comparison)."""
     from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
     from data.scanner_orchestrator import _build_technical_scores_from_feature_store
+    from scoring.universe_membership import resolve_feed_cut
 
-    cand = archive_manager.load_candidates_json(run_date) or {}
-    scanner_tickers = cand.get("scanner_tickers", [])
+    # The champion CUT, not candidates.json (alpha-engine-config-I7823).
+    #
+    # This is the LIVE feed. The retired research graph's `_resolve_agent_input_set`
+    # looks like the feed and is not: `agentic_sector_teams` is
+    # `kind="retired"` with `retired_date=2026-07-12`, and this producer is what
+    # actually selects from the scanner's output. Rewiring the graph alone
+    # (crucible-research-PR670) changed a path that has not produced since
+    # 2026-07-10.
+    #
+    # The old read was `load_candidates_json(run_date) or {}` then
+    # `.get("scanner_tickers", [])` — fail-soft to an EMPTY list. Under the
+    # weekly scanner cadence that artifact does not exist on four mornings in
+    # five, so the producer would have selected from nothing and emitted a
+    # well-formed signals payload with no new candidates, on a Tuesday, with
+    # nothing raising. `resolve_feed_cut` reads `latest` and fails LOUD.
+    scanner_tickers, _feed_provenance = resolve_feed_cut()
     if population is None:
         population = archive_manager.load_population()
     pop_tickers = [p["ticker"] for p in population]

@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
 from agents.langchain_utils import (
+    bind_structured_output,
     invoke_anthropic_safe,
     make_agent_llm,
 )
@@ -201,7 +202,7 @@ def run_cio(
     from graph.state_schemas import CIORawOutput
     from strict_mode import is_strict_validation_enabled
 
-    structured_llm = llm.with_structured_output(CIORawOutput)
+    structured_llm = bind_structured_output(llm, CIORawOutput)
     try:
         # ALL-AGENTS-STRICT (Brian, 2026-05-16): the CIO is one of the
         # agents in scope — "We don't get anything from this process if
@@ -284,7 +285,7 @@ def run_cio(
         # ``_build_cio_prompt(...)``) — what was handed to
         # ``HumanMessage(content=prompt)`` above, not the raw
         # ``LoadedPrompt`` template. Threaded back so the
-        # ``research_graph.py`` call site's ``track_llm_cost`` scope can
+        # The retired research graph's call site's ``track_llm_cost`` scope can
         # stamp it onto ``FullPromptContext.user_prompt`` instead of
         # falling back to the unsubstituted template text.
         cio_result["rendered_prompt"] = prompt
@@ -362,7 +363,7 @@ def run_cio_critic(
         or "  (none)",
     )
 
-    structured_llm = llm.with_structured_output(CIOCriticOutput)
+    structured_llm = bind_structured_output(llm, CIOCriticOutput)
     try:
         verdict: CIOCriticOutput = invoke_anthropic_safe(
             structured_llm,

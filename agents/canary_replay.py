@@ -6,9 +6,10 @@ Friday dry-preflight structurally cannot reach (``dry_run_llm=true`` only
 validates boot/wiring via installed stubs — see ``lambda/handler.py``
 around the ``dry_run_llm`` branch). This module exercises the real
 held-thesis-update and qual-analyst extraction paths against the live
-Anthropic API and the live research archive, plus a deliberately-injected
-validation-retry probe, so a regression in any of the three is caught
-before Saturday instead of during it.
+model router (``krepis.router``, reached at its TLS edge with the
+``research`` consumer credential) and the live research archive, plus a
+deliberately-injected validation-retry probe, so a regression in any of
+the three is caught before Saturday instead of during it.
 
 Runs from ``alpha-engine-config/infrastructure/canary_replay_spot_bootstrap.sh``
 alongside the sibling data-repo probe
@@ -33,7 +34,7 @@ import time
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def _probe_result(name: str, status: str, detail: str, duration_s: float) -> dic
 
 def _load_held_tickers(am, n: int) -> list[dict]:
     """Top-N held tickers by ``long_term_score`` — the same source
-    production uses (``graph/research_graph.py`` fetch_data node calls
+    production uses (the retired research graph's fetch_data node called
     ``am.load_population()`` and takes every ticker; the canary narrows to
     the top N to bound LLM cost)."""
     return am.load_population()[:n]
@@ -103,6 +104,18 @@ def probe_thesis_update(am, tickers: list[dict]) -> dict:
                 team_id="canary",
             )
             updated.append({"ticker": ticker, "rating": result.get("rating")})
+        # Same shape as the qual probe (I7463): "it returned" is not "it
+        # worked". A run of `None` ratings means the extraction produced
+        # nothing usable, and counting rows would report it as a full pass.
+        rated = [u for u in updated if u["rating"] is not None]
+        if len(rated) < len(tickers):
+            return _probe_result(
+                "thesis_update",
+                "FAIL",
+                f"{len(rated)}/{len(tickers)} held tickers came back with a "
+                f"rating: {updated}",
+                time.monotonic() - start,
+            )
         return _probe_result(
             "thesis_update",
             "PASS",
@@ -116,39 +129,27 @@ def probe_thesis_update(am, tickers: list[dict]) -> dict:
         )
 
 
-def probe_qual_analyst(am, tickers: list[dict]) -> dict:
-    """Probe 2b: qual-analyst ReAct extraction for the same held tickers,
-    live LLM + live tool-use loop (news/filings/insider/RAG tools)."""
-    from agents.sector_teams.qual_analyst import run_qual_analyst
-
-    start = time.monotonic()
-    try:
-        symbols = [p["ticker"] for p in tickers]
-        prior_theses = am.load_latest_theses(symbols)
-        quant_top5 = [
-            {
-                "ticker": p["ticker"],
-                "score": p.get("long_term_score", 0),
-                "sector": p.get("sector"),
-            }
-            for p in tickers
-        ]
-        result = run_qual_analyst(
-            team_id="canary",
-            quant_top5=quant_top5,
-            prior_theses=prior_theses,
-            market_regime="neutral",
-            run_date=CANARY_RUN_DATE,
-        )
-        n = len(result.get("assessments", []))
-        return _probe_result(
-            "qual_analyst", "PASS", f"{n} assessments returned", time.monotonic() - start
-        )
-    except Exception as e:
-        log.exception("[canary_replay] qual_analyst probe failed")
-        return _probe_result(
-            "qual_analyst", "FAIL", f"{type(e).__name__}: {e}", time.monotonic() - start
-        )
+# The probe's own output budget (alpha-engine-config-I7589), deliberately NOT
+# MAX_TOKENS_STRATEGIC. This is ONE call per canary run, so sizing it
+# generously costs nothing, and borrowing a constant tuned for strategic agent
+# calls coupled the probe to a number changed for unrelated reasons.
+#
+# It truncated on EVERY run before this, and the cause is the probe's own
+# design — which is otherwise exactly right: the prompt's semantically-correct
+# answer is NOT one of the enum values, so the model argues its way to a
+# non-conforming answer and `reasoning` grows; the retry then re-prompts WITH
+# the validation error appended, so each attempt carries more context and less
+# headroom than the one before. Against a shared 4096 the later attempts had
+# nowhere to land, and `invoke_structured_with_validation_retry` correctly
+# reported StructuredOutputTruncationError rather than letting a partial
+# tool-call surface downstream as a confusing Pydantic shape error.
+#
+# 8192 stopped being enough on its own (still measured intermittently
+# truncating 2026-08-22, after this budget and the `reasoning` field's
+# `max_length` below both shipped) — see `probe_validation_retry`'s
+# `force_reasoning_headroom=True` for the durable fix. Raising this constant
+# again would only move the same boundary a third time.
+_CANARY_PROBE_MAX_TOKENS = 8192
 
 
 class _CanaryConfidenceProbe(BaseModel):
@@ -164,7 +165,74 @@ class _CanaryConfidenceProbe(BaseModel):
     """
 
     confidence: Literal["low", "medium", "high"]
-    reasoning: str
+    # BOUNDED (alpha-engine-config-I7589). An unbounded free-text field inside a
+    # schema whose whole job is to be retried is the part that consumes the
+    # budget, and it grows on exactly the retries this probe exists to trigger.
+    # The bound is on the SCHEMA rather than only in the prompt because a prompt
+    # instruction is advice and a field constraint is a contract — and if the
+    # model overruns it, the validation error that produces is itself a
+    # legitimate exercise of the retry path this probe is measuring.
+    reasoning: str = Field(max_length=600)
+
+
+# alpha-engine-config-I8051: the model's semantically-correct answer to the
+# probe's prompt is DELIBERATELY off-enum (see the docstring above) — that is
+# what forces attempt 1 to trip validation and exercise the retry/recovery
+# path. `invoke_structured_with_validation_retry` already tells the model on
+# retry to "use ONLY exact values ... no synonyms, no compound values like
+# 'medium_high'" (agents/langchain_utils.py). Measured 2026-08-21
+# (pr-nousergon-nousergon-data-1490-ffcd1d751a79): a model can still repeat
+# the identical off-enum synonym on every retry despite that correction —
+# nondeterministic across otherwise-identical runs, not a defect in the retry
+# mechanism itself (three of four runs the same evening recovered normally).
+#
+# This is NOT a schema-level or chokepoint-level fix. A `field_validator` on
+# `_CanaryConfidenceProbe.confidence` would coerce the synonym on ATTEMPT 1,
+# which would make the injected failure never trip — trading this failure
+# mode for the OTHER one this probe already guards
+# (`test_first_attempt_success_is_a_fail`, alpha-engine-config-I7459: a PASS
+# must not mean "nothing needed recovering"). And widening it into
+# `invoke_structured_with_validation_retry` would relax the shared chokepoint
+# every real production schema in this repo depends on, for a case that is
+# only reasonable because THIS schema is deliberately unsatisfiable.
+#
+# So the mapping applies ONLY here, ONLY after the shared retry loop has
+# already exhausted every attempt (i.e. the retry path unquestionably ran),
+# and ONLY for this small, explicit, tested set of known confidence
+# synonyms. Deliberate rounding, not silent coercion: an unrecognized
+# off-enum value is not in this table and still fails terminally.
+_CONFIDENCE_SYNONYM_MAP: dict[str, Literal["low", "medium", "high"]] = {
+    "medium-high": "high",
+    "medium_high": "high",
+    "med-high": "high",
+    "high-medium": "high",
+    "medium-low": "low",
+    "medium_low": "low",
+    "low-medium": "low",
+    "med-low": "low",
+}
+
+
+def _map_terminal_confidence_synonym(parsing_error) -> tuple[str, str] | None:
+    """``(raw_value, mapped_value)`` iff *parsing_error* is a Pydantic
+    ``ValidationError`` on ``_CanaryConfidenceProbe.confidence`` whose exact
+    off-enum string is a known synonym in ``_CONFIDENCE_SYNONYM_MAP``.
+
+    Returns ``None`` for every other shape — a missing field, a wrong type,
+    a non-``ValidationError`` (e.g. the ``_NoToolCallError`` case, or a
+    plain string in a mocked test), or an off-enum string that is NOT a
+    recognized synonym — so an unmappable value is never silently accepted.
+    """
+    if not isinstance(parsing_error, ValidationError):
+        return None
+    for err in parsing_error.errors():
+        if err.get("loc") == ("confidence",) and err.get("type") == "literal_error":
+            raw_value = err.get("input")
+            if isinstance(raw_value, str):
+                mapped = _CONFIDENCE_SYNONYM_MAP.get(raw_value.strip().lower())
+                if mapped is not None:
+                    return raw_value, mapped
+    return None
 
 
 def probe_validation_retry(api_key: str | None) -> dict:
@@ -172,25 +240,50 @@ def probe_validation_retry(api_key: str | None) -> dict:
     shared ``invoke_structured_with_validation_retry`` chokepoint (issue
     #2246's third probe) — confirms the retry/recovery path recovers
     weekly, rather than relying on a real thesis-update call happening to
-    trip it (which it may or may not do on any given run)."""
+    trip it (which it may or may not do on any given run).
+
+    Addresses ``config.CANARY_PROBE_CLASS`` (``high``) rather than the
+    per-stock class, per Brian's 2026-08-16 ruling: this probe is the
+    weekly-SF rehearsal's structured-output check and it runs at the router's
+    top tier. Two consequences worth stating rather than discovering:
+    the probe no longer rehearses the tier the per-stock agents call at, and a
+    stronger model is likelier to satisfy the schema on the FIRST attempt — a
+    PASS here has never asserted that a retry actually fired, and now needs to
+    (alpha-engine-config-I7459)."""
     from langchain_core.messages import HumanMessage
 
     from agents.langchain_utils import (
+        _NoToolCallError,
+        bind_structured_output,
         invoke_structured_with_validation_retry,
         make_agent_llm,
     )
     from agents.prompt_loader import load_prompt
-    from config import MAX_TOKENS_STRATEGIC, PER_STOCK_CLASS
+    from config import CANARY_PROBE_CLASS
 
     start = time.monotonic()
     try:
         llm = make_agent_llm(
-            model_class=PER_STOCK_CLASS,
-            max_tokens=MAX_TOKENS_STRATEGIC,
+            model_class=CANARY_PROBE_CLASS,
+            max_tokens=_CANARY_PROBE_MAX_TOKENS,
             api_key=api_key,
+            # alpha-engine-config-I7589: this probe's whole job is to make the
+            # model argue its way to a non-conforming answer, so it is the ONE
+            # call in this repo where "did the routed pool member declare
+            # `reasoning`" is not a safe proxy for "will it spend output
+            # tokens thinking before it answers" — the `high` class
+            # load-balances across registry entries, and a member that thinks
+            # without declaring it produced the exact "identical input,
+            # coin-flip result" failure measured 2026-08-22 (two truncations
+            # against `nousergon-data-PR1508`, six passes the day before, no
+            # change on either side). Forcing the headroom removes the
+            # dependency on that per-entry registry fact instead of trusting
+            # it — free to over-apply per `_with_reasoning_headroom`'s own
+            # doc: unused headroom costs nothing.
+            force_reasoning_headroom=True,
         )
-        structured_llm = llm.with_structured_output(
-            _CanaryConfidenceProbe, include_raw=True
+        structured_llm = bind_structured_output(
+            llm, _CanaryConfidenceProbe, include_raw=True
         )
         # Prompt text lives in alpha-engine-config (research/prompts/
         # canary_validation_retry_probe.txt) — same load_prompt() chokepoint
@@ -206,17 +299,93 @@ def probe_validation_retry(api_key: str | None) -> dict:
         )
         parsed = resp.get("parsed")
         parsing_error = resp.get("parsing_error")
+        attempts = resp.get("structured_output_attempts")
         if parsing_error is not None or parsed is None:
+            if isinstance(parsing_error, _NoToolCallError):
+                # alpha-engine-config-I8051 follow-up (measured on THIS PR's
+                # own canary run, 20:54Z on fix/i8051-canary-confidence-
+                # synonym-map): a third, distinct terminal outcome — the model
+                # declined to call the tool on EVERY attempt, including after
+                # invoke_structured_with_validation_retry's retry sent the
+                # explicit "Your prior response did not call the required
+                # tool ... CALL THE TOOL" correction (I7459's _NoToolCallError
+                # retry path). There is nothing to map here (no off-enum value
+                # was ever returned to round), so this is NOT the confidence-
+                # synonym case above, and it is NOT a schema-shape
+                # ValidationError either — reporting it with the generic
+                # "terminal validation failure after retries" wording used
+                # below would misattribute a declined tool call as a schema
+                # violation, which is its own reporting defect class.
+                #
+                # Still a genuine FAIL, not a silent pass or a swallowed
+                # third status: tool_choice stays "auto" at this call site
+                # (see bind_structured_output's docstring — a FORCED
+                # tool_choice 400'd against the live router edge at this
+                # exact "high"-tier call path on 2026-08-16, and this repo's
+                # LLM calls are provider-routed through krepis.router /
+                # litellm rather than native Anthropic, so Anthropic's
+                # documented "adaptive thinking supports forced tool use"
+                # does not establish what the CURRENT router-resolved
+                # backend accepts). Retrying an unforced generation is
+                # already the retry/recovery mechanism this probe exists to
+                # measure, and it failed to elicit ANY structured output —
+                # arguably a harder failure than an off-enum synonym.
+                return _probe_result(
+                    "validation_retry",
+                    "FAIL",
+                    f"model declined to call the required tool on every "
+                    f"attempt ({attempts} total, including retries sent with "
+                    f"an explicit 'call the tool' correction) — no "
+                    f"structured output was ever returned to validate, let "
+                    f"alone map to a confidence synonym.",
+                    time.monotonic() - start,
+                )
+            synonym = _map_terminal_confidence_synonym(parsing_error)
+            if synonym is not None:
+                raw_value, mapped_value = synonym
+                return _probe_result(
+                    "validation_retry",
+                    "PASS",
+                    f"retry/recovery path was exercised across {attempts} attempts "
+                    f"(the injected failure tripped, and the correction was sent); "
+                    f"the model persisted with the off-enum synonym {raw_value!r} on "
+                    f"every attempt instead of an exact enum value. Mapped via the "
+                    f"explicit, tested synonym table to confidence={mapped_value!r} "
+                    f"(alpha-engine-config-I8051) — deliberate rounding, not silent "
+                    f"coercion: only exact strings in _CONFIDENCE_SYNONYM_MAP map; "
+                    f"anything else still fails terminally.",
+                    time.monotonic() - start,
+                )
             return _probe_result(
                 "validation_retry",
                 "FAIL",
                 f"terminal validation failure after retries: {parsing_error}",
                 time.monotonic() - start,
             )
+        if attempts == 1:
+            # The probe's subject is the RECOVERY path, not the model. A first
+            # -attempt success means the deliberately-unsatisfiable enum did
+            # not trip, so this run proved nothing about
+            # `invoke_structured_with_validation_retry` — and reporting PASS
+            # for it is how a probe quietly stops measuring its own name
+            # (alpha-engine-config-I7459). Likelier since the probe moved to
+            # the `high` class: a stronger model coerces its answer into the
+            # enum. The fix when this fires is to strengthen the prompt in
+            # alpha-engine-config/research/prompts/canary_validation_retry_probe.txt,
+            # not to relax this branch.
+            return _probe_result(
+                "validation_retry",
+                "FAIL",
+                f"schema satisfied on the FIRST attempt (confidence="
+                f"{parsed.confidence!r}) — the injected validation failure did "
+                f"not trip, so the retry/recovery path was never exercised. "
+                f"Strengthen the probe prompt.",
+                time.monotonic() - start,
+            )
         return _probe_result(
             "validation_retry",
             "PASS",
-            f"resolved to confidence={parsed.confidence!r}",
+            f"recovered on attempt {attempts} to confidence={parsed.confidence!r}",
             time.monotonic() - start,
         )
     except Exception as e:
@@ -244,9 +413,22 @@ def run_canary(run_id: str, n_tickers: int = 5, api_key: str | None = None) -> d
             "held-ticker paths against real data."
         )
 
+    # `probe_qual_analyst` was REMOVED 2026-08-20 (alpha-engine-config-I7816,
+    # I7817). It delegated to `agents.sector_teams.qual_analyst.run_qual_analyst`,
+    # part of the multi-agent research path retired by Brian's 2026-07-27 ruling.
+    # The registry row for the probe originally said so verbatim — "Canary probe
+    # delegates to a retired multi-agent agent, so it measures nothing
+    # reachable. Retired with its target" — and was reinstated on 2026-08-12
+    # (I7011 §2) on the reasoning that the canary calls it, which made a TEST the
+    # sole evidence of the component's liveness. Brian ruled 2026-08-20 that no
+    # test may run against a deprecated element; the probe goes with its target.
+    #
+    # Measured before removing, not assumed: production `signals/latest.json`
+    # (producer `signals_envelope`) carries no `sector_team_outputs`, no
+    # assessments, no cio and no macro — the multi-agent graph produces no
+    # production artifact.
     probes = [
         probe_thesis_update(am, tickers),
-        probe_qual_analyst(am, tickers),
         probe_validation_retry(api_key),
     ]
     overall = "PASS" if all(p["status"] == "PASS" for p in probes) else "FAIL"

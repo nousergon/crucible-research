@@ -18,17 +18,18 @@ from nousergon_lib.pillars import QualitativePillarAssessment
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.langchain_utils import (
-    extract_tool_calls as _extract_tool_calls,
-)
-from agents.langchain_utils import (
-    get_final_text as _get_final_text,
-)
-from agents.langchain_utils import (
+    bind_structured_output,
     invoke_react_with_recovery,
     invoke_structured_with_validation_retry,
     is_step_budget_exhausted_sentinel,
     make_agent_llm,
     make_tool_use_repair_hook,
+)
+from agents.langchain_utils import (
+    extract_tool_calls as _extract_tool_calls,
+)
+from agents.langchain_utils import (
+    get_final_text as _get_final_text,
 )
 from agents.langchain_utils import (
     serialize_transcript as _serialize_transcript,
@@ -228,7 +229,7 @@ def run_qual_analyst(
     try:
         # Token usage from this ReAct loop's multiple Anthropic calls
         # accumulates into the active ``track_llm_cost`` frame opened
-        # by the outer ``sector_team_node`` in research_graph.py.
+        # by the outer ``sector_team_node`` in the retired research graph.
         result = invoke_react_with_recovery(
             lambda: agent.invoke(
                 {"messages": [{"role": "user", "content": user_message}]},
@@ -290,7 +291,8 @@ def run_qual_analyst(
                 f"[qual:{team_id}] ReAct loop produced empty final_text — "
                 f"nothing to extract assessments from. tool_calls={len(tool_calls)}"
             )
-        structured_llm = llm.with_structured_output(
+        structured_llm = bind_structured_output(
+            llm,
             QualAnalystOutput,
             include_raw=True,
         )
@@ -447,7 +449,8 @@ def _extract_pillar_assessments(
     parse failure or when the agent's reasoning yields no clean pillar
     decomposition. Strict-mode raises ``RuntimeError`` on parse failure.
     """
-    structured_llm = llm.with_structured_output(
+    structured_llm = bind_structured_output(
+        llm,
         _QualPillarBatch,
         include_raw=True,
     )

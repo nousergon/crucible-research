@@ -29,7 +29,7 @@ flag governs both since they're complementary views of the same data.
 Why both per-node and per-call streams:
 
 - The existing decision-capture surface writes ONE artifact per node
-  boundary in ``research_graph.py``. A sector_team node fires up to four
+  boundary in the retired research graph. A sector_team node fires up to four
   LLM calls (quant ReAct → qual ReAct → peer_review quant addition →
   peer_review joint finalization); summing them into ``ModelMetadata``
   yields the total cost attributed to that team's decision.
@@ -37,15 +37,24 @@ Why both per-node and per-call streams:
   the JSONL sink so the daily aggregator can recompute costs against
   any pricing table version without replaying agents.
 
-Usage pattern (one ChatAnthropic instance, one agent decision)::
+Usage pattern (one chat-model instance, one agent decision)::
 
     from graph.llm_cost_tracker import (
         get_cost_telemetry_callback, track_llm_cost,
     )
+    from agents.langchain_utils import make_agent_llm
     from agents.prompt_loader import load_prompt
+    from config import MAX_TOKENS_PER_STOCK, PER_STOCK_CLASS
 
     cb = get_cost_telemetry_callback()
-    llm = ChatAnthropic(model=PER_STOCK_MODEL, callbacks=[cb], ...)
+    # The CLASS is what the caller names; the registry decides the model
+    # (alpha-engine-config-I7005). Constructing a provider client here with a
+    # model id would fail tests/test_llm_request_timeout.py's repo-wide guard.
+    llm = make_agent_llm(
+        model_class=PER_STOCK_CLASS,
+        max_tokens=MAX_TOKENS_PER_STOCK,
+        callbacks=[cb],
+    )
 
     user_prompt = load_prompt("cio_decision")
     rendered = user_prompt.format(**kwargs)
@@ -543,7 +552,7 @@ class _Frame:
     # from inside the ``with`` block when rendering happens deeper in a
     # called function that returns it (e.g. ``ic_cio.run_cio`` /
     # ``macro_agent.run_macro_agent_with_reflection`` — see their
-    # ``"rendered_prompt"`` result-dict key and the research_graph.py
+    # ``"rendered_prompt"`` result-dict key and the retired research graph
     # call sites that copy it onto ``frame.rendered_prompt`` before the
     # ``with`` block exits). Read at frame-exit to populate
     # ``FullPromptContext.user_prompt``; falls back to ``prompt.text``

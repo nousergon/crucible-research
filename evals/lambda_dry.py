@@ -130,6 +130,14 @@ def dry_process_result(batch_id: str | None = None) -> dict[str, Any]:
     return {
         "status": "OK",
         "dry_run": True,
+        # I6920: the real path hoists these to the top level so a Step
+        # Functions Choice can branch on coverage. The dry path must carry
+        # the same keys or that Choice's JSONPath is unresolvable on the
+        # Friday preflight run — a definition that works on Saturday and
+        # breaks on Friday. `dry_run: True` alongside is what tells a
+        # reader this completeness is the keystone's, not a corpus's.
+        "complete": True,
+        "budget_stopped": False,
         "summary": {
             "batch_id": batch_id or DRY_SENTINEL_BATCH_ID,
             "haiku_evaluated": 0,

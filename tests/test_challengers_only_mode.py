@@ -24,9 +24,8 @@ _HANDLER_PATH = Path(__file__).parent.parent / "lambda" / "handler.py"
 def _import_handler():
     """lambda/ collides with the keyword — load via importlib."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "research_handler_challengers_only_test", _HANDLER_PATH
-    )
+
+    spec = importlib.util.spec_from_file_location("research_handler_challengers_only_test", _HANDLER_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -51,12 +50,13 @@ def test_challengers_only_reconstructs_prior_population_and_runs():
     ]
     am = _archive_stub("2026-07-02", population)
 
-    with patch("archive.manager.ArchiveManager", return_value=am), \
-         patch("producers.runner.run_challengers",
-               return_value={"written": {"no_agent_quant": "k1"}, "errors": {}}) as rc:
-        res = mod._run_challengers_only(
-            {"mode": "challengers_only", "date": "2026-07-02"}
-        )
+    with (
+        patch("archive.manager.ArchiveManager", return_value=am),
+        patch(
+            "producers.runner.run_challengers", return_value={"written": {"no_agent_quant": "k1"}, "errors": {}}
+        ) as rc,
+    ):
+        res = mod._run_challengers_only({"mode": "challengers_only", "date": "2026-07-02"})
 
     assert res["status"] == "OK" and res["written"] == {"no_agent_quant": "k1"}
     # Prior population = membership minus the rows this run entered.
@@ -72,8 +72,7 @@ def test_challengers_only_refuses_non_latest_date():
     mod = _import_handler()
     am = _archive_stub("2026-07-02", [])
 
-    with patch("archive.manager.ArchiveManager", return_value=am), \
-         patch("producers.runner.run_challengers") as rc:
+    with patch("archive.manager.ArchiveManager", return_value=am), patch("producers.runner.run_challengers") as rc:
         with pytest.raises(ValueError, match="only valid for the latest run"):
             mod._run_challengers_only({"date": "2026-06-26"})
     rc.assert_not_called()
@@ -95,11 +94,71 @@ def test_handler_wiring_failhard_and_mode_dispatch():
     src = _HANDLER_PATH.read_text()
     dispatch = src.index('event.get("mode") == "challengers_only"')
     gates = src.index('force = event.get("force", False)')
-    assert dispatch < gates, (
-        "challengers_only must dispatch before the run-time/trading-day gates"
-    )
+    assert dispatch < gates, "challengers_only must dispatch before the run-time/trading-day gates"
     assert "shadow mode, non-fatal" not in src, (
         "the fail-soft swallow around the challenger post-step was "
         "re-introduced — config#1683 made experiment producers FAIL-HARD"
     )
     assert "from producers.runner import run_challengers" in src
+
+
+def test_a_saturday_calendar_date_resolves_to_the_trading_day():
+    """alpha-engine-config-I7419 — the measured defect.
+
+    The weekly SF passes `$.run_date`, the execution's CALENDAR date, and the
+    weekly run is a SATURDAY: never itself a session. `signals/latest.json` is
+    keyed on the trading day, so the freshness guard compared Saturday against
+    Friday's commit and raised on EVERY scheduled weekly run. Because the
+    stage's degraded flag propagates to `$.degraded_summary`, and config-I6891
+    terminates a degraded summary in a Fail state, this one argument made an
+    honest weekly terminal impossible on any Saturday.
+
+    2026-08-15 is a Saturday; 2026-08-14 is the Friday session before it.
+    """
+    mod = _import_handler()
+    population = [
+        {"ticker": "HELD1", "entry_date": "2026-08-07"},
+        {"ticker": "NEW1", "entry_date": "2026-08-14"},
+    ]
+    am = _archive_stub("2026-08-14", population)
+
+    with (
+        patch("archive.manager.ArchiveManager", return_value=am),
+        patch(
+            "producers.runner.run_challengers", return_value={"written": {"no_agent_quant": "k1"}, "errors": {}}
+        ) as rc,
+    ):
+        res = mod._run_challengers_only({"mode": "challengers_only", "date": "2026-08-15"})
+
+    assert res["status"] == "OK"
+    # The reconstruction ran against the TRADING day, so the row this run
+    # entered (2026-08-14) is the one dropped — passing the calendar date
+    # would have dropped nothing and reconstructed the post-run population.
+    assert [p["ticker"] for p in rc.call_args.kwargs["population"]] == ["HELD1"]
+    assert rc.call_args.args[1] == "2026-08-14"
+
+
+def test_a_genuinely_stale_cohort_still_fails_loud():
+    """The normalisation must not swallow the config#1683 invariant: two
+    trading days that differ is a real stale-cohort condition, and the message
+    says so explicitly to keep it distinguishable from the I7419 mismatch."""
+    mod = _import_handler()
+    am = _archive_stub("2026-08-07", [])
+
+    with patch("archive.manager.ArchiveManager", return_value=am), patch("producers.runner.run_challengers") as rc:
+        with pytest.raises(ValueError, match="genuinely stale cohort"):
+            mod._run_challengers_only({"date": "2026-08-15"})
+    rc.assert_not_called()
+
+
+def test_resolution_uses_the_fleet_chokepoint_not_a_local_calendar():
+    """policy-shared-code's fork test. A repo-local `most_recent_trading_day`
+    was removed for exactly this reason (config-I6667) — two calendar sources
+    in one repo is the drift class that produced the 2026-05-30
+    calendar-vs-trading-day recovery failure."""
+    import inspect
+
+    mod = _import_handler()
+    src = inspect.getsource(mod._run_challengers_only)
+    assert "from nousergon_lib.dates import resolve_trading_day" in src
+    assert "resolve_trading_day(" in src

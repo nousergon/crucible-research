@@ -60,9 +60,11 @@ def build_no_agent_signals(
     Pure function (no I/O) so it is unit-testable without S3/SQLite. Reuses the
     live ``_build_signals_payload`` for the actual assembly.
     """
-    # Imported lazily: graph.research_graph pulls the LangGraph stack at import,
-    # which the no-agent producer otherwise has no need for.
-    from graph.research_graph import _build_signals_payload
+    # Imported here (not at module top) to keep this module's own import
+    # graph lean; scoring.signals_payload has no LangGraph dependency itself
+    # (alpha-engine-config-I7827 lift), but keeping the import local matches
+    # this module's existing style.
+    from scoring.signals_payload import _build_signals_payload
 
     pop_tickers = {p["ticker"] for p in population}
 
@@ -164,9 +166,24 @@ def run_no_agent_producer(
     selection-only comparison)."""
     from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
     from data.scanner_orchestrator import _build_technical_scores_from_feature_store
+    from scoring.universe_membership import resolve_feed_cut
 
-    cand = archive_manager.load_candidates_json(run_date) or {}
-    scanner_tickers = cand.get("scanner_tickers", [])
+    # The champion CUT, not candidates.json (alpha-engine-config-I7823).
+    #
+    # This is the LIVE feed. The retired research graph's `_resolve_agent_input_set`
+    # looks like the feed and is not: `agentic_sector_teams` is
+    # `kind="retired"` with `retired_date=2026-07-12`, and this producer is what
+    # actually selects from the scanner's output. Rewiring the graph alone
+    # (crucible-research-PR670) changed a path that has not produced since
+    # 2026-07-10.
+    #
+    # The old read was `load_candidates_json(run_date) or {}` then
+    # `.get("scanner_tickers", [])` — fail-soft to an EMPTY list. Under the
+    # weekly scanner cadence that artifact does not exist on four mornings in
+    # five, so the producer would have selected from nothing and emitted a
+    # well-formed signals payload with no new candidates, on a Tuesday, with
+    # nothing raising. `resolve_feed_cut` reads `latest` and fails LOUD.
+    scanner_tickers, _feed_provenance = resolve_feed_cut()
     if population is None:
         population = archive_manager.load_population()
     pop_tickers = [p["ticker"] for p in population]

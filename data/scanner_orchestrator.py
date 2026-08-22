@@ -28,7 +28,7 @@ Phase 1 posture (observe-only): this module is invoked ONLY by
 ``lambda/scanner_handler.py`` and writes ``candidates.json`` to S3 for
 parallel-observe comparison against Research Lambda's internal scanner
 output. Research's internal scanner is unchanged in Phase 1 — the
-divergence between this module and ``graph/research_graph.fetch_data_node``
+divergence between this module and the retired research graph's ``fetch_data_node``
 is the load-bearing signal of the Phase 3 soak. Phase 5 (later) cuts
 Research over to read this module's artifact + retires the internal
 scanner.
@@ -358,42 +358,62 @@ def build_candidates_artifact(
     # 100% of rows every cycle post-PR#344).
     eval_log = _json_safe_eval_log(getattr(run_quant_filter, "_last_eval_log", None) or [])
 
-    # ── 4b. config#1186 momentum-sleeve cutover (2026-07-22 Option A) ──────
-    # Replace the technical composite (RSI/MACD/MA) ranking with the
-    # shadow-validated momentum sleeve z(momentum_20d)+z(return_60d) formula.
-    # The per-ticker gate decisions from run_quant_filter (liquidity_pass,
-    # volatility_pass) are held CONSTANT — only the ranking signal changes.
-    # Falls back to the original tech_score ranking if factor loadings or
-    # the sleeve ranker is unavailable (graceful degradation, never raises).
+    # ── 4b. Live champion ranking (config#1186 cutover, 2026-07-22) ───────
+    # ``run_quant_filter`` above ranked by ``tech_score``; the scanner slot's
+    # champion has been the momentum sleeve since the config#1186 Option A
+    # cutover, so the live cut is re-ranked by whichever arm the register
+    # declares champion. The per-ticker gate decisions from run_quant_filter
+    # (liquidity_pass, volatility_pass, scan_path) are held CONSTANT — only the
+    # ranking signal changes.
+    #
+    # The ranker is resolved through ``live_champion_spec()`` rather than
+    # imported directly. That indirection IS the fix for
+    # alpha-engine-config-I7808: with a direct import, the live path applied
+    # the momentum sleeve for four weeks while the register still declared a
+    # champion named ``tech_score_momentum``, the leaderboard scored that
+    # register entry against the live artifact, and the whole board compared
+    # one arm to itself. Nothing could see the disagreement because nothing
+    # read both. See SCANNER_CONTRACT.md §3.
+    #
+    # Falls back to run_quant_filter's ``tech_score`` ordering — the displaced
+    # incumbent, registered as the ``tech_score_gate`` arm — if the loadings
+    # are unavailable. Graceful degradation, never raises: the trading day must
+    # not stop for a missing shadow input (SCANNER_CONTRACT.md §5).
     try:
-        from data.fetchers.feature_store_reader import read_latest_factor_loadings
-        from data.scanner_specs import _rank_momentum_sleeve
+        from data.scanner_specs import live_champion_spec
 
-        _factor_loadings = read_latest_factor_loadings()
-        if _factor_loadings and eval_log:
-            _params = _resolved_scanner_params()
-            _ms_tickers = _rank_momentum_sleeve(
-                eval_log,
-                _factor_loadings,
-                _params,
+        _champion = live_champion_spec()
+        _factor_loadings, _fl_reason = factor_loadings_for_run(run_date, eval_log)
+        if _fl_reason:
+            logger.warning(
+                "[scanner_orchestrator] champion arm %r not applied (%s) — live cut "
+                "keeps the incumbent tech_score ordering this cycle",
+                _champion.name,
+                _fl_reason,
             )
-            if _ms_tickers:
-                scanner_tickers = _ms_tickers
-                # Re-mark quant_filter_pass per momentum sleeve ordering
-                # (was set by run_quant_filter's tech_score ranking).
-                _ms_set = set(_ms_tickers)
+        elif _factor_loadings:
+            _params = _resolved_scanner_params()
+            _champion_tickers = _champion.rank(eval_log, _factor_loadings, _params)
+            if _champion_tickers:
+                scanner_tickers = _champion_tickers
+                # Re-mark quant_filter_pass per the champion's ordering (was set
+                # by run_quant_filter's tech_score ranking).
+                _champ_set = set(_champion_tickers)
                 for rec in eval_log:
-                    rec["quant_filter_pass"] = 1 if rec["ticker"] in _ms_set else 0
-                    if rec["ticker"] not in _ms_set and not rec.get("filter_fail_reason"):
+                    rec["quant_filter_pass"] = 1 if rec["ticker"] in _champ_set else 0
+                    if rec["ticker"] not in _champ_set and not rec.get("filter_fail_reason"):
                         rec["filter_fail_reason"] = "rank_cutoff"
                 logger.info(
-                    "[scanner_orchestrator] re-ranked by momentum sleeve "
-                    "z(momentum_20d)+z(return_60d): %d candidates (config#1186)",
+                    "[scanner_orchestrator] live cut ranked by champion arm %r (%s): "
+                    "%d candidates",
+                    _champion.name,
+                    _champion.description,
                     len(scanner_tickers),
                 )
-    except Exception as _exc:
+    except Exception as _exc:  # noqa: BLE001 — live path degrades, never raises
         logger.warning(
-            "[scanner_orchestrator] momentum sleeve re-ranking unavailable (falling back to tech_score ranking): %s",
+            "[scanner_orchestrator] champion re-ranking unavailable (falling back to "
+            "tech_score ranking): %s",
             _exc,
         )
 
@@ -403,7 +423,7 @@ def build_candidates_artifact(
     # archive.manager.load_population directly. Empty list on cold-start.
     population_tickers = list(prior_population)
     # agent_input_set = population ∪ top-50 scanner picks (the Research
-    # Lambda's existing convention at research_graph.py:734).
+    # Lambda's existing convention at the retired research graph's fetch_data_node).
     agent_input_set = list(dict.fromkeys(population_tickers + scanner_tickers[:50]))
 
     # Diff vs prior cycle's scanner picks (the operationally interesting
@@ -481,6 +501,87 @@ def write_candidates_artifact(
     return key
 
 
+# ── One factor-loadings snapshot per cycle (alpha-engine-config-I7808) ───────
+# The live champion re-rank (§4b) and the shadow challenger build BOTH rank on
+# these loadings. They used to read them SEPARATELY — the live path unfiltered,
+# the shadow path with a ticker list and a wider column tuple — so the same arm
+# computed twice in one run could return different membership. Measured on
+# 2026-08-19: the live cut and the momentum_sleeve shadow cut, both produced by
+# the same function in the same invocation, agreed on 58 of 60 names. Two arms
+# that differ must differ because their SIGNALS differ, never because they read
+# the store at different moments; that residual made the leaderboard's vacuity
+# guard under-report a clone as a live comparison.
+#
+# Memoised on ``run_date`` and holding only the newest cycle: the Scanner
+# Lambda's process can survive into the next day, and serving yesterday's
+# loadings from a warm container would be the staleness this read exists to
+# make visible.
+_FACTOR_LOADINGS_CACHE: dict[str, tuple[dict[str, dict[str, float]] | None, str | None]] = {}
+
+
+def factor_loadings_for_run(
+    run_date: str,
+    eval_log: list[dict],
+) -> tuple[dict[str, dict[str, float]] | None, str | None]:
+    """``(loadings, reason)`` for ``run_date`` — read once, shared by every arm.
+
+    ``reason`` is None on success and a human-readable cause on failure;
+    ``loadings`` is None whenever ``reason`` is set. Fail-soft by contract: the
+    live path degrades to the incumbent ``tech_score`` ranking and the shadow
+    substrate records a miss, but NEITHER raises (SCANNER_CONTRACT.md §5).
+
+    Columns come from ``SHADOW_FACTOR_LOADING_COLS`` rather than the reader's
+    default tuple: the challenger arms need loadings the champion does not read
+    (``mom_12_1_pct_zscore``), and widening the reader's DEFAULT would push that
+    requirement onto the live attractiveness path, which is NOT fail-soft.
+
+    Two-step read, NOT one wide read. The ArcticDB path projects the requested
+    columns straight into the ReadRequest, so asking for a column the daily
+    cross-sectional pass has not written yet can fail the whole read — which
+    would cost EVERY arm its cycle, not just the one needing the new column. An
+    arm's unscored cycle is unrecoverable (champion-challenger-policy.md §3), so
+    a newly-added loading must never be able to cost an established arm its
+    evidence. The retry uses the reader's default columns, which still carry the
+    champion's two, so the fallback degrades the newest arm alone.
+    """
+    if run_date in _FACTOR_LOADINGS_CACHE:
+        return _FACTOR_LOADINGS_CACHE[run_date]
+
+    from data.fetchers.feature_store_reader import read_latest_factor_loadings
+    from data.scanner_specs import SHADOW_FACTOR_LOADING_COLS
+
+    # Tickers come from the eval log so this read uses the ArcticDB (daily)
+    # source like the live path, rather than silently dropping to the weekly
+    # snapshot and comparing a fresh champion against stale shadow specs.
+    tickers = [t for t in (row.get("ticker") for row in eval_log) if t]
+    result: tuple[dict[str, dict[str, float]] | None, str | None]
+    try:
+        loadings = read_latest_factor_loadings(
+            columns=SHADOW_FACTOR_LOADING_COLS,
+            tickers=tickers,
+        )
+    except Exception as wide_exc:  # noqa: BLE001 — fail-soft by contract
+        logger.warning(
+            "[scanner_orchestrator] wide factor-loading read failed (%s) — "
+            "retrying with default columns so established arms still rank this cycle",
+            wide_exc,
+        )
+        try:
+            loadings = read_latest_factor_loadings(tickers=tickers)
+        except Exception as exc:  # noqa: BLE001 — fail-soft by contract
+            result = (None, f"factor-loading read failed: {exc}")
+            _FACTOR_LOADINGS_CACHE.clear()
+            _FACTOR_LOADINGS_CACHE[run_date] = result
+            return result
+    if not loadings:
+        result = (None, "factor loadings unavailable this cycle")
+    else:
+        result = (loadings, None)
+    _FACTOR_LOADINGS_CACHE.clear()
+    _FACTOR_LOADINGS_CACHE[run_date] = result
+    return result
+
+
 def build_shadow_candidate_artifacts(
     live_artifact: dict,
 ) -> tuple[dict[str, dict], dict[str, str]]:
@@ -502,7 +603,6 @@ def build_shadow_candidate_artifacts(
     one — a whole-cycle skip is a miss for every spec too (config#6428,
     champion-challenger-policy.md §3).
     """
-    from data.fetchers.feature_store_reader import read_latest_factor_loadings
     from data.scanner import run_quant_filter
     from data.scanner_specs import build_shadow_artifacts, challenger_specs
 
@@ -517,30 +617,22 @@ def build_shadow_candidate_artifacts(
             reason,
         )
         return {}, _all_specs_missing(reason)
-    # Tickers come from the eval log so this read uses the ArcticDB (daily)
-    # source like the live path, rather than silently dropping to the weekly
-    # snapshot and comparing a fresh champion against stale shadow specs.
-    shadow_tickers = [t for t in (row.get("ticker") for row in eval_log) if t]
-    # Fail-soft is preserved DELIBERATELY here, unlike the live path above:
-    # this builds the champion/challenger SHADOW substrate, which must never
-    # jeopardize candidates.json. A staleness raise from the reader is caught
-    # and downgraded to the same skip as any other missing input.
-    try:
-        factor_loadings = read_latest_factor_loadings(tickers=shadow_tickers)
-    except Exception as exc:
-        reason = f"factor-loading read failed: {exc}"
+
+    # The SAME snapshot the live champion ranked on this cycle — memoised by
+    # :func:`factor_loadings_for_run`, not re-read here. Two arms must differ
+    # because their signals differ, never because they read the store at
+    # different moments (alpha-engine-config-I7808).
+    factor_loadings, reason = factor_loadings_for_run(
+        live_artifact.get("run_date") or "", eval_log
+    )
+    if reason or not factor_loadings:
+        reason = reason or "factor loadings unavailable this cycle"
         logger.warning(
             "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
             reason,
         )
         return {}, _all_specs_missing(reason)
-    if not factor_loadings:
-        reason = "factor loadings unavailable this cycle"
-        logger.warning(
-            "[scanner_orchestrator] %s — skipping shadow candidate-gen specs (live artifact unaffected)",
-            reason,
-        )
-        return {}, _all_specs_missing(reason)
+
     params = _resolved_scanner_params()
     return build_shadow_artifacts(live_artifact, eval_log, factor_loadings, params)
 
@@ -559,7 +651,7 @@ def build_scanner_eval_rows_for_board(
     shape ``scoring.universe_board.build_universe_board`` consumes.
 
     This is the Scanner-path equivalent of
-    ``graph.research_graph._build_scanner_eval_rows`` — same eval_log
+    The retired research graph's ``_build_scanner_eval_rows`` — same eval_log
     source, same row shape — minus the agent-only ``extra_override_tickers``
     union (there is no agent run in this Lambda, so every row comes
     straight from the scanner's own ~900-ticker universe pass).
@@ -600,7 +692,7 @@ def write_universe_board_for_scanner_run(
     until now).
 
     DUAL-WRITE TRANSITION STATE: the Research graph ALSO writes this board
-    (``graph/research_graph.py::archive_writer`` →
+    (the retired research graph's ``archive_writer`` →
     ``scoring.universe_board.compute_and_write_universe_board``) and will
     keep doing so until the SF cutover retires the graph's internal scanner
     (S3 contract safety — both producers coexist during the migration).

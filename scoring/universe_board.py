@@ -133,6 +133,12 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_BOARD_SCHEMA_VERSION = 3
 
+# Cap on the MEMBER list inside ``attractiveness_coverage``. The count itself is
+# never capped — see ``_attractiveness_coverage``. 50 is well above any expected
+# exclusion count on a healthy ~900-name board (the measured steady state is 0),
+# so hitting it is itself a signal rather than routine truncation.
+_COVERAGE_MEMBER_CAP = 50
+
 # Known-bad gate block (alpha-engine-config#4820). These two dated boards were
 # written BEFORE this module enforced the gate-passed-count producer contract
 # (``_assert_gate_passed_matches_scanner_tickers``) and are frozen with an
@@ -465,6 +471,101 @@ def _gate_trace(row: dict, gate_config: dict | None) -> tuple[list[dict], str]:
     return trace, stage
 
 
+def _attractiveness_coverage(stocks: list[dict]) -> dict:
+    """How many names the attractiveness ranking EXCLUDED, and which ones.
+
+    Emitted on every board UNCONDITIONALLY — a healthy run publishes an explicit
+    zero rather than nothing. A component that says nothing is unobserved, not
+    healthy (``observability-policy.md`` §3.4: records rejected WITH reason), and
+    an exclusion nobody can see is the same failure as the fabricated ``0.0``
+    this replaced (config-I7272, ``principles.md`` §2.7).
+
+    ``n_excluded_undefined`` counts names carrying ``attractiveness_score: None``
+    — every pillar leg undefined, so there is no measured position to rank them
+    at. They are absent from the ranking, NOT ranked last: the board's sort keeps
+    them after the scored names purely so the artifact has a stable order, and
+    ``attractiveness_rank`` is never assigned to them (see
+    ``universe_membership._rank_table``, which is fed a None-filtered dict).
+
+    ``excluded_tickers`` is capped at ``_COVERAGE_MEMBER_CAP`` because the board
+    is a dashboard artifact read on every page load; ``n_excluded_undefined`` is
+    always the true, uncapped count, and ``excluded_truncated`` says so in-band
+    rather than letting a reader mistake the cap for the total.
+
+    STOPGAP, deliberately (config-I7272): ``nousergon_lib.quant.attractiveness``
+    now publishes this same report itself, via
+    ``compute_cross_sectional_attractiveness_with_coverage``. This repo still
+    pins ``nousergon-lib@v0.124.3``, which predates that API, so the count is
+    derived here from the scores the pinned lib already returns — an identical
+    derivation over the identical input, not a second definition of the metric.
+    The pin-bump follow-up switches this to the library's own report so exactly
+    one implementation survives (``shared-code-policy.md``); until then the fork
+    is one function with this note on it.
+    """
+    excluded = sorted(
+        str(s["ticker"]) for s in stocks if s.get("attractiveness_score") is None
+    )
+    return {
+        "n_tickers": len(stocks),
+        "n_scored": len(stocks) - len(excluded),
+        "n_excluded_undefined": len(excluded),
+        "excluded_tickers": excluded[:_COVERAGE_MEMBER_CAP],
+        "excluded_truncated": len(excluded) > _COVERAGE_MEMBER_CAP,
+    }
+
+
+# Required fields for the producer-side coverage floor below
+# (alpha-engine-config-I7982): the three metrics `compute_tradeability`
+# consumes directly (`avg_volume`, `realized_vol_20d`) plus one more
+# feature-parquet-sourced technical (`atr_pct`) as a canary for the whole
+# `_TECHNICAL_METRICS`/`_FUNDAMENTAL_METRICS` mapping class — the 08-17
+# regression took 21 of 23 published fields to zero together, so one
+# representative from each source parquet is sufficient to catch the class
+# without hard-coding all 23 names into the floor.
+_REQUIRED_METRIC_COVERAGE_FIELDS: tuple[str, ...] = ("avg_volume", "realized_vol_20d", "atr_pct")
+
+
+def _assert_metric_coverage_floor(stocks: list[dict], run_date: str) -> None:
+    """Refuse to publish a board where a non-trivial universe has ZERO
+    non-null coverage on a metric the tradeability/optimizer path depends on
+    (alpha-engine-config-I7982).
+
+    Measured live 2026-08-17..08-20: ``features/{date}/{technical,fundamental}
+    .parquet`` reads failed inside the deployed Lambda (pyarrow import
+    failure — fixed in the same PR, see requirements.txt), so
+    ``_TECHNICAL_METRICS``/``_FUNDAMENTAL_METRICS`` populated every one of 21
+    fields as null for all 903 names, `compute_tradeability` derived
+    ``adv_usd``/``expected_cost_bps`` as null for every name, and the board
+    still wrote successfully with `attractiveness_score` intact — nothing
+    downstream raised. `current_price` and `rsi_14` are exempt from this
+    floor: both have their own fallback to the scanner-eval row directly
+    (see `build_universe_board`'s technical-metrics loop) and stayed near-
+    full coverage through the incident, so they cannot detect this class.
+
+    A small universe (< 20 names — an early/degraded scanner run) is exempt:
+    zero coverage there is plausibly a genuine data gap for that population,
+    not this failure mode, and raising on it would turn a real edge case
+    into a false-positive board outage on top of a real one.
+    """
+    if len(stocks) < 20:
+        return
+    zero_covered = [
+        field
+        for field in _REQUIRED_METRIC_COVERAGE_FIELDS
+        if not any(s["metrics"].get(field) is not None for s in stocks)
+    ]
+    if not zero_covered:
+        return
+    raise ValueError(
+        f"universe_board: metric coverage floor breached for {run_date} — "
+        f"{len(stocks)} names published with ZERO non-null coverage on "
+        f"{zero_covered} (of {_REQUIRED_METRIC_COVERAGE_FIELDS}). This is the "
+        "signature of a feature-parquet read failure (alpha-engine-config-"
+        "I7982) — refusing to publish a board whose tradeability/optimizer-"
+        "facing metrics are silently all-null (no-silent-fails)."
+    )
+
+
 def _assert_gate_passed_matches_scanner_tickers(stocks: list[dict], scanner_tickers: list[str], run_date: str) -> None:
     """Producer contract invariant (alpha-engine-config#4820): the board's own
     derived ``gate_stage == "passed"`` membership must equal the AUTHORITATIVE
@@ -555,10 +656,15 @@ def build_universe_board(
     Returns the board dict (also the unit under the producer contract test).
 
     Raises when ``scanner_evals`` is empty (a research run that produced no
-    universe is a real fault — the caller's WARN records it), or when
+    universe is a real fault — the caller's WARN records it), when
     ``scanner_tickers`` is provided and disagrees with the board's own
     ``gate_stage == "passed"`` set (no-silent-fails: a producer must not
-    emit an artifact whose gate block silently reads a false verdict).
+    emit an artifact whose gate block silently reads a false verdict), or
+    when a universe of >= 20 names publishes ZERO non-null coverage on any of
+    ``avg_volume``/``realized_vol_20d``/``atr_pct`` (alpha-engine-config-I7982
+    — the signature of a feature-parquet read failure taking the whole
+    technical/fundamental mapping class to null; see
+    ``_assert_metric_coverage_floor``).
     """
     if not scanner_evals:
         raise ValueError(
@@ -654,6 +760,13 @@ def build_universe_board(
         )
 
     # ── Attractiveness (SOTA z-blend → percentile) via the shared chokepoint ──
+    # config-I7272: a name whose every pillar leg is UNDEFINED (no cross-sectional
+    # dispersion to z-score against) comes back with attractiveness_score None and
+    # is EXCLUDED from the ranking rather than scored — a fabricated 0.0 would have
+    # competed against measured names, and a None sorted to one end would still
+    # occupy a rank position, silently and systematically. The exclusion is counted
+    # and published below: an exclusion nobody can see is the same failure as the
+    # fabricated zero it replaced (principles.md §2.7).
     attractiveness = compute_cross_sectional_attractiveness(pillar_scores_by_ticker, pillar_weights)
     for stock, _ in records:
         a = attractiveness.get(stock["ticker"], {})
@@ -674,10 +787,15 @@ def build_universe_board(
     if scanner_tickers is not None:
         _assert_gate_passed_matches_scanner_tickers(stocks, scanner_tickers, run_date)
 
+    _assert_metric_coverage_floor(stocks, run_date)
+
+    coverage = _attractiveness_coverage(stocks)
+
     return {
         "schema_version": UNIVERSE_BOARD_SCHEMA_VERSION,
         "as_of": run_date,
         "universe_count": len(stocks),
+        "attractiveness_coverage": coverage,
         "attractiveness_method": "sector_neutral_zscore_percentile",
         "tradeability_method": _TRADEABILITY_METHOD,
         "tradeability_reference_notional_usd": _reference_notional(tradeability_config),
@@ -763,8 +881,27 @@ def _read_parquet(name: str, run_date: str, bucket: str | None, s3_client: Any):
     try:
         obj = s3.get_object(Bucket=_bucket(bucket), Key=f"features/{run_date}/{name}.parquet")
         return pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
-    except Exception:
-        logger.warning("[universe_board] features/%s/%s.parquet not readable — those metrics null", run_date, name)
+    except Exception as e:
+        # alpha-engine-config-I7982: this except used to discard `e` entirely
+        # (`except Exception:` with no `as e`, message printed no cause) — the
+        # single reason a 4-day, 21-of-23-field, 0-of-903-names coverage
+        # collapse (2026-08-17..08-20) produced only a content-free WARN and
+        # nobody could diagnose it from the log alone. Root cause measured
+        # live: the deployed scanner Lambda's `import pyarrow` was failing —
+        # pyarrow was an UNDECLARED transitive dependency (pulled in only via
+        # edgartools, itself unpinned to a specific pyarrow release), so a
+        # routine `pip install` on a dependency bump could silently resolve a
+        # pyarrow build incompatible with this image's numpy pin. Fixed at the
+        # source by pinning pyarrow directly in requirements.txt (see that
+        # file); this `exc_info` is the detection backstop for the next class
+        # of read failure this same broad except would otherwise still hide.
+        logger.warning(
+            "[universe_board] features/%s/%s.parquet not readable — those metrics null: %s",
+            run_date,
+            name,
+            e,
+            exc_info=True,
+        )
         return None
 
 

@@ -3,9 +3,9 @@
 # started failing 2026-07-14 against the default 79.0.1 bundled by the
 # GH Actions Python 3.11 image). Not a build-backend requirement here — direct
 # pin exists solely to satisfy the security-audit gate.
-setuptools>=83.0.0
+setuptools>=84.0.0
 anthropic~=0.120
-# Raised to the 1.x line (config#2570): langchain-anthropic~=1.5 forces
+# Raised to the 1.x line (config#2570): langchain-anthropic~=1.6 forces
 # langchain-core 1.x, and the transitive eval graph (agentevals~=0.0 ->
 # openevals -> langchain 1.x) already resolves to langchain-core>=1.4.9 +
 # langgraph>=1.2.5. langgraph <1.2.5 (the 0.x lines) pins langchain-core<1.0
@@ -13,7 +13,7 @@ anthropic~=0.120
 # backtracking every 0.x release). `~=1.2` tracks the line the eval graph
 # already pulls in.
 langgraph~=1.2
-langchain-anthropic~=1.5
+langchain-anthropic~=1.6
 # OpenAI-compatible chat model — how every research agent now reaches the
 # router (or OpenRouter in Lambda). See agents/langchain_utils.make_agent_llm.
 # Raised to the 1.x line (config#2570): the transitive eval graph
@@ -21,7 +21,7 @@ langchain-anthropic~=1.5
 # langchain-openai to 1.4.1; a `<1.0` cap fights that and leaves the stale
 # 0.3.x compat line pinned under langchain-core 1.x. The 1.4.x line is the
 # current path.
-langchain-openai~=1.4
+langchain-openai~=1.6
 # Bumped 0.7 -> 0.8.18 (alpha-engine-config#2522): GHSA-f4xh-w4cj-qxq8, HIGH —
 # TracingMiddleware arbitrary server-side file read, fixed in 0.8.18. The old
 # `~=0.7` bound (PEP 440: fixes only the leading "0", i.e. >=0.7,<1.0) let
@@ -29,7 +29,7 @@ langchain-openai~=1.4
 # builds even though a fresh resolve already picked a newer version; `~=0.8.18`
 # hard-excludes every pre-fix release while staying within the 0.8.x line
 # (minimum version movement that clears the advisory).
-langsmith~=0.8.18
+langsmith~=0.10.18
 # openai: the OpenAI-compatible wire client for thinktank/ (config#1579) —
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
@@ -40,12 +40,24 @@ openai>=2.53.0
 agentevals~=0.0
 
 # Data
-yfinance~=1.5.2
+yfinance~=1.6.0
 requests-ratelimiter~=0.10
+# alpha-engine-config-I7982: scoring/universe_board.py::_read_parquet calls
+# pd.read_parquet(..., engine="pyarrow") on the Lambda's live path, but
+# pyarrow was NEVER a declared dependency here — it only ever arrived
+# transitively via edgartools (itself unpinned to a pyarrow release). A
+# routine dependency-bump build was free to resolve a pyarrow wheel
+# incompatible with this image's numpy pin, and did: the scanner board
+# published 0-of-903-names coverage on 21 of 23 metric fields for four
+# straight days (2026-08-17..08-20) with the only symptom a swallowed,
+# argument-free WARN (see the fixed-in-the-same-PR exception log). A
+# capability this repo calls directly belongs in its own dependency graph,
+# not borrowed from another package's transitive closure.
+pyarrow>=17.0  # floor matches edgartools' own pin so both resolve one wheel
 pandas~=2.2
-numpy~=1.26
+numpy~=2.5
 requests~=2.34
-feedparser~=6.0.13
+feedparser~=6.0.14
 beautifulsoup4~=4.15
 # Bumped 5.2 -> 6.1 (config#2342): PYSEC-2026-87 (untrusted XML entity
 # resolution could read local files under the old resolve_entities=True
@@ -113,7 +125,7 @@ pydantic~=2.13
 # repo — scoring/boost_signals.py's `from alpha_engine_lib.secrets import
 # get_secret` — fixed in the same PR to `from nousergon_lib.secrets import
 # get_secret` (matching every other call site in this repo already).
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.3
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.79
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
@@ -228,7 +240,59 @@ nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nouse
 # repo-wide `research-lambda` in flow-doctor.yaml (alpha-engine-config-I6910).
 # An older krepis raises TypeError on the kwarg rather than degrading, so the
 # floor is load-bearing rather than advisory.
-krepis>=0.43.0
+#
+# 0.51.0 floor (krepis-PR133, alpha-engine-config-I7009): `krepis.ec2_spot
+# relaunch-decision` gained `--json`, putting the verdict on a JSON field
+# instead of the exit code. `infrastructure/spot_research_weekly.sh` reads
+# that field; an older krepis has no `--json` flag at all.
+#
+# 0.57.0 floor (krepis-PR140, alpha-engine-config-I7179): `LLMClient` with no
+# `cost_sink=` argument now resolves one from KREPIS_COST_SINK_BUCKET +
+# KREPIS_COST_SINK_PREFIX, and `krepis.aws merge-lambda-env` is what
+# `infrastructure/deploy.sh` uses to set them. On an older krepis the deploy
+# fails loudly on an unknown subcommand — which is the right failure, because
+# the alternative is a deploy that succeeds while every Lambda it published
+# emits no cost record at all. That silence ran for months. Subsumed by the
+# higher floor below; kept because the floor's REASON is not recoverable from
+# the version number.
+#
+# 0.59.4 floor (alpha-engine-config-I7214): the FIRST published krepis
+# carrying `krepis.stage_coverage`, which every weekly-SF-backed handler in
+# lambda/ imports to self-assert its declared output before returning. The
+# call site's ImportError guard is deliberately silent about the handler's
+# own outcome (observe mode), so a deploy resolving an older krepis would
+# leave the assertion emitting NOTHING — indistinguishable on the console
+# from an assertion that ran and found nothing wrong (config-I7334). The
+# floor is the only thing that makes it measurable where it runs.
+#
+# 0.59.6 floor (alpha-engine-config-I7372): the FIRST published krepis
+# carrying `krepis.spot_bootstrap`'s `--max-runtime-seconds` flag and
+# `scan_for_inline_bootstraps`. `infrastructure/spot_research_weekly.sh`'s
+# bootstrap step passes `--max-runtime-seconds`; an older krepis rejects it
+# as an unrecognized argument — AFTER the spot instance already exists and
+# is billing, not at dispatch. `tests/test_spot_bootstrap_invariants.py`
+# imports `scan_for_inline_bootstraps`, which does not exist below 0.59.6 —
+# `ImportError` at collection on an older resolve (measured live on
+# crucible-predictor-PR505 against this exact symbol). A `>=0.59.4` floor
+# lets `pip` resolve past both silently whenever the newest publish happens
+# to satisfy it, which is resolution luck, not a requirement.
+# Raised to >=0.59.8 (alpha-engine-config-I7423): the first published krepis
+# carrying krepis.cost_sink.flush_default_sink(), which every handler in
+# lambda/ now calls in a `finally`. 0.59.7 emits the four cost-contract
+# columns and has no way to WRITE them — a frozen Lambda container never
+# runs the atexit hook the sink otherwise relies on.
+krepis==0.59.25  # pinned per §139 — first-party/fast-moving deps are pinned, never floored (alpha-engine-config-I7635); bumped from 0.59.23 (krepis-PR176, alpha-engine-config-I8030) — 0.59.23's remove-lambda-env enumerated Lambda aliases unconditionally, even under --defer-publish, and the deploy roles here hold no lambda:ListAliases, so the deploy stranded a partial deploy (image pushed, alias never moved) after this repo's own remove-lambda-env call; 0.59.24 skips the enumeration under --defer-publish; bumped 0.59.24 -> 0.59.25 (krepis-PR177, alpha-engine-config-I8037) — 0.59.24 skipped the alias enumeration only under --defer-publish, and this repo's alerts Lambda is UNALIASED so _converge_lambda_env_direct deliberately does not pass that flag; three deploys failed on lambda:ListAliases with 0.59.24 installed (runs 32512239555, 32514368875, 32515322808). 0.59.25 adds --no-alias, the symmetric caller assertion, which that helper now passes
+# (alpha-engine-config-I7393): schema_version / run_id / agent_id / model_name
+# first ship in 0.59.7 (krepis-PR154). nousergon-lib's transparency_inventory
+# `cost_telemetry` row asserts all four present, and this repo is the ONLY
+# constructor of a cost sink in the fleet (evals/judge.py,
+# producers/single_agent.py) — so an older krepis here means the weekly
+# substrate health check keeps reporting cost_telemetry as its single [FAIL].
+#
+# The floor is also what DEPLOYS the fix: .github/workflows/deploy.yml only
+# rebuilds the image when a path it watches changes, and `requirements*.txt`
+# is one of them. Leaving the floor at 0.59.6 would resolve to 0.59.7 on a
+# fresh build but never trigger one.
 
 # Scheduling / calendar
 exchange-calendars~=4.13
@@ -244,12 +308,12 @@ pytest-asyncio~=1.4
 # followed symlinks when rewriting .env files (arbitrary local file
 # overwrite via crafted symlink + cross-device rename fallback). 1.2.2 is a
 # same-major (1.x) patch/minor bump, no API changes used by this repo.
-python-dotenv~=1.2.2
+python-dotenv~=1.2.3
 # moto: mocked S3 for decision_capture integration tests
 moto~=5.2
 
 # SEC EDGAR data
-edgartools~=5.46
+edgartools~=5.51
 
 # RAG — vector retrieval over SEC filings + earnings transcripts
 psycopg2-binary~=2.9

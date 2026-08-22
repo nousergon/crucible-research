@@ -50,10 +50,6 @@ class TestProbeAggregation:
                 return_value={"name": "thesis_update", "status": "PASS", "detail": "", "duration_s": 0.1},
             ),
             patch(
-                "agents.canary_replay.probe_qual_analyst",
-                return_value={"name": "qual_analyst", "status": "PASS", "detail": "", "duration_s": 0.1},
-            ),
-            patch(
                 "agents.canary_replay.probe_validation_retry",
                 return_value={"name": "validation_retry", "status": "PASS", "detail": "", "duration_s": 0.1},
             ),
@@ -62,7 +58,9 @@ class TestProbeAggregation:
 
         assert result["overall_status"] == "PASS"
         assert result["held_tickers_probed"] == ["AAPL"]
-        assert len(result["probes"]) == 3
+        # 2, not 3: `probe_qual_analyst` was removed with its retired target
+        # (alpha-engine-config-I7816/I7817).
+        assert len(result["probes"]) == 2
 
     def test_one_probe_failing_yields_overall_fail(self):
         from agents.canary_replay import run_canary
@@ -78,12 +76,8 @@ class TestProbeAggregation:
                 return_value={"name": "thesis_update", "status": "PASS", "detail": "", "duration_s": 0.1},
             ),
             patch(
-                "agents.canary_replay.probe_qual_analyst",
-                return_value={"name": "qual_analyst", "status": "FAIL", "detail": "boom", "duration_s": 0.1},
-            ),
-            patch(
                 "agents.canary_replay.probe_validation_retry",
-                return_value={"name": "validation_retry", "status": "PASS", "detail": "", "duration_s": 0.1},
+                return_value={"name": "validation_retry", "status": "FAIL", "detail": "boom", "duration_s": 0.1},
             ),
         ):
             result = run_canary("test-run-id", n_tickers=5)

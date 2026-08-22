@@ -205,7 +205,8 @@ class ChallengerSelection(_Artifact):
     emitted for observability, but ``coverage_complete`` is the validity
     flag downstream consumers must gate on — Brian's ruling (config#1580):
     the selection only counts once the ENTIRE current-scan top-N coverage
-    window (``thinktank.run.GAP_FILL_TOP_N``) is covered. ``selections`` is
+    window (the cut ``universe_membership`` declares for Think Tank) is
+    covered. ``selections`` is
     ranked by Think Tank's OWN independent rating — never scanner
     attractiveness (independence is the point, see ``ratings.py``).
 
@@ -262,6 +263,15 @@ class ThemeThesis(_Artifact):
     theme: ThemeThesisLLM
     weekly_anchor_date: str | None = None  # signals.json date this theme is reconciled to
     divergence_from_weekly: str | None = None
+    #: Non-fresh upstream verdicts (``freshness.FreshnessVerdict.as_record()``)
+    #: that were in force when this theme was written — alpha-engine-config-I2638.
+    #: A theme reconciled against a five-month-old macro report is not the same
+    #: artifact as one reconciled against last Saturday's, and a downstream
+    #: reader (or the producer leaderboard scoring this arm) cannot tell them
+    #: apart unless the theme itself says so. Empty list = every dated input was
+    #: within tolerance; it is written on EVERY theme, not only degraded ones,
+    #: so silence here means "checked and fresh", never "not checked".
+    stale_inputs: list[dict] = Field(default_factory=list)
     model: str = ""
     tier: str = ""
     prompt_version: str = ""
@@ -293,12 +303,8 @@ class TriageDecisionLLM(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    escalate: bool = Field(
-        description="True only if the event changes the standing thesis's claim."
-    )
-    reason: str = Field(
-        description="One-two sentences; why the belief does or does not move."
-    )
+    escalate: bool = Field(description="True only if the event changes the standing thesis's claim.")
+    reason: str = Field(description="One-two sentences; why the belief does or does not move.")
 
 
 class SweepBatchLLM(BaseModel):
@@ -398,6 +404,23 @@ class TierUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    #: ``{rung: call_count}`` over ``krepis.llm``'s structured-output
+    #: degradation ladder (``native`` / ``tool_emulation`` / ``prompt_only``,
+    #: plus ``unknown`` when the transport reported none).
+    #:
+    #: krepis populates ``structured_output_rung`` on EVERY structured result,
+    #: degraded or not, expressly so a degraded call is visible in the
+    #: consumer's artifact — and this consumer read it nowhere
+    #: (alpha-engine-config-I7658). Measured live 2026-08-18 against the `low`
+    #: group: the deployment answers `400 This response_format type is
+    #: unavailable now`, krepis descends native -> prompt_only and records the
+    #: drop, and the run manifest said nothing. Every `sweep` and `triage`
+    #: call in the daily run has been running one rung down since the ladder
+    #: shipped, invisibly.
+    #:
+    #: Counts are published for the undegraded rung too: a tier that emits
+    #: nothing here is unobserved, not healthy.
+    structured_output_rungs: dict[str, int] = Field(default_factory=dict)
 
 
 class RunManifest(_Artifact):
@@ -426,13 +449,57 @@ class RunManifest(_Artifact):
     themes_reconciled: bool = False
     theme_updates_written: int = 0
     context_sources_present: dict[str, bool] = Field(default_factory=dict)
+    #: ``{source: FreshnessVerdict.as_record()}`` for every context source with
+    #: a checkable as-of timestamp — fresh ones included. Presence was already
+    #: recorded above; presence is not freshness (alpha-engine-config-I2638).
+    context_source_freshness: dict[str, dict] = Field(default_factory=dict)
+    #: Source names whose freshness verdict was ``stale`` or ``undated`` on this
+    #: run. Non-empty ⇒ this run is DEGRADED: it completed, but at least one
+    #: conclusion is anchored to an out-of-date input. Named separately from the
+    #: full record so a console/scorer can filter on one field.
+    degraded_inputs: list[str] = Field(default_factory=list)
     coverage_gap: dict | None = Field(
         default=None,
-        description="Coverage gap vs scanner top-N: top60/top30 pct covered, "
-        "uncovered counts. Emitted at end of every daily run.",
+        description="Coverage gap vs the DECLARED coverage window: pct covered, "
+        "uncovered count, plus the cut and basis the window resolved to. "
+        "Emitted at end of every daily run.",
+    )
+    # ── Which contract this run read (alpha-engine-config-I7842) ─────────────
+    # The window is resolved from `universe_membership/latest.json` through the
+    # live champion pointer, so "which arm was Think Tank covering on date D"
+    # has an artifact rather than being reconstructed from a deploy log. Before
+    # this, Think Tank re-derived its own ranking and no run recorded what it
+    # had ranked by — a champion cutover would have been invisible in the run
+    # record as well as in the behaviour.
+    feed_window: dict | None = Field(
+        default=None,
+        description="Provenance of the coverage window this run consumed: "
+        "cut, declared_cut, basis, size, run_date, cut_effective_date, "
+        "cut_refresh_cadence, rank_table_size, schema_version.",
     )
     ratings_rows: int = 0
     challenger_selection_written: bool = False
+    # ── Challenger-selection POINTER lag (alpha-engine-config-I7232) ─────────
+    # `challenger_selection/latest.json` is deliberately withheld on the abort
+    # path (see `_terminal_writes`) — the dated key still lands, so the
+    # directory keeps advancing daily while the pointer freezes, and to every
+    # consumer that resolves the arm through the pointer a frozen pointer is
+    # indistinguishable from a healthy one. Measured 2026-08-13: the pointer
+    # was byte-identical to the 08-10 object while 08-11 and 08-12 were written
+    # beside it.
+    #
+    # These two fields make the pointer's staleness a NUMBER published by the
+    # run itself, readable without listing the dated keys next to it, and
+    # published on healthy runs too — where it is 0, because the run just
+    # advanced the pointer. `principles.md` §2.7: a component emitting nothing
+    # is not healthy, it is unobserved, and "no data" is never rendered green.
+    #
+    # `None` on BOTH fields together means the pointer object does not exist at
+    # all — a distinct state from "exists and is N days behind", which is why
+    # the observed trading_day is carried rather than a lone lag integer with
+    # an overloaded sentinel.
+    challenger_selection_pointer_trading_day: str | None = None
+    challenger_selection_pointer_lag_days: int | None = None
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
     total_cost_usd: float = 0.0
     budget_month_spent_usd: float = 0.0

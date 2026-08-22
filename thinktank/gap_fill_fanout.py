@@ -52,16 +52,16 @@ from thinktank.challenger_selection import write_challenger_selection
 from thinktank.client import ThinktankClient
 from thinktank.context import load_context
 from thinktank.costs import BudgetGuard
+from thinktank.feed import FeedWindow, load_feed_window
 from thinktank.ledger import (
     load_ledger,
-    ranked_universe,
     record_sweep,
     record_thesis_write,
     save_ledger,
     select_intake,
 )
 from thinktank.ratings import update_ratings_board
-from thinktank.run import GAP_FILL_TOP_N, _compute_coverage_gap
+from thinktank.run import _compute_coverage_gap
 from thinktank.schemas import EventRecord, RunManifest
 from thinktank.settings import ThinktankSettings, load_settings
 from thinktank.storage import ThinktankStore
@@ -70,11 +70,20 @@ from thinktank.themes import ThemeKeeper
 logger = logging.getLogger(__name__)
 
 
-def _board_row_with_rank(board: dict, ticker: str) -> dict | None:
-    for rank, row in enumerate(ranked_universe(board), start=1):
+def _board_row_with_rank(board: dict, window: FeedWindow, ticker: str) -> dict | None:
+    """The ticker's board row, stamped with its rank from the DECLARED ranking.
+
+    The rank comes from ``window`` rather than from this function re-sorting the
+    board (alpha-engine-config-I7842). A BUILD worker that ranked independently
+    would have recorded a different ``attractiveness_rank`` on the thesis than
+    the PLAN phase used to select the ticket — two answers to one question,
+    inside one run.
+    """
+    for row in (board or {}).get("stocks") or []:
         if row.get("ticker") == ticker:
             row = dict(row)
-            row["_attractiveness_rank"] = rank
+            # Grandfathered field name — this is the rank in ``window.basis``.
+            row["_attractiveness_rank"] = window.rank_of(ticker)
             return row
     return None
 
@@ -113,12 +122,17 @@ def plan_gap_fill(
             "universe board (scanner/universe/latest.json) is missing — the "
             "think tank has no intake without it; aborting loudly."
         )
+    window = load_feed_window(store)
     ledger = load_ledger(store)
-    gap = _compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N)
+    gap = _compute_coverage_gap(window, ledger)
     gap_count = gap.get("uncovered_count", 0)
     new_rows, _ = select_intake(
-        ledger, ctx.board, daily_new_names=gap_count,
-        rank_ceiling=GAP_FILL_TOP_N, skip_stale_refill=True,
+        ledger,
+        ctx.board,
+        window,
+        daily_new_names=gap_count,
+        rank_ceiling=window.size,
+        skip_stale_refill=True,
     )
     tickers = [r["ticker"] for r in new_rows]
 
@@ -130,7 +144,9 @@ def plan_gap_fill(
     themes.ensure_current()
     if client.total_cost_usd():
         guard.record_run(
-            calendar_date, run_id=f"{run_id}-plan", trading_day=trading_day,
+            calendar_date,
+            run_id=f"{run_id}-plan",
+            trading_day=trading_day,
             cost_usd=client.total_cost_usd(),
         )
 
@@ -166,23 +182,27 @@ def build_gap_fill_unit(
     if existing is not None:
         logger.info(
             "gap_fill unit %s already checkpointed for %s — skipping",
-            ticker, trading_day,
+            ticker,
+            trading_day,
         )
         return existing
 
     ctx = load_context(store)
     if ctx.board is None:
         raise RuntimeError(
-            "universe board missing mid-fan-out — aborting loudly rather "
-            "than checkpointing a thesis built without it."
+            "universe board missing mid-fan-out — aborting loudly rather than checkpointing a thesis built without it."
         )
-    board_row = _board_row_with_rank(ctx.board, ticker)
+    window = load_feed_window(store)
+    board_row = _board_row_with_rank(ctx.board, window, ticker)
 
     client = client or ThinktankClient(settings=settings, run_id=run_id)
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
 
     thesis = build_thesis(
-        store, client, ctx, themes,
+        store,
+        client,
+        ctx,
+        themes,
         ticker=ticker,
         board_row=board_row,
         trading_day=trading_day,
@@ -261,7 +281,9 @@ def finalize_gap_fill(
 
     ctx = load_context(store)
     manifest.context_sources_present = dict(ctx.sources_present)
-    manifest.coverage_gap = _compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N)
+    window = load_feed_window(store)
+    manifest.feed_window = dict(window.provenance)
+    manifest.coverage_gap = _compute_coverage_gap(window, ledger)
 
     client = client or ThinktankClient(settings=settings, run_id=run_id)
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
@@ -270,9 +292,7 @@ def finalize_gap_fill(
     theses_written = []
     event_rows: list[dict] = []
     if covered_before:
-        assessments, macro_notes = sweep(
-            client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size
-        )
+        assessments, macro_notes = sweep(client, ctx, covered=covered_before, chunk_size=settings.sweep_chunk_size)
         manifest.sweep_tickers = len(covered_before)
         record_sweep(ledger, covered_before, trading_day)
         for a in assessments:
@@ -280,7 +300,10 @@ def finalize_gap_fill(
             if a.action == "update_thesis":
                 manifest.events_flagged += 1
                 thesis = build_thesis(
-                    store, client, ctx, themes,
+                    store,
+                    client,
+                    ctx,
+                    themes,
                     ticker=a.ticker,
                     board_row=ranked_rows.get(a.ticker),
                     trading_day=trading_day,
@@ -289,7 +312,9 @@ def finalize_gap_fill(
                     event_context=a.rationale,
                 )
                 record_thesis_write(
-                    ledger, ticker=a.ticker, trading_day=trading_day,
+                    ledger,
+                    ticker=a.ticker,
+                    trading_day=trading_day,
                     thesis_version=thesis.version,
                 )
                 save_ledger(store, ledger)
@@ -321,11 +346,15 @@ def finalize_gap_fill(
     board = update_ratings_board(store, ledger, theses_written, trading_day=trading_day)
     manifest.ratings_rows = len(board.rows)
     write_challenger_selection(
-        store, ledger, board,
-        run_id=run_id, mode=manifest.mode,
-        trading_day=trading_day, calendar_date=calendar_date,
+        store,
+        ledger,
+        board,
+        run_id=run_id,
+        mode=manifest.mode,
+        trading_day=trading_day,
+        calendar_date=calendar_date,
         board_date=(ctx.board or {}).get("as_of"),
-        coverage_gap=_compute_coverage_gap(ctx.board, ledger, top_n=GAP_FILL_TOP_N),
+        coverage_gap=_compute_coverage_gap(window, ledger),
     )
     manifest.challenger_selection_written = True
     if event_rows:
@@ -337,7 +366,9 @@ def finalize_gap_fill(
     manifest.total_cost_usd = round(build_cost_usd + client.total_cost_usd(), 6)
     guard = BudgetGuard(store, settings, ssm_client=ssm_client)
     cost_ledger = guard.record_run(
-        calendar_date, run_id=run_id, trading_day=trading_day,
+        calendar_date,
+        run_id=run_id,
+        trading_day=trading_day,
         cost_usd=manifest.total_cost_usd,
     )
     manifest.budget_month_spent_usd = cost_ledger.spent_usd
@@ -354,8 +385,12 @@ def finalize_gap_fill(
     logger.info(
         "thinktank gap_fill fan-out %s finalized: +%d theses (%d event "
         "updates), swept %d, cost $%.4f (month $%.2f / $%.2f)",
-        run_id, manifest.theses_written, manifest.event_updates_written,
-        manifest.sweep_tickers, manifest.total_cost_usd,
-        manifest.budget_month_spent_usd, manifest.budget_month_limit_usd,
+        run_id,
+        manifest.theses_written,
+        manifest.event_updates_written,
+        manifest.sweep_tickers,
+        manifest.total_cost_usd,
+        manifest.budget_month_spent_usd,
+        manifest.budget_month_limit_usd,
     )
     return manifest

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -125,3 +126,25 @@ def test_price_read_failure_degrades_gracefully_and_fires_observe_alert():
     kwargs = mock_alert.call_args.kwargs
     assert "trajectory_price_read" in kwargs.get("source", "")
     assert "arcticdb unavailable" in mock_alert.call_args.args[0]
+
+
+def test_console_base_url_default_matches_krepis_chokepoint():
+    """Regression pin for alpha-engine-config-I7158: this module's
+    CONSOLE_BASE_URL fallback must track krepis.console.DEFAULT_CONSOLE_BASE_URL
+    (the fleet chokepoint, alpha-engine-config-I6140), not a second hardcoded
+    literal. A prior copy here still read the retired
+    "https://console.nousergon.ai" host — every deep-link 404'd unless
+    CONSOLE_BASE_URL was explicitly set in the environment."""
+    import importlib
+
+    from krepis.console import DEFAULT_CONSOLE_BASE_URL
+
+    assert DEFAULT_CONSOLE_BASE_URL == "https://dashboard.nousergon.ai"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("CONSOLE_BASE_URL", None)
+        import scoring.attractiveness_trajectory as mod
+
+        importlib.reload(mod)
+        assert mod.CONSOLE_BASE_URL == DEFAULT_CONSOLE_BASE_URL
+        assert "console.nousergon.ai" not in mod.CONSOLE_BASE_URL

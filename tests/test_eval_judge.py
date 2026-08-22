@@ -97,6 +97,45 @@ def _valid_tool_args() -> dict:
     return _make_llm_output().model_dump()
 
 
+@pytest.fixture(autouse=True)
+def live_router_resolution(monkeypatch):
+    """This suite exercises the REAL ``krepis.llm.LLMClient`` (via
+    ``_patch_llm_client``) over a faked transport, so it needs a REAL
+    ``ModelSpec`` resolution (base_url + api_key_env) from
+    ``krepis.router.resolve_group_spec`` — the repo-root ``conftest.py``
+    autouse stub is a simplified duck (``api_key_env=None``) built for
+    callers that never construct a real ``LLMClient``, and trips that
+    class's custom-provider validation here. Faking only the registry read
+    (``resolve_group_structured``) keeps ``resolve_group_spec`` itself
+    under test — same division of labor as
+    ``tests/test_single_agent_producer.py``'s addressing tests.
+
+    Named ``live_router_resolution`` (shadowing the repo-root fixture of
+    the same name) and marked ``autouse`` so its mere presence in every
+    test's fixturenames satisfies the outer conftest's opt-out check
+    without every test in this module needing to request it explicitly.
+    """
+    import krepis.router as _kr
+
+    def fake_resolve_structured(group, *, exec_context=None, wire="openai", requires=()):
+        return {
+            "schema_version": 2,
+            "group": group,
+            "route": "litellm_proxy",
+            "provider": "litellm",
+            "deployment_id": group,
+            "api_base_url": "https://router.invalid/v1",
+            "auth_token_type": "litellm_master_key",
+            "registry_id": f"litellm:group:{group}",
+            "primary_registry_id": "deepseek-v4-flash",
+            "params": {},
+        }
+
+    monkeypatch.setattr(_kr, "resolve_group_structured", fake_resolve_structured)
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "router-test-key")
+    return True
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 
@@ -469,13 +508,16 @@ class TestEvaluateArtifact:
         # PRESERVED across the migration (S3 path / CloudWatch dimension /
         # rolling-mean identity; see evaluate_artifact's docstring).
         assert result.judge_model == "claude-haiku-4-5"
-        # ...while the ACTUAL API call now goes to the OpenRouter default
-        # evaluate_artifact_openrouter already uses (Brian's ruling: "keep
-        # consistent" rather than a bespoke new pin) — NOT the old Anthropic
-        # dated-snapshot pin.
+        # judge_request_model is now the caller's DECLARED identity (see
+        # evaluate_artifact's docstring) — it no longer selects the model:
+        # since alpha-engine-config-I6559, the `low` router group does.
         assert result.judge_request_model == OPENROUTER_SHADOW.request_model
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["model"] == OPENROUTER_SHADOW.request_model
+        # The model sent to the transport is the router-RESOLVED deployment
+        # (this module's `live_router_resolution` fixture fakes the group
+        # `low` -> deployment_id `low`), not the OPENROUTER_SHADOW
+        # request_model literal.
+        assert call_kwargs["model"] == "low"
         assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
         assert result.judged_artifact_s3_key.endswith("/r1.json")
         assert result.rubric_version  # non-empty
@@ -484,20 +526,24 @@ class TestEvaluateArtifact:
         assert "regime engagement" in result.overall_reasoning
         # First-attempt success — should NOT have called create more than once
         assert fake_client.chat.completions.create.call_count == 1
-        # base_url must resolve to the OpenRouter endpoint.
+        # base_url must resolve to the router edge stub, no longer a direct
+        # OpenRouter link (alpha-engine-config-I6559, I6367 ruling).
         mock_llm_cls.assert_called_once()
-        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://openrouter.ai/api/v1"
+        assert _spec_of(mock_llm_cls).resolved_base_url() == "https://router.invalid/v1"
+        # `api_key` is a test seam only — forwarded verbatim, unresolved by
+        # this module. Production leaves it None; the router resolves the
+        # credential BY NAME at call time.
         assert mock_llm_cls.call_args.kwargs["api_key"] == "sk-or-test"
         # reasoning={"exclude": True} forwarded (truncation-avoidance default).
+        # No `usage: {include: True}` opt-in here (alpha-engine-config-I6559):
+        # that was an OpenRouter-provider-specific extra krepis's
+        # _openai_extra_body() added only for provider=="openrouter" — the
+        # provider is now the router-edge custom provider, not "openrouter"
+        # literal, so it no longer applies. Per-call cost now flows through
+        # `provider_cost_usd` when the edge/upstream provider supplies it.
         assert call_kwargs["extra_body"] == {
             # Truncation-avoidance default, forwarded from the ModelSpec.
             "reasoning": {"exclude": True},
-            # OpenRouter usage-accounting opt-in, added by krepis's
-            # _openai_extra_body() since alpha-engine-config#5223. It is what
-            # populates LLMResult.usage.provider_cost_usd — the field the
-            # migrated judge now reads for per-call cost, replacing the raw
-            # `usage.cost` read it did against a bare OpenAI client.
-            "usage": {"include": True},
         }
 
     def test_sonnet_tier_also_routes_to_the_same_openrouter_default(self):

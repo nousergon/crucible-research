@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from types import SimpleNamespace
 
 import boto3
 import pytest
 from moto import mock_aws
 
+from tests._feed_helpers import membership_for_board
 from thinktank import LEDGER_KEY
 from thinktank.client import ThinktankClient
 from thinktank.gap_fill_fanout import build_gap_fill_unit, finalize_gap_fill, plan_gap_fill
@@ -50,8 +52,10 @@ class _FakeBackend:
         self.calls.append(name)
         if name == "ThemeThesisLLM":
             body = {
-                "narrative": "themes narrative", "stance": "neutral",
-                "drivers": ["d1"], "watch_items": ["w1"],
+                "narrative": "themes narrative",
+                "stance": "neutral",
+                "drivers": ["d1"],
+                "watch_items": ["w1"],
                 "material_change": self.macro_material_change,
                 "change_summary": "changed" if self.macro_material_change else "",
             }
@@ -59,10 +63,17 @@ class _FakeBackend:
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             body = {
-                "business_summary": "b", "moat": "m", "filings_review": "f",
-                "news_sentiment": "n", "valuation": "v", "market_dynamics": "md",
-                "risks": ["r1"], "catalysts": ["c1"], "stance": "attractive",
-                "conviction": 70, "summary": "s",
+                "business_summary": "b",
+                "moat": "m",
+                "filings_review": "f",
+                "news_sentiment": "n",
+                "valuation": "v",
+                "market_dynamics": "md",
+                "risks": ["r1"],
+                "catalysts": ["c1"],
+                "stance": "attractive",
+                "conviction": 70,
+                "summary": "s",
                 "rating": self.ratings.get(ticker, 72),
                 "rating_rationale": "evidence-driven number",
             }
@@ -77,8 +88,12 @@ class _FakeBackend:
             body = {
                 "quality": _sub("quality"),
                 "quality_moat": {
-                    "primary_type": "none", "secondary_types": [], "width": "none",
-                    "durability_years": 0, "trend": "stable", "evidence": [],
+                    "primary_type": "none",
+                    "secondary_types": [],
+                    "width": "none",
+                    "durability_years": 0,
+                    "trend": "stable",
+                    "evidence": [],
                 },
                 "value": _sub("value"),
                 "momentum": _sub("momentum"),
@@ -118,13 +133,14 @@ def tt_config(tmp_path, monkeypatch):
             "coverage": {"daily_new_names": 3, "rank_ceiling": 150, "sweep_chunk_size": 25},
             "budget": {"monthly_usd_default": 25.0, "ssm_param": "/thinktank/monthly_budget_usd"},
             "llm": {
-                "providers": {
-                    "fake": {"base_url": "http://fake", "key_secret": "OPENROUTER_API_KEY"}
-                },
+                "providers": {"fake": {"base_url": "http://fake", "key_secret": "OPENROUTER_API_KEY"}},
                 "tiers": {
                     t: {
-                        "provider": "fake", "model": f"fake/{t}", "max_tokens": 1000,
-                        "price_in_per_m": 1.0, "price_out_per_m": 2.0,
+                        "provider": "fake",
+                        "model": f"fake/{t}",
+                        "max_tokens": 1000,
+                        "price_in_per_m": 1.0,
+                        "price_out_per_m": 2.0,
                         "structured_outputs": True,
                     }
                     for t in ("sweep", "themes", "thesis", "pillar")
@@ -145,22 +161,60 @@ def tt_config(tmp_path, monkeypatch):
 
 def _seed_read_side(s3, *, signals_date="2026-06-28"):
     s3.create_bucket(Bucket=BUCKET)
-    stocks = [
-        {"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": 100 - i}
-        for i in range(8)
-    ]
+    stocks = [{"ticker": f"T{i}", "sector": "Tech", "attractiveness_score": 100 - i} for i in range(8)]
     s3.put_object(
-        Bucket=BUCKET, Key="scanner/universe/latest.json",
+        Bucket=BUCKET,
+        Key="scanner/universe/latest.json",
         Body=json.dumps({"schema_version": 3, "stocks": stocks}),
     )
+    # The coverage window is READ from the membership artifact
+    # (alpha-engine-config-I7842) — a board alone is a state Think Tank
+    # deliberately refuses, so every read-side seed publishes both.
     s3.put_object(
-        Bucket=BUCKET, Key="signals/latest.json",
-        Body=json.dumps({
-            "date": signals_date, "market_regime": "neutral",
-            "sector_ratings": {"Tech": {"rating": "market_weight"}}, "signals": {},
-        }),
+        Bucket=BUCKET,
+        Key="universe_membership/latest.json",
+        Body=json.dumps(membership_for_board({"stocks": stocks})),
     )
-    s3.put_object(Bucket=BUCKET, Key="archive/macro/macro_report.md", Body=b"# Macro\nSteady.")
+    s3.put_object(
+        Bucket=BUCKET,
+        Key="signals/latest.json",
+        Body=json.dumps(
+            {
+                "date": signals_date,
+                "market_regime": "neutral",
+                "sector_ratings": {"Tech": {"rating": "market_weight"}},
+                "signals": {},
+            }
+        ),
+    )
+    # Think Tank's macro anchor: the weekly regime substrate (dated artifact +
+    # pointer sidecar) rather than the retired archive/macro/macro_report.md
+    # (alpha-engine-config-I2638). Dated TODAY so these runs exercise the fresh
+    # path — the degraded path has its own suite.
+    substrate_key = "regime/2608150900.json"
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=substrate_key,
+        Body=json.dumps(
+            {
+                "calendar_date": date.today().isoformat(),
+                "trading_day": date.today().isoformat(),
+                "run_id": "2608150900",
+                "hmm": {
+                    "probs": {"bear": 0.1, "neutral": 0.3, "bull": 0.6},
+                    "argmax": "bull",
+                    "weeks_in_current_state": 3,
+                },
+                "composite": {"intensity_z": 0.4, "implied_severity": "calm"},
+                "guardrails": {"active_severity_floor": None},
+            }
+        ),
+    )
+    s3.put_object(
+        Bucket=BUCKET,
+        Key="regime/latest.json",
+        Body=json.dumps({"artifact_key": substrate_key}),
+    )
 
 
 def _client(backend, run_id="run") -> ThinktankClient:
@@ -197,8 +251,12 @@ def test_build_unit_is_idempotent_on_repeat_call(tt_config):
 
         calls_before = len(backend.calls)
         cp1 = build_gap_fill_unit(
-            settings, store=store, client=_client(backend, "u-T0"),
-            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18",
+            settings,
+            store=store,
+            client=_client(backend, "u-T0"),
+            run_id="gf1",
+            trading_day="2026-07-18",
+            calendar_date="2026-07-18",
             ticker="T0",
         )
         calls_after_first = len(backend.calls)
@@ -206,8 +264,12 @@ def test_build_unit_is_idempotent_on_repeat_call(tt_config):
 
         # repeat call for the SAME ticker/trading_day — idempotent, no new LLM calls
         cp2 = build_gap_fill_unit(
-            settings, store=store, client=_client(backend, "u-T0-retry"),
-            run_id="gf1", trading_day="2026-07-18", calendar_date="2026-07-18",
+            settings,
+            store=store,
+            client=_client(backend, "u-T0-retry"),
+            run_id="gf1",
+            trading_day="2026-07-18",
+            calendar_date="2026-07-18",
             ticker="T0",
         )
         assert len(backend.calls) == calls_after_first
@@ -236,9 +298,13 @@ def test_finalize_merges_concurrent_build_checkpoints_without_losing_any(tt_conf
         # touch the coverage ledger directly (only their own checkpoint key).
         for ticker in plan["tickers"]:
             build_gap_fill_unit(
-                settings, store=ThinktankStore(BUCKET, s3), client=_client(backend, f"u-{ticker}"),
-                run_id="gf1", trading_day=plan["trading_day"],
-                calendar_date=plan["calendar_date"], ticker=ticker,
+                settings,
+                store=ThinktankStore(BUCKET, s3),
+                client=_client(backend, f"u-{ticker}"),
+                run_id="gf1",
+                trading_day=plan["trading_day"],
+                calendar_date=plan["calendar_date"],
+                ticker=ticker,
             )
 
         # Ledger untouched by BUILD — still only the daily run's T0-T2.
@@ -246,8 +312,11 @@ def test_finalize_merges_concurrent_build_checkpoints_without_losing_any(tt_conf
         assert set(ledger.entries) == {"T0", "T1", "T2"}
 
         manifest = finalize_gap_fill(
-            settings, store=store, client=_client(backend, "fin"),
-            run_id="gf1", trading_day=plan["trading_day"],
+            settings,
+            store=store,
+            client=_client(backend, "fin"),
+            run_id="gf1",
+            trading_day=plan["trading_day"],
             calendar_date=plan["calendar_date"],
         )
         assert manifest.mode == "gap_fill"
@@ -281,8 +350,12 @@ def test_finalize_with_zero_checkpoints_is_a_safe_no_op(tt_config):
         run_daily(settings, store=store, client=_client(backend, "d"))
 
         manifest = finalize_gap_fill(
-            settings, store=store, client=_client(backend, "fin"),
-            run_id="gf-empty", trading_day="2026-07-18", calendar_date="2026-07-18",
+            settings,
+            store=store,
+            client=_client(backend, "fin"),
+            run_id="gf-empty",
+            trading_day="2026-07-18",
+            calendar_date="2026-07-18",
         )
         assert manifest.names_added == []
         assert manifest.theses_written == 0

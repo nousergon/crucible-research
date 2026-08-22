@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -347,9 +348,11 @@ def test_scanner_failure_mode_liquidity_gate_regression_caught():
 #     ``df is not None and len(df) >= 20`` and passed the result straight
 #     into compute_technical_score WITHOUT checking for the None sentinel.
 # So any ticker whose ArcticDB history has 20–29 rows produced
-# ``indicators=None`` → crash. The two other production callers
-# (data/scanner.py, local/time_scanner.py) already skip on None; fetch_data
-# was the lone unguarded call site.
+# ``indicators=None`` → crash. The other production callers (data/scanner.py)
+# already skipped on None; fetch_data was the lone unguarded call site. That
+# consumer was deleted with the retired graph (alpha-engine-config-I7827), so
+# the source anchor below now sweeps EVERY live call site instead of naming
+# one — the defect class is "an unguarded call site", not "that function".
 
 
 def test_compute_technical_indicators_returns_none_for_20_to_29_rows():
@@ -407,24 +410,39 @@ def test_fetch_data_skips_short_history_tickers_without_crashing():
     assert isinstance(technical_scores["GOODY"]["technical_score"], float)
 
 
-def test_fetch_data_call_site_guards_none_indicators():
-    """Source anchor: the fetch_data OHLCV scoring loop must guard the None
-    return of compute_technical_indicators before calling
-    compute_technical_score. Pins the literal fix so a future refactor cannot
-    silently reintroduce the 2026-06-27 crash."""
-    import inspect
+def test_every_live_call_site_guards_none_indicators():
+    """Source anchor: EVERY live caller of ``compute_technical_indicators``
+    must guard its ``None`` return before using the result. Pins the literal
+    fix so a future refactor cannot silently reintroduce the 2026-06-27 crash.
 
-    import graph.research_graph as rg
+    Re-pointed 2026-08-20 (alpha-engine-config-I7827): this used to grep
+    ``graph/research_graph.py::fetch_data``, the deleted retired consumer. The
+    live callers are in ``data/scanner.py``. Written as a sweep over every
+    call site rather than a named one, because the defect class is "an
+    unguarded call site", and the original crash happened precisely because
+    ONE of several callers lacked the guard the others had.
+    """
+    import re
 
-    src = inspect.getsource(rg.fetch_data)
-    idx_compute = src.find("compute_technical_indicators(df)")
-    assert idx_compute != -1, "expected compute_technical_indicators(df) call in fetch_data"
-    # Between computing indicators and scoring them, there must be a None guard.
-    tail = src[idx_compute:]
-    idx_guard = tail.find("if indicators is None")
-    idx_score = tail.find("compute_technical_score(indicators")
-    assert idx_guard != -1 and idx_score != -1 and idx_guard < idx_score, (
-        "fetch_data must skip (continue) when compute_technical_indicators "
-        "returns None BEFORE passing indicators to compute_technical_score — "
-        "otherwise a 20–29-row-history ticker crashes the research pipeline."
+    repo_root = Path(__file__).resolve().parent.parent
+    live_callers = sorted(
+        p for p in (repo_root / "data").rglob("*.py")
+        if "compute_technical_indicators(" in p.read_text()
+        and "def compute_technical_indicators" not in p.read_text()
     )
+    assert live_callers, (
+        "no live caller of compute_technical_indicators found — this guard "
+        "would pass vacuously"
+    )
+    for path in live_callers:
+        src = path.read_text()
+        for m in re.finditer(r"(\w+)\s*=\s*compute_technical_indicators\(", src):
+            var = m.group(1)
+            tail = src[m.end():m.end() + 600]
+            assert f"if {var} is None" in tail, (
+                f"{path.name}: the call assigning `{var} = "
+                f"compute_technical_indicators(...)` has no `if {var} is None` "
+                "guard within the following lines. A ticker with 20-29 rows of "
+                "history yields None and crashes the consumer "
+                "(the 2026-06-27 Saturday SF failure)."
+            )

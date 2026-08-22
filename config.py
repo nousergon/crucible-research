@@ -90,7 +90,7 @@ TECHNICAL_CFG: dict = _scoring_cfg.get("technical", {})
 # All stocks are derived from S&P 900 scanner — no hardcoded starting stocks.
 # UNIVERSE / UNIVERSE_TICKERS / SECTOR_MAP are loaded dynamically from
 # population/latest.json (S3) or SQLite at run time.
-# The static list below is kept empty — graph.research_graph loads the active
+# The static list below is kept empty — the retired research graph loads the active
 # population from the archive manager at startup.
 POPULATION_CFG: dict = _cfg.get("population", {})
 UNIVERSE: list[dict] = _cfg.get("universe", [])  # backward compat (empty after migration)
@@ -189,7 +189,7 @@ MAX_QUARANTINED_TICKERS: int = int(_AGGREGATOR_CFG.get("max_quarantined_tickers"
 # Regime-conditional blend of the 4 factor composites (quality / momentum /
 # value / low_vol — produced by scoring.factor_scoring) into the composite
 # score. Loaded from scoring.yaml `aggregator.factor_blend`. Wired in
-# graph.research_graph.score_aggregator: per-ticker factor profile is read
+# The retired research graph's score_aggregator: per-ticker factor profile is read
 # once from S3, blended at `weight` into the existing quant+qual base.
 _FACTOR_BLEND_CFG: dict = _AGGREGATOR_CFG.get("factor_blend", {})
 FACTOR_BLEND_ENABLED: bool = bool(_FACTOR_BLEND_CFG.get("enabled", False))
@@ -396,9 +396,16 @@ HOLIDAY_CALENDAR: str = SCHEDULE_CFG["holiday_calendar"]
 # ── Predictor ─────────────────────────────────────────────────────────────────
 _pred_cfg: dict = _cfg.get("predictor", {})
 PREDICTOR_PREDICTIONS_KEY: str = _pred_cfg.get("s3_predictions_key", "predictor/predictions/latest.json")
-# Minimum GBM prediction_confidence required to apply the confirmation gate veto.
-# Below this threshold the prediction is treated as low-conviction and ignored.
-MIN_PREDICTION_CONFIDENCE: float = float(_pred_cfg.get("min_confidence", 0.60))
+# `MIN_PREDICTION_CONFIDENCE` removed 2026-08-17 (alpha-engine-config-I7527).
+# It was read from universe.yaml's `predictor.min_confidence` and never used by
+# anything: its only consumer was the `predictor_enrichment` block in
+# scoring/technical.py, deleted under alpha-engine-config-I4983 (Brian
+# 2026-07-28) because it closed a predictor -> tech_score -> scanner feedback
+# loop. Its docstring described a "confirmation gate veto" that does not exist
+# in this repo. It also carried 0.65/0.60 defaults on the retired
+# winner-probability confidence axis — `prediction_confidence` has been
+# `|p_up - 0.5| * 2` since crucible-predictor PR #143 (2026-05-12), so any
+# future reader copying this constant would have gated on the wrong scale.
 
 # ── Adaptive slot allocation (config#926) ────────────────────────────────────
 # When enabled, compute_team_slots nudges each team's eligible-pick count ±1 by
@@ -461,7 +468,18 @@ CIO_CRITIC_ENABLED: bool = (
 LLM_CFG: dict = _cfg["llm"]
 # Capability CLASSES, not concrete models. A model id in consumer config is a
 # selection fact living outside the registry (model-portability-policy I1).
-_DEFAULT_CLASS_FOR = {"per_stock_class": "low", "strategic_class": "med"}
+_DEFAULT_CLASS_FOR = {
+    "per_stock_class": "low",
+    "strategic_class": "med",
+    # The Saturday-replay canary's validation-retry probe (alpha-engine-config
+    # -I7448). It is deliberately NOT `per_stock_class`: the probe is the one
+    # research call whose job is to prove the structured-output retry path
+    # still recovers, and Brian's 2026-08-16 ruling routes it at the router's
+    # top capability tier rather than at whatever tier the per-stock agents
+    # happen to be configured for. A class, not a model — the registry still
+    # owns which deployment serves `high`.
+    "canary_probe_class": "high",
+}
 
 
 def _resolve_class(key: str) -> str:
@@ -470,37 +488,30 @@ def _resolve_class(key: str) -> str:
 
 PER_STOCK_CLASS: str = _resolve_class("per_stock_class")
 STRATEGIC_CLASS: str = _resolve_class("strategic_class")
+CANARY_PROBE_CLASS: str = _resolve_class("canary_probe_class")
 
-# Endpoint that resolves a class name. A deployment fact, not a selection one.
+# THE CLASS IS THE ONLY ROUTING FACT THIS CONFIG HOLDS, DELIBERATELY.
 #
-# UNSET IS THE DEFAULT, AND IT MEANS DIRECT MODE. An empty value routes
-# make_agent_llm() back to a direct Anthropic client using the concrete
-# *_MODEL ids below — byte-identical to pre-migration behaviour. This makes
-# the migration opt-in per deployment rather than flag-day.
+# `router_base_url`, `router_key_secret`, `per_stock_model`, `strategic_model`
+# and the derived `DIRECT_MODEL_FOR_CLASS` table were removed in
+# alpha-engine-config-I7005. Every one of them was a routing fact held at
+# `model-router-policy` §2 layer 5, which the policy names as a defect on
+# sight: a consumer "must not hold a routing table, a model slug, or an
+# endpoint of their own", and "if a fact appears at two layers, delete the copy
+# at the lower layer".
 #
-# It is deliberately NOT defaulted to 127.0.0.1:8980. Only the laptop and the
-# dashboard box run a local router; Lambda and the EC2 canary box cannot reach
-# localhost at all, so a localhost default is wrong for most of the fleet and
-# fails as a connection error at call time rather than at config load.
-ROUTER_BASE_URL: str = str(LLM_CFG.get("router_base_url", "") or "")
-ROUTER_KEY_SECRET: str = str(LLM_CFG.get("router_key_secret", "LITELLM_MASTER_KEY"))
-
-# Concrete model ids for DIRECT mode and for the call sites still talking to
-# Anthropic by hand (ic_cio, canary_replay — held back per policy section 8).
+# They are not replaced by other config keys. `agents.langchain_utils
+# .make_agent_llm` resolves the class through `krepis.router
+# .resolve_group_spec()`, which returns the model, the endpoint and the
+# credential NAME from the registry, filtered by the execution context the
+# process DECLARES via `KREPIS_EXEC_CONTEXT` (R29 — declared, never inferred).
+# The router edge URL and the per-consumer credential name are likewise krepis'
+# own environment contract (`KREPIS_LITELLM_PROXY_URL`,
+# `KREPIS_ROUTER_CREDENTIAL_SECRET`), set by each deployment's launcher, so
+# there is exactly one copy of each and this file is not it.
 #
-# These MUST stay real model ids. An earlier revision of this change aliased
-# them onto the class names; every un-migrated ChatAnthropic(model=...) site
-# then sent the literal string "low" to Anthropic and got a 404. Caught by the
-# canary replay probe, which is exactly the failure it exists to catch.
-PER_STOCK_MODEL: str = str(LLM_CFG.get("per_stock_model", "claude-haiku-4-5-20251001"))
-STRATEGIC_MODEL: str = str(LLM_CFG.get("strategic_model", "claude-sonnet-4-6"))
-
-# Class -> concrete model, for direct mode only. In router mode the registry
-# owns this mapping and this table is unused.
-DIRECT_MODEL_FOR_CLASS: dict[str, str] = {
-    PER_STOCK_CLASS: PER_STOCK_MODEL,
-    STRATEGIC_CLASS: STRATEGIC_MODEL,
-}
+# Leaving the keys in a `research/universe.yaml` is harmless — nothing reads
+# them — but they are dead and should be dropped on the next edit of that file.
 MAX_TOKENS_PER_STOCK: int = LLM_CFG["max_tokens_per_stock"]
 MAX_TOKENS_STRATEGIC: int = LLM_CFG["max_tokens_strategic"]
 CONCURRENT_AGENTS: int = LLM_CFG["concurrent_agents"]

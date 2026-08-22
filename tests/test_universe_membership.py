@@ -34,14 +34,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scoring.universe_membership import (  # noqa: E402
     _RANK_CUTS,
     ATTRACTIVENESS_FEED_TOP_N,
+    CHAMPION_CUT,
     FEED_CUT_NAME,
+    FUNNEL_CONSUMER_THINKTANK,
     PREDICTOR_UNIVERSE_CUT,
+    PROMOTABLE_CUTS,
     SCHEMA_VERSION,
+    TECH_SCORE_RANKS_FIELD,
     UniverseMembershipError,
+    assert_population_parity,
+    assert_rank_tables_cover_promotable_cuts,
     attractiveness_from_board,
     build_universe_membership,
     compute_turnover,
+    declared_cut_for,
+    rank_table_for_cut,
     run_stamp,
+    scanned_universe_from_eval_log,
     write_universe_membership_to_s3,
 )
 
@@ -84,7 +93,11 @@ def test_envelope_shape_and_schema_version():
 
 def test_every_cut_carries_basis_size_and_provenance():
     for name, cut in _membership()["cuts"].items():
-        assert cut["basis"] in ("scanner_gate", "attractiveness_rank"), name
+        assert cut["basis"] in (
+            "scanner_champion_rank",
+            "attractiveness_rank",
+            "tech_score_rank",
+        ), name
         assert cut["size"] == len(cut["tickers"]), name
         assert cut["source"], name
 
@@ -126,13 +139,16 @@ def test_unrankable_names_are_absent_not_zeroed():
 
 def test_scanner_cut_passes_through_verbatim():
     m = _membership()
-    assert m["cuts"]["scanner_candidates"]["tickers"] == sorted(_scanner_cut())
-    assert m["cuts"]["scanner_candidates"]["basis"] == "scanner_gate"
+    assert m["cuts"][CHAMPION_CUT]["tickers"] == sorted(_scanner_cut())
+    # NOT "scanner_gate": the live cut is ranked by the scanner slot's champion
+    # arm, not by the gate's tech_score, and has been since the 2026-07-22
+    # cutover (alpha-engine-config-I7808).
+    assert m["cuts"][CHAMPION_CUT]["basis"] == "scanner_champion_rank"
 
 
 def test_scanner_cut_is_deduped():
     m = build_universe_membership(_RUN_DATE, ["AAA", "BBB", "AAA"], _attractiveness())
-    cut = m["cuts"]["scanner_candidates"]
+    cut = m["cuts"][CHAMPION_CUT]
     assert cut["tickers"] == ["AAA", "BBB"]
     assert cut["size"] == 2
 
@@ -164,7 +180,7 @@ def test_scanner_cut_and_rank_cut_are_independent():
     # Guards against a refactor that quietly derives one cut from the other —
     # their divergence is the measurement this artifact exists to enable.
     m = _membership()
-    scanner = set(m["cuts"]["scanner_candidates"]["tickers"])
+    scanner = set(m["cuts"][CHAMPION_CUT]["tickers"])
     rank60 = set(m["cuts"]["attractiveness_top_60"]["tickers"])
     assert scanner != rank60
 
@@ -308,8 +324,9 @@ def test_build_attaches_turnover_and_defaults_it_to_null():
 
 # ── 6. Incumbent challenger arm (alpha-engine-config-I4983) ──────────────────
 #
-# `scanner_candidates` is stored alphabetically (set semantics), so the
-# incumbent's own `tech_score` ordering is NOT recoverable from it. Without
+# The scanner's champion cut (`CHAMPION_CUT`) is stored alphabetically (set
+# semantics), so the incumbent's own `tech_score` ordering is NOT recoverable
+# from it. Without
 # `scanner_ranks` there is no way to ask "what would the pre-I4983 rule have
 # picked at the champion's width?" — which is the comparison the champion flip
 # has to be judged against.
@@ -647,3 +664,315 @@ def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
     written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
     assert written["cut_refresh_cadence"] == CADENCE_DAILY
     assert written["cut_effective_date"] == _RUN_DATE
+
+
+# ── 7. The funnel as a READ contract (alpha-engine-config-I7842) ──────────────
+#
+# Producer half of the Think Tank boundary contract. Think Tank resolves its
+# coverage window and its intake ranking FROM this artifact — it no longer
+# re-derives either from the universe board — so the fields it reads are now
+# part of the producer's contract and must fail here, on the producer, rather
+# than at 05:15 in a Lambda. Consumer half: tests/test_thinktank_feed_contract.py.
+
+
+def test_funnel_names_thinktank_coverage_window():
+    """The producer must keep DECLARING Think Tank's window.
+
+    If this key disappears, the consumer fails loud by design — and it fails in
+    production, on the run that needed it. The point of asserting it here is
+    that the deletion is caught by the producer's own suite instead.
+    """
+    m = _membership()
+    advances = m["funnel"]["advances_to"]
+    assert FUNNEL_CONSUMER_THINKTANK in advances, (
+        "universe_membership stopped declaring "
+        f"funnel.advances_to.{FUNNEL_CONSUMER_THINKTANK} — Think Tank resolves "
+        "its coverage window from this key and has no fallback"
+    )
+    assert advances[FUNNEL_CONSUMER_THINKTANK] == FEED_CUT_NAME
+
+
+def test_the_cut_the_funnel_names_for_thinktank_is_actually_emitted():
+    """A declaration pointing at a cut that is not in ``cuts`` is a dangling
+    contract: the consumer resolves a name and finds nothing behind it."""
+    m = _membership()
+    named = m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK]
+    assert named in m["cuts"]
+    assert m["cuts"][named]["tickers"]
+    assert declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK) == named
+
+
+def test_declared_cut_for_raises_when_the_declaration_is_dropped():
+    m = _membership()
+    del m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK]
+    with pytest.raises(UniverseMembershipError, match=FUNNEL_CONSUMER_THINKTANK):
+        declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK)
+
+
+def test_declared_cut_for_raises_when_the_named_cut_disappears():
+    m = _membership()
+    m["cuts"].pop(FEED_CUT_NAME)
+    with pytest.raises(UniverseMembershipError, match="not in ``cuts``|not in"):
+        declared_cut_for(m, FUNNEL_CONSUMER_THINKTANK)
+
+
+def test_rank_table_covers_the_consumers_configured_ceiling():
+    """The rank map must reach as far as Think Tank's widest configured rank.
+
+    ``exit_rank`` is read from the consumer's own shipped config rather than
+    restated here: a test asserting a hardcoded 200 would keep passing after the
+    consumer widened its threshold, which is exactly the drift this is for.
+    """
+    import yaml
+
+    cfg = yaml.safe_load(
+        open(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "thinktank.sample.yaml")
+        )
+    )
+    coverage = (cfg.get("thinktank") or cfg).get("coverage") or {}
+    widest = int(coverage.get("exit_rank") or coverage.get("rank_ceiling"))
+    assert widest > 0
+
+    m = build_universe_membership(
+        _RUN_DATE,
+        _scanner_cut(),
+        {f"T{i:04d}": float(2000 - i) for i in range(widest + 50)},
+    )
+    ranks, basis = rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=widest)
+    assert basis == "attractiveness_rank"
+    assert len(ranks) >= widest
+
+
+def test_a_rank_table_short_of_the_universe_is_refused():
+    """The tech-basis asymmetry, asserted rather than described.
+
+    ``scanner_ranks`` covers the cut, not the universe, so a champion ranked in
+    that basis cannot answer "who is rank 150". Substituting the attractiveness
+    table would rank by an arm that is not the champion — the defect this whole
+    contract exists to stop — so the correct behaviour is a refusal naming the
+    producer-side fix (alpha-engine-config-I7843).
+    """
+    m = _membership()
+    m["ranks"] = dict(list(m["ranks"].items())[:10])
+    with pytest.raises(UniverseMembershipError, match="I7843"):
+        rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=150)
+
+
+def test_a_tech_basis_cut_has_no_rank_table_and_says_so():
+    m = _membership(tech_scores={t: float(i) for i, t in enumerate(_scanner_cut())})
+    incumbent = next(name for name, cut in m["cuts"].items() if cut["basis"] == "tech_score_rank")
+    with pytest.raises(UniverseMembershipError, match="I7843"):
+        rank_table_for_cut(m, incumbent, minimum_coverage=150)
+
+
+def test_every_promotable_cut_that_can_hold_the_feed_is_a_named_cut():
+    """A pointer may only name an arm the artifact can actually serve."""
+    m = _membership()
+    for name in PROMOTABLE_CUTS:
+        assert name.startswith(("attractiveness_top_", "tech_score_top_")), name
+    assert FEED_CUT_NAME in PROMOTABLE_CUTS, (
+        "the cut the funnel declares for the feed consumers is not in the "
+        "promotable set — the champion pointer could then never serve it"
+    )
+    assert m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK] in PROMOTABLE_CUTS
+
+
+# ── 9. Full rank tables per promotable basis (alpha-engine-config-I7843) ──────
+#
+# The champion pointer can hand any PROMOTABLE cut the funnel, and the consumer
+# of that slot resolves its rank ceiling in the SERVING arm's basis. Before this
+# section, the only tech table was ``scanner_ranks`` — 60 names ranked within
+# the champion's own cut — so a ``tech_score_top_60`` champion could not answer
+# "who is rank 150" and the arm was unpromotable in practice.
+
+
+def _gate_eligible() -> dict[str, float]:
+    """A momentum-path tech_score projection, deliberately NARROWER than the
+    attractiveness universe: ``scan_path == "momentum"`` is the incumbent rule's
+    own eligibility gate, and that narrowing is a declared property of the
+    basis, not a defect."""
+    return {f"T{i:04d}": float(1000 - i) for i in range(250)}
+
+
+def test_every_promotable_cut_basis_has_a_full_universe_rank_table():
+    """The producer-side closes-when of alpha-engine-config-I7843.
+
+    Fails if a promotable arm is emitted whose basis has no full-universe table
+    — which is a promotion that would fail in a consumer, on the morning it was
+    made, with the cut already live.
+    """
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    emitted = [c for c in PROMOTABLE_CUTS if c in m["cuts"]]
+    assert emitted, "no promotable cut was emitted — this test would be vacuous"
+    for cut_name in emitted:
+        basis = m["cuts"][cut_name]["basis"]
+        assert basis in m["rank_tables"], (
+            f"promotable cut {cut_name!r} is ranked by {basis!r}, for which the "
+            f"artifact emits no full-universe rank table (has: "
+            f"{sorted(m['rank_tables'])}) — alpha-engine-config-I7843"
+        )
+        table = m[m["rank_tables"][basis]["field"]]
+        assert table, f"{basis!r} declares a field that carries no names"
+
+
+def test_a_promotable_arm_without_its_rank_table_is_a_red_run():
+    """The guard, not the happy path: strip the PROMOTABLE arm's table and the
+    producer refuses to publish the artifact.
+
+    Scoped to the promotable arm deliberately (alpha-engine-config-I8060). The
+    rationale is that the champion pointer can hand a promotable arm the funnel
+    at any time, so its rank ceiling must resolve on the morning the promotion
+    lands. `tech_score_top_60` became observe-only on 2026-08-21 and can no
+    longer be handed anything, so it is recorded rather than raised on — see the
+    test below.
+    """
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    m.pop("ranks", None)
+    m.pop("rank_tables")
+    with pytest.raises(UniverseMembershipError, match="I7843"):
+        assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)
+
+
+def test_an_observe_only_arm_without_its_rank_table_is_recorded_not_raised(caplog):
+    """Non-promotable must not decay into unmeasured without anyone deciding it.
+
+    Losing the table costs the arm its rank-IC and nothing live, so redding a
+    Scanner run over it is the wrong trade — but the loss has to be VISIBLE
+    (champion-challenger-policy.md §3).
+    """
+    import logging
+
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    m.pop(TECH_SCORE_RANKS_FIELD)
+    m["rank_tables"] = {
+        b: e for b, e in (m.get("rank_tables") or {}).items() if "tech_score" not in b
+    }
+    with caplog.at_level(logging.WARNING):
+        assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)  # no raise
+    assert any("observe-only arm" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_the_tech_table_covers_the_universe_not_the_cut():
+    m = _membership(
+        tech_scores={t: float(i) for i, t in enumerate(_scanner_cut())},
+        gate_eligible_tech_scores=_gate_eligible(),
+    )
+    # Two tables, answering two different questions — both retained.
+    assert len(m["scanner_ranks"]) == 60
+    assert len(m[TECH_SCORE_RANKS_FIELD]) == len(_gate_eligible())
+    ranks, basis = rank_table_for_cut(m, "tech_score_top_60", minimum_coverage=200)
+    assert basis == "tech_score_rank"
+    assert len(ranks) >= 200
+
+
+def test_the_tech_table_is_ranked_by_tech_score_not_by_attractiveness():
+    """Key names are part of the contract: a table of tech_score values carrying
+    ``attractiveness_rank`` keys is a lie no reader can catch."""
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    entry = next(iter(m[TECH_SCORE_RANKS_FIELD].values()))
+    assert set(entry) == {"tech_score_rank", "tech_score"}
+    top = min(m[TECH_SCORE_RANKS_FIELD].items(), key=lambda kv: kv[1]["tech_score_rank"])
+    assert top[0] == "T0000"  # the highest tech_score, not the most attractive
+
+
+def test_rank_tables_declares_width_so_a_consumer_can_check_it():
+    """A consumer must be able to ASK whether a basis reaches its ceiling rather
+    than discover it by being refused."""
+    m = _membership(gate_eligible_tech_scores={f"T{i:04d}": float(i) for i in range(5)})
+    tech = m["rank_tables"]["tech_score_rank"]
+    assert tech["size"] == 5
+    assert tech["population"] == m["universe_count"]
+    assert tech["serves_rank_ceiling"] is False
+    assert tech["eligibility"]
+    assert m["rank_tables"]["attractiveness_rank"]["serves_rank_ceiling"] is True
+
+
+def test_the_index_is_read_from_the_artifact_not_from_a_module_constant():
+    """``rank_tables`` is the declaration; a consumer that resolved the field
+    from a constant in this module would keep working after the producer moved
+    the table, and silently read the wrong one."""
+    m = _membership(gate_eligible_tech_scores=_gate_eligible())
+    m["relocated_tech_ranks"] = m.pop(TECH_SCORE_RANKS_FIELD)
+    m["rank_tables"]["tech_score_rank"]["field"] = "relocated_tech_ranks"
+    ranks, basis = rank_table_for_cut(m, "tech_score_top_60", minimum_coverage=200)
+    assert basis == "tech_score_rank"
+    assert len(ranks) == len(_gate_eligible())
+
+
+def test_an_artifact_written_before_rank_tables_still_resolves():
+    """Backwards compatibility: the module constant is the fallback index."""
+    m = _membership()
+    m.pop("rank_tables")
+    ranks, basis = rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=50)
+    assert basis == "attractiveness_rank"
+    assert len(ranks) == 100
+
+
+# ── 10. Population parity with the universe board (alpha-engine-config-I7844) ─
+#
+# ``ranks`` and the universe board are two views of ONE Scanner invocation, and
+# they were built from two different sources: the board iterates the eval log
+# (the SCANNED universe), while the ranks came from every key in the factor
+# profiles — a file that legitimately carries Metron-supplemental and
+# fundamental-only rows the scanner never evaluated. Measured 2026-08-20 on the
+# live artifacts: 906 ranked vs 903 board rows, with EQR ranked 98 — inside
+# Think Tank's rank_ceiling of 150 — on four of six pillars and no technical
+# data at all.
+
+
+def test_ranks_outside_the_scanned_universe_are_a_red_run():
+    m = _membership()
+    m["population_reconciliation"] = {
+        "scanned_universe_size": 903,
+        "ranked": 906,
+        "unrankable": [],
+        "ranked_outside_scanned_universe": ["AVB", "EQR", "HYOAS", "XLRE"],
+    }
+    with pytest.raises(UniverseMembershipError, match="I7844"):
+        assert_population_parity(m, _RUN_DATE)
+
+
+def test_the_reconciliation_block_records_both_sides_and_the_difference():
+    scanned = [*_attractiveness(), "VMRK"]  # one scanned name with no profile row
+    m = _membership(scanned_universe=scanned)
+    recon = m["population_reconciliation"]
+    assert recon["scanned_universe_size"] == 101
+    assert recon["ranked"] == 100
+    assert recon["unrankable"] == ["VMRK"]
+    assert recon["ranked_outside_scanned_universe"] == []
+    assert recon["unrankable_reason"]
+
+
+def test_a_wholesale_unrankable_population_is_a_red_run():
+    """A handful of unscorable names is normal; a broken profiles read is not,
+    and must not be published as a rank table over the remains."""
+    scanned = [*_attractiveness(), *[f"X{i:04d}" for i in range(50)]]
+    with pytest.raises(UniverseMembershipError, match="I7844"):
+        _membership(scanned_universe=scanned)
+
+
+def test_a_backfill_with_no_eval_log_says_so_rather_than_asserting():
+    """The historical backfill has no eval log. An unreconciled artifact that
+    SAYS it is unreconciled is honest; asserting against a population the run
+    does not have is not."""
+    m = _membership()
+    recon = m["population_reconciliation"]
+    assert recon["scanned_universe_size"] is None
+    assert "not asserted" in recon["note"].lower()
+    assert_population_parity(m, _RUN_DATE)  # does not raise
+
+
+def test_the_scanned_universe_projection_is_the_population_not_a_score_filter():
+    """Every other eval-log projection in this module selects rows by a score or
+    a gate. This one is the population itself — a row that failed every gate and
+    carries no tech_score is still a scanned name, and the board still has a row
+    for it."""
+    log = [
+        {"ticker": "AAA", "tech_score": 10.0, "scan_path": "momentum"},
+        {"ticker": "bbb", "tech_score": None, "scan_path": None},
+        {"ticker": "AAA", "tech_score": 10.0},
+        {"ticker": None},
+    ]
+    assert scanned_universe_from_eval_log(log) == ["AAA", "BBB"]
+    assert scanned_universe_from_eval_log(None) == []

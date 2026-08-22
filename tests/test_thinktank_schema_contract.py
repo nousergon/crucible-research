@@ -127,6 +127,7 @@ _FROZEN_FIELDS = {
         "theme",
         "weekly_anchor_date",
         "divergence_from_weekly",
+        "stale_inputs",
         "model",
         "tier",
         "prompt_version",
@@ -198,10 +199,24 @@ _FROZEN_FIELDS = {
         "theme_updates_written",
         "ratings_rows",
         "challenger_selection_written",
+        # alpha-engine-config-I7232 — challenger_selection_written says the
+        # pointer was withheld; these say how stale the pointer LEFT BEHIND
+        # now is. The dated key still lands on the abort path, so the
+        # directory listing keeps advancing and only the pointer's own lag
+        # distinguishes a frozen pointer from a healthy one.
+        "challenger_selection_pointer_trading_day",
+        "challenger_selection_pointer_lag_days",
         "context_sources_present",
+        "context_source_freshness",
+        "degraded_inputs",
         "usage_by_tier",
         "total_cost_usd",
         "coverage_gap",
+        # alpha-engine-config-I7842 — which contract this run read: the cut,
+        # the declared cut, and the basis the window resolved to. Without it,
+        # "which arm was Think Tank covering on date D" is reconstructed from a
+        # deploy log rather than read from the run record.
+        "feed_window",
         "budget_month_spent_usd",
         "budget_month_limit_usd",
         "errors",

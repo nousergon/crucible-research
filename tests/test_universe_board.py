@@ -292,13 +292,37 @@ def test_attractiveness_monotonic_in_blend():
 
 
 def test_pillar_contributions_sum_to_raw():
+    """The additive w_p·z_p/Σw terms must reconstruct the signed blend exactly,
+    over the pillars that SURVIVED — coverage reallocation plus the
+    config-I7272 undefined-leg drop.
+
+    Two distinct reasons a pillar is absent here, and both must be:
+
+      * ``growth`` / ``stewardship`` — only AAPL carries them, so the
+        cross-section is a single observation and its standard deviation is
+        zero. There is no z-score against a one-name cohort.
+      * ``defensiveness`` — present for BOTH names at the identical 60.0, so
+        the cross-sectional spread is exactly zero.
+
+    Before the nousergon-lib v0.124.70 pin these three legs each voted a
+    fabricated ``0.0`` into the blend — a number nobody measured, diluting
+    every measured pillar toward neutral, and indistinguishable from a name
+    genuinely sitting at its cohort mean. They are now DROPPED and the
+    surviving weights renormalize, which is why every contribution below is
+    ±1/3 rather than ±1/6.
+    """
     b = _by_ticker(_build())
     for tkr in ("AAPL", "LIN"):
         contribs = b[tkr]["pillar_contributions"]
         assert contribs, tkr
         assert round(sum(contribs.values()), 3) == round(b[tkr]["attractiveness_raw"], 3)
-    # LIN only blends its 4 available pillars (coverage reallocation).
-    assert set(b["LIN"]["pillar_contributions"]) == {"quality", "value", "momentum", "defensiveness"}
+    # Only the three pillars with real cross-sectional dispersion survive.
+    for tkr in ("AAPL", "LIN"):
+        assert set(b[tkr]["pillar_contributions"]) == {"quality", "value", "momentum"}, tkr
+    # ...and the drop is a DROP, not a zero: a fabricated 0.0 would still be a key.
+    assert "defensiveness" not in b["AAPL"]["pillar_contributions"]
+    assert b["AAPL"]["pillars"]["defensiveness"] == b["LIN"]["pillars"]["defensiveness"] == 60.0
+    # LIN never had growth at all — the pre-existing coverage path, unchanged.
     assert b["LIN"]["pillars"]["growth"] is None
 
 
@@ -540,3 +564,219 @@ def test_scanner_tickers_none_skips_the_check():
     are unaffected; the check is opt-in via passing the list."""
     board = _build(scanner_tickers=None)  # explicit default; must not raise
     assert board["universe_count"] == 3
+
+
+# ── 8. Producer-side metric coverage floor (alpha-engine-config-I7982) ───────
+#
+# Reproduces the 2026-08-17..08-20 shape: the feature-parquet read failed
+# (technical_df/fundamental_df both absent → _index_parquet returns {} for
+# every ticker), so every _TECHNICAL_METRICS/_FUNDAMENTAL_METRICS field is
+# null for the whole universe, while current_price/rsi_14 (fallback to the
+# scanner-eval row) stay populated and attractiveness_score still computes —
+# nothing else in the pipeline notices.
+
+
+def _scanner_evals_n(n: int) -> list[dict]:
+    """A >=20-name universe (the floor's exemption threshold) — one AAPL-
+    shaped passer repeated under distinct tickers, all carrying their own
+    gate-input values so gate_stage/attractiveness compute normally."""
+    return [
+        {
+            "ticker": f"T{i:03d}",
+            "sector": "Information Technology",
+            "tech_score": 72.0,
+            "current_price": 100.0 + i,
+            "avg_volume_20d": 10_000_000.0,
+            "atr_pct": 1.5,
+            "price_vs_ma200": 0.10,
+            "focus_score": 80.0,
+            "focus_stance": "momentum",
+            "quant_filter_pass": 1,
+            "filter_fail_reason": None,
+        }
+        for i in range(n)
+    ]
+
+
+def test_metric_coverage_floor_raises_on_total_parquet_read_failure():
+    """technical_df/fundamental_df both an empty (no ``ticker`` column)
+    DataFrame — exactly what ``_index_parquet`` produces when
+    ``_read_parquet`` returns None, the effect of the 2026-08-17 pyarrow-
+    import failure — on a 25-name universe must raise, not silently publish
+    an all-null board. (Passing an explicit empty frame here, not None,
+    keeps the test hermetic — None would make build_universe_board attempt
+    its own S3 read via the default boto3 client.)"""
+    import pytest
+
+    with pytest.raises(ValueError, match="metric coverage floor breached"):
+        build_universe_board(
+            "2026-08-20",
+            _scanner_evals_n(25),
+            factor_profiles={},
+            classification={},
+            technical_df=pd.DataFrame(),
+            fundamental_df=pd.DataFrame(),
+            gate_config=_GATE_CONFIG,
+        )
+
+
+def test_metric_coverage_floor_exempts_small_universe():
+    """A < 20 name universe (e.g. an early/degraded scanner run) is exempt —
+    zero coverage there is plausibly a genuine small-population data gap,
+    not this failure class, and the floor must not manufacture a second
+    outage on top of one."""
+    board = build_universe_board(
+        "2026-08-20",
+        _scanner_evals_n(5),
+        factor_profiles={},
+        classification={},
+        technical_df=pd.DataFrame(),
+        fundamental_df=pd.DataFrame(),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == 5
+
+
+def test_metric_coverage_floor_passes_on_healthy_parquet_reads():
+    """The floor must not false-positive on the ordinary healthy case: a
+    >=20-name universe with real technical_df/fundamental_df coverage."""
+    n = 20
+    technical_rows = [
+        {
+            "ticker": f"T{i:03d}",
+            "rsi_14": 50.0,
+            "momentum_20d": 0.01,
+            "return_60d": 0.02,
+            "return_120d": 0.03,
+            "realized_vol_20d": 0.2,
+            "atr_14_pct": 0.015,
+            "dist_from_52w_high": -0.05,
+            "price_vs_ma200": 0.1,
+            "beta_60d": 1.0,
+            "avg_volume_20d_raw": 10_000_000.0,
+        }
+        for i in range(n)
+    ]
+    fundamental_rows = [{"ticker": f"T{i:03d}", "market_cap_raw": 1e10} for i in range(n)]
+    board = build_universe_board(
+        "2026-08-20",
+        _scanner_evals_n(n),
+        factor_profiles={},
+        classification={},
+        technical_df=pd.DataFrame(technical_rows),
+        fundamental_df=pd.DataFrame(fundamental_rows),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == n
+    assert all(s["metrics"]["avg_volume"] is not None for s in board["stocks"])
+
+
+def test_read_parquet_logs_the_real_exception_not_a_content_free_warning(caplog):
+    """alpha-engine-config-I7982: _read_parquet's except used to discard the
+    exception entirely (bare `except Exception:`), which is why a 4-day
+    total-coverage collapse produced only a content-free WARN in production.
+    A broken S3 client (raises inside get_object) must now surface the real
+    exception text in the log record."""
+    import logging
+
+    from scoring.universe_board import _read_parquet
+
+    class _BrokenS3:
+        def get_object(self, **kwargs):
+            raise RuntimeError("distinctive-injected-failure-i7982")
+
+    with caplog.at_level(logging.WARNING):
+        result = _read_parquet("technical", "2026-08-20", None, _BrokenS3())
+    assert result is None
+    assert any("distinctive-injected-failure-i7982" in rec.message for rec in caplog.records)
+
+
+# ── config-I7272: the excluded count is PUBLISHED, even at zero ──────────────
+
+
+def test_attractiveness_coverage_is_published_on_every_board():
+    """An exclusion nobody can see is the same failure as the fabricated 0.0 it
+    replaced (principles.md 2.7). The coverage block is emitted on EVERY board,
+    with its count stated against a denominator and its members named.
+
+    XYZ carries no factor data at all in this fixture, so it is genuinely
+    unscorable — the board excludes it from the ranking and SAYS so, rather than
+    handing it a fabricated score that would rank it against AAPL and LIN."""
+    board = _build()
+    coverage = board["attractiveness_coverage"]
+
+    assert coverage["n_excluded_undefined"] == 1
+    assert coverage["excluded_tickers"] == ["XYZ"]
+    assert coverage["excluded_truncated"] is False
+    # The count is stated against a denominator — a bare number with no total is
+    # not readable as coverage.
+    assert coverage["n_tickers"] == board["universe_count"] == 3
+    assert coverage["n_scored"] == 2
+    # It agrees with the rows it describes; the count can never drift from them.
+    unscored = [s["ticker"] for s in board["stocks"] if s["attractiveness_score"] is None]
+    assert unscored == coverage["excluded_tickers"]
+
+
+def test_attractiveness_coverage_publishes_an_explicit_zero():
+    """The zero case is the one that matters: a healthy run must publish an
+    explicit 0 rather than staying silent, or a reader cannot tell "no
+    exclusions" from "nobody looked" (observability-policy.md — no data is
+    never rendered as green)."""
+    from scoring.universe_board import _attractiveness_coverage
+
+    coverage = _attractiveness_coverage(
+        [{"ticker": t, "attractiveness_score": 50.0} for t in ("AAA", "BBB")]
+    )
+    assert coverage["n_excluded_undefined"] == 0
+    assert coverage["excluded_tickers"] == []
+    assert coverage["excluded_truncated"] is False
+    assert coverage["n_tickers"] == coverage["n_scored"] == 2
+
+
+def test_attractiveness_coverage_names_the_excluded_members():
+    """A number published without its members is unactionable — when the count
+    moves, the reader must be able to ask WHICH names, not just how many."""
+    from scoring.universe_board import _attractiveness_coverage
+
+    stocks = [
+        {"ticker": "AAA", "attractiveness_score": 90.0},
+        {"ticker": "BBB", "attractiveness_score": None},
+        {"ticker": "CCC", "attractiveness_score": None},
+    ]
+    coverage = _attractiveness_coverage(stocks)
+    assert coverage["n_excluded_undefined"] == 2
+    assert coverage["excluded_tickers"] == ["BBB", "CCC"]
+    assert coverage["n_scored"] == 1
+    assert coverage["excluded_truncated"] is False
+
+
+def test_attractiveness_coverage_count_is_never_capped_only_the_member_list():
+    """Truncation is marked IN-BAND and never touches the count — a capped list
+    read as the total would understate the exclusion by design."""
+    from scoring.universe_board import _COVERAGE_MEMBER_CAP, _attractiveness_coverage
+
+    n = _COVERAGE_MEMBER_CAP + 7
+    stocks = [{"ticker": f"T{i:03d}", "attractiveness_score": None} for i in range(n)]
+    coverage = _attractiveness_coverage(stocks)
+    assert coverage["n_excluded_undefined"] == n  # uncapped, the true count
+    assert len(coverage["excluded_tickers"]) == _COVERAGE_MEMBER_CAP
+    assert coverage["excluded_truncated"] is True
+    assert coverage["n_scored"] == 0
+
+
+def test_an_unscored_name_never_takes_a_rank_position():
+    """EXCLUDED, not ranked last. The board keeps unscored names in the artifact
+    for visibility, but they must carry a null score — never a fabricated 0.0
+    that would compete against measured names in the ranking."""
+    board = _build()
+    for stock in board["stocks"]:
+        score = stock["attractiveness_score"]
+        assert score is None or score > 0.0
+    # Scored names lead the artifact; any unscored tail sorts after them.
+    scores = [s["attractiveness_score"] for s in board["stocks"]]
+    seen_none = False
+    for score in scores:
+        if score is None:
+            seen_none = True
+        else:
+            assert not seen_none, "a scored name must never follow an unscored one"

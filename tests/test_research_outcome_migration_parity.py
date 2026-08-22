@@ -397,8 +397,35 @@ class TestEpisodicParity:
             def invoke(self, messages):
                 return _StubResponse()
 
+        # The factory resolves the capability class through the model registry
+        # (alpha-engine-config-I7005) — there is no direct-provider branch left
+        # to stub. Stub the RESOLVER, not a provider client, so this test does
+        # not need a registry on disk.
+        monkeypatch.setattr("langchain_openai.ChatOpenAI", _StubLLM, raising=False)
+
+        class _StubSpec:
+            model = "low-claude-haiku"
+            base_url = "https://router.invalid/v1"
+            api_key_env = None
+            max_tokens = 1024
+            reasoning = None
+
+        import krepis.router as _krepis_router
+
         monkeypatch.setattr(
-            "langchain_anthropic.ChatAnthropic", _StubLLM, raising=False
+            _krepis_router,
+            "resolve_group_spec",
+            lambda group, **kw: (
+                _StubSpec(),
+                {
+                    "route": "litellm_proxy",
+                    "registry_id": f"litellm:group:{group}",
+                    "primary_registry_id": "claude-haiku",
+                    "exec_context": "laptop",
+                    "skipped_entries": [],
+                },
+            ),
+            raising=True,
         )
 
         import sys
@@ -407,9 +434,6 @@ class TestEpisodicParity:
         stub_config = types.ModuleType("config")
         stub_config.ANTHROPIC_API_KEY = "test-key"
         stub_config.PER_STOCK_CLASS = "low"
-        stub_config.DIRECT_MODEL_FOR_CLASS = {"low": "claude-haiku-4-5-20251001"}
-        stub_config.ROUTER_BASE_URL = ""
-        stub_config.ROUTER_KEY_SECRET = "unused"
         monkeypatch.setitem(sys.modules, "config", stub_config)
 
         stub_cost_tracker = types.ModuleType("graph.llm_cost_tracker")

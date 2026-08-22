@@ -9,7 +9,7 @@ Two concerns:
      agent Haiku/Sonnet call (``invoke_with_rate_limit_retry``).
 
 The 429 wrapper exists because the 6-team parallel ``Send()`` fan-out
-in ``graph/research_graph.py`` bursts over the org's Haiku input-TPM
+in the retired research graph bursts over the org's Haiku input-TPM
 ceiling (450,000 tokens/min, claude-haiku-4-5). On the 2026-05-16
 recovery run that surfaced as ``RateLimitError 429`` aborting
 defensives/financials/technology.
@@ -164,14 +164,230 @@ _T = TypeVar("_T")
 # an OpenAI-compatible endpoint keeps the loops, the tool calling and
 # with_structured_output byte-identical, and gains the platform.
 #
-# WHY THE ENDPOINT IS CONFIG. On a host running the LiteLLM router this points
-# at the router and inherits fallback chains and DLP scanning. In Lambda —
-# which cannot reach 127.0.0.1 — it points at OpenRouter, exactly as thinktank
-# already resolves ProviderSpec.base_url. The class is a selection fact and
-# belongs to the registry; the endpoint is a deployment fact and belongs to
-# config. Note that the Lambda path therefore does NOT gain egress-proxy DLP:
-# that gap is pre-existing and fleet-wide for Lambda, not specific to these
-# call sites, and it is not closed here.
+# WHERE THE ENDPOINT COMES FROM — and why it is no longer config.
+#
+# Until alpha-engine-config-I7005 this factory had TWO branches. When
+# ``config.ROUTER_BASE_URL`` was empty — the DEFAULT, so this was the live path
+# on every deployment — it constructed ``ChatAnthropic`` from
+# ``config.DIRECT_MODEL_FOR_CLASS``, a consumer-held capability-class ->
+# concrete-model-slug table built from two model-id literals in the research
+# config. That is precisely what `model-router-policy` §2 layer 5 forbids a
+# consumer to hold ("a routing table, a model slug, or an endpoint of their
+# own"), and its fall-through was to an unscanned direct provider rather than
+# the fail-closed §5 step 3 requires. The other branch pointed ``ChatOpenAI``
+# at a config-supplied ``base_url`` — not a hardcoded public endpoint, but a
+# SECOND parallel mapping of the same routing fact, which §2's test names as a
+# defect on its own ("if a fact appears at two layers, delete the copy at the
+# lower layer").
+#
+# Both are gone. There is ONE path: ``krepis.router.resolve_group_spec()``
+# returns the model, the endpoint and the credential NAME for a capability
+# tier, filtered by where this process declares it is running. This module now
+# says exactly two things about routing — which tier it wants, and which wire
+# format it speaks — and nothing at all about models, endpoints or providers.
+#
+# Mirrors ``alpha-engine-evaluator/director/agent.py`` (the fleet's reference
+# implementation of this pattern) and ``producers/single_agent.py`` in this
+# repo, rather than inventing a third variant.
+
+
+def _exec_context() -> str | None:
+    """Where this process declares it is running, or None to take krepis' default.
+
+    R29: the context is a DECLARED input, never inferred. This deliberately
+    does NOT sniff the hostname, the EC2 metadata service, or the presence of
+    ``AWS_LAMBDA_FUNCTION_NAME`` — a wrong guess produces a mis-resolution that
+    looks like a health failure, which is the exact confusion R29 exists to
+    prevent. Read at call time (not import) so a test or a wrapper script that
+    sets the variable late still takes effect.
+
+    Returning None hands the decision to krepis' own documented resolution
+    order (``KREPIS_EXEC_CONTEXT`` -> ``DEFAULT_EXEC_CONTEXT``), so this module
+    holds no default of its own.
+
+    Deployments that set it:
+      * ``alpha-engine-research-runner`` Lambda — ``infrastructure/deploy.sh``
+        ``_apply_router_env`` sets ``lambda`` alongside the router URL, the
+        per-consumer credential name and the AppConfig registry coordinates.
+      * the weekly Research spot — set by the launcher in ``nous-ergon-ops``.
+    """
+    raw = os.environ.get("KREPIS_EXEC_CONTEXT")
+    return raw.strip() if raw and raw.strip() else None
+
+
+def _assert_routed_through_the_proxy(route: dict) -> None:
+    """Refuse a resolution that reached a direct provider endpoint from a
+    context where no such endpoint legitimately exists.
+
+    This is a guard against a **corrupted input**, not a routing decision, and
+    the distinction is what keeps it on the right side of `model-router-policy`
+    §2's layer-5 rule: this factory does not choose a route, it refuses one
+    that cannot be conformant. Which entries are reachable from a context
+    remains entirely the registry's statement about itself (R28/R29).
+
+    It matters here specifically because of a vocabulary over-claim that this
+    repo cannot fix from inside itself. The registry's local egress-proxy
+    entries declare ``reachable_from: [laptop, ec2]``, where ``ec2`` means the
+    dashboard box — the one EC2 instance that runs an egress proxy on
+    loopback. The weekly Research run executes on an **ephemeral spot** that
+    has no such proxy, and the group chains also contain ``route: openrouter``
+    entries which carry the same ``ec2`` claim and are NOT health-probed at
+    resolve time. So a spot declaring ``ec2`` whose router edge is momentarily
+    unhealthy would fall straight through to openrouter.ai — DLP-unscanned,
+    and the exact linkage Brian's 2026-08-03 ruling forbids categorically
+    (alpha-engine-config-I6367). The same shape already shipped once, in the
+    Director, and served ``glm-5.2`` at openrouter.ai while logging a healthy
+    route (alpha-engine-config-I6183).
+
+    Raising loses the run. That is the intended trade (R20 / §5 step 3): an
+    unscanned paid egress that reports success is worse than a job that does
+    not run, and §5 is explicit that where no reachable direct route exists,
+    router unavailability is an **outage** to be reported rather than absorbed.
+
+    On ``laptop`` a direct egress-proxy route IS legitimate — the proxy is on
+    loopback there and R27d permits it — so the guard steps aside, exactly as
+    the Director's does.
+
+    The context read here is ``route["exec_context"]`` — the value the resolver
+    ACTUALLY used — not the value this module declared. They differ whenever the
+    declaration is ``None``: krepis then applies its own default, and a guard
+    comparing against the un-resolved ``None`` would fire on a route that was
+    legitimately resolved for the laptop. That is not hypothetical; it broke six
+    tests on the first CI run of this change, where `KREPIS_EXEC_CONTEXT` is
+    unset and krepis resolved `laptop`. The route is the honest record of what
+    the resolution was made against, and it is what a guard on the resolution
+    must read.
+    """
+    ctx = route.get("exec_context")
+    if ctx == "laptop":
+        return
+    actual = route.get("route")
+    if actual == "litellm_proxy":
+        return
+    raise RuntimeError(
+        f"research agent resolved route={actual!r} from exec_context={ctx!r}. "
+        f"The only conformant route from a research Lambda or the weekly "
+        f"Research spot is 'litellm_proxy' (model-router-policy R26): neither "
+        f"runs a local egress proxy, so a direct provider endpoint resolved "
+        f"from here means the router edge is unhealthy, the registry copy is "
+        f"stale, or the declared context over-claims reachability. Refusing to "
+        f"make a paid, DLP-unscanned call — an unreachable router is an OUTAGE "
+        f"(model-router-policy §5), not a licence to reach a public endpoint. "
+        f"Resolved: model={route.get('deployment_id')!r} "
+        f"provider={route.get('provider')!r} "
+        f"api_base_url={route.get('api_base_url')!r}; "
+        f"skipped={route.get('skipped_entries')!r}"
+    )
+
+
+def _log_route(route: dict, *, model_class: str) -> None:
+    """Emit the route's degradation state on EVERY call — 0 on the healthy path.
+
+    R12 makes serving from a fallback an alert rather than a log line, and
+    ``principles.md`` §2.7 is that a signal which only appears when something is
+    wrong is indistinguishable from a dead emitter. So the healthy value is
+    emitted too, and the WARN line is shaped for flow-doctor pickup like every
+    other retry/repair warning in this module.
+
+    Degradation on the proxy route can only mean ``skipped_entries`` — which
+    entry the proxy walks to is server-side and arrives at call time, so
+    ``krepis.router.route_is_degraded`` correctly answers False there rather
+    than firing on every healthy call (the category error that pinned the
+    Director's fallback metric at 1 on its first healthy run).
+
+    Never raises: a telemetry failure must not take down a research run.
+    """
+    try:
+        from krepis.router import route_is_degraded
+
+        skipped = route.get("skipped_entries") or []
+        degraded = bool(skipped) or route_is_degraded(route)
+        if degraded:
+            log.warning(
+                "[agent_route:%s] route DEGRADED: served=%s route=%s primary=%s context=%s — skipped: %s",
+                model_class,
+                route.get("registry_id"),
+                route.get("route"),
+                route.get("primary_registry_id") or route.get("primary_model"),
+                route.get("exec_context"),
+                "; ".join(f"{s.get('registry_id')}: {s.get('reason')}" for s in skipped) or "(none recorded)",
+            )
+        else:
+            log.info(
+                "[agent_route:%s] route healthy: served=%s route=%s context=%s degraded=0",
+                model_class,
+                route.get("registry_id"),
+                route.get("route"),
+                route.get("exec_context"),
+            )
+    except Exception:  # noqa: BLE001 — telemetry only; the call itself must proceed
+        log.exception("[agent_route:%s] route telemetry failed — degradation is blind for this call", model_class)
+
+
+#: Output tokens a thinking model may spend BEFORE the answer starts.
+#:
+#: On a reasoning model the visible answer and the hidden chain of thought come
+#: out of the SAME `max_tokens` ceiling. Every budget in this repo was sized
+#: against Anthropic, where they do not, so the migration onto the router
+#: (alpha-engine-config-I7005) silently cut each one — `max_tokens_strategic:
+#: 4096` stopped meaning "4096 tokens of answer" and started meaning "4096
+#: tokens of thinking AND answer, thinking first".
+#:
+#: Measured on the canary box 2026-08-16 (marker
+#: pr-nousergon-crucible-research-638-472bfa7c04b4): the qual-analyst pillar
+#: extraction died with StructuredOutputTruncationError — `stop_reason:
+#: max_tokens` mid-tool-call, the model having spent the budget reasoning. A
+#: direct probe of the same group with max_tokens=64 returned
+#: `finish_reason: "length"` with an EMPTY content and a populated
+#: `reasoning_content`, which is the same failure in miniature.
+#:
+#: Headroom rather than a multiplier: the caller's number keeps meaning what it
+#: says (how much ANSWER it needs), and the thinking allowance is a model fact
+#: that belongs next to the model. Costed on tokens actually emitted, not on the
+#: ceiling, so a generous allowance is free where it goes unused — and the
+#: DeepSeek entries' provider ceiling is 393216, so this is nowhere near it.
+REASONING_OUTPUT_HEADROOM_TOKENS = 16384
+
+
+def _with_reasoning_headroom(spec, *, model_class: str, force: bool = False) -> int:
+    """The caller's answer budget plus a thinking allowance, when the resolved
+    model thinks.
+
+    ``spec.reasoning`` is the registry's per-model statement. ``None`` means the
+    model does not reason (or the entry does not say so), and ``{"exclude":
+    True}`` means reasoning is turned OFF for this entry — neither gets
+    headroom, because neither spends output tokens before answering.
+
+    ``force=True`` (alpha-engine-config-I7589) skips that registry read
+    entirely and always adds the headroom. It exists for a caller whose OWN
+    prompt is what makes the model reason at length regardless of what the
+    routed pool member declares — a "high"-tier call load-balances across
+    registry entries, and an entry that reasons without having `reasoning`
+    set on it produces exactly the "identical input, coin-flip result"
+    truncation this headroom was built to close (I7005's own diagnosis).
+    Free to over-apply: the doc above notes this is costed on tokens actually
+    emitted, not on the ceiling, so a forced allowance that goes unused on a
+    non-reasoning pool member costs nothing.
+    """
+    reasoning = getattr(spec, "reasoning", None)
+    reasons = force or (bool(reasoning) and not (isinstance(reasoning, dict) and reasoning.get("exclude")))
+    if not reasons:
+        return spec.max_tokens
+
+    effective = spec.max_tokens + REASONING_OUTPUT_HEADROOM_TOKENS
+    # Logged, not silent: the number sent is not the number the caller asked
+    # for, and a budget that differs from the one in the logs is the exact
+    # defect the `resolve_group_spec(max_tokens=...)` comment above warns about.
+    log.info(
+        "[agent_route:%s] reasoning model %s — max_tokens %d + %d headroom = %d%s",
+        model_class,
+        spec.model,
+        spec.max_tokens,
+        REASONING_OUTPUT_HEADROOM_TOKENS,
+        effective,
+        " (forced)" if force else "",
+    )
+    return effective
 
 
 def make_agent_llm(
@@ -180,9 +396,25 @@ def make_agent_llm(
     max_tokens: int,
     api_key: str | None = None,
     callbacks: list | None = None,
+    force_reasoning_headroom: bool = False,
     **extra,
 ):
     """Return a chat model for *model_class* ("low"/"med"/"high"/"ultra").
+
+    ``force_reasoning_headroom`` (alpha-engine-config-I7589): apply the
+    ``REASONING_OUTPUT_HEADROOM_TOKENS`` allowance unconditionally instead of
+    only when the resolved registry entry declares ``reasoning``. Default
+    False — this changes behaviour only for a caller that opts in.
+
+    The class is resolved to a model, an endpoint and a credential by
+    ``krepis.router.resolve_group_spec`` — the registry decides all three; this
+    factory decides only which capability tier it wants, where it is running,
+    and that it speaks the OpenAI wire format. There is no direct-provider
+    branch and no configured endpoint: both were layer-5 routing facts
+    (`model-router-policy` §2), and the resolver **fails closed** with its own
+    ``ValueError``/``FileNotFoundError`` when the tier cannot be served from
+    here, which is what §5 step 3 requires of a consumer that cannot reach the
+    router.
 
     Preserves the retry and timeout budgets every agent previously set by
     hand — dropping those silently would change failure behaviour under load
@@ -190,69 +422,59 @@ def make_agent_llm(
     """
     # Local imports: keeps this module importable without the LLM deps, which
     # matters because it is also imported by tooling that never makes a call.
+    from krepis.router import resolve_group_spec
+    from langchain_openai import ChatOpenAI
     from nousergon_lib.secrets import get_secret
 
-    from config import (
-        DIRECT_MODEL_FOR_CLASS,
-        ROUTER_BASE_URL,
-        ROUTER_KEY_SECRET,
-    )
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
     cbs = callbacks if callbacks is not None else [get_cost_telemetry_callback()]
+    ctx = _exec_context()
 
-    # DIRECT MODE — no router configured for this deployment. Resolve the class
-    # to a concrete model locally and talk to Anthropic exactly as these call
-    # sites did before the migration.
-    #
-    # This branch is why the migration is safe to land: Lambda and the EC2
-    # canary box have no reachable router, and defaulting them onto one turned
-    # every agent call into a connection error. Opting in is a config edit per
-    # deployment, not a flag day.
-    if not ROUTER_BASE_URL:
-        from langchain_anthropic import ChatAnthropic
+    # `max_tokens` is handed to the resolver rather than applied afterwards so
+    # the spec, the log line and the request all carry ONE number. The Director
+    # learned this the hard way: it restated the budget locally and logged
+    # `spec.max_tokens`, so the value printed was not the value sent.
+    spec, route = resolve_group_spec(
+        model_class,
+        exec_context=ctx,
+        wire="openai",
+        max_tokens=max_tokens,
+    )
+    _assert_routed_through_the_proxy(route)
+    _log_route(route, model_class=model_class)
 
-        model = DIRECT_MODEL_FOR_CLASS.get(model_class)
-        if model is None:
-            # Fail loud: a class with no direct-mode model would otherwise be
-            # sent to Anthropic as a literal model name and 404 at call time.
-            raise ValueError(
-                f"model_class {model_class!r} has no direct-mode model. Either set "
-                f"llm.router_base_url to resolve classes via the registry, or add a "
-                f"concrete model for this class in config.DIRECT_MODEL_FOR_CLASS "
-                f"(known: {sorted(DIRECT_MODEL_FOR_CLASS)})."
-            )
-        return ChatAnthropic(
-            model=model,
-            anthropic_api_key=api_key or get_secret("ANTHROPIC_API_KEY", required=False, default=""),
-            max_tokens=max_tokens,
-            max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
-            default_request_timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
-            callbacks=cbs,
-            **extra,
-        )
-        # Custodial compliance (policy §2a): the key is fetched from Secrets
-        # Manager at call time, NOT from a process-wide env var. Deployments
-        # with a reachable router use the sentinel ROUTER_KEY_SECRET instead
-        # and hold no upstream provider credential at all.
-        # The eval_judge Lambda handlers are registered as declared exceptions
-        # in the fleet's LLM_CALLSITE_REGISTRY.yaml until I4927 puts them
-        # behind the in-VPC gateway.
+    # The credential is resolved BY NAME, from the name the resolver returned.
+    # `api_key_env is None` means `auth_token_type: placeholder` — the egress
+    # proxy holds the real key and there is nothing to resolve here, which is
+    # not the same as a missing credential. `api_key` stays a test seam.
+    if api_key:
+        key = api_key
+    elif spec.api_key_env:
+        key = get_secret(spec.api_key_env, required=False, default="") or "unused"
+    else:
+        key = "unused"
 
-    # ROUTER MODE — the class name goes on the wire and the registry resolves it.
-    from langchain_openai import ChatOpenAI
+    kwargs = dict(extra)
+    if spec.reasoning is not None:
+        # A per-model registry param (e.g. {"exclude": True}), forwarded
+        # verbatim. Setting it from here would override a per-model fact with a
+        # guess made for a different model — the registry owns it.
+        kwargs.setdefault("extra_body", {})["reasoning"] = spec.reasoning
 
-    key = api_key or get_secret(ROUTER_KEY_SECRET, required=False, default="") or "unused"
+    effective_max_tokens = _with_reasoning_headroom(
+        spec, model_class=model_class, force=force_reasoning_headroom
+    )
 
     return ChatOpenAI(
-        model=model_class,
-        base_url=ROUTER_BASE_URL,
+        model=spec.model,
+        base_url=spec.base_url,
         api_key=key,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
         max_retries=SECTOR_TEAM_LLM_MAX_RETRIES,
         timeout=SECTOR_TEAM_LLM_REQUEST_TIMEOUT_SECONDS,
         callbacks=cbs,
-        **extra,
+        **kwargs,
     )
 
 
@@ -893,6 +1115,59 @@ def _schema_name_of(structured_llm) -> str | None:
     return None
 
 
+# ── Structured-output binding — ONE place that decides HOW ────────────────────
+
+
+def bind_structured_output(llm, schema, *, include_raw: bool = False, **kw):
+    """Bind *schema* to *llm* for structured extraction.
+
+    THE METHOD IS THE POINT. ``langchain_openai>=1.0`` changed the
+    ``with_structured_output`` default from ``function_calling`` to
+    ``json_schema``, which sends an OpenAI ``response_format``. Under
+    ``ChatAnthropic`` that default never applied; the moment these agents
+    resolved through the router to DeepSeek (alpha-engine-config-I7005 /
+    I7448) every extraction started returning::
+
+        litellm.BadRequestError: OpenAIException -
+        This response_format type is unavailable now.
+        Received Model Group=high-deepseek-v4-pro-max
+
+    Measured on the canary-replay box, 2026-08-16, marker
+    ``pr-nousergon-crucible-research-606-f1f856480de2`` — a provider-capability
+    mismatch that is invisible to every mocked test, because a fake
+    ``with_structured_output`` accepts any method.
+
+    ``function_calling`` is the portable choice, not merely the working one:
+    tool calling is supported by Anthropic, OpenAI, DeepSeek and every
+    OpenAI-compatible endpoint the registry can resolve, so this survives the
+    next provider swap (``model-portability-policy``). ``json_schema`` is an
+    OpenAI-family capability we would be depending on by accident.
+
+    Call sites pass the schema and (where they need the raw message)
+    ``include_raw=True``, and say nothing about method — same split as
+    ``make_agent_llm``: the call site names WHAT it wants, this module owns HOW.
+    """
+    return llm.with_structured_output(
+        schema,
+        include_raw=include_raw,
+        method="function_calling",
+        # `tool_choice="auto"` overrides langchain's FORCED choice
+        # (`tool_choice: <tool name>`, hardcoded for this method). A reasoning
+        # model refuses a forced tool: measured against the live router edge,
+        # 2026-08-16, `high` group —
+        #   forced tool_choice -> 400 "Thinking mode does not support this tool_choice"
+        #   tool_choice="auto" -> 200, model calls the tool
+        # Auto means the model CAN decline to call it, which surfaces as
+        # `parsed=None` + `parsing_error`. That path is not new and is not
+        # silent: every extraction here goes through
+        # `invoke_structured_with_validation_retry`, which re-prompts with the
+        # violation and then fails loud, and strict mode raises. A forced
+        # choice that 400s has no such recovery.
+        tool_choice="auto",
+        **kw,
+    )
+
+
 # ── SOTA structured-output retry with validation feedback ─────────────────────
 
 
@@ -904,6 +1179,16 @@ def _schema_name_of(structured_llm) -> str | None:
 # on a 6-agent fan-out should not hard-fail the cycle when the fix is to
 # re-prompt with the schema violation as context.
 STRUCTURED_OUTPUT_MAX_RETRIES = 2
+
+
+class _NoToolCallError(RuntimeError):
+    """The model answered without calling the bound tool.
+
+    Its own class so the retry loop can send the right correction: a schema
+    violation and a missing tool call need different instructions, and quoting a
+    violation that does not exist tells the model to fix a field it never
+    emitted.
+    """
 
 
 def invoke_structured_with_validation_retry(
@@ -950,6 +1235,11 @@ def invoke_structured_with_validation_retry(
         failure (all retries exhausted) ``parsing_error`` carries the LAST
         ``ValidationError`` and the caller's existing fail-loud branch
         (e.g., ``raise RuntimeError(...)``) fires as before.
+
+        Plus ``structured_output_attempts``: how many sends this call took,
+        1-based. Added for callers that need to know whether the retry path
+        actually ran — a probe asserting recovery cannot distinguish "recovered"
+        from "never tripped" without it (alpha-engine-config-I7459).
     """
     from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -979,6 +1269,30 @@ def invoke_structured_with_validation_retry(
         # a validation-retry attempt.
         raise_if_truncated(final_resp, label=label, schema_name=schema_name)
         parsing_error = final_resp.get("parsing_error")
+        if parsing_error is None and final_resp.get("parsed") is None:
+            # NO TOOL CALL AT ALL — not a schema violation, and until now not a
+            # retry either: the loop keyed entirely on `parsing_error`, so this
+            # returned immediately with `parsed=None, parsing_error=None` and
+            # every caller's fail-loud branch reported "terminal validation
+            # failure after retries: None". A failure whose own error is the
+            # word None is a failure nobody can act on.
+            #
+            # It became reachable when structured output moved to
+            # `tool_choice="auto"` (alpha-engine-config-I7448): a forced tool
+            # choice cannot produce this, and a reasoning model rejects a forced
+            # tool choice, so the two arrived together. Measured on the canary
+            # box 2026-08-16, marker
+            # pr-nousergon-crucible-research-638-472bfa7c04b4.
+            #
+            # Retrying is right BECAUSE the cause is usually recoverable: the
+            # model answered in prose instead of calling the tool, and saying so
+            # fixes it. The correction below is deliberately not the schema
+            # correction — there is no violation to quote.
+            parsing_error = _NoToolCallError(
+                "the model returned no tool call, so nothing was parsed "
+                "(tool_choice='auto' lets it decline)"
+            )
+            final_resp["parsing_error"] = parsing_error
         if parsing_error is None:
             if attempt > 0:
                 log.info(
@@ -986,6 +1300,13 @@ def invoke_structured_with_validation_retry(
                     label,
                     attempt,
                 )
+            # How many sends it took. Additive: every existing consumer reads
+            # `parsed` / `parsing_error` / `raw` and is untouched. It exists
+            # because a caller could not otherwise tell one attempt from three,
+            # and the canary's validation-retry probe reported PASS whether or
+            # not the recovery path it exists to exercise ever ran
+            # (alpha-engine-config-I7459).
+            final_resp["structured_output_attempts"] = attempt + 1
             return final_resp
 
         # Parse failed. Log this attempt loudly with the raw payload head so a
@@ -1015,13 +1336,25 @@ def invoke_structured_with_validation_retry(
                 max_retries,
                 parsing_error,
             )
+            final_resp["structured_output_attempts"] = attempt + 1
             return final_resp
 
         # Build a correction that names the specific schema violation so the
         # LLM can fix the offending field directly. The failed ``raw`` AIMessage
         # from the prior attempt is included so the model sees its own output in
         # context (full conversation, not just a fresh prompt).
-        correction_text = (
+        if isinstance(parsing_error, _NoToolCallError):
+            # Different failure, different correction. Quoting a schema
+            # violation that does not exist would tell the model to fix a field
+            # it never emitted.
+            correction_text = (
+                "Your prior response did not call the required tool, so nothing "
+                "could be extracted from it. Re-answer by CALLING THE TOOL with "
+                "the same substantive content — do not reply in prose, and do "
+                "not wrap the JSON in text."
+            )
+        else:
+            correction_text = (
             f"Your prior response failed schema validation:\n\n"
             f"{type(parsing_error).__name__}: {parsing_error}\n\n"
             f"Please re-submit your response with the schema corrections "
@@ -1032,7 +1365,7 @@ def invoke_structured_with_validation_retry(
             f"the exact type (string vs number vs boolean vs list). "
             f"Preserve all the substantive content from your prior "
             f"response — only fix the schema violation."
-        )
+            )
 
         raw = final_resp.get("raw")
         # ``with_structured_output`` is FORCED TOOL-USE: on a validation failure

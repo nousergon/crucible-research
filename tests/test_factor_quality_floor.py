@@ -11,7 +11,7 @@ Plan: ~/Development/alpha-engine-docs/private/factor-substrate-260513.md (Phase 
 """
 
 
-from graph.research_graph import _build_signals_payload
+from scoring.signals_payload import _build_signals_payload
 
 
 def _make_thesis(
@@ -63,18 +63,18 @@ def _apply_floor_only(monkeypatch, *, enabled=True, min_pct=10.0, exempt=None):
     tests can isolate floor behavior without bleed-through from the other
     structural gate that runs in the same buy_candidates loop."""
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_ENABLED", enabled, raising=False
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_ENABLED", enabled, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_MIN_PERCENTILE", min_pct, raising=False
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_MIN_PERCENTILE", min_pct, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS",
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS",
         exempt if exempt is not None else [],
         raising=False,
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", False, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", False, raising=False
     )
 
 
@@ -193,19 +193,19 @@ def test_coherence_gate_runs_alongside_quality_floor(monkeypatch):
     # is filtered by the coherence gate; the quality floor is the second
     # layer. Both produce the same end result here: not in buy_candidates.
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_ENABLED", True, raising=False
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_MIN_PERCENTILE", 10.0, raising=False
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_MIN_PERCENTILE", 10.0, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS", [], raising=False
+        "scoring.signals_payload.FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS", [], raising=False
     )
 
     state = _make_state(

@@ -43,6 +43,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Captured 2026-05-27.
 EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "archive/manager.py": 5,
+    # research/{run_date}/self_test.json (the §2.3a numeric-correctness verdict)
+    # + ops/checks/ae-research-self-test/latest.json (its console envelope).
+    # BOTH REGISTERED in ARTIFACT_REGISTRY.yaml as research_self_test /
+    # research_self_test_check, not grandfathered: a missing correctness verdict
+    # is exactly the absence that makes every consumer succeed as though the
+    # check had passed (sf-pipeline-policy §2.3a), so its absence must page
+    # rather than pass. severity=warning while no consumer hard-blocks on it
+    # (the evaluator tile is not yet wired). config-I7262
+    "scoring/self_test.py": 2,
     "data/fetchers/analyst_fetcher.py": 1,
     "data/fetchers/insider_fetcher.py": 1,
     "data/fetchers/revision_fetcher.py": 1,
@@ -116,9 +125,6 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # freshness-SLA artifacts with a daily consumer — so no ARTIFACT_REGISTRY
     # row, just this per-file PUT pin.
     "graph/llm_cost_tracker.py": 2,
-    # Single PUT site: dated data_manifest/{module}/{date}.json. Health
-    # enrichment writes moved to nousergon_lib.health (config#1727 Phase C).
-    "data_manifest.py": 1,
     "local/sync_db.py": 1,
     # 3 since the daily-scanner cutover: by_ticker.json, the latest.json
     # sidecar, and provenance.json (registered as factor_profiles_provenance
@@ -144,6 +150,21 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # after-producer). Single PUT site (loop over dated + latest keys in
     # write_universe_membership_to_s3).
     "scoring/universe_membership.py": 1,
+    # Scanner-cut promotion decision (alpha-engine-config-I7826). 1 PUT site
+    # (the loop over the dated audit key, the latest.json mirror and the live
+    # pointer config/scanner_cut_champion.json). LOAD-BEARING: the pointer is
+    # what universe_membership.resolve_feed_cut resolves the sector teams'
+    # input set from, and the record is written on EVERY evaluation — promote
+    # or hold — precisely so a dead engine is distinguishable from an engine
+    # that decided to hold (champion-challenger-policy.md §3; the config#2054
+    # lesson, whose fix on the sibling producer-champion slot is the
+    # config_apply_audit_producer_champion registry row). ARTIFACT_REGISTRY.yaml
+    # rows for config_scanner_cut_champion + config_apply_audit_scanner_cut_
+    # champion (liveness_via the audit latest.json, cadence = the scanner run)
+    # are filed as alpha-engine-config-I7833 — three docs PRs were already open
+    # against that repo's private-docs on 2026-08-20, and opening a fourth
+    # against work in flight is what the engagement protocol forbids.
+    "scoring/cut_promotion.py": 1,
     # One-time historical backfill of the membership artifact. Writes the DATED
     # key only (never the latest pointer the predictor resolves from) — an
     # operator-invoked reconstruction script, not a pipeline producer, hence no
@@ -167,16 +188,29 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # post-step in signals_envelope_handler.py; one PUT site.
     "scoring/morning_brief.py": 1,
     "scripts/aggregate_costs.py": 1,
+    # Capture-stream sentinel (decision_artifacts/_cost_raw/latest.json),
+    # config-I7407 deliverable 4. REGISTERED in ARTIFACT_REGISTRY.yaml as
+    # llm_cost_capture_stream, not grandfathered: the whole point of the
+    # object is that the fleet freshness monitor watches it, and an
+    # unregistered sentinel is a detector nobody reads. One PUT site
+    # (write_capture_sentinel).
+    "scripts/cost_capture_freshness.py": 1,
     # Distillation SFT-corpus stats artifact
     # (decision_artifacts/distillation/corpus_stats/{date}.json + latest.json).
-    # SECONDARY observability built fail-soft as a non-fatal post-step of the
-    # research run (WARNs, never fails the run; signals.json is primary). Reads
-    # the whole _sft_raw corpus and rewrites a rebuildable summary; the console
-    # Distillation-Corpus panel consumer graceful-degrades when absent → absence
-    # is NOT a silent failure and needs no daily freshness-SLA alarm. Per-file
-    # PUT pin only; ARTIFACT_REGISTRY row deferred until first Saturday
-    # production (register-with-or-after-producer — config#1544). One PUT site
-    # (loop over dated + latest keys in compute_corpus_stats).
+    # SECONDARY observability, fail-soft. Its invoker moved with
+    # alpha-engine-config-I7856: the research graph's champion pass owned it
+    # until crucible-research-PR685 deleted that pass, leaving the artifact
+    # frozen at 2026-07-01 with NO invoker anywhere in the fleet. Now a
+    # non-fatal post-step of the weekly AggregateCosts stage
+    # (lambda/aggregate_costs_handler.py::_refresh_corpus_stats) — same weekly
+    # cadence, and compute_corpus_stats reads the WHOLE cumulative corpus on
+    # every call, so regular beats frequent.
+    # ARTIFACT_REGISTRY row still deferred, deliberately: config#1544's
+    # register-with-or-after-producer rule means the row goes in once the
+    # repointed producer has written once (first weekly SF after this merges),
+    # not before — a row over a prefix whose writer has not yet run is the
+    # alpha-engine-config-I7838 defect. Tracked on I7856.
+    # One PUT site (loop over dated + latest keys in compute_corpus_stats).
     "scripts/corpus_stats.py": 1,
     # Champion/challenger leaderboard scorer (config#1221 scanner + config#1223
     # producer; ONE shared engine, ARCHITECTURE §37). Single PUT site

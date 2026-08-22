@@ -5,12 +5,12 @@ composite score is below SECTOR_COHERENCE_UW_MIN_SCORE. Existing HOLDs and
 EXITs are unaffected — gate only filters ENTER signals at buy_candidates
 construction.
 
-Wired into ``_build_signals_payload`` in graph/research_graph.py. Threshold
+Wired into ``_build_signals_payload`` in scoring/signals_payload.py. Threshold
 lives in alpha-engine-config/research/scoring.yaml under
 ``aggregator.macro_sector_coherence_gate``.
 """
 
-from graph.research_graph import _build_signals_payload
+from scoring.signals_payload import _build_signals_payload
 
 
 def _make_thesis(ticker, rating, score, sector="Technology"):
@@ -32,10 +32,10 @@ def test_uw_sector_below_threshold_dropped_from_buy_candidates(monkeypatch):
     NOT appear in buy_candidates even when the CIO advanced it. This is
     the 2026-05-13 HD/MCD-in-Consumer-Disc case."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
@@ -62,10 +62,10 @@ def test_uw_sector_above_threshold_kept_in_buy_candidates(monkeypatch):
     — the gate only blocks weak picks in fighting-the-macro-call sectors,
     not strong-conviction ones."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
@@ -90,10 +90,10 @@ def test_uw_sector_above_threshold_kept_in_buy_candidates(monkeypatch):
 def test_ow_sector_not_affected_by_gate(monkeypatch):
     """OVERWEIGHT sectors are not gated — any score that earned ENTER passes."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
@@ -116,10 +116,10 @@ def test_ow_sector_not_affected_by_gate(monkeypatch):
 def test_market_weight_sector_not_affected_by_gate(monkeypatch):
     """MARKET_WEIGHT sectors are not gated either — gate only fires for UW."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
@@ -143,10 +143,10 @@ def test_gate_disabled_passes_everything(monkeypatch):
     """When the gate is disabled at config level, UW-sector low-score picks
     pass through. Provides the kill-switch behavior for rollback."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", False, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", False, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
@@ -173,10 +173,10 @@ def test_held_uw_sector_position_not_dropped(monkeypatch):
     gate only blocks NEW entries (signal='ENTER'). This pins that existing
     portfolio exposures aren't force-liquidated by a sector downgrade."""
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_GATE_ENABLED", True, raising=False
     )
     monkeypatch.setattr(
-        "graph.research_graph.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
+        "scoring.signals_payload.SECTOR_COHERENCE_UW_MIN_SCORE", 80.0, raising=False
     )
 
     state = {
