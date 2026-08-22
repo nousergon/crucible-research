@@ -219,6 +219,12 @@ def _run(event, context):
     from nousergon_lib.dates import resolve_trading_day
 
     calendar_date = run_date[:10]
+    # alpha-engine-config-I8155: `calendar_date` is the SF execution's own
+    # run_date, un-normalized, and is never reassigned below — that is what
+    # stage_coverage groups a run's verdicts by (the ONLY key one execution's
+    # verdicts share). Alias it explicitly so the intent survives a future
+    # edit near this normalization block.
+    execution_run_date = calendar_date
     run_date = resolve_trading_day(calendar_date)
     if run_date != calendar_date:
         logger.info(
@@ -489,15 +495,55 @@ def _run(event, context):
     # §2.3a rescope): the assertion lives in the stage's own handler,
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
-    try:
-        from krepis.stage_coverage import assert_stage_coverage
-
-        result["stage_coverage"] = assert_stage_coverage(
-            "SignalsEnvelope", run_date=run_date, window_start=_started,
+    if not execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument. The required-field guard above
+        # makes this unreachable today, but the check stays as the contract
+        # boundary rather than relying on that upstream guard.
+        logger.error(
+            "[signals_envelope_handler] stage-coverage assertion SKIPPED "
+            "for SignalsEnvelope: no execution run_date on this event "
+            "(execution identity absent)"
         )
-    except ImportError as exc:
-        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-        # the handler's own outcome is unchanged (config-I7214).
-        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": "SignalsEnvelope",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+        }
+    else:
+        try:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "SignalsEnvelope",
+                run_date=execution_run_date,
+                window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+            # the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "SignalsEnvelope",
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Both are
+            # library-internal contract failures, not stage failures — log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[signals_envelope_handler] stage-coverage assertion "
+                "raised for SignalsEnvelope: %s: %s",
+                type(exc).__name__, exc,
+            )
+            result["stage_coverage"] = {
+                "stage": "SignalsEnvelope",
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
 
     return result

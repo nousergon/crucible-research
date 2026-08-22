@@ -283,6 +283,14 @@ def _run(event, context):
             "error": f"invalid run_date {run_date!r}: expected ISO YYYY-MM-DD",
         }
 
+    # alpha-engine-config-I8155: capture the SF execution's run_date BEFORE
+    # trading-day normalization overwrites the `run_date` local below.
+    # stage_coverage groups verdicts by the execution's run_date (the ONLY
+    # key one execution's verdicts share) — passing the normalized trading
+    # day instead landed this stage's verdict under the WRONG prefix on the
+    # 2026-08-22 weekly run. `execution_run_date` is never reassigned.
+    execution_run_date = run_date
+
     # ── Trading-day normalization (DATE_CONVENTIONS) ─────────────────────────
     # Every trade artifact in the system keys by the TRADING DAY, not the
     # calendar date: signals.json, sector_team_runs, scanner_evaluations, and
@@ -709,15 +717,51 @@ def _run(event, context):
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
     result = {"status": "OK", "summary": summary, "date": run_date}
-    try:
-        from krepis.stage_coverage import assert_stage_coverage
-
-        result["stage_coverage"] = assert_stage_coverage(
-            "Scanner", run_date=run_date, window_start=_started,
+    if not execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument. The event's own required-field
+        # guard above makes this unreachable today, but the check stays as
+        # the contract boundary rather than relying on that upstream guard.
+        logger.error(
+            "[scanner_handler] stage-coverage assertion SKIPPED for Scanner: "
+            "no execution run_date on this event (execution identity absent)"
         )
-    except ImportError as exc:
-        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-        # the handler's own outcome is unchanged (config-I7214).
-        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": "Scanner",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+        }
+    else:
+        try:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "Scanner", run_date=execution_run_date, window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+            # the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "Scanner",
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Both are
+            # library-internal contract failures, not stage failures — log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[scanner_handler] stage-coverage assertion raised for "
+                "Scanner: %s: %s", type(exc).__name__, exc,
+            )
+            result["stage_coverage"] = {
+                "stage": "Scanner",
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
 
     return result

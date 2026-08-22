@@ -124,11 +124,18 @@ def _run(event, context):
         datetime.fromisoformat(end_time_iso.replace("Z", "+00:00"))
         if end_time_iso else None
     )
-    # This handler's own event carries no run_date — only end_time_iso
-    # ($$.Execution.StartTime, SF-threaded). Its date portion is the
-    # closest available proxy for the cycle this stage belongs to
-    # (config-I7214).
-    _run_date_for_coverage = (end_time or _started).date().isoformat()
+    # This handler's own event carries no `run_date` field — only
+    # end_time_iso ($$.Execution.StartTime, SF-threaded verbatim). Its date
+    # portion IS the execution's own un-normalized run_date (verified
+    # against nousergon-data/infrastructure/step_function.json —
+    # `EvalRollingMean`'s Payload is `end_time_iso.$: "$$.Execution.
+    # StartTime"`, the same source InitializeInput derives $.run_date from),
+    # not a proxy for it. alpha-engine-config-I8155: `_started` (this
+    # handler's OWN invocation time, via `datetime.now(UTC)`) must never
+    # substitute for a genuinely-absent end_time_iso — that was exactly the
+    # forbidden fabrication class. When end_time_iso is absent there is no
+    # execution identity to attribute to; the assertion is skipped below.
+    _execution_run_date = end_time.date().isoformat() if end_time else None
 
     logger.info(
         "[eval_rolling_mean_handler] start end_time_iso=%s",
@@ -307,16 +314,51 @@ def _run(event, context):
     # §2.3a rescope): the assertion lives in the stage's own handler,
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
-    try:
-        from krepis.stage_coverage import assert_stage_coverage
-
-        result["stage_coverage"] = assert_stage_coverage(
-            "EvalRollingMean", run_date=_run_date_for_coverage,
-            window_start=_started,
+    if not _execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument.
+        logger.error(
+            "[eval_rolling_mean_handler] stage-coverage assertion SKIPPED "
+            "for EvalRollingMean: no end_time_iso on this event (execution "
+            "identity absent)",
         )
-    except ImportError as exc:
-        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-        # the handler's own outcome is unchanged (config-I7214).
-        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": "EvalRollingMean",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event (no end_time_iso)",
+        }
+    else:
+        try:
+            from krepis.stage_coverage import assert_stage_coverage
+
+            result["stage_coverage"] = assert_stage_coverage(
+                "EvalRollingMean", run_date=_execution_run_date,
+                window_start=_started,
+            )
+        except ImportError as exc:
+            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+            # the handler's own outcome is unchanged (config-I7214).
+            logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "EvalRollingMean",
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[eval_rolling_mean_handler] stage-coverage assertion "
+                "raised for EvalRollingMean: %s: %s",
+                type(exc).__name__, exc,
+            )
+            result["stage_coverage"] = {
+                "stage": "EvalRollingMean",
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
 
     return result

@@ -160,6 +160,13 @@ class TestSuccessPath:
         read_substrate.assert_called_once()
         build.assert_called_once_with("2026-07-14", _board(), None)
         assert write.call_args.kwargs["target"] == "shadow"
+        # alpha-engine-config-I8155: the krepis.stage_coverage import is
+        # simulated absent here (no stub_stage_coverage fixture requested,
+        # so conftest's autouse default applies) — the handler now records
+        # that as an UNMEASURED verdict rather than omitting the key.
+        stage_coverage = result.pop("stage_coverage", None)
+        assert stage_coverage is not None
+        assert stage_coverage["status"] == "UNMEASURED"
         assert result == {
             "status": "OK",
             "dated_key": "signals_envelope/2026-07-14/signals.json",

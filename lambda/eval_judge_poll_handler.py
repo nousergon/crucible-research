@@ -194,30 +194,59 @@ def _run(event, context):
     }
 
     # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
-    # §2.3a rescope). EvalJudgePoll's own SF Payload carries no run_date
-    # (only batch_id/submit_iso/max_wait_seconds) — the SUBMIT_iso date is
-    # the closest available proxy for the cycle this poll belongs to.
-    # Where even that is unavailable, silence is better than a wrong
-    # attribution (mirrors the ChallengerShadow disambiguation above): skip
-    # the assertion rather than guess today's date.
+    # §2.3a rescope). EvalJudgePoll's own SF Payload carries no `run_date`
+    # field (only batch_id/submit_iso/max_wait_seconds), but `submit_iso` IS
+    # the execution's own identity: ComputeEvalCadence sets it directly from
+    # `$$.Execution.StartTime` (alpha-engine-config-I8155 — verified against
+    # nousergon-data/infrastructure/step_function.json), never normalized
+    # against a trading-day calendar. `submit_iso[:10]` is therefore already
+    # the un-normalized execution run_date, not a proxy for it.
     if submit_iso:
+        _execution_run_date = submit_iso[:10]
         try:
-            _run_date_for_coverage = submit_iso[:10]
             from krepis.stage_coverage import assert_stage_coverage
 
             result["stage_coverage"] = assert_stage_coverage(
-                "EvalJudgePoll", run_date=_run_date_for_coverage,
+                "EvalJudgePoll", run_date=_execution_run_date,
                 window_start=_started,
             )
         except ImportError as exc:
             # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe
             # mode — the handler's own outcome is unchanged (config-I7214).
             logger.error("stage-coverage assertion unavailable: %s", exc)
+            result["stage_coverage"] = {
+                "stage": "EvalJudgePoll",
+                "status": "UNMEASURED",
+                "reason": f"assertion unavailable: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+            # alpha-engine-config-I8155: the krepis landing this arc makes
+            # run_date a required, contract-enforced kwarg (TypeError on
+            # omission, StageCoverageContractError on blank/None). Log
+            # loudly and degrade to UNMEASURED rather than raising out of
+            # the handler.
+            logger.error(
+                "[eval_judge_poll_handler] stage-coverage assertion raised "
+                "for EvalJudgePoll: %s: %s", type(exc).__name__, exc,
+            )
+            result["stage_coverage"] = {
+                "stage": "EvalJudgePoll",
+                "status": "UNMEASURED",
+                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            }
     else:
-        logger.info(
-            "[eval_judge_poll_handler] no submit_iso on event — skipping "
-            "stage-coverage assertion (no reliable run_date to attribute "
-            "to, config-I7214)",
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument — no execution identity is
+        # recoverable from this event at all.
+        logger.error(
+            "[eval_judge_poll_handler] stage-coverage assertion SKIPPED "
+            "for EvalJudgePoll: no submit_iso on this event (execution "
+            "identity absent)",
         )
+        result["stage_coverage"] = {
+            "stage": "EvalJudgePoll",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event (no submit_iso)",
+        }
 
     return result

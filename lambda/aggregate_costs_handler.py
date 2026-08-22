@@ -98,7 +98,16 @@ def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None
     immediately before it returns, rather than a separate end-of-run SF
     state. OBSERVE MODE ONLY — never enables enforcement, never raises.
     Shared by both this handler's terminal returns (OK and the legitimate
-    SKIPPED no-op) since both are real completions, not failures."""
+    SKIPPED no-op) since both are real completions, not failures.
+
+    ``run_date`` here is ``date_str`` == ``event["date"]`` == the SF
+    Payload's ``$.run_date`` verbatim (alpha-engine-config-I8155 — verified
+    against nousergon-data/infrastructure/step_function.json's
+    ``AggregateCosts`` state) — the execution's own un-normalized run_date,
+    never reassigned by this handler. Both call sites already guard against
+    a missing/blank ``date_str`` before reaching here (the handler returns
+    ERROR early), so this never fabricates a substitute.
+    """
     try:
         from krepis.stage_coverage import assert_stage_coverage
 
@@ -109,6 +118,25 @@ def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None
         # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
         # the handler's own outcome is unchanged (config-I7214).
         logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": "AggregateCosts",
+            "status": "UNMEASURED",
+            "reason": f"assertion unavailable: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+        # alpha-engine-config-I8155: the krepis landing this arc makes
+        # run_date a required, contract-enforced kwarg (TypeError on
+        # omission, StageCoverageContractError on blank/None). Log loudly
+        # and degrade to UNMEASURED rather than raising out of the handler.
+        logger.error(
+            "[aggregate_costs_handler] stage-coverage assertion raised for "
+            "AggregateCosts: %s: %s", type(exc).__name__, exc,
+        )
+        result["stage_coverage"] = {
+            "stage": "AggregateCosts",
+            "status": "UNMEASURED",
+            "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+        }
 
 
 @monitor_handler
