@@ -69,7 +69,10 @@ thinktank:
       themes:     # macro + sector theme maintenance
         provider: openrouter
         model: qwen/qwen3-235b-a22b-instruct
-        max_tokens: 4000
+        # Keep in step with private thinktank.yaml themes ceiling
+        # (alpha-engine-config-I8239): reasoning models draw from the same
+        # budget as content; 4000 truncates to empty on themes_sector.
+        max_tokens: 8000
         price_in_per_m: 0.50
         price_out_per_m: 3.00
         structured_outputs: false
