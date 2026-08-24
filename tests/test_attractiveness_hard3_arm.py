@@ -43,7 +43,6 @@ from scoring.universe_membership import (  # noqa: E402
     UniverseMembershipError,
     assert_cut_invariants,
     build_universe_membership,
-    hard3_arm_applicable,
 )
 
 HARD3_CUT = f"{HARD3_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
