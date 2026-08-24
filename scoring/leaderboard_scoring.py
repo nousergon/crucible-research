@@ -508,11 +508,29 @@ class SpecDay:
 
 @dataclass(frozen=True)
 class SpecHistory:
-    """A spec's picks across the cohort, keyed by date, plus its identity."""
+    """A spec's picks across the cohort, keyed by date, plus its identity.
+
+    ``held_dates`` maps each SCORED date to every calendar date that carried
+    the same decision — ``{scored_date: [scored_date, ...carried dates]}``. A
+    loader that writes one artifact per run while the DECISION is re-derived on
+    a slower cadence (``universe_membership/{date}` is written every run; the
+    cut is re-formed on ``cut_refresh_cadence``) must collapse the carried
+    dates into the one they carry, or every horizon's ``n_dates_scored`` counts
+    a held decision once per calendar prefix and overstates the evidence by
+    roughly the hold length (alpha-engine-config-I8269).
+
+    Default empty: a loader whose observations are one-per-decision by
+    construction (every producer/scanner spec) leaves it alone and the
+    consumer treats a missing entry as ``[date]`` — one calendar date, one
+    decision. It is deliberately not a bare count: the dates themselves are
+    what make "the cut was held for four sessions" legible on the artifact
+    rather than inferred from the cadence config.
+    """
 
     name: str
     kind: str  # "champion" | "challenger"
     by_date: dict[str, SpecDay] = field(default_factory=dict)
+    held_dates: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _signal_for_ic(day: SpecDay) -> dict[str, float]:
@@ -884,6 +902,7 @@ def score_multi_horizon(
     horizon_notes: Mapping[int, tuple[str, str]] | None = None,
     population_by_horizon: Mapping[int, Mapping[str, float]] | None = None,
     cohort_spacing_days: int | None = None,
+    cohort_spacing_by_horizon: Mapping[int, int | None] | None = None,
 ) -> dict:
     """Score every arm at EVERY horizon in ``horizons_days`` and assemble one
     leaderboard artifact. PURE — no I/O.
@@ -891,6 +910,13 @@ def score_multi_horizon(
     ``realized_by_horizon`` is ``{horizon_days: {date: {ticker: forward_return}}}``
     — one realized-return map per horizon, all derived by the caller from ONE
     closes panel read.
+
+    ``cohort_spacing_days`` is the fallback trading-day gap between cohort
+    dates; ``cohort_spacing_by_horizon`` overrides it PER HORIZON and is what a
+    caller should pass whenever different horizons score different subsets of
+    the cohort (a long horizon scores only the matured, older dates). Each
+    block records the spacing it used in ``cohort_spacing_days``, so no reader
+    has to reconstruct why one block's ``overlap_lags`` differs from another's.
 
     ``horizon_notes`` optionally carries ``{horizon_days: (status, reason)}``
     for horizons the caller already knows could not be measured (e.g. the
@@ -941,7 +967,20 @@ def score_multi_horizon(
         # 21..252 sessions against the same weekly cohort. Applying one lag
         # count across all three would under-correct the long horizons — which
         # are the MORE distorted ones, not less (alpha-engine-config-I8263).
-        lags = overlap_lags_for(h, cohort_spacing_days)
+        #
+        # The SPACING may also differ per horizon, and on the live board it
+        # does. A 21-session horizon scores only the cohort dates whose window
+        # has MATURED — on 2026-08-21 that was 8 weekly dates spaced ~5
+        # sessions — while the full enumerated cohort runs daily through
+        # August, whose median gap is 1. Deriving the lag from the whole
+        # calendar rather than from the dates a horizon actually used asks for
+        # 20 lags on 8 observations: the HAC estimator then truncates to n-1
+        # and returns a number built from almost no independent information
+        # (measured 2026-08-24, alpha-engine-config-I8263 deliverable 4).
+        # Overlap is a property of the observations that ENTERED the mean.
+        lags = overlap_lags_for(
+            h, (cohort_spacing_by_horizon or {}).get(h, cohort_spacing_days),
+        )
         scored = score_leaderboard(
             champion,
             challengers,
@@ -967,6 +1006,12 @@ def score_multi_horizon(
                 # means genuinely non-overlapping, not "not checked".
                 "overlap_lags": lags,
                 "observations_overlap": lags > 0,
+                # The denominator behind `overlap_lags`, stated rather than
+                # inferable: two blocks on one board can legitimately carry
+                # different spacings (see the per-horizon comment above).
+                "cohort_spacing_days": (
+                    (cohort_spacing_by_horizon or {}).get(h, cohort_spacing_days)
+                ),
                 "specs": scored["specs"],
             }
         )

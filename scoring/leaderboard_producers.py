@@ -701,6 +701,108 @@ def _annotate_arm_measurement_gaps(
             )
 
 
+def _annotate_degraded_inputs(
+    blocks: list[dict],
+    arms: list[SpecHistory],
+    realized_by_horizon: Mapping[int, Mapping[str, Any]],
+) -> dict:
+    """Flag, PER ARM and PER DATE, the cohort dates an arm was ranked on a
+    known-degenerate fundamentals cross-section (alpha-engine-config-I8255 d2).
+
+    Measured 2026-08-24: five vendor fundamental fields (``fcf_yield``,
+    ``gross_margin``, ``roe``, ``revenue_growth_3y``, ``eps_growth_3y``) were
+    saturated placeholders — as few as ONE distinct value across ~899 covered
+    names — on every scanner board inside the window the constant below names,
+    and genuinely populated (738-889 distinct) after it. Three of the six
+    attractiveness pillars therefore carried almost no cross-sectional spread
+    over that window, so a cut formed on one of those dates ranked on
+    materially less information than its own board claimed. ``pe``, ``pb``,
+    ``debt_to_equity`` and ``current_ratio`` were populated throughout.
+
+    The window is CONSUMED from ``scoring.universe_board``, never restated: the
+    producer-side distinctness floor and this flag must agree by construction,
+    and a second copy of the dates is how they stop agreeing.
+
+    PER ARM AND PER DATE, never a board-level boolean. An arm whose cohort
+    dates all postdate the window is unaffected and must not be tarred by a
+    flag that belongs to its co-arms; an arm straddling it needs the affected
+    FRACTION, because "3 of 8 dates" and "8 of 8" are different verdicts about
+    the same board. A promotion consumer reading this board can then refuse,
+    discount, or accept a row on the evidence rather than on the flag's mere
+    presence.
+
+    Returns the board-level summary block; annotates the rows in place.
+    """
+    from scoring.universe_board import (
+        DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW,
+        is_degenerate_fundamentals_run_date,
+    )
+
+    by_name = {a.name: a for a in arms}
+    affected: set[str] = set()
+    for block in blocks:
+        realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
+        for row in block["specs"]:
+            arm = by_name.get(row.get("name"))
+            scored = sorted(
+                d for d in (arm.by_date if arm is not None else ())
+                if realized_h.get(d)
+            )
+            bad = [d for d in scored if is_degenerate_fundamentals_run_date(d)]
+            if not bad:
+                # Explicit null, not a missing key: "checked, clean" and "never
+                # checked" must never render identically (§7.2).
+                row["degraded_input"] = None
+                continue
+            affected.add(row["name"])
+            row["degraded_input"] = {
+                "reason": "degenerate_fundamentals",
+                "window": list(DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW),
+                "dates": bad,
+                "n_dates": len(bad),
+                "n_dates_scored": len(scored),
+                "fraction_of_scored": round(len(bad) / len(scored), 4) if scored else None,
+                "issue": "alpha-engine-config-I8255",
+            }
+    return {
+        "degenerate_fundamentals": {
+            "window": list(DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW),
+            "arms_affected": sorted(affected),
+            "detail": "per-arm, per-date — see each row's `degraded_input`",
+            "issue": "alpha-engine-config-I8255",
+        },
+    }
+
+
+def _annotate_cut_cadence(
+    blocks: list[dict],
+    arms: list[SpecHistory],
+    realized_by_horizon: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """Report the held-vs-scored distinction per arm (I8269), rather than
+    performing the collapse silently.
+
+    ``n_dates_scored`` counts DECISIONS after the carry-forward collapse;
+    ``n_dates_held`` counts the calendar prefixes those decisions spanned. Equal
+    numbers mean every cohort date carried its own fresh cut. A gap means the
+    cut was HELD, and how long is then legible on the artifact instead of being
+    inferred from the cadence config — which is the whole reason the miscount
+    was invisible in the first place.
+    """
+    by_name = {a.name: a for a in arms}
+    for block in blocks:
+        realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
+        for row in block["specs"]:
+            arm = by_name.get(row.get("name"))
+            scored = [
+                d for d in (arm.by_date if arm is not None else ())
+                if realized_h.get(d)
+            ]
+            held = sum(len(arm.held_dates.get(d) or [d]) for d in scored) if arm else 0
+            row["n_dates_held"] = held
+            row["cut_carry_forward"] = held > len(scored)
+
+
 # ── Shadow-artifact → SpecHistory loaders ─────────────────────────────────────
 
 
@@ -1425,6 +1527,11 @@ def _load_cut_specs(
     ``crucible-research-PR648`` renamed the gate cut, and a literal here would
     have silently stopped matching.
 
+    ONE OBSERVATION PER CUT, not per calendar prefix: consecutive dates sharing
+    a ``cut_effective_date`` are one held decision and are collapsed into the
+    first of them, with the hold recorded on ``SpecHistory.held_dates``
+    (alpha-engine-config-I8269 — see the inline comment on the loop).
+
     A cut carries no per-ticker score, so the rank order IS the signal — same
     contract as :func:`_load_scanner_specs`. Membership stores tickers sorted
     alphabetically for the gate cut (set semantics), so its rank-IC is
@@ -1540,9 +1647,33 @@ def _load_cut_specs(
         for name in aliases
     }
     widths: dict[str, int] = {}
-    for d in dates:
+    # ── One CUT, one observation (alpha-engine-config-I8269) ─────────────────
+    # `universe_membership/{date}/membership.json` is written on EVERY scanner
+    # run, but the cut is re-derived on `cut_refresh_cadence()` — under
+    # `weekly`, `carry_forward_cuts` holds the prior run's `cuts` verbatim and
+    # stamps `cut_effective_date` with the date the cut was actually FORMED.
+    # Counting one SpecDay per dated prefix therefore counts a held decision
+    # once per session: five prefixes, one cut, `n_dates_scored: 5`, and every
+    # horizon's evidence overstated by the hold length on the very board
+    # `cut_promotion.decide_cut_champion` reads. The cadence default is
+    # `daily` today, so this is latent rather than live — and the trigger is a
+    # one-line config flip that was deliberately built to need no deploy.
+    #
+    # Collapse on the arm's own `cut_effective_date`, keeping the EARLIEST
+    # enumerated date that carries it (not the effective date itself, which may
+    # predate the enumerated cohort and would then have no realized-return
+    # join). Artifacts written before ~2026-08-10 carry NO `cut_effective_date`
+    # at all: those fall back to their own `run_date`, never to a shared
+    # sentinel — a `None` key would collapse the entire pre-field history into
+    # ONE cohort date and destroy 20+ dates of champion evidence, which is the
+    # alpha-engine-config-I7631 failure in a new guise.
+    first_date_for: dict[str, dict[str, str]] = {}
+    for d in sorted(dates):
         doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d)) or {}
         cuts = doc.get("cuts") or {}
+        effective = doc.get("cut_effective_date")
+        if not (isinstance(effective, str) and len(effective) == 10):
+            effective = d  # pre-field artifact: the run date IS the effective date
         for name, keys in aliases.items():
             tickers = next(
                 (t for t in ((cuts.get(k) or {}).get("tickers") for k in keys) if t),
@@ -1550,12 +1681,37 @@ def _load_cut_specs(
             )
             if not tickers:
                 continue
+            widths[name] = max(widths.get(name, 0), len(tickers))
+            prior = first_date_for.setdefault(name, {}).get(effective)
+            if prior is not None:
+                if set(tickers) == set(hists[name].by_date[prior].ranked):
+                    # Same cut, later prefix: record the hold, not a new
+                    # observation.
+                    hists[name].held_dates.setdefault(prior, [prior]).append(d)
+                    continue
+                # The doc says "held" and THIS arm's picks moved anyway — an
+                # arm re-derived on a different cadence from the one the
+                # artifact stamps. Collapsing it would DISCARD a real
+                # observation, which is the opposite failure and the more
+                # expensive one, so it is scored on its own date and the
+                # disagreement is recorded rather than swallowed.
+                logger.warning(
+                    "[leaderboard] cut %r changed on %s while the artifact "
+                    "reports cut_effective_date=%s (first seen %s) — scoring it "
+                    "as its own observation rather than collapsing a cut that "
+                    "actually moved (alpha-engine-config-I8269)",
+                    name, d, effective, prior,
+                )
             table_key, rank_field = rank_source[name]
             ranked, rank_ordered = _rank_order(
                 list(tickers), doc.get(table_key) or {}, rank_field,
             )
             hists[name].by_date[d] = SpecDay(ranked=ranked, rank_ordered=rank_ordered)
-            widths[name] = max(widths.get(name, 0), len(tickers))
+            hists[name].held_dates[d] = [d]
+            # Keyed on the date it was OBSERVED when the stamped effective date
+            # already resolved to a different cut, so a later carry-forward of
+            # THIS one still collapses onto it.
+            first_date_for[name][effective if prior is None else d] = d
     return [h for h in hists.values() if h.by_date], widths
 
 
@@ -1617,12 +1773,22 @@ def build_cuts_leaderboard(
     resolved from the pointer rather than hardcoded so the row cannot go stale
     against a promotion (§7.5). Every other row is ``kind="challenger"``.
 
-    ``topn_alpha_vs_champion`` is null throughout regardless: each arm is scored
-    in its own single-arm pass (see below), so no pass ever holds two arms to
-    difference. The slot's primary metric is ``topn_alpha_vs_population``, which
-    is comparable across arms precisely because they are count-matched — that is
-    the comparison a promotion consumer reads, and it is by construction, not by
-    failure.
+    ``topn_alpha_vs_champion`` is computed OUTSIDE the single-arm passes, where
+    both arms are in scope (alpha-engine-config-I8263; it was null on every arm
+    on every board before that). It is width-gated: an arm whose width differs
+    from the champion's keeps a null, because a paired difference across widths
+    measures breadth rather than the selection rule. The slot's primary metric
+    remains ``topn_alpha_vs_population``, which is comparable across arms
+    precisely because they are count-matched.
+
+    Every row also carries what the number was measured ON:
+
+    * ``degraded_input`` — the cohort dates this arm was ranked on the
+      known-degenerate fundamentals cross-section, per arm and per date
+      (alpha-engine-config-I8255); explicit ``null`` when clean.
+    * ``n_dates_held`` / ``cut_carry_forward`` — the calendar prefixes the
+      arm's scored DECISIONS spanned, so a held cut is legible rather than
+      counted as fresh evidence (alpha-engine-config-I8269).
 
     OBSERVE-ONLY + FAIL-SOFT, same contract as the sibling producers.
     """
@@ -1667,7 +1833,29 @@ def build_cuts_leaderboard(
         # The overlap denominator, measured from the cohort calendar rather
         # than assumed from the declared weekly cadence (alpha-engine-config
         # -I8263). Every horizon block derives its own Bartlett lag from this.
+        #
+        # Measured per HORIZON from the dates that horizon actually scored, not
+        # once from the whole enumerated prefix list. On 2026-08-21 the two
+        # differ by 5x: the enumerated cohort runs daily through August (median
+        # gap 1 session) while the 21-session horizon had matured only on the 8
+        # WEEKLY dates from May-July (median gap 5). Asking for
+        # ceil(21/1)-1 = 20 lags on 8 observations makes the HAC estimator
+        # truncate to n-1 and return a number carrying almost no independent
+        # information — an SE built on the wrong dependence structure, which is
+        # the defect I8263 exists to remove rather than to relocate. The
+        # whole-cohort spacing stays as the fallback for a horizon whose scored
+        # set is too thin to estimate a spacing from.
         spacing = median_cohort_spacing_days(dates)
+        spacing_by_horizon = {
+            h: (
+                median_cohort_spacing_days(sorted({
+                    d for arm in arms for d in arm.by_date
+                    if (realized_by_horizon.get(h) or {}).get(d)
+                }))
+                or spacing
+            )
+            for h in horizons
+        }
         champion_arm_obj = next((a for a in arms if a.kind == "champion"), None)
 
         merged: dict | None = None
@@ -1691,6 +1879,7 @@ def build_cuts_leaderboard(
                 horizon_notes=horizon_notes,
                 population_by_horizon=population_by_horizon,
                 cohort_spacing_days=spacing,
+                cohort_spacing_by_horizon=spacing_by_horizon,
             )
             for block in scored.get("horizons", []):
                 for row in block.get("specs", []):
@@ -1758,6 +1947,10 @@ def build_cuts_leaderboard(
         merged["n_dates"] = primary_block["n_dates"]
         _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
         _annotate_arm_measurement_gaps("cuts", merged["horizons"], arms, date_str)
+        _annotate_cut_cadence(merged["horizons"], arms, realized_by_horizon)
+        merged["input_quality"] = _annotate_degraded_inputs(
+            merged["horizons"], arms, realized_by_horizon,
+        )
         merged["leaderboard_id"] = "cuts"
         merged["date"] = date_str
         # `merged` is seeded from whichever arm happened to be scored first, so
