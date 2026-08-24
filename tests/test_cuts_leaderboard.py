@@ -828,3 +828,318 @@ def test_unreadable_membership_writes_the_verdict_instead_of_going_silent():
     assert written is not None, "the verdict must reach S3, not just the caller"
     assert written["status"] == "unmeasurable"
     assert "no membership cuts readable" in written["unmeasurable_reason"]
+
+
+# ── Degraded fundamental inputs, per arm and per date (I8255 d2) ─────────────
+#
+# RED on origin/main at c38c2350: no row on any cuts board carries a
+# `degraded_input` key at all, and nothing in `leaderboard_producers` imports
+# the measured window — so a promotion consumer reading the board cannot tell a
+# cut ranked on the saturated-placeholder cross-section from one ranked on real
+# fundamentals.
+
+from scoring.universe_board import (  # noqa: E402
+    DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW,
+)
+
+IN_WINDOW = ["2026-08-05", "2026-08-06"]
+OUT_WINDOW = ["2026-08-25", "2026-08-26"]
+MIXED_DATES = IN_WINDOW + OUT_WINDOW
+
+
+class _MixedWindowS3(_S3):
+    """One arm straddles the degenerate window; another sits entirely outside.
+
+    The board-level boolean this replaces would tar both identically.
+    """
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            d = Key.split("/")[1]
+            cuts = {FEED_CUT_NAME: {"tickers": FEED}, CHAMPION_CUT: {"tickers": GATE}}
+            if d in OUT_WINDOW:
+                # Only present after the fundamentals repair — no degraded date.
+                cuts[PREDICTOR_UNIVERSE_CUT] = {"tickers": CHAMP}
+            return {"Body": _Body(json.dumps({"cuts": cuts}).encode())}
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+    def get_paginator(self, _op):
+        return _DatedPaginator(MIXED_DATES)
+
+
+class _DatedPaginator:
+    def __init__(self, dates):
+        self._dates = dates
+
+    def paginate(self, Bucket, Prefix):  # noqa: N803
+        yield {"Contents": [
+            {"Key": f"{Prefix}{d}/membership.json"} for d in self._dates
+        ] + [{"Key": f"{Prefix}latest.json"}]}
+
+
+@pytest.fixture
+def mixed_built():
+    s3 = _MixedWindowS3()
+    realized = {
+        d: dict.fromkeys(FEED + GATE + CHAMP, 0.01) | {"SPY": 0.005}
+        for d in MIXED_DATES
+    }
+    population = dict.fromkeys(MIXED_DATES, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: realized, 252: realized},
+            {},
+            {21: population, 126: population, 252: population},
+        ),
+    ):
+        out = build_cuts_leaderboard(s3, "b", "2026-08-27")
+    return out, s3
+
+
+def test_degraded_input_is_flagged_per_arm_and_per_date(mixed_built):
+    """Five vendor fundamental fields were saturated placeholders — as few as
+    ONE distinct value across ~899 names — on every scanner board dated
+    2026-08-03..2026-08-19 (measured 2026-08-24). An arm ranked on those dates
+    was ranked on three near-constant pillars, and the board must say so
+    without also condemning an arm that never scored a date in the window."""
+    lb = out_lb(mixed_built)
+    block = lb["horizons"][0]
+    rows = {r["name"]: r for r in block["specs"]}
+
+    straddling = rows[FEED_CUT_NAME]["degraded_input"]
+    assert straddling is not None
+    assert straddling["dates"] == IN_WINDOW
+    assert straddling["n_dates"] == 2
+    assert straddling["n_dates_scored"] == 4
+    assert straddling["fraction_of_scored"] == 0.5
+    assert straddling["reason"] == "degenerate_fundamentals"
+
+    # The arm that only ever scored post-repair dates carries an explicit null:
+    # "checked, clean" must never render as "never checked" (§7.2).
+    assert PREDICTOR_UNIVERSE_CUT in rows
+    assert rows[PREDICTOR_UNIVERSE_CUT]["degraded_input"] is None
+
+    assert lb["input_quality"]["degenerate_fundamentals"]["arms_affected"] == sorted(
+        {FEED_CUT_NAME, CHAMPION_CUT}
+    )
+
+
+def test_the_degenerate_window_is_consumed_not_restated(mixed_built):
+    """A second copy of the dates is how the producer-side distinctness floor
+    and the consumer-side flag stop agreeing. The window is imported from
+    `scoring.universe_board`, where PR735 put it."""
+    import inspect
+
+    import scoring.leaderboard_producers as lp
+
+    src = inspect.getsource(lp)
+    assert "2026-08-03" not in src, "the window literal must not be restated here"
+    assert "is_degenerate_fundamentals_run_date" in src
+
+    lb = out_lb(mixed_built)
+    assert lb["input_quality"]["degenerate_fundamentals"]["window"] == list(
+        DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW
+    )
+
+
+# ── One cut, one observation (alpha-engine-config-I8269) ────────────────────
+#
+# RED on origin/main at c38c2350: `_load_cut_specs` writes one SpecDay per
+# dated prefix, so three prefixes carrying ONE held cut score as three
+# independent cohort dates and every horizon's evidence is overstated by the
+# hold length — on the board `cut_promotion.decide_cut_champion` reads.
+
+HELD_DATES = ["2026-07-06", "2026-07-07", "2026-07-08", "2026-07-13"]
+FRESH_CUT = [f"F{i:03d}" for i in range(60)]
+
+
+class _HeldCutS3(_S3):
+    """Weekly-cadence membership: three prefixes carry ONE cut, then a re-cut.
+
+    Shaped exactly as `carry_forward_cuts` writes it under
+    `CUT_REFRESH_CADENCE=weekly` — the cuts are byte-identical and
+    `cut_effective_date` points back at the date the cut was FORMED.
+    """
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            d = Key.split("/")[1]
+            fresh = d == "2026-07-13"
+            body = {
+                "run_date": d,
+                "cut_effective_date": "2026-07-13" if fresh else "2026-07-06",
+                "cut_refresh_cadence": "weekly",
+                "cuts": {
+                    FEED_CUT_NAME: {"tickers": FRESH_CUT if fresh else FEED},
+                    CHAMPION_CUT: {"tickers": GATE},
+                },
+            }
+            return {"Body": _Body(json.dumps(body).encode())}
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+    def get_paginator(self, _op):
+        return _DatedPaginator(HELD_DATES)
+
+
+class _NoEffectiveDateS3(_HeldCutS3):
+    """Pre-2026-08-10 artifacts carry NO `cut_effective_date` at all."""
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            d = Key.split("/")[1]
+            body = {
+                "run_date": d,
+                "cuts": {FEED_CUT_NAME: {"tickers": FEED + [f"X{d[-2:]}"]}},
+            }
+            return {"Body": _Body(json.dumps(body).encode())}
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+
+def test_a_held_cut_is_one_cohort_date_not_one_per_prefix():
+    """`universe_membership/{date}` is written on EVERY run; the cut is
+    re-derived on `cut_refresh_cadence()`. Three prefixes, one cut, one
+    observation — and the hold recorded rather than performed silently."""
+    arms, widths = _load_cut_specs(_HeldCutS3(), "b", HELD_DATES)
+    feed = next(a for a in arms if a.name == FEED_CUT_NAME)
+    assert sorted(feed.by_date) == ["2026-07-06", "2026-07-13"]
+    assert feed.held_dates == {
+        "2026-07-06": ["2026-07-06", "2026-07-07", "2026-07-08"],
+        "2026-07-13": ["2026-07-13"],
+    }
+    # The width is unchanged by the collapse — it is a property of the cut.
+    assert widths[FEED_CUT_NAME] == 60
+    # The collapse keeps the EARLIEST prefix carrying the effective date, so
+    # the observation still joins a realized-return map keyed by cohort date.
+    assert feed.by_date["2026-07-06"].ranked, "the scored day must carry picks"
+
+
+def test_an_artifact_with_no_cut_effective_date_falls_back_to_its_run_date():
+    """A `None` key would collapse the whole pre-field history into ONE cohort
+    date and destroy 20+ dates of champion evidence — the alpha-engine-config
+    -I7631 failure in a new guise. Every such date is counted, and counted
+    once."""
+    arms, _ = _load_cut_specs(_NoEffectiveDateS3(), "b", HELD_DATES)
+    feed = next(a for a in arms if a.name == FEED_CUT_NAME)
+    assert sorted(feed.by_date) == sorted(HELD_DATES)
+    assert feed.held_dates == {d: [d] for d in HELD_DATES}
+
+
+@pytest.fixture
+def held_built():
+    s3 = _HeldCutS3()
+    realized = {
+        d: dict.fromkeys(FEED + GATE + FRESH_CUT, 0.01) | {"SPY": 0.005}
+        for d in HELD_DATES
+    }
+    population = dict.fromkeys(HELD_DATES, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: realized, 252: realized},
+            {},
+            {21: population, 126: population, 252: population},
+        ),
+    ):
+        out = build_cuts_leaderboard(s3, "b", "2026-07-14")
+    return out, s3
+
+
+def test_the_board_reports_held_versus_scored_per_arm(held_built):
+    """Reported, not performed silently: `n_dates_scored` counts DECISIONS,
+    `n_dates_held` counts the calendar prefixes they spanned. A gap between
+    them is the cut being HELD, legible on the artifact instead of inferred
+    from the cadence config."""
+    lb = out_lb(held_built)
+    block = lb["horizons"][0]
+    rows = {r["name"]: r for r in block["specs"]}
+    feed = rows[FEED_CUT_NAME]
+    assert feed["n_dates_scored"] == 2
+    assert feed["n_dates_held"] == 4
+    assert feed["cut_carry_forward"] is True
+    # The gate cut is byte-identical on every prefix here too, so it collapses
+    # onto the same two effective dates.
+    assert rows[CHAMPION_CUT]["n_dates_held"] == 4
+
+
+def test_the_overlap_correction_uses_the_dates_the_horizon_actually_scored():
+    """Overlap is a property of the observations that ENTERED the mean.
+
+    On the live board the two differ by 5x: the enumerated cohort runs daily
+    through August (median gap 1 session) while the 21-session horizon had
+    matured only on 8 WEEKLY dates. Deriving the lag from the whole calendar
+    asks for ceil(21/1)-1 = 20 lags on 8 observations, which the HAC estimator
+    truncates to n-1 and answers from almost no independent information
+    (measured 2026-08-24, alpha-engine-config-I8263 d4).
+    """
+    daily = ["2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10",
+             "2026-07-17", "2026-07-24", "2026-07-31"]
+    scored = ["2026-07-10", "2026-07-17", "2026-07-24", "2026-07-31"]  # weekly
+
+    class _S(_S3):
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+                d = Key.split("/")[1]
+                body = {"run_date": d, "cut_effective_date": d,
+                        "cuts": {FEED_CUT_NAME: {"tickers": FEED + [f"Y{d[-2:]}"]}}}
+                return {"Body": _Body(json.dumps(body).encode())}
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        def get_paginator(self, _op):
+            return _DatedPaginator(daily)
+
+    # Only the weekly subset has a matured 21-session window.
+    realized = {
+        d: dict.fromkeys(FEED + [f"Y{d[-2:]}"], 0.01) | {"SPY": 0.005} for d in scored
+    }
+    population = dict.fromkeys(scored, 0.002)
+    with patch(
+        "scoring.leaderboard_producers._resolve_realized_returns_by_horizon",
+        return_value=(
+            {21: realized, 126: {}, 252: {}},
+            {},
+            {21: population, 126: {}, 252: {}},
+        ),
+    ):
+        out = build_cuts_leaderboard(_S(), "b", "2026-08-01")
+
+    block = next(b for b in out["leaderboard"]["horizons"] if b["horizon_days"] == 21)
+    assert block["cohort_spacing_days"] == 5, block
+    assert block["overlap_lags"] == 4, block  # ceil(21/5) - 1
+
+
+class _MovedUnderHoldS3(_HeldCutS3):
+    """The artifact stamps a HELD effective date while this arm's picks move.
+
+    An arm re-derived on a different cadence from the one the doc stamps. The
+    collapse must not eat a real observation on the strength of a field that
+    describes a different arm.
+    """
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
+            d = Key.split("/")[1]
+            body = {
+                "run_date": d,
+                "cut_effective_date": "2026-07-06",
+                "cuts": {FEED_CUT_NAME: {"tickers": FEED + [f"W{d[-2:]}"]}},
+            }
+            return {"Body": _Body(json.dumps(body).encode())}
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+
+def test_a_cut_that_actually_moved_is_never_collapsed_into_the_held_one():
+    """Discarding a real observation is the opposite failure to counting a held
+    one twice, and the more expensive of the two: the evidence is gone rather
+    than overstated. The collapse is gated on the arm's picks being identical,
+    not on the stamped field alone."""
+    arms, _ = _load_cut_specs(_MovedUnderHoldS3(), "b", HELD_DATES)
+    feed = next(a for a in arms if a.name == FEED_CUT_NAME)
+    assert sorted(feed.by_date) == sorted(HELD_DATES)
+    assert feed.held_dates == {d: [d] for d in HELD_DATES}
