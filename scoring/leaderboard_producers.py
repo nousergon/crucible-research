@@ -1386,6 +1386,7 @@ def _load_cut_specs(
         FEED_CUT_NAME,
         GATE_BASELINE_CUT,
         GATE_LEGACY_CUT,
+        HARD3_CUT_PREFIX,
         MOMZERO_CUT_PREFIX,
         OBSERVE_ONLY_CUTS,
         PREDICTOR_UNIVERSE_CUT,
@@ -1397,14 +1398,15 @@ def _load_cut_specs(
     tech_score_cut = f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
     momzero_cut = f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
     mom121_cut = f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+    hard3_cut = f"{HARD3_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
     # The slot's arm set is the REGISTRY's, not this module's. An arm that the
     # registry declares and the board does not score is the registered-but-
     # unscored rumour champion-challenger-policy.md §3 warns about, and
     # non-promotability must never quietly become non-measurement
     # (alpha-engine-config-I8060).
-    if set(OBSERVE_ONLY_CUTS) != {tech_score_cut, momzero_cut, mom121_cut}:
+    if set(OBSERVE_ONLY_CUTS) != {tech_score_cut, momzero_cut, mom121_cut, hard3_cut}:
         raise RuntimeError(
-            f"the cuts board scores {sorted((tech_score_cut, momzero_cut, mom121_cut))} "
+            f"the cuts board scores {sorted((tech_score_cut, momzero_cut, mom121_cut, hard3_cut))} "
             f"but the registry declares OBSERVE_ONLY_CUTS={sorted(OBSERVE_ONLY_CUTS)} — "
             "an arm in one and not the other is either unscored or unregistered. "
             "Raised rather than asserted: `python -O` strips an assert, and this "
@@ -1427,20 +1429,21 @@ def _load_cut_specs(
         PREDICTOR_UNIVERSE_CUT: (PREDICTOR_UNIVERSE_CUT,),
         CHAMPION_CUT: (CHAMPION_CUT, GATE_BASELINE_CUT, GATE_LEGACY_CUT),
         # ── The universe-cut SLOT's arms (alpha-engine-config-I8026) ────────
-        # The three above are funnel STAGES. These three are competing RULES in
-        # the slot `FEED_CUT_NAME` currently holds, and until this change none
-        # of them was scored anywhere. `cut_promotion.decide_cut_champion`
+        # The three above are funnel STAGES. These are competing RULES in the
+        # slot `FEED_CUT_NAME` currently holds, and until I8026 none of them
+        # was scored anywhere. `cut_promotion.decide_cut_champion`
         # decides between `attractiveness_top_60` and `tech_score_top_60` from
         # THIS board, so it was reading a board that had never carried one of
         # the two arms it compares — a promotion engine structurally unable to
         # promote, whose every record would have read `arm_row_missing`.
         #
-        # All three are emitted at ATTRACTIVENESS_FEED_TOP_N, so the slot is
+        # All of them are emitted at ATTRACTIVENESS_FEED_TOP_N, so the slot is
         # count-matched by construction (champion-challenger-policy.md §4) and
         # `per_arm_width` resolves them all to the same 60.
         tech_score_cut: (tech_score_cut,),
         momzero_cut: (momzero_cut,),
         mom121_cut: (mom121_cut,),
+        hard3_cut: (hard3_cut,),
     }
     # Where each arm's RANK order lives in the membership artifact. The cut's
     # own `tickers` list is alphabetical for every cut, so it is never it.
@@ -1463,6 +1466,7 @@ def _load_cut_specs(
         # give them one.
         momzero_cut: ("__no_rank_table__", "attractiveness_rank"),
         mom121_cut: ("__no_rank_table__", "attractiveness_rank"),
+        hard3_cut: ("__no_rank_table__", "attractiveness_rank"),
     }
     # §3: the champion is scored on the same axis as the challengers, and a
     # leaderboard whose champion field is null is a broken leaderboard — for a
