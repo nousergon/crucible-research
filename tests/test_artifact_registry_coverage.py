@@ -185,6 +185,22 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # config#1393). One PUT site each.
     "scoring/attractiveness_history.py": 1,
     "scoring/attractiveness_trajectory.py": 1,
+    # The universe-cut slot's APPEND-ONLY weekly performance ledger
+    # (research/cuts_weekly_ledger/ledger.parquet, alpha-engine-config-I8261 —
+    # Brian's ruling 2026-08-24 that the slot is graded on weekly
+    # holding-period returns rather than forward returns from a cohort date).
+    # One PUT site: `append_week` rewrites the single parquet after refusing to
+    # replace any already-written (arm, week) row.
+    #
+    # ARTIFACT_REGISTRY row DEFERRED, not waived — register-with-or-after-
+    # producer, the same rule the two lines above landed under (config#1393).
+    # NOTHING WRITES THIS YET: this PR ships the module, and the scanner-run
+    # wiring is a separate PR gated on alpha-engine-config-I8262 backfilling the
+    # three arms that have no history. A freshness row on a prefix no producer
+    # writes would alarm on an artifact that was never due, which is the
+    # inverse of the silent-absence failure the registry exists to catch. The
+    # row lands in the wiring PR, tracked as alpha-engine-config-I8264.
+    "scoring/weekly_ledger.py": 1,
     # research_consolidated_morning (config-I3290 port). PUT site moved here
     # from the retired archive/manager.py::save_consolidated_report — same
     # S3 key (consolidated/{run_date}/morning.md), already registered in
