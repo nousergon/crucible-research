@@ -380,6 +380,56 @@ asked ("does momentum belong here at all?") and, if it wins, the follow-up
 experiment is a tuned weight somewhere in (0, 1/6) — which is only worth
 running once the sign is known."""
 
+# ── Fundamentals-half arm (alpha-engine-config-I8256) ──────────────────────
+# The six pillars split cleanly by input provenance:
+#
+#   price / balance-sheet   value, momentum, defensiveness — derived from the
+#                           price series and from balance-sheet ratios that
+#                           carried real cross-sectional spread throughout.
+#   vendor fundamentals     quality, growth, stewardship — roe, gross_margin,
+#                           revenue_growth_3y, eps_growth_3y, fcf_yield.
+#
+# The second group was placeholder-saturated until 2026-08-20
+# (alpha-engine-config-I8255: `fcf_yield` held ONE distinct value across 899
+# names, `gross_margin` two, `roe` fourteen), so for weeks the six-pillar
+# champion was a three-pillar ranking by accident and nobody could see it —
+# `pillar_coverage` read 897-of-903 the whole time, because a placeholder is
+# not null.
+#
+# This arm asks the question that accident raises but cannot answer: now that
+# the vendor half has real spread for the first time, does it earn its half of
+# the weight? The surviving three are close to the classical value + momentum +
+# low-volatility trio, which makes this the natural null hypothesis rather than
+# an arbitrary ablation.
+#
+# It is NOT a reconstruction of the pre-2026-08-20 state. That ranking ran on
+# placeholders, is not point-in-time reproducible, and backfilling it onto
+# those dates would enter the cohort as a near-clone of the champion —
+# poisoning the exact comparison this arm exists to make. The series starts at
+# the first cut built on repaired fundamentals.
+HARD3_CUT_PREFIX = "attractiveness_hard3_top_"
+
+HARD3_PILLAR_WEIGHTS: dict[str, float] = {
+    "quality": 0.0,
+    "value": 1.0 / 3.0,
+    "momentum": 1.0 / 3.0,
+    "growth": 0.0,
+    "stewardship": 0.0,
+    "defensiveness": 1.0 / 3.0,
+}
+"""Zero on the vendor half, not merely reduced — the same reasoning as
+:data:`MOMZERO_PILLAR_WEIGHTS`. A partial weight produces a ranking that is
+neither the champion's nor a clean counterfactual, so a win or loss cannot be
+attributed to the half under test. If this arm wins, the follow-up experiment
+is a tuned weight somewhere in (0, 1/2); that is only worth running once the
+sign is known."""
+
+_HARD3_CUT_NS = (ATTRACTIVENESS_FEED_TOP_N,)
+"""Width 60 only, count-matched to the champion (champion-challenger-policy.md
+§4). Deliberately NOT also emitted at 20: a second width doubles the arm count
+without asking a second question, and ``attractiveness_top_20`` — the only
+other 20-wide arm — has never scored a cohort date."""
+
 _DEFAULT_BUCKET = "alpha-engine-research"
 
 
@@ -500,6 +550,7 @@ OBSERVE_ONLY_CUTS: tuple[str, ...] = (
     f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
     f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
     f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
+    f"{HARD3_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
 )
 """Arms that are SCORED every cycle but cannot hold the feed.
 
@@ -1306,10 +1357,28 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
     # VACUITY — if the challenger resolves to the SAME membership as the
     # champion, every assertion still passes and the leaderboard reports a
     # well-formed comparison of an arm against itself (§4, alpha-engine-config
-    # -I6429). The two definitions differ only in the momentum pillar, so an
-    # identical top-20 is the signature of the override having silently not
-    # applied — precisely the failure this must not render as a tie.
-    for prefix, n in [(p, n) for p in (CHALLENGER_CUT_PREFIX, MOMZERO_CUT_PREFIX) for n in _CHALLENGER_CUT_NS]:
+    # -I6429). Each arm below differs from the champion in exactly one declared
+    # way, so an identical cut is the signature of that override having
+    # silently not applied — precisely the failure this must not render as a
+    # tie.
+    #
+    # EXACT equality raises; NEAR-identity is recorded, not raised
+    # (alpha-engine-config-I8256). champion-challenger-policy.md §4 requires
+    # near-identity to be VISIBLE — an equality guard reported 8 collision
+    # dates across a window in which every date was a clone, because two call
+    # sites reading the factor store separately disagreed about 2 of 60 names.
+    # But a threshold that reds the Scanner run is the wrong instrument for it:
+    # membership is load-bearing for the predictor's universe, and an arm may
+    # legitimately overlap the champion heavily on a given week without being
+    # broken. So the overlap FRACTION is written onto every challenger cut,
+    # where the board and the console can flag a run of high values, and only
+    # arithmetic identity — which cannot happen unless the definition failed to
+    # apply — stops the run.
+    _slot_arm_widths: list[tuple[str, int]] = [
+        *[(p, n) for p in (CHALLENGER_CUT_PREFIX, MOMZERO_CUT_PREFIX) for n in _CHALLENGER_CUT_NS],
+        *[(HARD3_CUT_PREFIX, n) for n in _HARD3_CUT_NS],
+    ]
+    for prefix, n in _slot_arm_widths:
         challenger_cut = _cuts.get(f"{prefix}{n}")
         if challenger_cut is None:
             continue
@@ -1321,16 +1390,25 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
                 f"narrow the arm and turn a horizon comparison into a breadth one."
             )
         counterpart = _cuts.get(f"attractiveness_top_{n}")
-        if counterpart is not None and set(challenger_cut["tickers"]) == set(counterpart["tickers"]):
+        if counterpart is None:
+            continue
+        picked = set(challenger_cut["tickers"])
+        champion_picked = set(counterpart["tickers"])
+        if picked == champion_picked:
             raise UniverseMembershipError(
                 f"universe membership {run_date}: vacuous challenger — "
                 f"{prefix}{n} resolves to the same {n} names as "
-                f"attractiveness_top_{n}. The two composites differ in the "
-                f"momentum pillar, so identical membership means the challenger "
-                f"definition did not apply. Scoring this would compare the "
-                f"champion against itself and report it as a tie "
+                f"attractiveness_top_{n}. This arm differs from the champion by "
+                f"one declared change, so identical membership means the "
+                f"challenger definition did not apply. Scoring this would "
+                f"compare the champion against itself and report it as a tie "
                 f"(champion-challenger-policy.md §4)."
             )
+        # Divided by the WIDER set, never the intersection: a narrow arm fully
+        # contained in a wide one is a different (narrower) arm, not a perfect
+        # clone, and dividing by the intersection would score it as one.
+        wider = max(len(picked), len(champion_picked)) or 1
+        challenger_cut["champion_overlap"] = round(len(picked & champion_picked) / wider, 4)
 
 
 def compute_turnover(current: dict, prior: dict | None) -> dict | None:
@@ -1421,6 +1499,7 @@ def build_universe_membership(
     gate_eligible_tech_scores: dict[str, float] | None = None,
     challenger_attractiveness: dict[str, float] | None = None,
     momzero_attractiveness: dict[str, float] | None = None,
+    hard3_attractiveness: dict[str, float] | None = None,
     scanned_universe: list[str] | None = None,
     generated_at: str | None = None,
     backfilled_from: str | None = None,
@@ -1631,6 +1710,25 @@ def build_universe_membership(
                 "size": len(tickers),
                 "tickers": tickers,
                 "source": (f"factors/profiles/{run_date}/by_ticker.json::attractiveness_score@momentum_weight=0"),
+            }
+
+    # Fundamentals-half arm (alpha-engine-config-I8256). Same champion factor
+    # profiles, same pillar scores — only the WEIGHT vector differs, exactly as
+    # for momzero, so the two arms and the champion cannot disagree about
+    # anything except how much each half of the composite counted. Same
+    # absent-is-a-miss rule: the cuts are omitted rather than faked.
+    if hard3_attractiveness:
+        hard3_ranks = _rank_table(hard3_attractiveness)
+        for n in _HARD3_CUT_NS:
+            tickers = _top_n(hard3_ranks, n)
+            cuts[f"{HARD3_CUT_PREFIX}{n}"] = {
+                "basis": "attractiveness_rank_hard3",
+                "size": len(tickers),
+                "tickers": tickers,
+                "source": (
+                    f"factors/profiles/{run_date}/by_ticker.json"
+                    "::attractiveness_score@quality=growth=stewardship=0"
+                ),
             }
 
     assert_cut_invariants({"cuts": cuts}, run_date)
@@ -1974,27 +2072,42 @@ def momentum_path_tech_scores(eval_log: list[dict] | None) -> dict[str, float]:
     return out
 
 
-def champion_momentum_weight(bucket: str | None = None, s3_client: Any = None) -> float:
-    """The momentum pillar's weight in the LIVE champion composite.
+def champion_pillar_weights(bucket: str | None = None, s3_client: Any = None) -> dict[str, float]:
+    """The LIVE champion composite's pillar weights, or all-zero on a read failure.
 
     Read from the same chokepoint the cut producer uses
     (``universe_board._load_pillar_weights`` → the optional private
     ``config/factor_attractiveness_weights.json``, equal-weight when absent),
     so this can never disagree with the weights the champion cut was actually
-    ranked by. Returns 0.0 on any read failure — the conservative direction,
-    because a zero reading only suppresses observe-only arms.
+    ranked by.
+
+    All-zero on failure is the conservative direction and it is uniform across
+    every caller: a zero reading only ever SUPPRESSES an observe-only arm, and
+    suppression is recorded as "inapplicable" rather than as a miss. Returning
+    the equal-weight default here instead would let an unreadable config
+    silently arm every weight-vector arm against a champion nobody had read.
     """
     from scoring.universe_board import _load_pillar_weights
 
     try:
-        return float(_load_pillar_weights(bucket, s3_client).get("momentum", 0.0))
-    except Exception as exc:  # noqa: BLE001 — gating an observe-only arm
+        return {str(k): float(v) for k, v in (_load_pillar_weights(bucket, s3_client) or {}).items()}
+    except Exception as exc:  # noqa: BLE001 — gating observe-only arms
         logger.info(
-            "[universe_membership] champion momentum weight unreadable (%s) — "
-            "treating as 0 and suppressing the momentum arms",
+            "[universe_membership] champion pillar weights unreadable (%s) — "
+            "treating every weight as 0 and suppressing the weight-vector arms",
             exc,
         )
-        return 0.0
+        return {}
+
+
+def champion_momentum_weight(bucket: str | None = None, s3_client: Any = None) -> float:
+    """The momentum pillar's weight in the LIVE champion composite.
+
+    One projection of :func:`champion_pillar_weights`, not a second reader of
+    the same object — two readers of one config is the multi-writer drift the
+    chokepoint exists to prevent.
+    """
+    return float(champion_pillar_weights(bucket, s3_client).get("momentum", 0.0))
 
 
 def momentum_arms_applicable(bucket: str | None = None, s3_client: Any = None) -> bool:
@@ -2077,6 +2190,84 @@ def momzero_attractiveness_for_run(
         logger.info(
             "[universe_membership] momzero arm not computed (%s) — cuts omitted, "
             "recorded as a miss for that arm (I7573)",
+            exc,
+        )
+        return None
+    return {
+        ticker: rec["attractiveness_score"]
+        for ticker, rec in scored.items()
+        if isinstance(rec, dict) and rec.get("attractiveness_score") is not None
+    }
+
+
+def hard3_arm_applicable(bucket: str | None = None, s3_client: Any = None) -> bool:
+    """Whether the fundamentals-half arm can express a real experiment.
+
+    Structural, not empirical — the same shape as
+    :func:`momentum_arms_applicable` and for the same reason. This arm zeroes
+    the quality / growth / stewardship weights. If the LIVE champion already
+    weights all three at zero, this arm IS the champion by arithmetic, it would
+    emit a cut identical to ``attractiveness_top_60``, and the §4 vacuity guard
+    would correctly fire — turning a legal configuration into a RED Scanner run
+    on an artifact the predictor's universe depends on.
+
+    champion-challenger-policy.md §4 names this case explicitly: an arm that
+    shares the champion's ranking is ``inapplicable``, not vacuous, and is
+    refused BEFORE it is scored rather than alerted on daily. So the test lives
+    here, upstream of the guard, and the arm resumes automatically with no code
+    change the moment the champion gives the vendor half weight again.
+    """
+    weights = champion_pillar_weights(bucket, s3_client)
+    return any(float(weights.get(p, 0.0)) > 1e-9 for p in ("quality", "growth", "stewardship"))
+
+
+def hard3_attractiveness_for_run(
+    run_date: str,
+    *,
+    scanned_universe: list[str] | None = None,
+    bucket: str | None = None,
+    s3_client: Any = None,
+) -> dict[str, float] | None:
+    """``{ticker: attractiveness_score}`` with the vendor-fundamentals half zeroed.
+
+    Reads the CHAMPION's factor profiles — not a shadow copy — because this arm
+    changes only the weight vector, not the pillar scores. Sharing the input
+    artifact is what guarantees the arm and the champion cannot differ for any
+    other reason; recomputing profiles here would reintroduce the data-vintage
+    difference the experiment exists to exclude.
+
+    ``scanned_universe`` is threaded through for the COMPARISON, not only for
+    correctness: this arm and the champion must rank the same population, or
+    the leaderboard attributes a population difference to the weight vector
+    (champion-challenger-policy.md §4).
+
+    Fail-soft: an observe-only arm must never red a Scanner run. Returns None
+    (not an empty dict, not a champion fallback) so the cut is omitted and
+    recorded as a miss for this arm alone.
+    """
+    from scoring.universe_board import (
+        _read_factor_profiles,
+        attractiveness_from_factor_profiles,
+    )
+
+    if not hard3_arm_applicable(bucket, s3_client):
+        logger.info(
+            "[universe_membership] hard3 arm inapplicable — the live champion "
+            "already weights quality, growth and stewardship at 0, so this arm "
+            "IS the champion; cut omitted (not a miss, not a tie)"
+        )
+        return None
+
+    try:
+        profiles = _read_factor_profiles(run_date, bucket, s3_client) or {}
+        if not profiles:
+            return None
+        profiles = _restrict_to_scanned_universe(profiles, scanned_universe, arm=f"hard3 arm {run_date}")
+        scored = attractiveness_from_factor_profiles(profiles, pillar_weights=HARD3_PILLAR_WEIGHTS)
+    except Exception as exc:  # noqa: BLE001 — observe-only arm
+        logger.info(
+            "[universe_membership] hard3 arm not computed (%s) — cut omitted, "
+            "recorded as a miss for that arm (alpha-engine-config-I8256)",
             exc,
         )
         return None
@@ -2190,6 +2381,9 @@ def compute_and_write_universe_membership(
             run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client
         ),
         momzero_attractiveness=momzero_attractiveness_for_run(
+            run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client
+        ),
+        hard3_attractiveness=hard3_attractiveness_for_run(
             run_date, scanned_universe=scanned_universe, bucket=bucket, s3_client=s3_client
         ),
         scanned_universe=scanned_universe,
