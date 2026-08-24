@@ -174,6 +174,19 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # operator-invoked reconstruction script, not a pipeline producer, hence no
     # ARTIFACT_REGISTRY row of its own beyond the producer's.
     "scripts/backfill_universe_membership.py": 1,
+    # One-time historical reconstruction of the weight-vector challenger arms
+    # (alpha-engine-config-I8262). Two PUT sites, both operator-invoked behind an
+    # explicit --write (the default is a dry run):
+    #   1. universe_membership/{date}/membership.json — the SAME dated key the
+    #      live producer writes and the registry already covers; the backfill
+    #      ADDS arm cuts to it and never touches the latest pointer or a runs/
+    #      copy. No new row: same artifact, same prefix, same freshness SLA.
+    #   2. research/cut_backfill/{stamp}.json — the run's own per-arm
+    #      contamination report. Written once per deliberate invocation, on no
+    #      cadence, with no consumer that degrades on its absence, so it carries
+    #      no freshness SLA and gets a per-file PUT pin only (same rationale as
+    #      evals/judge.py's sidecar and scoring/leaderboard_producers.py).
+    "scripts/backfill_cut_arms.py": 2,
     # Per-stock attractiveness HISTORY parquet
     # (scanner/universe/history/attractiveness_history.parquet) + the weekly
     # TRAJECTORY signal (scanner/universe/trajectory/{date}.json + latest).
