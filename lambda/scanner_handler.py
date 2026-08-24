@@ -528,6 +528,85 @@ def _run(event, context):
         membership_key,
     )
 
+    # ── Weekly cut ledger (alpha-engine-config-I8264) ───────────────────────
+    # The week the cut just written ENDS is the week the PRIOR cut was held,
+    # and this is the moment it becomes both complete and cheap to price. One
+    # run records at most that one week; nothing here walks history (a
+    # backfilled week is not immune to the 2026-08-20 fundamentals restatement,
+    # I8255, and mixing the two provenances inside an append-only store would
+    # destroy the one property it has).
+    #
+    # PLACED BEFORE the promotion block on purpose. `record_completed_week`
+    # resolves the serving arm from the live pointer (§7.5), and the promotion
+    # engine below can MOVE that pointer inside this same invocation — reading
+    # it afterwards would attribute the incoming champion to a week the
+    # outgoing one served.
+    #
+    # FAIL-SOFT + ALARMED, the ARCHITECTURE §61(a) carve-out rather than §61's
+    # raise-after-the-primary-deliverable default. Raising here would abort the
+    # two blocks below, and the second of them WRITES THE LIVE CHAMPION POINTER
+    # the sector teams resolve their feed from — so an observe-only ledger
+    # would be able to withhold a live control decision. The failure is never
+    # silent: an `unmeasurable` week (a week that closed and could not be
+    # priced) raises an observe alert and lands in the summary, which is the
+    # §7.2 invariant this ledger's whole arc is about.
+    ledger_status: dict = {"status": "not_attempted"}
+    logger.info("[scanner_handler] attempting weekly cut ledger run_date=%s", run_date)
+    try:
+        from scoring.universe_membership import read_latest_membership
+        from scoring.weekly_ledger import record_completed_week
+
+        _membership_doc = read_latest_membership(bucket=bucket, s3_client=s3_client)
+        if not _membership_doc:
+            ledger_status = {
+                "status": "unmeasurable",
+                "reason": "membership_unreadable",
+                "detail": (
+                    "universe_membership/latest.json was not readable immediately "
+                    "after this run wrote it"
+                ),
+            }
+        else:
+            ledger_status = record_completed_week(
+                _membership_doc,
+                bucket=bucket,
+                s3_client=s3_client,
+                market_regime=market_regime,
+            )
+        logger.info(
+            "[scanner_handler] weekly cut ledger status=%s week=%s report=%s",
+            ledger_status.get("status"),
+            ledger_status.get("week"),
+            ledger_status.get("report"),
+        )
+    except Exception as exc:  # noqa: BLE001 — observe-only, live unaffected
+        logger.exception("[scanner_handler] weekly cut ledger FAILED on %s", run_date)
+        ledger_status = {"status": "error", "reason": "unhandled", "detail": str(exc)}
+
+    if ledger_status.get("status") in ("unmeasurable", "error"):
+        # A week that closed and produced no row is indistinguishable, at the
+        # artifact, from a week in which nothing was measured. That is the
+        # silent-absence class (champion-challenger-policy.md §7.2), so it gets
+        # an alerted surface rather than a WARN nobody reads (ARCHITECTURE §61).
+        try:
+            from observe_alerts import publish_observe_alert
+
+            publish_observe_alert(
+                message=(
+                    f"[weekly_ledger] the universe-cut slot's weekly ledger could "
+                    f"NOT record the week that closed on {run_date}: "
+                    f"{ledger_status.get('reason')} — {ledger_status.get('detail')}. "
+                    "Nothing live is degraded; the week is simply unrecorded, and "
+                    "an append-only series cannot recover it on a later run "
+                    "(alpha-engine-config-I8264)."
+                ),
+                source="research:weekly_ledger",
+                dedup_key=f"weekly_ledger_unmeasurable:{run_date}",
+                severity="ERROR",
+            )
+        except Exception:  # noqa: BLE001 — alerting is secondary, never fatal
+            logger.warning("[scanner_handler] weekly ledger alert publish failed")
+
     # ── Funnel-cut leaderboard (alpha-engine-config-I7584) ───────────────────
     # Scores attractiveness_top_60, attractiveness_top_20 and the gate baseline
     # against the population each narrowed. Stays in THIS invocation — while the
@@ -646,6 +725,18 @@ def _run(event, context):
             "status": cuts_leaderboard_status.get("status"),
             "key": cuts_leaderboard_status.get("key"),
         },
+        # The per-row outcome report is carried verbatim: "written",
+        # "skipped_immutable" and "restated" are three different claims about
+        # an append-only store, and collapsing them to a count would hide the
+        # only one that matters (a rewrite attempt).
+        "weekly_ledger": {
+            "status": ledger_status.get("status"),
+            "reason": ledger_status.get("reason"),
+            "week": ledger_status.get("week"),
+            "report": ledger_status.get("report"),
+            "arms_priced": ledger_status.get("arms_priced"),
+            "arms_missing": ledger_status.get("arms_missing"),
+        },
         "cut_promotion": {
             "status": promotion_status.get("status", "ok"),
             "decision": promotion_status.get("decision"),
@@ -682,12 +773,18 @@ def _run(event, context):
     # `research/cuts_leaderboard/{trading_day}.json` freshness detector
     # (I7841 D1), keyed on the scanner having run rather than the calendar.
     _board_stages = {
+        "weekly_ledger": ledger_status.get("status"),
         "cuts_leaderboard": cuts_leaderboard_status.get("status"),
         "cut_promotion": promotion_status.get("status", "ok"),
     }
     summary["boards"] = {
         "attempted": [name for name, status in _board_stages.items() if status != "not_attempted"],
-        "completed": [name for name, status in _board_stages.items() if status in ("ok", "unmeasurable")],
+        # "skipped" joins the completed set for the ledger's legitimate
+        # nothing-closed weeks: the stage ran and reached a correct conclusion.
+        # "unmeasurable" stays here for the same reason it always has — the
+        # stage completed and said so — and is separately ALARMED above rather
+        # than being inferred from this rollup.
+        "completed": [name for name, status in _board_stages.items() if status in ("ok", "unmeasurable", "skipped")],
         "not_attempted": [name for name, status in _board_stages.items() if status == "not_attempted"],
         "errored": [name for name, status in _board_stages.items() if status == "error"],
     }

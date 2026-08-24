@@ -97,6 +97,13 @@ multi-year series becomes uninterpretable.
 LEDGER_COLS = [
     # Identity — the primary key is (arm, week_start).
     "arm", "week_start", "week_end",
+    # The sessions the return was actually priced from. Normally identical to
+    # (week_start, week_end); they diverge when a cut date is not itself a
+    # session (a holiday re-cut) or when the closing session's bar has not
+    # landed in ArcticDB yet. Recorded rather than assumed, because a week
+    # priced over a shorter span than its label claims is a wrong number
+    # wearing a right name — the defect class this ledger exists to end.
+    "priced_from", "priced_to",
     # What the arm held.
     "n_names", "retained_from_prior", "turnover_frac",
     # What it earned. Log-domain throughout, market-relative computed by the
@@ -279,6 +286,8 @@ def build_week_row(
     adv_dollar: float | None = None,
     config: dict | None = None,
     code_sha: str | None = None,
+    priced_from: str | None = None,
+    priced_to: str | None = None,
     written_at: str,
 ) -> dict:
     """One immutable ledger row. PURE — no I/O, no clock.
@@ -305,6 +314,12 @@ def build_week_row(
                                between needing tens of observations and
                                hundreds (champion-challenger-policy.md §4).
 
+    ``priced_from`` / ``priced_to`` default to the week's own labels and are
+    overridden by the caller when the boundary had to be resolved to a nearby
+    session. They are stored rather than left implicit so a reader can see the
+    span a number was actually measured over instead of trusting the label —
+    the same reason ``net_unavailable_reason`` exists.
+
     The row carries the LEGS, not the differences. A difference is one
     subtraction a consumer can always do; a leg it was never given is gone for
     good, and a stored difference cannot be re-based when the champion changes.
@@ -327,6 +342,8 @@ def build_week_row(
         "arm": arm,
         "week_start": week_start,
         "week_end": week_end,
+        "priced_from": priced_from or week_start,
+        "priced_to": priced_to or week_end,
         "n_names": n_names,
         "retained_from_prior": retained_from_prior,
         "turnover_frac": (float(turnover_frac) if turnover_frac is not None else None),
@@ -528,3 +545,336 @@ def paired_weekly_differences(
         except (TypeError, ValueError):
             continue
     return out
+
+
+# ── Wiring: turning a scanner run into one completed week ────────────────────
+#
+# alpha-engine-config-I8264. Everything above is pure or S3-only and testable
+# without a pipeline; this section is the impure edge that runs inside the
+# Scanner invocation, and it is deliberately the ONLY place the two are joined.
+#
+# The shape of the wiring follows from what a week IS. A week's return is
+# realized at the moment the NEXT cut replaces the current one — which is
+# exactly the moment this code runs. So a scanner run does not record the week
+# it is starting; it records the week it just ENDED, whose basket is the PRIOR
+# membership artifact and whose end date is the cut being written now. There is
+# no other run at which that week is both complete and cheap to price.
+#
+# WHAT THIS DOES NOT DO: it never walks history. A run records at most the ONE
+# week that just closed. Backfilling the ledger from archived membership
+# artifacts would mix forward-accumulated weeks (immune to the 2026-08-20
+# fundamentals restatement, alpha-engine-config-I8255) with reconstructed ones
+# (not immune) inside a store whose entire value is that no row was ever
+# restated. If a prior series is ever wanted it is a separate, explicitly
+# flagged decision — alpha-engine-config-I8262 owns it — and it must be
+# distinguishable in the artifact, not silently interleaved.
+
+_MAX_BOUNDARY_SLIP_DAYS = 5
+"""How far back a week boundary may be resolved to find a priced session.
+
+A cut date is normally a session, but a holiday re-cut or an ArcticDB append
+that has not yet landed leaves the exact date unpriced. Resolving to the last
+session on-or-before the boundary is correct and is RECORDED (``priced_from`` /
+``priced_to``); resolving arbitrarily far back is not — past about a week the
+span stops being the week the row is labelled with. Beyond this, the week is
+reported unmeasurable rather than priced over a span nobody asked for.
+"""
+
+_CLOSE_COLS = ("Close", "close")
+
+
+def _closes_panel(
+    symbols: Sequence[str], *, week_start: str, week_end: str,
+    bucket: str | None = None, ohlcv_loader: Any = None,
+) -> dict[str, dict[str, float]]:
+    """``{date: {ticker: close}}`` over the week, from the DURABLE OHLCV store.
+
+    ArcticDB via ``nousergon_lib.arcticdb.load_universe_ohlcv``, never
+    ``staging/daily_closes/``: that prefix carries a 7-day expiry rule, and a
+    ledger that reads it would silently stop being able to price any week the
+    moment a run slipped (alpha-engine-config-I5195 — the same source cost the
+    leaderboards a month of empty artifacts).
+
+    The window is the WEEK plus a small margin, not a cohort span. A weekly
+    holding period needs exactly two cross-sections, so a wide read here would
+    be dead weight paid inside a Lambda that has already died on a timeout once
+    (alpha-engine-config-I7841). ``end`` is pinned to the week's end so the read
+    cannot drift with the wall clock either.
+    """
+    import pandas as pd
+    from nousergon_lib.arcticdb import load_universe_ohlcv
+
+    span = (pd.Timestamp(week_end) - pd.Timestamp(week_start)).days
+    loader = ohlcv_loader or load_universe_ohlcv
+    frames = loader(
+        _bucket(bucket),
+        symbols=sorted({str(s).upper() for s in symbols}),
+        lookback_days=max(span, 1) + _MAX_BOUNDARY_SLIP_DAYS + 2,
+        end=week_end,
+        columns=[_CLOSE_COLS[0]],
+    ) or {}
+    panel: dict[str, dict[str, float]] = {}
+    for ticker, df in frames.items():
+        if df is None or getattr(df, "empty", True):
+            continue
+        # ArcticDB's universe library stores TITLE-case OHLCV. Accept either
+        # case rather than assuming — a wrong-case filter returns an empty
+        # frame SILENTLY, which is the I5195 failure shape exactly.
+        col = next((c for c in _CLOSE_COLS if c in df.columns), None)
+        if col is None:
+            continue
+        for ts, close in df[col].items():
+            if pd.isna(close) or float(close) <= 0:
+                continue
+            panel.setdefault(ts.strftime("%Y-%m-%d"), {})[str(ticker).upper()] = float(close)
+    return panel
+
+
+def resolve_boundary(panel: Mapping[str, Mapping[str, float]], boundary: str) -> str | None:
+    """The latest priced session on-or-before ``boundary``, within the slip.
+
+    None when no session inside :data:`_MAX_BOUNDARY_SLIP_DAYS` is priced. None
+    rather than the nearest available date: past the slip the row would carry a
+    span materially shorter than its own label, and a wrong number under a right
+    name is the failure this ledger was built against.
+    """
+    from datetime import date, timedelta
+
+    # ISO dates compare lexicographically, so the whole resolution is string
+    # comparison against one computed floor — no timestamp parsing per key.
+    floor = (date.fromisoformat(boundary) - timedelta(days=_MAX_BOUNDARY_SLIP_DAYS)).isoformat()
+    candidates = [d for d in panel if floor <= d <= boundary]
+    return max(candidates) if candidates else None
+
+
+def prior_membership(
+    membership: Mapping[str, Any], *, bucket: str | None = None, s3_client: Any = None,
+) -> dict | None:
+    """The membership artifact whose cut the completed week was HELD in.
+
+    Resolved from the current artifact's own ``turnover`` block — which names
+    the prior write by ``prior_run_date`` + ``prior_generated_at`` — and read
+    from the IMMUTABLE ``runs/`` copy keyed on that timestamp, never from the
+    dated ``membership.json`` pointer. On a day with two scanner runs the dated
+    pointer already holds the later one, so reading it would price the week
+    against a basket that was never held for it: the clobber defect
+    (alpha-engine-config-I6785) entering through the reader instead of the
+    writer.
+
+    Falls back to the dated pointer ONLY when its ``generated_at`` matches the
+    one the turnover block named — same bytes, different key. Any mismatch
+    returns None: an unrecoverable prior is an unmeasurable week, not a week to
+    price against whatever happens to be there.
+    """
+    import json
+
+    from scoring.universe_membership import run_stamp
+
+    turnover = membership.get("turnover") or {}
+    prior_run_date = turnover.get("prior_run_date")
+    prior_generated_at = turnover.get("prior_generated_at")
+    if not prior_run_date or not prior_generated_at:
+        return None
+    s3 = _client(s3_client)
+    b = _bucket(bucket)
+    stamp = run_stamp(prior_generated_at)
+    for key in (
+        f"universe_membership/{prior_run_date}/runs/{stamp}.json",
+        f"universe_membership/{prior_run_date}/membership.json",
+    ):
+        try:
+            doc = json.loads(s3.get_object(Bucket=b, Key=key)["Body"].read())
+        except Exception as exc:  # noqa: BLE001 — absence is a legitimate state here
+            logger.info("[weekly_ledger] prior membership not at %s: %s", key, exc)
+            continue
+        if doc.get("generated_at") == prior_generated_at:
+            return doc
+        logger.warning(
+            "[weekly_ledger] %s carries generated_at=%s but the turnover block "
+            "named %s — a later same-day run has replaced it, so it is NOT the "
+            "basket the completed week was held in",
+            key, doc.get("generated_at"), prior_generated_at,
+        )
+    return None
+
+
+def _arm_turnover(prior: Mapping[str, Any], arm: str) -> tuple[float | None, int | None]:
+    """``(turnover_frac, retained_from_prior)`` for ``arm`` AT FORMATION.
+
+    Read from the week's OWN artifact — the churn recorded when its basket was
+    formed — not recomputed here and not taken from the following cut. Two
+    reasons, and both matter:
+
+    * ``compute_turnover`` already writes this on every run
+      (alpha-engine-config-I6785). A second derivation in this module would be
+      exactly the multi-writer drift the membership artifact exists to end.
+    * Charging the FORMATION rebalance bills each week's basket exactly once,
+      in the week that holds it. Charging the closing rebalance instead would
+      also bill once, but the two conventions must never be mixed inside one
+      series, and formation is the one whose number lives in the same artifact
+      as the basket it belongs to.
+
+    None turnover (the prior artifact's own first run) yields a null cost and a
+    null net with a stated reason — never a zero, which is the real and
+    different claim that an arm changed nothing.
+    """
+    per_cut = ((prior.get("turnover") or {}).get("per_cut") or {}).get(arm)
+    if not per_cut:
+        return None, None
+    retention = per_cut.get("retention_pct")
+    if retention is None:
+        return None, per_cut.get("retained")
+    return max(0.0, 1.0 - float(retention) / 100.0), per_cut.get("retained")
+
+
+def record_completed_week(
+    membership: Mapping[str, Any],
+    *,
+    bucket: str | None = None,
+    s3_client: Any = None,
+    market_regime: str | None = None,
+    written_at: str | None = None,
+    code_sha: str | None = None,
+    ohlcv_loader: Any = None,
+) -> dict:
+    """Record the week that ``membership``'s new cut just ENDED. One week, once.
+
+    ``membership`` is the artifact this scanner run just wrote. Returns a status
+    dict — never raises for a week that cannot be recorded, because the caller
+    is on the live Scanner path — carrying one of:
+
+    ``ok``            rows were appended (or refused as already-written; the
+                      per-row ``report`` says which, and "already written" is a
+                      recorded outcome, not a silent no-op).
+    ``skipped``       there is nothing to record: no prior cut (first run), or
+                      the cut was carried forward so no week closed. A legitimate
+                      state with a stated ``reason``, distinct from a failure.
+    ``unmeasurable``  a week DID close and could not be priced. This is the
+                      status that must alarm (champion-challenger-policy.md
+                      §7.2): an unmeasurable result rendering as an empty success
+                      is the fleet's dominant bug class.
+
+    Every arm of the slot gets a row, including arms the prior cut did not carry
+    — those are written as MISSES (null gross, ``n_names`` 0) rather than
+    omitted, per §3: a cycle where an arm produced no output is recorded, and
+    silent absence must never render like a genuine zero.
+    """
+    from datetime import UTC, datetime
+
+    from scoring.universe_membership import SLOT_ARMS, live_cut_champion
+
+    week_end_date = membership.get("cut_effective_date")
+    prior = prior_membership(membership, bucket=bucket, s3_client=s3_client)
+    if prior is None:
+        return {
+            "status": "skipped",
+            "reason": "no_recoverable_prior_cut",
+            "detail": (
+                "no prior membership artifact was named by this run's turnover "
+                "block, or the one named could not be recovered — the first "
+                "run of the series, or a clobbered prior"
+            ),
+        }
+    week = holding_period(prior.get("cut_effective_date"), week_end_date)
+    if week is None:
+        return {
+            "status": "skipped",
+            "reason": "no_week_closed",
+            "detail": (
+                f"the cut effective on {prior.get('cut_effective_date')} is still "
+                f"in force (this run's cut_effective_date is {week_end_date}) — "
+                "an unfinished week is not a missing week"
+            ),
+        }
+    week_start, week_end = week
+
+    prior_cuts = prior.get("cuts") or {}
+    population = sorted((prior.get("ranks") or {}).keys())
+    champion = live_cut_champion(bucket=bucket, s3_client=s3_client)
+    champion_tickers = list((prior_cuts.get(champion) or {}).get("tickers") or [])
+
+    symbols = {"SPY", *population, *champion_tickers}
+    for arm in SLOT_ARMS:
+        symbols.update((prior_cuts.get(arm) or {}).get("tickers") or [])
+
+    try:
+        panel = _closes_panel(
+            sorted(symbols), week_start=week_start, week_end=week_end,
+            bucket=bucket, ohlcv_loader=ohlcv_loader,
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced as unmeasurable, never swallowed
+        return {
+            "status": "unmeasurable",
+            "week": [week_start, week_end],
+            "reason": "closes_read_failed",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    priced_from = resolve_boundary(panel, week_start)
+    priced_to = resolve_boundary(panel, week_end)
+    if priced_from is None or priced_to is None or priced_from >= priced_to:
+        return {
+            "status": "unmeasurable",
+            "week": [week_start, week_end],
+            "reason": "week_boundaries_unpriced",
+            "detail": (
+                f"no priced session within {_MAX_BOUNDARY_SLIP_DAYS} days of both "
+                f"boundaries (resolved start={priced_from}, end={priced_to}) over "
+                f"{len(symbols)} symbols — the ArcticDB universe library is the "
+                "source; check MorningArcticAppend"
+            ),
+        }
+    closes_start = dict(panel.get(priced_from) or {})
+    closes_end = dict(panel.get(priced_to) or {})
+
+    stamped = written_at or datetime.now(UTC).isoformat(timespec="seconds")
+    rows = []
+    for arm in SLOT_ARMS:
+        tickers = list((prior_cuts.get(arm) or {}).get("tickers") or [])
+        turnover_frac, retained = _arm_turnover(prior, arm)
+        rows.append(
+            build_week_row(
+                arm=arm,
+                week_start=week_start,
+                week_end=week_end,
+                tickers=tickers,
+                closes_start=closes_start,
+                closes_end=closes_end,
+                turnover_frac=turnover_frac,
+                retained_from_prior=retained,
+                population_tickers=population,
+                champion_tickers=champion_tickers,
+                # Resolved from the live pointer, never a literal
+                # (champion-challenger-policy.md §7.5). Read BEFORE the
+                # promotion engine runs later in this same invocation, so it
+                # names the arm that actually served the week being recorded.
+                is_champion=(arm == champion),
+                # The regime observed as the week CLOSED — this run. Recorded
+                # for conditioning, not as a claim about the whole week.
+                market_regime=market_regime,
+                priced_from=priced_from,
+                priced_to=priced_to,
+                code_sha=code_sha,
+                written_at=stamped,
+            )
+        )
+
+    try:
+        report = append_week(rows, bucket=bucket, s3_client=s3_client)
+    except Exception as exc:  # noqa: BLE001 — the caller is the live Scanner path
+        return {
+            "status": "unmeasurable",
+            "week": [week_start, week_end],
+            "reason": "append_failed",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    priced = [r["arm"] for r in rows if r["gross_log_return"] is not None]
+    return {
+        "status": "ok",
+        "week": [week_start, week_end],
+        "priced_span": [priced_from, priced_to],
+        "champion": champion,
+        "arms_priced": priced,
+        "arms_missing": [r["arm"] for r in rows if r["gross_log_return"] is None],
+        "report": {k: [list(key) for key in v] for k, v in report.items()},
+        "key": LEDGER_KEY,
+    }
