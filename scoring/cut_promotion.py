@@ -658,12 +658,19 @@ def _paired_series(
 
     A week where either leg is missing the column is DROPPED and counted, never
     substituted with a zero: substituting would manufacture a week in which the
-    arm exactly matched the champion. A week whose two rows disagree about
-    ``week_end`` is also dropped and counted separately — the holding period
-    ends when the next cut lands, so two arms reporting different ends for the
-    same start are not describing the same window, and differencing them
-    compares different spans (champion-challenger-policy.md §4, same cohort
-    dates).
+    arm exactly matched the champion.
+
+    A week whose two rows disagree about the span they cover is also dropped and
+    counted separately (champion-challenger-policy.md §4, same cohort dates).
+    The comparison is over ``week_end`` AND the actually-priced boundaries
+    ``priced_from`` / ``priced_to`` — added by alpha-engine-config-I8264, which
+    established that the two can diverge whenever a cut date is not itself a
+    session or a closing bar has not landed. Checking only the LABEL would let
+    two arms priced over different spans difference against each other while
+    both rows agreed about what they claimed to cover, which is the defect that
+    field was introduced to make visible. Rows written before those columns
+    existed carry ``None`` on both legs and still agree, so an older ledger
+    reconciles rather than emptying itself.
     """
     champ_by_week = {str(r.get("week_start")): r for r in champion_rows}
     diffs: list[float] = []
@@ -676,7 +683,10 @@ def _paired_series(
         if champ is None:
             unpaired += 1
             continue
-        if row.get("week_end") != champ.get("week_end"):
+        if any(
+            row.get(f) != champ.get(f)
+            for f in ("week_end", "priced_from", "priced_to")
+        ):
             mismatched += 1
             continue
         mine = row.get(column)

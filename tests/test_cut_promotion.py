@@ -135,6 +135,7 @@ def _ledger_row(
     is_champion: bool = False,
     ledger_version: int = LEDGER_VERSION,
     week_end: str | None = None,
+    priced_to: str | None = None,
 ) -> dict:
     """One weekly-ledger row in ``weekly_ledger.LEDGER_COLS`` shape.
 
@@ -147,6 +148,8 @@ def _ledger_row(
         "arm": arm,
         "week_start": week[0],
         "week_end": week_end or week[1],
+        "priced_from": week[0],
+        "priced_to": priced_to or week_end or week[1],
         "n_names": 60,
         "retained_from_prior": None,
         "turnover_frac": 0.3,
@@ -174,6 +177,7 @@ def _ledger(
     champion_leg: float | None = None,
     arms: tuple[str, ...] = (CHAMP, CHALLENGER),
     chal_week_end_shift: int = 0,
+    chal_priced_to_shift: int = 0,
     chal_stale_versions: int = 0,
 ) -> list[dict]:
     weeks = _weeks(n_weeks)
@@ -197,10 +201,16 @@ def _ledger(
                 end = (
                     date.fromisoformat(week[1]) + timedelta(days=chal_week_end_shift)
                 ).isoformat()
+            priced_to = None
+            if chal_priced_to_shift:
+                priced_to = (
+                    date.fromisoformat(week[1])
+                    + timedelta(days=chal_priced_to_shift)
+                ).isoformat()
             rows.append(
                 _ledger_row(
                     CHALLENGER, week, net=chal_series[i], champion_leg=champion_leg,
-                    week_end=end,
+                    week_end=end, priced_to=priced_to,
                     ledger_version=(
                         LEDGER_VERSION - 1 if i < chal_stale_versions else LEDGER_VERSION
                     ),
@@ -531,6 +541,50 @@ def test_a_week_whose_two_legs_disagree_about_its_end_is_dropped_and_counted():
     assert d.reason_code == REASON_INSUFFICIENT_WEEKS
     assert d.arms[CHALLENGER].n_weeks_paired == 0
     assert d.arms[CHALLENGER].weeks_dropped_window_mismatch == 10
+
+
+def test_two_legs_priced_over_different_spans_are_dropped_even_when_labelled_alike():
+    """alpha-engine-config-I8264 established that a week's LABEL and the sessions
+    it was actually priced from can diverge — a holiday re-cut, or a closing bar
+    that has not landed. Two arms agreeing about what they claim to cover while
+    being priced over different spans is exactly what `priced_from`/`priced_to`
+    were added to make visible, and differencing them compares different spans.
+    A guard on `week_end` alone would pass this."""
+    rows = _ledger(champ_net=0.000, chal_net=0.900, chal_priced_to_shift=1)
+    # The LABELS agree on both legs; only the priced span differs. A guard on
+    # week_end alone sees nothing wrong here.
+    assert {r["week_end"] for r in rows if r["arm"] == CHAMP} == {
+        r["week_end"] for r in rows if r["arm"] == CHALLENGER
+    }
+    assert {r["priced_to"] for r in rows if r["arm"] == CHAMP} != {
+        r["priced_to"] for r in rows if r["arm"] == CHALLENGER
+    }
+    d = decide_cut_champion(
+        slot=TWO_ARM_SLOT, ledger_rows=rows, board=_board(),
+        champion_before=CHAMP, decided_on=DATE,
+    )
+    assert d.decision == "hold"
+    assert d.reason_code == REASON_INSUFFICIENT_WEEKS
+    assert d.arms[CHALLENGER].n_weeks_paired == 0
+    assert d.arms[CHALLENGER].weeks_dropped_window_mismatch == 10
+
+
+def test_a_ledger_written_before_the_priced_span_columns_still_reconciles():
+    """Rows predating alpha-engine-config-I8264 carry no `priced_from`/
+    `priced_to`. Both legs read None, both agree, and the series must not empty
+    itself — a guard that rejects an older ledger wholesale is worse than the
+    ambiguity it removes."""
+    rows = _ledger(champ_net=0.000, chal_net=0.100)
+    for r in rows:
+        r.pop("priced_from", None)
+        r.pop("priced_to", None)
+    d = decide_cut_champion(
+        slot=TWO_ARM_SLOT, ledger_rows=rows, board=_board(),
+        champion_before=CHAMP, decided_on=DATE,
+    )
+    assert d.decision == "promote"
+    assert d.arms[CHALLENGER].n_weeks_paired == 10
+    assert d.arms[CHALLENGER].weeks_dropped_window_mismatch == 0
 
 
 def test_rows_at_an_older_ledger_version_are_set_aside_and_counted():
