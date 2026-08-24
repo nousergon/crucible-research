@@ -780,3 +780,205 @@ def test_an_unscored_name_never_takes_a_rank_position():
             seen_none = True
         else:
             assert not seen_none, "a scored name must never follow an unscored one"
+
+
+# ── alpha-engine-config-I8255: fundamental-distinctness floor ───────────────
+#
+# Non-null is not the same as informative — 08-03..08-19, three of the six
+# attractiveness pillars rode a saturated placeholder fundamental input
+# (fcf_yield pinned to 0.0, gross_margin to {0.0, 1.0}, etc.) while
+# `pillar_coverage` read 897-903 of 903 the whole time. These tests reproduce
+# the REAL measured 2026-08-14 shape: fcf_yield 1 distinct value across the
+# whole universe, gross_margin 2, roe 14, revenue_growth_3y 68,
+# eps_growth_3y 42 — vs. the genuinely-populated 2026-08-21 shape (700+
+# distinct on every one of those fields).
+
+
+def _fundamental_df_shaped(n: int, *, degenerate: bool) -> pd.DataFrame:
+    """``n``-row fundamental_df. ``degenerate=True`` reproduces the measured
+    2026-08-03..08-19 saturated-placeholder shape (fcf_yield ALL 0.0,
+    gross_margin two-valued, roe/revenue_growth_3y/eps_growth_3y each cycling
+    through a small fixed set of placeholder-shaped values — never more than
+    68 distinct regardless of ``n``). ``degenerate=False`` gives every row a
+    genuinely distinct value on every field (the 2026-08-21 shape)."""
+    rows = []
+    for i in range(n):
+        if degenerate:
+            rows.append(
+                {
+                    "ticker": f"T{i:03d}",
+                    "pe_ratio": 0.5 + (i % 200) / 400.0,  # untouched by this defect
+                    "pb_ratio": 0.4 + (i % 200) / 400.0,
+                    "debt_to_equity": 0.3 + (i % 200) / 400.0,
+                    "current_ratio": 0.6 + (i % 200) / 400.0,
+                    "fcf_yield": 0.0,  # 1 distinct — measured 2026-08-03/14
+                    "dividend_yield": 0.01,
+                    "payout_ratio": 0.2,
+                    "roe": float(i % 14) / 10.0,  # 14 distinct — measured 2026-08-14
+                    "gross_margin": 1.0 if i % 5 else 0.0,  # 2 distinct — measured exactly
+                    "revenue_growth_3y": float(i % 68) / 10.0,  # 68 distinct — measured 2026-08-14
+                    "eps_growth_3y": float(i % 42) / 10.0,  # 42 distinct — measured 2026-08-14
+                    "market_cap_raw": 1e10 + i,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "ticker": f"T{i:03d}",
+                    "pe_ratio": 0.5 + i / 1000.0,
+                    "pb_ratio": 0.4 + i / 1000.0,
+                    "debt_to_equity": 0.3 + i / 1000.0,
+                    "current_ratio": 0.6 + i / 1000.0,
+                    "fcf_yield": i / 1000.0,
+                    "dividend_yield": 0.01,
+                    "payout_ratio": 0.2,
+                    "roe": i / 1000.0,
+                    "gross_margin": i / 1000.0,
+                    "revenue_growth_3y": i / 1000.0,
+                    "eps_growth_3y": i / 1000.0,
+                    "market_cap_raw": 1e10 + i,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _technical_df_n(n: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ticker": f"T{i:03d}",
+                "rsi_14": 50.0,
+                "momentum_20d": 0.01,
+                "return_60d": 0.02,
+                "return_120d": 0.03,
+                "realized_vol_20d": 0.2,
+                "atr_14_pct": 0.015,
+                "dist_from_52w_high": -0.05,
+                "price_vs_ma200": 0.1,
+                "beta_60d": 1.0,
+                "avg_volume_20d_raw": 10_000_000.0,
+            }
+            for i in range(n)
+        ]
+    )
+
+
+def test_fundamental_distinctness_floor_raises_on_the_measured_2026_08_14_shape():
+    """RED-run fixture (alpha-engine-config-I8255): fcf_yield/gross_margin/
+    roe/revenue_growth_3y/eps_growth_3y reproduce the real measured
+    2026-08-14 distinct-value shape (1, 2, 14-18, 68, 42) across a 250-name
+    universe. Against pre-fix code (no fundamental-distinctness floor) this
+    board built successfully with pillar_coverage reading full — this test
+    is the guard that must fail loud instead."""
+    import pytest
+
+    n = 250
+    with pytest.raises(ValueError, match="fundamental distinctness floor breached"):
+        build_universe_board(
+            "2026-08-14",
+            _scanner_evals_n(n),
+            factor_profiles={},
+            classification={},
+            technical_df=_technical_df_n(n),
+            fundamental_df=_fundamental_df_shaped(n, degenerate=True),
+            gate_config=_GATE_CONFIG,
+        )
+
+
+def test_fundamental_distinctness_floor_names_every_degenerate_field():
+    """The raised error names every offending field with its measured count,
+    not just the first one hit — an operator reading the log needs the full
+    picture in one shot."""
+    import pytest
+
+    n = 250
+    with pytest.raises(ValueError) as exc_info:
+        build_universe_board(
+            "2026-08-14",
+            _scanner_evals_n(n),
+            factor_profiles={},
+            classification={},
+            technical_df=_technical_df_n(n),
+            fundamental_df=_fundamental_df_shaped(n, degenerate=True),
+            gate_config=_GATE_CONFIG,
+        )
+    msg = str(exc_info.value)
+    for field in ("fcf_yield", "gross_margin", "roe", "revenue_growth_3y", "eps_growth_3y"):
+        assert field in msg
+
+
+def test_fundamental_distinctness_floor_passes_on_the_measured_2026_08_21_shape():
+    """GREEN case: a genuinely populated cross-section (the repaired
+    2026-08-21 shape — 700+ distinct per field) must not trip the floor."""
+    n = 250
+    board = build_universe_board(
+        "2026-08-21",
+        _scanner_evals_n(n),
+        factor_profiles={},
+        classification={},
+        technical_df=_technical_df_n(n),
+        fundamental_df=_fundamental_df_shaped(n, degenerate=False),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == n
+    for field in ("fcf_yield", "gross_margin", "roe", "revenue_growth_3y", "eps_growth_3y"):
+        assert board["fundamental_distinctness"][field] >= n - 5
+
+
+def test_fundamental_distinctness_floor_exempts_universes_smaller_than_the_floor():
+    """A distinct-count floor of 100 cannot be met by construction on a
+    universe smaller than 100 names, healthy or not — the exemption must be
+    sized to the floor (2x here), not the flat 20-name cutoff the metric-
+    coverage floor uses. A 50-name universe with a fully saturated
+    fcf_yield must NOT raise."""
+    n = 50
+    board = build_universe_board(
+        "2026-08-14",
+        _scanner_evals_n(n),
+        factor_profiles={},
+        classification={},
+        technical_df=_technical_df_n(n),
+        fundamental_df=_fundamental_df_shaped(n, degenerate=True),
+        gate_config=_GATE_CONFIG,
+    )
+    assert board["universe_count"] == n
+
+
+def test_fundamental_distinctness_is_published_on_every_board():
+    """alpha-engine-config-I8255 deliverable 1, first clause: the board
+    records a per-field cross-sectional distinct-count for EVERY published
+    fundamental metric, not only the five the enforcement floor covers —
+    including pe/pb/debt_to_equity/current_ratio, which were genuinely
+    populated throughout and are deliberately excluded from enforcement."""
+    board = _build()
+    fd = board["fundamental_distinctness"]
+    for _col, field, _mult in (
+        ("pe_ratio", "pe", 30.0),
+        ("pb_ratio", "pb", 5.0),
+        ("debt_to_equity", "debt_to_equity", 2.0),
+        ("current_ratio", "current_ratio", 3.0),
+        ("fcf_yield", "fcf_yield", 1.0),
+        ("roe", "roe", 1.0),
+        ("gross_margin", "gross_margin", 1.0),
+        ("revenue_growth_3y", "revenue_growth_3y", 1.0),
+        ("eps_growth_3y", "eps_growth_3y", 1.0),
+    ):
+        assert field in fd
+
+
+def test_degenerate_fundamentals_run_date_window():
+    """alpha-engine-config-I8255 deliverable 3 (backfill decision: ANNOTATE,
+    not recompute) — the window is exactly the measured degenerate range,
+    inclusive on both ends, and nothing outside it."""
+    from scoring.universe_board import (
+        DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW,
+        is_degenerate_fundamentals_run_date,
+    )
+
+    assert DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW == ("2026-08-03", "2026-08-19")
+    assert is_degenerate_fundamentals_run_date("2026-08-03") is True
+    assert is_degenerate_fundamentals_run_date("2026-08-14") is True
+    assert is_degenerate_fundamentals_run_date("2026-08-19") is True
+    assert is_degenerate_fundamentals_run_date("2026-08-02") is False
+    assert is_degenerate_fundamentals_run_date("2026-08-20") is False
+    assert is_degenerate_fundamentals_run_date("2026-08-21") is False

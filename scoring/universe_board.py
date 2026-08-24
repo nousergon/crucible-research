@@ -48,6 +48,10 @@ Schema::
     "tradeability_reference_notional_usd": float,                     # reference single-name trade size
     "pillars": ["quality", "value", "momentum", "growth", "stewardship", "defensiveness"],
     "pillar_weights": {quality: float, ...},   # normalized to sum 1.0 (equal default)
+    "fundamental_distinctness": {pe: int, pb: int, ..., eps_growth_3y: int},  # per-field
+      # cross-sectional DISTINCT count over non-null values (alpha-engine-config-
+      # I8255) — non-null is not the same as informative; see
+      # _assert_fundamental_distinctness_floor for the enforced subset + threshold.
     "gate_config": {                           # the resolved scanner thresholds this cycle (null if unresolvable)
       "min_avg_volume", "min_price", "tech_score_min", "max_atr_pct",
       "momentum_ma200_floor_pct", "momentum_top_n",
@@ -162,6 +166,41 @@ _COVERAGE_MEMBER_CAP = 50
 # untrustworthy. A consumer must skip/flag ``gate_stage`` for these dates
 # rather than trust it at face value.
 KNOWN_BAD_GATE_RUN_DATES: frozenset[str] = frozenset({"2026-07-02", "2026-06-26"})
+
+# alpha-engine-config-I8255 — backfill decision for boards written BEFORE this
+# module's fundamental-distinctness floor existed (``_assert_fundamental_
+# distinctness_floor`` below). Measured 2026-08-24, AWS_PROFILE=ne-admin, from
+# scanner/universe/{date}/universe.json::stocks[].metrics: five fundamental
+# fields (fcf_yield, gross_margin, roe, revenue_growth_3y, eps_growth_3y) were
+# saturated placeholders — as low as 1 DISTINCT value across ~899 covered
+# names — on every board dated 2026-08-03 through 2026-08-19 inclusive, and
+# genuinely populated (738-889 distinct) from 2026-08-21 on (the repair
+# reached the live board between the 08-19 and 08-20 scanner runs; #4820's
+# gate-passed contract and #7982's all-null-metrics collapse are separate,
+# unrelated defects on the same window — see their own docstrings above/
+# below). DECISION: ANNOTATE, not recompute. The feature-store snapshot that
+# fed factor_scoring.py on any of these dates is gone; recomputing today's
+# fundamentals against those historical dates would not reconstruct what the
+# board actually ranked on — it would silently swap one wrong-looking-right
+# board for another, exactly the reasoning already applied to
+# KNOWN_BAD_GATE_RUN_DATES above. A consumer reading universe_board data for
+# a date in this window (e.g. a backfill/audit script, NOT the live pipeline
+# — no such consumer exists in this repo today) should treat the quality/
+# growth/stewardship pillars as unreliable for that date via
+# ``is_degenerate_fundamentals_run_date``. This module cannot itself flag
+# the downstream cuts-leaderboard artifact (``research/cuts_leaderboard/
+# {date}.json`` — deliverable 2 of alpha-engine-config-I8255, out of scope
+# for this change: it lands in ``scoring/leaderboard_producers.py``, which
+# has open PRs against it as of this writing) — that remains open.
+DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW: tuple[str, str] = ("2026-08-03", "2026-08-19")
+
+
+def is_degenerate_fundamentals_run_date(run_date: str) -> bool:
+    """True when ``run_date`` (YYYY-MM-DD) falls inside the measured
+    saturated-placeholder window (alpha-engine-config-I8255). ISO date
+    strings compare lexicographically, so a plain range check is exact."""
+    start, end = DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW
+    return start <= run_date <= end
 
 # Reference single-name trade size (USD) for the per-name tradeability estimate —
 # a representative position on the paper book. ``expected_cost_bps`` is the
@@ -566,6 +605,105 @@ def _assert_metric_coverage_floor(stocks: list[dict], run_date: str) -> None:
     )
 
 
+
+# Fundamental-distinctness floor (alpha-engine-config-I8255, deliverable 1).
+#
+# ``pillar_coverage`` reads 897-903 of 903 on a healthy board AND on a
+# degenerate one — non-null is not the same as informative. Measured
+# 2026-08-24 (see DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW above for detail),
+# distinct cross-sectional values on these five fields collapsed to 1-68
+# for at least 18 days while genuinely populated boards carry 738-889:
+#
+#   field               2026-08-03/14 (broken)   2026-08-21 (healthy)
+#   fcf_yield                    1                    889
+#   gross_margin                 2                    741
+#   roe                        14-18                  773
+#   revenue_growth_3y            68                    795
+#   eps_growth_3y               41-42                  738
+#
+# `pe`, `pb`, `debt_to_equity`, `current_ratio` were genuinely populated
+# throughout (~760-796 distinct on every measured date, including the
+# broken window) and are deliberately EXCLUDED from this floor — flooring
+# them too would risk tripping on a legitimately narrow but real
+# cross-section, which this module must not do (a guard that fires on
+# healthy data gets silenced, which is worse than no guard).
+#
+# THRESHOLD: 100. The worst-case broken value measured across all five
+# fields is 68 (revenue_growth_3y); the best-case healthy value is 738
+# (eps_growth_3y). 100 sits just above the broken ceiling with a wide
+# margin below the healthy floor (738), so it catches every measured
+# degenerate shape (1, 2, 14, 18, 41, 42, 68) without coming within 6x of
+# any measured healthy value — not tuned to the exact historical numbers,
+# which would make the floor brittle to next quarter's coverage drifting a
+# little either way.
+_FUNDAMENTAL_DISTINCTNESS_FLOOR = 100
+_REQUIRED_FUNDAMENTAL_DISTINCTNESS_FIELDS: tuple[str, ...] = (
+    "fcf_yield",
+    "gross_margin",
+    "roe",
+    "revenue_growth_3y",
+    "eps_growth_3y",
+)
+
+
+def _fundamental_distinct_counts(stocks: list[dict]) -> dict[str, int]:
+    """Per-field cross-sectional DISTINCT count over every published
+    fundamental metric (alpha-engine-config-I8255 deliverable 1, first
+    clause: "records a per-field cross-sectional distinct-count ... for
+    every fundamental metric it publishes") — not just the five the
+    producer floor enforces. Null values never count as a distinct value:
+    an all-null field reads as 0 distinct, which is itself degenerate and
+    already covered by ``_assert_metric_coverage_floor`` for its own three
+    canary fields, and would also be caught here for any of these twelve
+    if that class ever hit a fundamental column instead."""
+    counts: dict[str, int] = {}
+    for _col, field, _mult in _FUNDAMENTAL_METRICS:
+        values = {s["metrics"].get(field) for s in stocks if s["metrics"].get(field) is not None}
+        counts[field] = len(values)
+    return counts
+
+
+def _assert_fundamental_distinctness_floor(stocks: list[dict], run_date: str) -> None:
+    """Refuse to publish a board where a required fundamental field is
+    NON-null but SATURATED — the same non-informative-placeholder shape
+    that let three of six attractiveness pillars ride near-constant for at
+    least 18 days with `pillar_coverage` reading 897-903/903 the whole
+    time (alpha-engine-config-I8255). Catches both measured degenerate
+    shapes: a field pinned to one placeholder value (fcf_yield, 1 distinct)
+    and a field all-null (0 distinct — the I7982 collapse shape, here
+    applied to the fundamental fields I7982's own floor does not cover).
+
+    Exemption is sized to the FLOOR itself, not the flat 20 used by
+    ``_assert_metric_coverage_floor``: a distinct-count floor of
+    ``_FUNDAMENTAL_DISTINCTNESS_FLOOR`` (100) cannot be met by construction
+    on a universe smaller than that many names, healthy or not — a 20-name
+    universe with 20 genuinely distinct ROE values would still read as
+    degenerate under a flat 20-name cutoff. ``2 x`` the floor keeps a
+    comfortable margin so a merely-small-but-real population (a scanner run
+    with reduced coverage, still in the hundreds) is not itself flagged as
+    saturated.
+    """
+    if len(stocks) < 2 * _FUNDAMENTAL_DISTINCTNESS_FLOOR:
+        return
+    counts = _fundamental_distinct_counts(stocks)
+    degenerate = {
+        field: counts.get(field, 0)
+        for field in _REQUIRED_FUNDAMENTAL_DISTINCTNESS_FIELDS
+        if counts.get(field, 0) < _FUNDAMENTAL_DISTINCTNESS_FLOOR
+    }
+    if not degenerate:
+        return
+    raise ValueError(
+        f"universe_board: fundamental distinctness floor breached for {run_date} — "
+        f"{len(stocks)} names published with fewer than {_FUNDAMENTAL_DISTINCTNESS_FLOOR} "
+        f"distinct cross-sectional values on {degenerate} (of "
+        f"{_REQUIRED_FUNDAMENTAL_DISTINCTNESS_FIELDS}). Non-null is not the same as "
+        "informative — this is the signature of a saturated-placeholder fundamental "
+        "input (alpha-engine-config-I8255): refusing to publish a board whose pillar "
+        "ranking would ride a near-constant cross-section undetected (no-silent-fails)."
+    )
+
+
 def _assert_gate_passed_matches_scanner_tickers(stocks: list[dict], scanner_tickers: list[str], run_date: str) -> None:
     """Producer contract invariant (alpha-engine-config#4820): the board's own
     derived ``gate_stage == "passed"`` membership must equal the AUTHORITATIVE
@@ -664,7 +802,12 @@ def build_universe_board(
     ``avg_volume``/``realized_vol_20d``/``atr_pct`` (alpha-engine-config-I7982
     — the signature of a feature-parquet read failure taking the whole
     technical/fundamental mapping class to null; see
-    ``_assert_metric_coverage_floor``).
+    ``_assert_metric_coverage_floor``), or when a universe of >= 20 names
+    publishes fewer than 100 distinct cross-sectional values on any of
+    ``fcf_yield``/``gross_margin``/``roe``/``revenue_growth_3y``/
+    ``eps_growth_3y`` (alpha-engine-config-I8255 — the signature of a
+    saturated-placeholder fundamental input; non-null but non-informative;
+    see ``_assert_fundamental_distinctness_floor``).
     """
     if not scanner_evals:
         raise ValueError(
@@ -789,6 +932,9 @@ def build_universe_board(
 
     _assert_metric_coverage_floor(stocks, run_date)
 
+    fundamental_distinctness = _fundamental_distinct_counts(stocks)
+    _assert_fundamental_distinctness_floor(stocks, run_date)
+
     coverage = _attractiveness_coverage(stocks)
 
     return {
@@ -802,6 +948,13 @@ def build_universe_board(
         "pillars": list(_PILLAR_ORDER),
         "pillar_weights": pillar_weights,
         "gate_config": gate_config,
+        # alpha-engine-config-I8255 deliverable 1: per-field cross-sectional
+        # DISTINCT count for every published fundamental metric — emitted
+        # unconditionally (healthy steady state is a real number in the
+        # hundreds, never omitted), so a dashboard/audit consumer can see
+        # spread degrade WITHOUT a producer failure once it drops but stays
+        # above the enforcement floor. See _assert_fundamental_distinctness_floor.
+        "fundamental_distinctness": fundamental_distinctness,
         "stocks": stocks,
     }
 
