@@ -665,7 +665,7 @@ def test_an_overdue_arm_alerts_but_an_immature_arm_does_not(built_with_gap):
 
 from scoring.cut_promotion import (  # noqa: E402
     CUT_PROMOTION_SLOT,
-    REASON_ARM_ROW_MISSING,
+    _veto_horizon,
     decide_cut_champion,
 )
 from scoring.universe_membership import (  # noqa: E402
@@ -790,18 +790,28 @@ def test_board_names_the_serving_arm_as_champion(slot_built):
     assert kinds[TECH_CUT] == "challenger"
 
 
-def test_promotion_engine_no_longer_holds_on_a_missing_arm_row(slot_built):
-    """End to end: the decision this board exists to feed can now be reached.
+def test_every_promotable_arm_is_readable_by_the_long_horizon_veto(slot_built):
+    """End to end onto the post-I8261 consumer.
 
-    The engine may still HOLD — the 126-session cohort is immature in this
-    fixture and that is correct — but it must no longer hold because an arm it
-    compares has no row at all, which is what a board without `tech_score_top_60`
-    forced on every single evaluation."""
+    The DECISION no longer comes from this board (alpha-engine-config-I8261,
+    Brian's ruling 2026-08-24 — it comes from the weekly ledger), but the
+    corroborating VETO still does, and a veto cannot be taken on a horizon
+    where an arm it compares has no row at all. That is what a board without
+    `tech_score_top_60` forced on every single evaluation.
+
+    An IMMATURE block is still a legitimate non-blocking outcome here and is
+    what this fixture produces at 126/252 — the property under test is that the
+    reason is maturity, never a missing row.
+    """
     lb = out_lb(slot_built)
+    for horizon in CUT_PROMOTION_SLOT.corroborating_horizons_days:
+        entry = _veto_horizon(lb, CUT_PROMOTION_SLOT, FEED_CUT_NAME, horizon)
+        assert "rows at" not in entry["note"], (horizon, entry["note"])
+    # And the decision path itself still produces a full arms block.
     decision = decide_cut_champion(
-        board=lb, champion_before=FEED_CUT_NAME, decided_on="2026-07-03",
+        ledger_rows=None, board=lb, champion_before=FEED_CUT_NAME,
+        decided_on="2026-07-03",
     )
-    assert decision.reason_code != REASON_ARM_ROW_MISSING, decision.reason
     assert set(decision.arms) == set(CUT_PROMOTION_SLOT.arms)
 
 

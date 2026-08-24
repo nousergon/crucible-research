@@ -152,12 +152,21 @@ def test_write_leaderboard_passes_a_clean_board():
 
 
 def test_promotion_refuses_to_decide_on_the_live_defective_board(live_defective_board):
-    """On ``origin/main`` this returns ``decision_horizon_immature`` with
+    """On ``origin/main`` this returned ``decision_horizon_immature`` with
     ``defect=None`` — a hold whose stated reason is true of the board and
     silent about the thing actually wrong with it. The duplicates are in the
-    21d block, which this engine never reads, so the per-arm check below it
-    cannot see them."""
+    21d block, which this engine never decides from, so a per-arm check on the
+    decision surface alone cannot see them.
+
+    Still true after the alpha-engine-config-I8261 cutover, and now for a
+    sharper reason: the board is only the corroborating VETO source, and an
+    ABSENT veto is legitimately non-blocking (§5.1) while a CORRUPT one is not.
+    A safety mechanism that may be reading someone else's numbers is worse than
+    one that is switched off, so a duplicated board still disqualifies itself
+    and the hold still names the defect — even with a weekly ledger that would
+    otherwise support a decision."""
     decision = decide_cut_champion(
+        ledger_rows=[],
         board=live_defective_board,
         champion_before="attractiveness_top_60",
         decided_on="2026-08-19",
@@ -188,7 +197,8 @@ def test_a_clean_immature_board_still_holds_on_immaturity_not_on_a_defect():
         ],
     }
     decision = decide_cut_champion(
-        board=board, champion_before="attractiveness_top_60", decided_on="2026-08-21",
+        ledger_rows=[], board=board,
+        champion_before="attractiveness_top_60", decided_on="2026-08-21",
     )
     assert decision.reason_code != REASON_BOARD_DEFECTIVE
     assert decision.defect is None

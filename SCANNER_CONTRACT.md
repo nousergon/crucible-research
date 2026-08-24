@@ -30,7 +30,7 @@ weekly, and the champion is what the sector teams research.**
 | ranking basis | `attractiveness_rank` — the 6-pillar composite (quality, value, momentum, growth, stewardship, defensiveness) | `tech_score_rank` — RSI / MACD / MA50 / MA200 / 20-day momentum, equally weighted |
 | momentum | **included, at 1/6.** The momentum pillar's weight lives in `s3://{bucket}/config/factor_attractiveness_weights.json`. It was set to ZERO on 2026-08-17 (`alpha-engine-config-I7580`) and Brian REVERSED that on 2026-08-21 (`I7988`): equal weight is the champion again and the momentum-zero composite runs as the `attractiveness_momzero_top_60` shadow arm, so the question is measured before it is adopted rather than after. | **included.** `momentum_20d` is one of the five equally-weighted `tech_score` terms. |
 | width | 60 | 60 — count-matched, so a win is never confounded with breadth |
-| graded on | `topn_alpha_vs_population` at 21 / 126 / 252 sessions, against the population it narrowed — never against SPY (`alpha-engine-config-I7576`) | same |
+| graded on | **decided** on the paired weekly difference vs the champion, chained (`research/cuts_weekly_ledger/ledger.parquet`, Brian's ruling 2026-08-24 / `alpha-engine-config-I8261`); still SCORED at 21 / 126 / 252 sessions on `topn_alpha_vs_population`, against the population it narrowed and never against SPY (`alpha-engine-config-I7576`) — 126 and 252 hold a veto, 21 holds nothing | same |
 
 **The champion pointer.** `s3://{bucket}/config/scanner_cut_champion.json` names
 which arm is live. `universe_membership.live_cut_champion()` reads it;
@@ -46,14 +46,17 @@ another is the exact drift this contract exists to prevent.
 **`tech_score_top_60` is OBSERVE-ONLY as of 2026-08-21** (Brian ruling,
 `alpha-engine-config-I8060`). `PROMOTABLE_CUTS` is `("attractiveness_top_60",)`
 and `OBSERVE_ONLY_CUTS` carries `tech_score_top_60` plus the two attractiveness
-challengers. All four are scored every cycle at 21 / 126 / 252 — non-promotable
-is not non-measured — but only the promotable set may hold the pointer, and
-`live_cut_champion` refuses the rest regardless of what the promotion engine
-believes. With one promotable arm there is nothing to decide, so the engine
-writes `reason_code: "no_promotable_challenger"` every cycle rather than falling
+challengers. All four are scored every cycle — on the weekly ledger and at
+21 / 126 / 252 on the leaderboard; non-promotable is not non-measured — but only
+the promotable set may hold the pointer, and `live_cut_champion` refuses the
+rest regardless of what the promotion engine believes. With one promotable arm
+there is nothing to decide, so the engine writes
+`reason_code: "no_promotable_challenger"` every cycle rather than falling
 through to a comparison it did not make. The arm was made promotable on
 2026-08-20 and first emitted the same day, so it has never had a scored cohort;
-it returns to `PROMOTABLE_CUTS` on a ruling once it has weeks of measured
+Brian declined to restore it in the I8261 cutover for that reason — arming an
+automatic pointer write before evidence exists re-creates the I8060 condition.
+It returns to `PROMOTABLE_CUTS` on a ruling once it has weeks of measured
 performance, which is a one-line registry edit.
 
 **Fixed consumers, not subject to promotion:** `attractiveness_top_20` is the
@@ -61,13 +64,21 @@ predictor's daily universe (`PREDICTOR_UNIVERSE_CUT`, explicitly ruled unchanged
 2026-08-20); `attractiveness_top_60` is the RAG corpus scope and Think Tank's
 coverage window regardless of which arm holds the feed.
 
-**Promotion refuses immature evidence.** The horizons that match a ~1-year
-objective are 126 and 252 sessions. `tech_score_top_60` was first emitted
-2026-08-20, so neither is measurable for months. Promoting on the 21-day block
-selects for exactly the short-horizon behaviour the momentum-zero ruling removed
-— the error recorded in `alpha-engine-config-I7580`. Until a horizon matures the
-pointer holds the standing champion, and the engine says so rather than flipping
-the feed on a number it has already called wrong.
+**Promotion decides on the chained weekly series** (Brian's ruling
+2026-08-24, `alpha-engine-config-I8261`). The cut is re-formed weekly, so a
+forward-window return from a cohort date measures a hold the re-cut guarantees
+never happens, and consecutive cohort dates' windows overlap. The decision
+metric is therefore the **paired weekly difference vs the champion** — net of
+transaction cost, both legs read from `research/cuts_weekly_ledger/ledger.parquet`
+and joined on the week — aggregated over the chained series. 126 and 252 are
+demoted from decision basis to **corroborating vetoes**: a mature block may
+block a promotion the weekly series proposes and may never propose one, and an
+immature one is recorded non-blocking (§5.1 — you cannot gate on a statistic you
+did not measure). 21 sessions is excluded from both roles: it is the block that
+produced `alpha-engine-config-I7580`. `forbidden_horizons_days` retired with the
+old basis; the property it held is now held by three import-time invariants in
+`cut_promotion.py` (decision source pinned to the ledger; excluded horizons
+disjoint from veto horizons; every veto horizon ≥ 126).
 
 ### The promotion engine
 
@@ -78,15 +89,16 @@ the feed on a number it has already called wrong.
 
 | | value | why |
 |---|---|---|
-| evidence | `research/cuts_leaderboard/{date}.json`, `topn_alpha_vs_population` | the arm against the population it narrowed (`alpha-engine-config-I7576`) |
-| decision horizon | **126 sessions** | the shorter of the two horizons matching the ~1-year objective, so it matures first |
-| corroborating horizon | 252 sessions, **veto only** | a longer horizon may block a promotion the shorter one proposes, never propose one — the asymmetry is `I7580` |
-| forbidden horizon | **21 sessions**, at any confidence | asserted at import; it is the block that produced `I7580` |
-| evidence floor | both arms `n_dates_scored ≥ min_dates_for_inference` (5) | below it a per-date mean is an anecdote (`alpha-engine-config-I7542`) |
-| hysteresis (§5.2) | margin `0.005` of mean lift, cooldown `28` days, symmetric on demotion | implemented, not waived — the §9.3 winner-take-all delta is scoped to the selection-producer slot and does not transfer |
+| evidence | `research/cuts_weekly_ledger/ledger.parquet`, `net_log_return` | the return the slot actually earns over the week it is held; net because at weekly rebalance turnover is first-order and these arms' churn differs 42% vs 76% |
+| decision metric | **`paired_weekly_net_log_return_vs_champion`**, chained | the same-week champion leg cancels the common market factor, which is the only thing that makes ~52 observations a year enough (`champion-challenger-policy.md` §4) |
+| corroborating horizons | 126 and 252 sessions, **veto only** | a long horizon may block a promotion the weekly series proposes, never propose one — the asymmetry is `I7580`; immature ⇒ non-blocking (§5.1) |
+| excluded horizon | **21 sessions** — neither decides nor vetoes | asserted disjoint from the veto set at import; it is the block that produced `I7580` |
+| evidence floor | every arm `n_weeks_paired ≥ min_weeks_for_inference` (5) | below it a mean of paired weekly differences is an anecdote (`alpha-engine-config-I7542`) |
+| earliest possible decision | **2026-09-25** | `FIRST_COHORT_DATE` 2026-08-20 (`I8255`) + 5 weekly holding periods. The v1 basis put it at 2027-02-22 |
+| hysteresis (§5.2) | margin `0.0002` **per week**, cooldown `28` days, symmetric on demotion | implemented, not waived. The margin is the retired `0.005`-per-126-sessions bar converted to weekly units (0.005 / 25.2 weeks) — the cutover changes the BASIS, not the BAR |
 
 **A decision is written on every evaluation, promote or hold**, to three keys
-carrying one v1 document (`contracts/scanner_cut_champion.schema.json`):
+carrying one v2 document (`contracts/scanner_cut_champion.schema.json`):
 
 | key | role |
 |---|---|
@@ -95,12 +107,14 @@ carrying one v1 document (`contracts/scanner_cut_champion.schema.json`):
 | `config/apply_audit/scanner_cut_champion/latest.json` | liveness proxy: a dead engine must not read as an engine that held |
 
 Every record carries `decision`, a machine-readable `reason_code`, a prose
-`reason`, and **both arms' `n_dates_scored` even when zero** — that count is the
+`reason`, and **every arm's `n_weeks_paired` even when zero** — that count is the
 number saying how far off a real decision is, and it is the measurability
-surface for this slot. An evidence-shaped hold (immature, thin, board absent) is
-the expected steady state and does not alert. A structural defect on the board
-(duplicate rows, a missing horizon block) is recorded as a hold **and then
-raised**: the defect is durable before the process is allowed to fail.
+surface for this slot. An evidence-shaped hold (ledger absent, series thin, no
+promotable challenger) is the expected steady state and does not alert. A
+CORRUPT board — duplicate arm rows — is recorded as a hold **and then raised**:
+the defect is durable before the process is allowed to fail. An ABSENT board is
+neither, post-I8261: it makes every veto unmeasured and therefore non-blocking,
+and a decision the ledger fully supports still goes through.
 
 The engine is **cadence-agnostic** — its hysteresis is measured in calendar
 days, not invocations — so it behaves identically before and after the weekly
