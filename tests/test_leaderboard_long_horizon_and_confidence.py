@@ -351,6 +351,20 @@ def _continuity_fixture():
 #                              unchanged SPY series
 _ADDITIVE_SINCE_CAPTURE = ("confidence", "topn_alpha_vs_population")
 
+# Additive fields added INSIDE a metric block, rather than alongside it. Same
+# rule as above and the same test: each must carry new information about the
+# protected number without changing it.
+#
+#   se_method / overlap_lags   alpha-engine-config-I8263 — WHICH standard error
+#                              produced this block, and whether its observations
+#                              overlapped. The pinned series is scored with no
+#                              declared cohort spacing, so it takes the iid
+#                              branch and every protected mean/se/t_stat is
+#                              arithmetically untouched — which is exactly what
+#                              this lock is here to prove, and why the keys are
+#                              stripped rather than the pin re-captured.
+_ADDITIVE_IN_METRIC_SINCE_CAPTURE = ("se_method", "overlap_lags")
+
 
 def _numeric_only(row: dict) -> dict:
     """A spec row reduced to the fields that existed when the pin was captured.
@@ -358,7 +372,17 @@ def _numeric_only(row: dict) -> dict:
     Deliberately a subtraction from the LIVE row rather than a re-capture of the
     literals: re-pinning would let a future change to the protected numbers slide
     through under cover of an unrelated addition."""
-    return {k: v for k, v in row.items() if k not in _ADDITIVE_SINCE_CAPTURE}
+    out = {}
+    for k, v in row.items():
+        if k in _ADDITIVE_SINCE_CAPTURE:
+            continue
+        if isinstance(v, dict):
+            v = {
+                mk: mv for mk, mv in v.items()
+                if mk not in _ADDITIVE_IN_METRIC_SINCE_CAPTURE
+            }
+        out[k] = v
+    return out
 
 
 class TestTwentyOneDayContinuity:
