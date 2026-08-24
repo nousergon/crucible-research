@@ -76,6 +76,17 @@ def stub_universe_membership():
     ``_last_eval_log`` as a module attribute, so these tests reach the
     shadow path only once an earlier file has populated it. Alone, the
     empty stash short-circuits before the read.
+
+    The weekly cut ledger (alpha-engine-config-I8264) is stubbed for the same
+    reason one layer further along: it reads the membership artifact this run
+    just wrote and then prices a week out of ArcticDB, neither of which exists
+    under a MagicMock S3. Its own contract tests live in
+    ``tests/test_weekly_ledger_wiring.py``; here it returns the commonest real
+    outcome — a run where no week closed — so the handler tests exercise the
+    wiring without asserting anything about the ledger's own behaviour. Its
+    membership READ is stubbed alongside it: the handler re-reads the artifact
+    it just wrote to hand the ledger the cut it must measure against, and under
+    a MagicMock S3 that read raises before the stub above is ever reached.
     """
     with (
         patch(
@@ -85,6 +96,14 @@ def stub_universe_membership():
         patch(
             "data.fetchers.feature_store_reader.read_latest_factor_loadings",
             return_value={},
+        ),
+        patch(
+            "scoring.universe_membership.read_latest_membership",
+            return_value={"cut_effective_date": "2026-05-29", "turnover": None},
+        ),
+        patch(
+            "scoring.weekly_ledger.record_completed_week",
+            return_value={"status": "skipped", "reason": "no_week_closed"},
         ),
     ):
         yield
@@ -562,7 +581,7 @@ class TestBoardsLegibilityRollup:
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
         boards = result["summary"]["boards"]
-        assert sorted(boards["completed"]) == ["cut_promotion", "cuts_leaderboard"]
+        assert sorted(boards["completed"]) == ["cut_promotion", "cuts_leaderboard", "weekly_ledger"]
         assert boards["attempted"] == boards["completed"]  # nothing errored or was skipped
         assert boards["errored"] == []
         assert boards["not_attempted"] == []
@@ -641,6 +660,9 @@ class TestBoardsLegibilityRollup:
             result = handler_mod.handler({"run_date": "2026-05-30"}, context=None)
         boards = result["summary"]["boards"]
         assert "cuts_leaderboard" in boards["completed"]
+        # The ledger stub reports a week that did not close — a correct outcome,
+        # so it completes rather than erroring (I8264).
+        assert "weekly_ledger" in boards["completed"]
         assert boards["errored"] == []
 
 
