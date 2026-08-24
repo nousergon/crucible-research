@@ -68,10 +68,110 @@ class TestDateClusteredStats:
 
     def test_single_date_has_no_se(self):
         s = date_clustered_stats([0.42])
-        assert s == {"mean": 0.42, "se": None, "t_stat": None, "n_dates": 1}
+        assert s == {
+            "mean": 0.42, "se": None, "t_stat": None, "n_dates": 1,
+            # No SE exists for one observation, and the block says so rather
+            # than omitting the field — a reader must never have to infer
+            # WHY an SE is absent (alpha-engine-config-I8263).
+            "se_method": "unavailable",
+        }
 
     def test_empty_is_none(self):
         assert date_clustered_stats([]) is None
+
+    def test_independent_observations_keep_the_iid_se_and_say_so(self):
+        """The original weeks-as-N contract, unchanged and now DECLARED.
+
+        ``overlap_lags=0`` is a positive statement that the observations do not
+        overlap — not "not checked" — so the iid SE it labels is correct rather
+        than merely conventional.
+        """
+        s = date_clustered_stats([0.1, 0.2, 0.3], overlap_lags=0)
+        assert s["se_method"] == "iid"
+        assert s["se"] == pytest.approx(0.1 / (3**0.5), rel=1e-4)
+
+    def test_overlapping_observations_get_a_hac_se_not_an_iid_one(self):
+        """The defect this parameter exists to remove.
+
+        ``sd/sqrt(n)`` over overlapping forward windows understates the SE by
+        roughly ``sqrt(lags+1)`` and reads as significance. A block declaring
+        overlap must carry a HAC method.
+        """
+        series = [0.05, 0.06, 0.05, 0.07, 0.06, 0.05, 0.06, 0.07]
+        s = date_clustered_stats(series, overlap_lags=3)
+        assert s["se_method"] == "newey-west"
+        assert s["overlap_lags"] == 3
+        assert s["se"] is not None
+
+    def test_a_positively_autocorrelated_series_gets_a_LARGER_se_under_hac(self):
+        """Direction matters, not just the label.
+
+        Overlapping windows share most of their span, which induces strong
+        POSITIVE autocorrelation. HAC must widen the SE relative to iid — a
+        correction that narrowed it would make the very numbers it was added to
+        discipline look more significant, not less.
+        """
+        series = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+        iid = date_clustered_stats(series, overlap_lags=0)
+        hac = date_clustered_stats(series, overlap_lags=4)
+        assert hac["se_method"] == "newey-west"
+        assert hac["se"] > iid["se"], (iid["se"], hac["se"])
+        assert abs(hac["t_stat"]) < abs(iid["t_stat"])
+
+    def test_an_uncomputable_hac_se_is_null_never_an_iid_substitute(self):
+        """Silently downgrading to iid would be indistinguishable from a
+        correct number, which is the whole failure mode. `unavailable` is the
+        honest output (champion-challenger-policy.md §7.2)."""
+        import scoring.leaderboard_scoring as ls
+
+        original = ls._hac_se
+        try:
+            ls._hac_se = lambda *a, **k: None
+            s = date_clustered_stats([0.1, 0.2, 0.3, 0.4], overlap_lags=2)
+        finally:
+            ls._hac_se = original
+        assert s["se_method"] == "unavailable"
+        assert s["se"] is None
+        assert s["t_stat"] is None
+        assert s["mean"] == pytest.approx(0.25)
+
+
+class TestOverlapLags:
+    """``overlap_lags_for`` — the (horizon, cohort spacing) → lag mapping."""
+
+    def test_weekly_cohort_on_a_21_session_horizon_overlaps_four_neighbours(self):
+        """The live configuration. Cohort dates ~5 sessions apart, forward
+        window 21 sessions: each window shares span with four neighbours."""
+        from scoring.leaderboard_scoring import overlap_lags_for
+
+        assert overlap_lags_for(21, 5) == 4
+
+    def test_a_longer_horizon_overlaps_more_at_the_same_spacing(self):
+        """Monotone in the horizon — the 126- and 252-session blocks are the
+        MORE distorted ones, which is the opposite of how they are usually
+        read."""
+        from scoring.leaderboard_scoring import overlap_lags_for
+
+        assert overlap_lags_for(126, 5) > overlap_lags_for(21, 5)
+        assert overlap_lags_for(252, 5) > overlap_lags_for(126, 5)
+
+    def test_a_weekly_holding_period_on_weekly_cohorts_does_not_overlap(self):
+        """The measurement Brian ruled for on 2026-08-24: hold the cut for the
+        week it is formed. Horizon == spacing, so the windows abut rather than
+        overlap and the iid SE is correct as written."""
+        from scoring.leaderboard_scoring import overlap_lags_for
+
+        assert overlap_lags_for(5, 5) == 0
+
+    def test_unknown_spacing_applies_no_correction(self):
+        """Fewer than two cohort dates means no spacing exists. Inventing one
+        would be a fabricated correction; applying none is honest, and the
+        block's declared `overlap_lags: 0` is then a statement about what was
+        measurable."""
+        from scoring.leaderboard_scoring import overlap_lags_for
+
+        assert overlap_lags_for(21, None) == 0
+        assert overlap_lags_for(21, 0) == 0
 
 
 # ── Scorer ────────────────────────────────────────────────────────────────────

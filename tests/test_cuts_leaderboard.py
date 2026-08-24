@@ -190,9 +190,9 @@ def test_all_three_arms_present_at_every_horizon(built):
         assert names == {FEED_CUT_NAME, PREDICTOR_UNIVERSE_CUT, CHAMPION_CUT}
 
 
-def test_champion_names_the_live_cut_and_vs_champion_stays_null(built):
-    """The board names the arm that is actually serving, and still holds no
-    arm-vs-arm difference.
+def test_champion_names_the_live_cut_and_carries_the_paired_difference(built):
+    """The board names the arm that is actually serving, and now holds the
+    arm-vs-arm difference it never used to.
 
     Before alpha-engine-config-I8026 this asserted ``champion is None``, on the
     reading that the board's arms are funnel STAGES and stages do not compete.
@@ -202,10 +202,17 @@ def test_champion_names_the_live_cut_and_vs_champion_stays_null(built):
     and §3 calls a null champion field on a slot that has one a broken
     leaderboard.
 
-    ``topn_alpha_vs_champion`` stays null regardless — each arm is scored in
-    its own single-arm pass, so no pass ever holds two arms to difference. The
-    comparison a consumer reads is ``topn_alpha_vs_population``, which is
-    legitimate here because the slot arms are count-matched at 60.
+    Until alpha-engine-config-I8263 this ALSO asserted that
+    ``topn_alpha_vs_champion`` stays null, because each arm is scored in its
+    own single-arm pass and no pass ever held two arms to difference. That was
+    a faithful description of the code and a defect in it: the paired
+    difference is the highest-power statistic the count-matched same-date
+    design makes available, and discarding it left the slot comparing two
+    independently-estimated means at ~52 observations a year. It is now
+    computed outside the pass, where both arms are in scope.
+
+    The CHAMPION's own row keeps a null — an arm has no difference against
+    itself, and a zero there would read as a measured tie.
     """
     lb = out_lb(built)
     assert lb["champion"] == FEED_CUT_NAME
@@ -214,9 +221,99 @@ def test_champion_names_the_live_cut_and_vs_champion_stays_null(built):
     ]
     assert champion_rows, "the champion arm must still carry a scored row (§3)"
     assert all(r["kind"] == "champion" for r in champion_rows)
+    assert all(r["topn_alpha_vs_champion"] is None for r in champion_rows), (
+        "an arm has no paired difference against itself"
+    )
+
+    # Every count-matched challenger that shares cohort dates with the champion
+    # must now carry one. A null here is the I8263 defect returning.
+    champion_width = next(
+        r["top_n"] for block in lb["horizons"] for r in block["specs"]
+        if r["name"] == FEED_CUT_NAME
+    )
+    paired_rows = [
+        r for block in lb["horizons"] for r in block["specs"]
+        if r["kind"] == "challenger"
+        and r["top_n"] == champion_width
+        and (r.get("n_dates_scored") or 0) > 0
+    ]
+    assert paired_rows, "fixture must carry at least one count-matched challenger"
+    for row in paired_rows:
+        assert row["topn_alpha_vs_champion"] is not None, row["name"]
+
+
+def test_a_challenger_at_a_different_width_gets_no_paired_difference(built):
+    """Width-gated, not width-adjusted (champion-challenger-policy.md §4).
+
+    A paired difference between a 60-wide arm and a 20-wide champion measures
+    BREADTH, not the selection rule — the question the slot is asking. A null
+    is the correct output for such a row, and it must not be filled in with a
+    number that answers a different question.
+    """
+    lb = out_lb(built)
+    champion_width = next(
+        r["top_n"] for block in lb["horizons"] for r in block["specs"]
+        if r["name"] == FEED_CUT_NAME
+    )
     for block in lb["horizons"]:
         for row in block["specs"]:
-            assert row["topn_alpha_vs_champion"] is None
+            if row["kind"] == "challenger" and row["top_n"] != champion_width:
+                assert row["topn_alpha_vs_champion"] is None, row["name"]
+
+
+def test_every_horizon_declares_whether_its_observations_overlap(built):
+    """The dependence assumption is stated ON the artifact, never inferred.
+
+    An SE is only interpretable against the assumption behind it, and no
+    consumer can recover that from the number. ``overlap_lags: 0`` means
+    genuinely non-overlapping — not "not checked" (alpha-engine-config-I8263).
+    """
+    lb = out_lb(built)
+    for block in lb["horizons"]:
+        assert "overlap_lags" in block, block["horizon_days"]
+        assert isinstance(block["overlap_lags"], int)
+        assert block["observations_overlap"] == (block["overlap_lags"] > 0)
+
+
+def test_a_longer_horizon_never_gets_a_smaller_overlap_correction(built):
+    """Overlap is monotone in the horizon at fixed cohort spacing.
+
+    The 126- and 252-session blocks are the MORE distorted ones, not less, so a
+    single lag count applied across all horizons would under-correct exactly
+    where the correction matters most.
+    """
+    lb = out_lb(built)
+    by_h = sorted(
+        ((b["horizon_days"], b["overlap_lags"]) for b in lb["horizons"]),
+        key=lambda p: p[0],
+    )
+    lags = [x[1] for x in by_h]
+    assert lags == sorted(lags), by_h
+
+
+def test_an_overlapping_metric_never_publishes_an_iid_t_stat(built):
+    """The defect in one assertion.
+
+    A t-stat computed with ``sd/sqrt(n)`` over overlapping windows understates
+    the SE by roughly ``sqrt(lags+1)`` and reads as significance. Any block
+    declaring overlap must carry a HAC method, or no SE at all — never `iid`.
+    """
+    lb = out_lb(built)
+    for block in lb["horizons"]:
+        if not block["observations_overlap"]:
+            continue
+        for row in block["specs"]:
+            for key in (
+                "realized_rank_ic", "topn_alpha_vs_champion",
+                "topn_alpha_vs_benchmark", "topn_alpha_vs_population",
+            ):
+                metric = row.get(key)
+                if not isinstance(metric, dict):
+                    continue
+                assert metric.get("se_method") != "iid", (
+                    f"{row['name']}.{key} at {block['horizon_days']}d publishes "
+                    "an iid SE over overlapping windows"
+                )
 
 
 def test_population_metric_is_populated(built):

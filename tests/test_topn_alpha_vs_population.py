@@ -102,6 +102,28 @@ BASELINE_ON_MAIN = {
 }
 
 
+# Keys added INSIDE a metric block after this baseline was captured. Stripped
+# rather than re-pinned, for the reason the baseline exists: re-capturing the
+# literals would let a real change to a protected NUMBER slide through under
+# cover of an unrelated addition.
+#
+#   se_method / overlap_lags   alpha-engine-config-I8263 — which standard error
+#                              produced the block, and whether its observations
+#                              overlapped. This fixture declares no cohort
+#                              spacing, so it takes the iid branch and every
+#                              mean/se/t_stat below is arithmetically untouched.
+_ADDITIVE_IN_METRIC_SINCE_CAPTURE = ("se_method", "overlap_lags")
+
+
+def _without_additive(value):
+    if not isinstance(value, dict):
+        return value
+    return {
+        k: v for k, v in value.items()
+        if k not in _ADDITIVE_IN_METRIC_SINCE_CAPTURE
+    }
+
+
 @pytest.mark.parametrize("name", sorted(BASELINE_ON_MAIN))
 def test_pre_change_fields_are_byte_identical(scored, name):
     """Captured from `origin/main` at aff64bd8 on this exact fixture. Every
@@ -109,7 +131,23 @@ def test_pre_change_fields_are_byte_identical(scored, name):
     adding a metric must not perturb one."""
     row = _row(scored, name)
     for field, expected in BASELINE_ON_MAIN[name].items():
-        assert row[field] == expected, f"{name}.{field} changed"
+        assert _without_additive(row[field]) == expected, f"{name}.{field} changed"
+
+
+def test_this_fixture_takes_the_iid_branch_and_declares_it(scored):
+    """The premise the strip above rests on, asserted rather than assumed.
+
+    If a future change made this fixture take the HAC branch, the numbers WOULD
+    move and the baseline would be silently comparing a corrected series
+    against an uncorrected pin. Naming `iid` here means that can only happen
+    loudly (alpha-engine-config-I8263).
+    """
+    for name in BASELINE_ON_MAIN:
+        row = _row(scored, name)
+        for field in ("realized_rank_ic", "topn_alpha_vs_benchmark"):
+            metric = row.get(field)
+            if isinstance(metric, dict) and metric.get("se") is not None:
+                assert metric["se_method"] == "iid", f"{name}.{field}"
 
 
 def test_leaderboard_level_fields_unchanged(scored):

@@ -82,7 +82,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date as _date
 from typing import Any
 
@@ -109,6 +109,7 @@ from scoring.leaderboard_scoring import (
     SpecDay,
     SpecHistory,
     duplicate_arm_rows,
+    paired_alpha_vs_champion,
     population_return_from_panel,
     score_multi_horizon,
     slot_spec,
@@ -1299,6 +1300,13 @@ def build_scanner_leaderboard(
                 reason=str(exc),
                 write=write,
             )
+        # Same overlap correction as the cuts board, for the same reason: this
+        # board's cohort dates are DAILY shadow writes and its horizons are
+        # 21..252 sessions, so the windows overlap even more heavily than the
+        # weekly slot's. Fixing only the board where the defect was noticed
+        # would leave two of three boards publishing iid t-stats over
+        # overlapping windows (engagement-protocol-policy.md §5 — the fix
+        # survives the class, not the instance).
         leaderboard = score_multi_horizon(
             champion,
             challengers,
@@ -1308,6 +1316,7 @@ def build_scanner_leaderboard(
             min_dates_for_inference=slot.min_dates_for_inference,
             horizon_notes=horizon_notes,
             population_by_horizon=population_by_horizon,
+            cohort_spacing_days=median_cohort_spacing_days(dates),
         )
         _annotate_horizon_maturity("scanner", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "scanner"
@@ -1357,6 +1366,49 @@ def build_scanner_leaderboard(
             dedup_key=f"scanner_leaderboard_build_error:{date_str}",
         )
         return {"status": "error", "error": str(exc)}
+
+
+def median_cohort_spacing_days(dates: Sequence[str]) -> int | None:
+    """Median TRADING-day gap between consecutive cohort dates, or None.
+
+    The denominator of the overlap question: a forward window of H sessions
+    measured on cohort dates spaced S sessions apart overlaps its neighbours
+    whenever S < H. Measured from the artifact calendar rather than assumed
+    from the declared cadence, because the two diverge — the cut is weekly but
+    `universe_membership/{date}` is written on every run, and a backfill or a
+    missed Saturday moves the real spacing without moving the declared one.
+
+    MEDIAN, not mean: one long gap (a missed run, a holiday week) must not
+    inflate the spacing and thereby understate the overlap. Understating
+    overlap is the failure direction that produces a confident wrong t-stat,
+    so the estimator is chosen to be robust in that direction
+    (alpha-engine-config-I8263).
+
+    Returns None for fewer than two dates — no spacing exists, and the caller
+    then applies no correction rather than inventing one.
+    """
+    uniq = sorted({d for d in dates if isinstance(d, str) and len(d) == 10})
+    if len(uniq) < 2:
+        return None
+    gaps: list[int] = []
+    for a, b in zip(uniq, uniq[1:], strict=False):  # deliberately offset by one
+        try:
+            gaps.append(int(count_trading_days(_date.fromisoformat(a), _date.fromisoformat(b))))
+        except Exception as exc:  # noqa: BLE001 — one bad pair must not sink the estimate
+            # Recorded, never swallowed: a spacing estimated from fewer pairs
+            # than the calendar has is still usable, but a systematically
+            # unparseable calendar would understate overlap silently, and that
+            # is the direction that produces a confident wrong t-stat.
+            logger.warning(
+                "[leaderboard] cohort spacing: skipping unparseable date pair "
+                "%s..%s (%s) — spacing estimated from the remaining pairs", a, b, exc,
+            )
+    gaps = [g for g in gaps if g > 0]
+    if not gaps:
+        return None
+    gaps.sort()
+    mid = len(gaps) // 2
+    return gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) // 2 or 1
 
 
 def _load_cut_specs(
@@ -1612,6 +1664,12 @@ def build_cuts_leaderboard(
         # the rows are merged. score_multi_horizon takes one `top_n` for the
         # whole call, so a single call could not give three arms three widths
         # without silently truncating two of them.
+        # The overlap denominator, measured from the cohort calendar rather
+        # than assumed from the declared weekly cadence (alpha-engine-config
+        # -I8263). Every horizon block derives its own Bartlett lag from this.
+        spacing = median_cohort_spacing_days(dates)
+        champion_arm_obj = next((a for a in arms if a.kind == "champion"), None)
+
         merged: dict | None = None
         for arm in arms:
             width = widths.get(arm.name) or 0
@@ -1632,10 +1690,38 @@ def build_cuts_leaderboard(
                 min_dates_for_inference=slot.min_dates_for_inference,
                 horizon_notes=horizon_notes,
                 population_by_horizon=population_by_horizon,
+                cohort_spacing_days=spacing,
             )
             for block in scored.get("horizons", []):
                 for row in block.get("specs", []):
                     row["top_n"] = width
+            # ── The PAIRED difference vs the champion (I8263) ──────────────
+            # The single-arm pass structure above hands every challenger
+            # `champion=None`, so `score_leaderboard` skips the paired metric
+            # and `topn_alpha_vs_champion` was null on every arm on every board
+            # ever written. It is computed HERE, outside the pass, where both
+            # arms are in scope.
+            #
+            # WIDTH-GATED, not width-adjusted: a paired difference between arms
+            # of different widths measures breadth rather than the selection
+            # rule, so an arm whose width differs from the champion's keeps a
+            # null and is not silently compared at the wrong question
+            # (champion-challenger-policy.md §4).
+            if (
+                not is_champion
+                and champion_arm_obj is not None
+                and (widths.get(champion_arm_obj.name) or 0) == width
+            ):
+                for block in scored.get("horizons", []):
+                    h = block["horizon_days"]
+                    realized_h = realized_by_horizon.get(h) or {}
+                    paired = paired_alpha_vs_champion(
+                        arm, champion_arm_obj, realized_h, width,
+                        overlap_lags=block.get("overlap_lags") or 0,
+                    )
+                    for row in block.get("specs", []):
+                        if row.get("name") == arm.name:
+                            row["topn_alpha_vs_champion"] = paired
             if merged is None:
                 merged = scored
                 continue
@@ -1802,6 +1888,13 @@ def build_producer_leaderboard(
                 reason=str(exc),
                 write=write,
             )
+        # Same overlap correction as the cuts board, for the same reason: this
+        # board's cohort dates are DAILY shadow writes and its horizons are
+        # 21..252 sessions, so the windows overlap even more heavily than the
+        # weekly slot's. Fixing only the board where the defect was noticed
+        # would leave two of three boards publishing iid t-stats over
+        # overlapping windows (engagement-protocol-policy.md §5 — the fix
+        # survives the class, not the instance).
         leaderboard = score_multi_horizon(
             champion,
             challengers,
@@ -1811,6 +1904,7 @@ def build_producer_leaderboard(
             min_dates_for_inference=slot.min_dates_for_inference,
             horizon_notes=horizon_notes,
             population_by_horizon=population_by_horizon,
+            cohort_spacing_days=median_cohort_spacing_days(dates),
         )
         _annotate_horizon_maturity("producer", leaderboard["horizons"], dates, date_str, horizons[0])
         leaderboard["leaderboard_id"] = "producer"
