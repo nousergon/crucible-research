@@ -402,11 +402,24 @@ running once the sign is known."""
 # low-volatility trio, which makes this the natural null hypothesis rather than
 # an arbitrary ablation.
 #
-# It is NOT a reconstruction of the pre-2026-08-20 state. That ranking ran on
-# placeholders, is not point-in-time reproducible, and backfilling it onto
-# those dates would enter the cohort as a near-clone of the champion —
-# poisoning the exact comparison this arm exists to make. The series starts at
-# the first cut built on repaired fundamentals.
+# It is NOT a reconstruction of the pre-2026-08-20 state: that ranking ran on
+# placeholders and is not what this arm is asking about.
+#
+# It IS reconstructable onto those dates, and the near-clone risk this comment
+# predicted was MEASURED and did not hold (alpha-engine-config-I8262,
+# 2026-08-24). The prediction was that a champion which had accidentally become
+# a three-pillar ranking would be reproduced by an arm zeroing exactly those
+# three pillars. Over all 24 archived cycles the reconstructed hard3 top-60
+# overlapped the champion's archived top-60 on 0.05–0.30 of the wider set, peak
+# 0.30 — nowhere near a clone, because the placeholder pillars were saturated
+# rather than absent and still moved the per-stock renormalisation. So the arm
+# gets a 24-date backfilled history stamped `backfilled_from`, and its
+# `vendor_fundamentals_exposure` is 0.0 on every one of those dates: hard3 puts
+# no weight on the repaired half, which is exactly why its reconstructed
+# history is the most trustworthy of the three arms. `momzero`, at 0.6 exposure,
+# is reconstructable and contaminated on all 20 of its pre-repair dates — the
+# same operation, a different reading, which is why they are not backfilled
+# identically.
 HARD3_CUT_PREFIX = "attractiveness_hard3_top_"
 
 HARD3_PILLAR_WEIGHTS: dict[str, float] = {
@@ -1690,12 +1703,9 @@ def build_universe_membership(
         challenger_ranks = _rank_table(challenger_attractiveness)
         for n in _CHALLENGER_CUT_NS:
             tickers = _top_n(challenger_ranks, n)
-            cuts[f"{CHALLENGER_CUT_PREFIX}{n}"] = {
-                "basis": "attractiveness_rank_mom121",
-                "size": len(tickers),
-                "tickers": tickers,
-                "source": (f"scanner/factor_profiles_shadow/mom121/{run_date}/profiles.json::attractiveness_score"),
-            }
+            cuts[f"{CHALLENGER_CUT_PREFIX}{n}"] = weight_vector_cut_block(
+                CHALLENGER_CUT_PREFIX, n, tickers, run_date
+            )
 
     # Zero-momentum arm (alpha-engine-config-I7574). Same champion factor
     # profiles, same pillar scores — only the WEIGHT vector differs, so this
@@ -1705,12 +1715,9 @@ def build_universe_membership(
         momzero_ranks = _rank_table(momzero_attractiveness)
         for n in _CHALLENGER_CUT_NS:
             tickers = _top_n(momzero_ranks, n)
-            cuts[f"{MOMZERO_CUT_PREFIX}{n}"] = {
-                "basis": "attractiveness_rank_momzero",
-                "size": len(tickers),
-                "tickers": tickers,
-                "source": (f"factors/profiles/{run_date}/by_ticker.json::attractiveness_score@momentum_weight=0"),
-            }
+            cuts[f"{MOMZERO_CUT_PREFIX}{n}"] = weight_vector_cut_block(
+                MOMZERO_CUT_PREFIX, n, tickers, run_date
+            )
 
     # Fundamentals-half arm (alpha-engine-config-I8256). Same champion factor
     # profiles, same pillar scores — only the WEIGHT vector differs, exactly as
@@ -1721,15 +1728,9 @@ def build_universe_membership(
         hard3_ranks = _rank_table(hard3_attractiveness)
         for n in _HARD3_CUT_NS:
             tickers = _top_n(hard3_ranks, n)
-            cuts[f"{HARD3_CUT_PREFIX}{n}"] = {
-                "basis": "attractiveness_rank_hard3",
-                "size": len(tickers),
-                "tickers": tickers,
-                "source": (
-                    f"factors/profiles/{run_date}/by_ticker.json"
-                    "::attractiveness_score@quality=growth=stewardship=0"
-                ),
-            }
+            cuts[f"{HARD3_CUT_PREFIX}{n}"] = weight_vector_cut_block(
+                HARD3_CUT_PREFIX, n, tickers, run_date
+            )
 
     assert_cut_invariants({"cuts": cuts}, run_date)
 
@@ -2416,3 +2417,332 @@ def compute_and_write_universe_membership(
     membership["turnover"] = compute_turnover(membership, prior)
 
     return write_universe_membership_to_s3(membership, run_date, bucket=bucket, s3_client=s3_client)
+
+
+# ══ Weight-vector arm cut blocks — one shape, two producers ═════════════════
+# alpha-engine-config-I8262.
+#
+# The live producer (``build_universe_membership``) and the historical backfill
+# (``scripts/backfill_cut_arms.py``) must emit BYTE-COMPARABLE cut blocks, or
+# the leaderboard's cohort silently mixes two artifact shapes and a reader
+# cannot tell an arm's reconstructed week from its live one. Two copies of the
+# block literal is how that drift starts, so the block is built HERE and both
+# paths call it (shared-code-policy: second adoption lifts the pattern).
+
+_ARM_PILLAR_WEIGHTS: dict[str, dict[str, float]] = {
+    MOMZERO_CUT_PREFIX: MOMZERO_PILLAR_WEIGHTS,
+    HARD3_CUT_PREFIX: HARD3_PILLAR_WEIGHTS,
+}
+"""Cut prefix → the weight vector that DEFINES that arm.
+
+The mapping is what makes every other property of these arms derivable rather
+than restated: the `source` annotation, the contamination exposure and the
+backfill's ranking all read this one dict, so an arm cannot be described by a
+literal that disagrees with the weights it actually ranked by
+(champion-challenger-policy.md §7.5). ``mom121`` is deliberately absent — it is
+not a weight-vector arm; it re-composes a pillar and reads its own shadow
+profiles."""
+
+_ARM_BASIS: dict[str, str] = {
+    CHALLENGER_CUT_PREFIX: "attractiveness_rank_mom121",
+    MOMZERO_CUT_PREFIX: "attractiveness_rank_momzero",
+    HARD3_CUT_PREFIX: "attractiveness_rank_hard3",
+}
+
+_ARM_CUT_WIDTHS: dict[str, tuple[int, ...]] = {
+    CHALLENGER_CUT_PREFIX: _CHALLENGER_CUT_NS,
+    MOMZERO_CUT_PREFIX: _CHALLENGER_CUT_NS,
+    HARD3_CUT_PREFIX: _HARD3_CUT_NS,
+}
+
+BACKFILLABLE_ARM_PREFIXES: tuple[str, ...] = (MOMZERO_CUT_PREFIX, HARD3_CUT_PREFIX)
+"""The arms a historical cycle can be reconstructed for, and the only ones.
+
+Both are pure functions of ``factors/profiles/{date}/by_ticker.json`` plus a
+weight vector, and that object is retained for every archived cycle — so their
+picks for a past date are recomputable exactly, with no data-vintage difference
+from the champion that ranked the same file.
+
+``mom121`` is NOT here even though it is an arm of the same slot: its 12-1
+re-composed pillars are a different artifact
+(``factors/profiles_shadow/mom121/{date}/by_ticker.json``) whose first snapshot
+is 2026-08-18, so there is nothing earlier to reconstruct FROM. Reconstructing
+it from the champion's profiles would silently emit the champion.
+
+The CHAMPION is not here and must never be. Its picks are archived as written;
+recomputing them from today's factor store would restate the fundamentals it
+ranked on and inject look-ahead into the one arm whose history is real."""
+
+
+def arm_cut_source(prefix: str, run_date: str) -> str:
+    """The ``source`` provenance string for one arm's cut, DERIVED.
+
+    champion-challenger-policy.md §7.5 — provenance is true by construction,
+    never a literal that goes stale. Both live defects this replaces were
+    literals: ``mom121`` named ``scanner/factor_profiles_shadow/mom121/{date}/
+    profiles.json``, a prefix that has never existed on S3 in either its
+    directory or its filename, while the reader
+    (:func:`challenger_attractiveness_for_run`) has always read
+    ``factor_scoring.CHALLENGER_PROFILE_PREFIX``. Reader and annotation now
+    resolve the same constant, so they cannot disagree again
+    (alpha-engine-config-I8262).
+
+    The weight-vector arms annotate WHICH pillars they zeroed by reading
+    :data:`_ARM_PILLAR_WEIGHTS`, so an arm whose weights are retuned cannot
+    keep advertising the old ablation.
+    """
+    if prefix == CHALLENGER_CUT_PREFIX:
+        from scoring.factor_scoring import CHALLENGER_PROFILE_PREFIX
+
+        return f"{CHALLENGER_PROFILE_PREFIX}/{run_date}/by_ticker.json::attractiveness_score"
+    weights = _ARM_PILLAR_WEIGHTS[prefix]
+    zeroed = [p for p in PILLAR_ORDER_FOR_WEIGHTS if float(weights.get(p, 0.0)) <= 0.0]
+    ablation = f"@{'='.join(zeroed)}=0" if zeroed else ""
+    return f"factors/profiles/{run_date}/by_ticker.json::attractiveness_score{ablation}"
+
+
+def weight_vector_cut_block(prefix: str, n: int, tickers: list[str], run_date: str) -> dict:
+    """One slot-arm cut block, in the single shape every producer of it emits."""
+    return {
+        "basis": _ARM_BASIS[prefix],
+        "size": len(tickers),
+        "tickers": tickers,
+        "source": arm_cut_source(prefix, run_date),
+    }
+
+
+# ══ Vendor-fundamentals contamination (alpha-engine-config-I8255) ═══════════
+
+VENDOR_FUNDAMENTAL_PILLARS: tuple[str, ...] = ("quality", "growth", "stewardship")
+"""The three pillars fed by vendor fundamentals — ``roe``, ``gross_margin``,
+``revenue_growth_3y``, ``eps_growth_3y``, ``fcf_yield``. The other three
+(``value``, ``momentum``, ``defensiveness``) derive from the price series and
+from balance-sheet ratios that carried real cross-sectional spread throughout."""
+
+VENDOR_FUNDAMENTALS_REPAIR_DATE = "2026-08-20"
+"""First cycle whose vendor-fundamental fields carried real cross-sectional
+spread. Before it (alpha-engine-config-I8255) ``fcf_yield`` held ONE distinct
+value across 899 names, ``gross_margin`` two and ``roe`` fourteen, while
+``revenue_growth_3y`` / ``eps_growth_3y`` had 631 and 478 names pinned at clamp
+ceilings. `pillar_coverage` read 897-of-903 the whole time, because a
+placeholder is not null — so nothing on the health surface said so."""
+
+VENDOR_FUNDAMENTALS_TRACKER = "alpha-engine-config-I8255"
+
+
+def vendor_fundamentals_exposure(pillar_weights: dict[str, float], run_date: str) -> dict:
+    """How much of an arm's ranking, on ``run_date``, rested on placeholders.
+
+    Computed FROM the arm's own weight vector rather than recorded per arm as a
+    judgement, so an arm cannot carry a contamination label that disagrees with
+    the weights it ranked by (champion-challenger-policy.md §7.5). Under today's
+    vectors: ``momzero`` 0.6, ``hard3`` 0.0, an equal-weight champion 0.5.
+
+    A backfilled cut on a pre-repair date is REPRODUCIBLE — the profiles are
+    archived and the arithmetic is exact — but what it reproduces is a ranking
+    over fields that carried almost no spread. Recording the exposure is what
+    keeps "we can compute it" from being read as "it means what a live cut
+    would have meant".
+    """
+    parsed = {p: max(0.0, float(pillar_weights.get(p, 0.0) or 0.0)) for p in PILLAR_ORDER_FOR_WEIGHTS}
+    total = sum(parsed.values())
+    exposed = sum(parsed[p] for p in VENDOR_FUNDAMENTAL_PILLARS)
+    fraction = round(exposed / total, 4) if total > 0 else 0.0
+    pre_repair = str(run_date) < VENDOR_FUNDAMENTALS_REPAIR_DATE
+    return {
+        "placeholder_pillars": list(VENDOR_FUNDAMENTAL_PILLARS),
+        "weight_fraction_on_placeholder_pillars": fraction,
+        "repaired_from": VENDOR_FUNDAMENTALS_REPAIR_DATE,
+        "run_date_is_pre_repair": pre_repair,
+        "contaminated": bool(pre_repair and fraction > 0.0),
+        "tracker": VENDOR_FUNDAMENTALS_TRACKER,
+    }
+
+
+# ══ Historical arm backfill (alpha-engine-config-I8262) ═════════════════════
+
+
+class BackfilledCutRefused(RuntimeError):
+    """One arm-date is not reconstructable, with the reason.
+
+    Distinct from :class:`UniverseMembershipError` on purpose: that one means
+    the artifact is broken, this one means a specific reconstruction was
+    DECLINED and the surviving artifact is fine. A refusal is a recorded
+    outcome, never a silent skip — champion-challenger-policy.md §3, a cycle an
+    arm produced nothing for is a miss, not an omission.
+    """
+
+
+def build_backfilled_arm_cuts(
+    run_date: str,
+    profiles: dict,
+    *,
+    population: list[str] | None,
+    champion_cuts: dict[str, dict],
+    prefixes: tuple[str, ...] = BACKFILLABLE_ARM_PREFIXES,
+    reconstructed_at: str | None = None,
+) -> tuple[dict[str, dict], dict[str, str]]:
+    """``({cut_name: cut_block}, {cut_name: refusal_reason})`` for one past date.
+
+    Pure — no S3, no clock beyond the ``reconstructed_at`` default — so the
+    reconstruction contract is unit-testable without fixtures or network, the
+    same property ``build_universe_membership`` has.
+
+    ``population`` is the names the CHAMPION ranked on that date, read off the
+    archived artifact's own ``ranks`` table. It is load-bearing rather than a
+    tidiness measure: attractiveness is a percentile over the population being
+    scored, so ranking the raw profiles file (which legitimately carries
+    Metron-supplemental and fundamental-only rows the scanner never evaluated)
+    would give the backfilled arm a different population from the champion it
+    is compared against, and the leaderboard would attribute a population
+    difference to the weight vector (alpha-engine-config-I7844, §4).
+
+    ``champion_cuts`` is the archived cuts block. It is the ONLY thing the
+    champion is read from here — the champion's picks are used as written and
+    are never recomputed (see :data:`BACKFILLABLE_ARM_PREFIXES`).
+
+    An arm-date is refused, not emitted, when:
+
+    * the champion cut it would be compared against is absent — there is
+      nothing to count-match against or to test vacuity on;
+    * it resolves to the champion's exact membership. On a pre-repair date that
+      is the LIKELY outcome for ``hard3``, not a remote one: the champion was a
+      three-pillar ranking by accident then, so an arm that zeroes exactly the
+      three placeholder pillars can reproduce it. Emitting it would enter the
+      cohort as a clone and report the champion against itself as a tie (§4).
+    """
+    from scoring.universe_board import attractiveness_from_factor_profiles
+
+    reconstructed_at = reconstructed_at or datetime.now(UTC).isoformat(timespec="seconds")
+    cuts: dict[str, dict] = {}
+    refused: dict[str, str] = {}
+    if not profiles:
+        raise UniverseMembershipError(
+            f"cut backfill {run_date}: no factor profiles — an arm cannot be "
+            f"reconstructed from an absent input, and a cut built from nothing "
+            f"is indistinguishable from a real empty one"
+        )
+
+    for prefix in prefixes:
+        weights = _ARM_PILLAR_WEIGHTS[prefix]
+        restricted = _restrict_to_scanned_universe(
+            profiles, population, arm=f"backfill {prefix.rstrip('_')} {run_date}"
+        )
+        scored = attractiveness_from_factor_profiles(restricted, pillar_weights=weights)
+        by_ticker = {
+            ticker: rec["attractiveness_score"]
+            for ticker, rec in scored.items()
+            if isinstance(rec, dict) and rec.get("attractiveness_score") is not None
+        }
+        if not by_ticker:
+            refused[prefix] = "no ticker in the restricted population carried a rankable score"
+            continue
+        ranks = _rank_table(by_ticker)
+        exposure = vendor_fundamentals_exposure(weights, run_date)
+        for n in _ARM_CUT_WIDTHS[prefix]:
+            name = f"{prefix}{n}"
+            counterpart = (champion_cuts.get(f"attractiveness_top_{n}") or {}).get("tickers")
+            if not counterpart:
+                refused[name] = (
+                    f"the archived artifact carries no attractiveness_top_{n} cut to "
+                    f"count-match or test vacuity against — reconstructing the arm "
+                    f"alone would put an unpaired row on the board"
+                )
+                continue
+            tickers = _top_n(ranks, n)
+            if len(tickers) != n:
+                refused[name] = (
+                    f"only {len(tickers)} of {n} names rankable — a short arm turns a "
+                    f"weight-vector comparison into a breadth one (§4)"
+                )
+                continue
+            if set(tickers) == set(counterpart):
+                refused[name] = (
+                    f"vacuous — resolves to the same {n} names as attractiveness_top_{n}. "
+                    f"On a pre-repair date this is the expected outcome for an arm that "
+                    f"zeroes the placeholder pillars, not an anomaly; scoring it would "
+                    f"compare the champion against itself (§4)."
+                )
+                continue
+            block = weight_vector_cut_block(prefix, n, tickers, run_date)
+            wider = max(len(tickers), len(counterpart)) or 1
+            block["champion_overlap"] = round(len(set(tickers) & set(counterpart)) / wider, 4)
+            block["backfilled_from"] = (
+                f"factors/profiles/{run_date}/by_ticker.json + {prefix}weights "
+                f"(reconstructed {reconstructed_at}; alpha-engine-config-I8262)"
+            )
+            block["vendor_fundamentals_exposure"] = exposure
+            cuts[name] = block
+    return cuts, refused
+
+
+def merge_backfilled_cuts(membership: dict, backfilled: dict[str, dict]) -> tuple[dict, dict[str, str]]:
+    """``membership`` with reconstructed arm cuts ADDED — never any cut replaced.
+
+    Returns the new artifact and the per-cut refusals from the merge itself.
+
+    Three rules, all of them about not destroying the one arm whose history is
+    real:
+
+    1. **A cut that already exists is never touched.** A contemporaneous write
+       is the record of what the run actually served; a reconstruction that
+       overwrote it would make the served cut unrecoverable and would do it
+       silently.
+    2. **Only :data:`BACKFILLABLE_ARM_PREFIXES` cuts may be added.** Nothing
+       else — a backfill that could write the champion's key is one bad
+       argument away from rewriting the history it is measured against.
+    3. **The artifact is not stamped ``backfilled_from``.** That field means
+       "this whole artifact is a reconstruction", which is false here: the
+       champion's picks in it are first-class. Provenance is per CUT, plus an
+       artifact-level ``backfilled_arms`` index so a reader does not have to
+       walk every cut to learn one was added.
+    """
+    merged = dict(membership)
+    cuts = dict(merged.get("cuts") or {})
+    refused: dict[str, str] = {}
+    added: list[str] = []
+    for name, block in backfilled.items():
+        if not name.startswith(BACKFILLABLE_ARM_PREFIXES):
+            refused[name] = (
+                f"{name!r} is not a backfillable arm — only "
+                f"{list(BACKFILLABLE_ARM_PREFIXES)} may be reconstructed, and the "
+                f"champion never (alpha-engine-config-I8262)"
+            )
+            continue
+        if name in cuts:
+            refused[name] = "already written live — a contemporaneous cut is never overwritten"
+            continue
+        cuts[name] = block
+        added.append(name)
+    merged["cuts"] = cuts
+    if added:
+        merged["backfilled_arms"] = sorted(set(merged.get("backfilled_arms") or []) | set(added))
+    return merged, refused
+
+
+def assert_backfill_preserved_live_cuts(before: dict, after: dict, run_date: str) -> None:
+    """Raise unless every cut present BEFORE the backfill survived it verbatim.
+
+    The one guard that has to hold whatever else is wrong. A backfill runs over
+    the archived record of what the funnel actually served, and that record is
+    the denominator of every arm comparison — so a reconstruction that mutated
+    it would not produce a wrong number, it would produce an unfalsifiable one.
+    Checked on the assembled artifacts rather than trusted from
+    :func:`merge_backfilled_cuts`'s own bookkeeping, because a guard that reads
+    only the code path it guards cannot fail.
+    """
+    old = before.get("cuts") or {}
+    new = after.get("cuts") or {}
+    for name, block in old.items():
+        if name not in new:
+            raise UniverseMembershipError(
+                f"cut backfill {run_date}: the reconstruction DROPPED the live cut "
+                f"{name!r}. Backfilled arms are added; nothing archived is removed."
+            )
+        if (new[name] or {}).get("tickers") != (block or {}).get("tickers"):
+            raise UniverseMembershipError(
+                f"cut backfill {run_date}: the reconstruction MODIFIED the live cut "
+                f"{name!r}. The archived picks are the record of what the funnel "
+                f"served and are used as written — recomputing them would inject "
+                f"look-ahead into the one arm whose history is real."
+            )
