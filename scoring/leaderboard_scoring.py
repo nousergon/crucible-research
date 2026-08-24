@@ -342,10 +342,63 @@ def spearman_ic(signal: Sequence[float], realized: Sequence[float]) -> float | N
     return _pearson(_rankdata(signal), _rankdata(realized))
 
 
-def date_clustered_stats(per_date: Sequence[float]) -> dict | None:
-    """Date-clustered significance for a per-date metric series (each date = one
-    independent cluster; weeks-as-N). Returns mean, the clustered standard error
-    ``sd / sqrt(n)``, a t-stat ``mean / SE``, and n_dates — or None if empty.
+SE_IID = "iid"
+SE_NEWEY_WEST = "newey-west"
+SE_UNAVAILABLE = "unavailable"
+"""How a metric block's standard error was produced.
+
+Recorded ON the metric (``se_method``) rather than left to be inferred, because
+an SE is only interpretable against the dependence assumption behind it and no
+consumer can recover that from the number. The vocabulary is deliberately the
+one ``crucible-evaluator``'s ``MetricRecord.ci_method`` already uses — two
+vocabularies for one claim is how two repos drift into disagreeing about what a
+t-stat means (alpha-engine-config-I8263).
+"""
+
+
+def overlap_lags_for(horizon_days: int, cohort_spacing_days: int | None) -> int:
+    """How many neighbouring observations a forward window overlaps.
+
+    A metric measured as "the return over the ``horizon_days`` sessions after
+    each cohort date" produces observations whose windows OVERLAP whenever the
+    cohort dates are spaced closer together than the horizon. With weekly cohort
+    dates (~5 sessions) and a 21-session horizon, each window shares roughly 76%
+    of its span with each of its four neighbours.
+
+    That is not a small correction. ``sd / sqrt(n)`` assumes independence; under
+    this much overlap the effective independent count is nearer ``n / (lags+1)``
+    and the iid SE is understated by roughly ``sqrt(lags+1)``. Returning the
+    Bartlett truncation lag here lets the caller ask for a HAC SE instead of
+    silently publishing a t-stat that assumes something false.
+
+    Returns 0 when the observations genuinely do not overlap — a weekly
+    holding-period return measured on weekly cohort dates — in which case the
+    iid SE is correct as written and no correction is applied.
+    """
+    if not cohort_spacing_days or cohort_spacing_days <= 0 or horizon_days <= 0:
+        return 0
+    return max(0, math.ceil(horizon_days / cohort_spacing_days) - 1)
+
+
+def date_clustered_stats(
+    per_date: Sequence[float], *, overlap_lags: int | None = None,
+) -> dict | None:
+    """Significance for a per-date metric series. Returns mean, standard error,
+    t-stat, n_dates and the ``se_method`` that produced them — or None if empty.
+
+    ``overlap_lags`` declares how many neighbouring observations each one
+    overlaps (see :func:`overlap_lags_for`). ``None`` or ``0`` means the
+    observations are independent and the clustered ``sd / sqrt(n)`` is correct —
+    the original weeks-as-N contract, unchanged. A positive value switches to a
+    Newey-West (Bartlett kernel) HAC standard error via the fleet's shared
+    ``nousergon_lib.quant.stats.intervals.newey_west_se``.
+
+    **A requested HAC SE is never silently downgraded to iid.** If the shared
+    primitive cannot be imported or reports insufficient data, the block is
+    emitted with ``se`` and ``t_stat`` NULL and ``se_method`` = ``unavailable``.
+    Publishing the iid number instead is the exact defect this parameter exists
+    to remove, and it would be indistinguishable from a correct one
+    (alpha-engine-config-I8263).
 
     A 2-sided p-value is NOT returned (no scipy in the Lambda layout): the t-stat
     is the load-bearing surface the operator + the cutover gate read, and at the
@@ -358,7 +411,26 @@ def date_clustered_stats(per_date: Sequence[float]) -> dict | None:
         return None
     mean = fmean(vals)
     if n == 1:
-        return {"mean": round(mean, 6), "se": None, "t_stat": None, "n_dates": 1}
+        return {"mean": round(mean, 6), "se": None, "t_stat": None, "n_dates": 1,
+                "se_method": SE_UNAVAILABLE}
+
+    lags = int(overlap_lags or 0)
+    if lags > 0:
+        se = _hac_se(vals, lags)
+        if se is None:
+            return {"mean": round(mean, 6), "se": None, "t_stat": None,
+                    "n_dates": n, "se_method": SE_UNAVAILABLE,
+                    "overlap_lags": lags}
+        t_stat = (mean / se) if se > 0.0 else None
+        return {
+            "mean": round(mean, 6),
+            "se": round(se, 6),
+            "t_stat": (round(t_stat, 4) if t_stat is not None else None),
+            "n_dates": n,
+            "se_method": SE_NEWEY_WEST,
+            "overlap_lags": lags,
+        }
+
     var = sum((v - mean) ** 2 for v in vals) / (n - 1)  # sample variance
     sd = math.sqrt(var)
     se = sd / math.sqrt(n)
@@ -368,7 +440,41 @@ def date_clustered_stats(per_date: Sequence[float]) -> dict | None:
         "se": round(se, 6),
         "t_stat": (round(t_stat, 4) if t_stat is not None else None),
         "n_dates": n,
+        "se_method": SE_IID,
     }
+
+
+def _hac_se(vals: Sequence[float], lags: int) -> float | None:
+    """Newey-West SE of the mean, or None when it cannot be computed.
+
+    Imported lazily and inside the branch that needs it: this module is
+    stdlib-only on the path every other metric takes, and the HAC primitive
+    pulls numpy. None on ANY failure — the caller renders ``unavailable``
+    rather than an iid substitute.
+    """
+    try:
+        from nousergon_lib.quant.stats.intervals import newey_west_se
+    except Exception as exc:  # noqa: BLE001 — recorded as `unavailable`, never as iid
+        logger.warning(
+            "[leaderboard] HAC standard error requested but "
+            "nousergon_lib.quant.stats.intervals is unavailable (%s) — emitting "
+            "se/t_stat NULL rather than an iid SE that assumes independence "
+            "these overlapping observations do not have (I8263)", exc,
+        )
+        return None
+    try:
+        res = newey_west_se(list(vals), max_lags=lags)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[leaderboard] newey_west_se raised (%s) — se NULL", exc)
+        return None
+    if not isinstance(res, dict) or res.get("status") == "insufficient_data":
+        return None
+    se = res.get("se") if "se" in res else res.get("standard_error")
+    try:
+        se = float(se)
+    except (TypeError, ValueError):
+        return None
+    return se if math.isfinite(se) and se >= 0.0 else None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -422,6 +528,8 @@ def _signal_for_ic(day: SpecDay) -> dict[str, float]:
 def _rank_ic_metric(
     spec: SpecHistory,
     realized: Mapping[str, Mapping[str, float]],
+    *,
+    overlap_lags: int | None = None,
 ) -> dict | None:
     """Date-clustered cross-sectional rank-IC: per date, Spearman(signal,
     realized) over the names with a realized return; cluster across dates."""
@@ -442,7 +550,7 @@ def _rank_ic_metric(
         ic = spearman_ic([p[0] for p in paired], [p[1] for p in paired])
         if ic is not None:
             per_date.append(ic)
-    return date_clustered_stats(per_date)
+    return date_clustered_stats(per_date, overlap_lags=overlap_lags)
 
 
 def _top_n_return_by_date(
@@ -460,6 +568,8 @@ def _topn_alpha_metric(
     champion: SpecHistory,
     realized: Mapping[str, Mapping[str, float]],
     top_n: int,
+    *,
+    overlap_lags: int | None = None,
 ) -> dict | None:
     """Date-clustered long-only top-N alpha = mean(spec top-N) − mean(champion
     top-N), per date, clustered across dates. A date contributes only when BOTH
@@ -475,7 +585,7 @@ def _topn_alpha_metric(
         if spec_r is None or champ_r is None:
             continue
         per_date.append(spec_r - champ_r)
-    return date_clustered_stats(per_date)
+    return date_clustered_stats(per_date, overlap_lags=overlap_lags)
 
 
 def _topn_alpha_vs_benchmark_metric(
@@ -483,6 +593,8 @@ def _topn_alpha_vs_benchmark_metric(
     realized: Mapping[str, Mapping[str, float]],
     top_n: int,
     benchmark_ticker: str,
+    *,
+    overlap_lags: int | None = None,
 ) -> dict | None:
     """Date-clustered long-only top-N alpha = mean(spec top-N) − the
     ``benchmark_ticker``'s own realized return, per date, clustered across
@@ -506,7 +618,7 @@ def _topn_alpha_vs_benchmark_metric(
         if spec_r is None:
             continue
         per_date.append(spec_r - bench_r)
-    return date_clustered_stats(per_date)
+    return date_clustered_stats(per_date, overlap_lags=overlap_lags)
 
 
 def population_return_from_panel(
@@ -534,6 +646,8 @@ def _topn_alpha_vs_population_metric(
     realized: Mapping[str, Mapping[str, float]],
     top_n: int,
     population_returns: Mapping[str, float] | None,
+    *,
+    overlap_lags: int | None = None,
 ) -> dict | None:
     """Date-clustered long-only top-N excess over the scored population
     (alpha-engine-config-I7576): mean(spec top-N) − mean(all scored names),
@@ -583,7 +697,46 @@ def _topn_alpha_vs_population_metric(
         if spec_r is None:
             continue
         per_date.append(spec_r - pop_r)
-    return date_clustered_stats(per_date)
+    return date_clustered_stats(per_date, overlap_lags=overlap_lags)
+
+
+def paired_alpha_vs_champion(
+    spec: SpecHistory,
+    champion: SpecHistory,
+    realized: Mapping[str, Mapping[str, float]],
+    top_n: int,
+    *,
+    overlap_lags: int | None = None,
+) -> dict | None:
+    """The PAIRED per-date difference between ``spec`` and the champion.
+
+    Public because the cuts board cannot get this from
+    :func:`score_leaderboard`: it scores each arm in its own single-arm pass
+    (arms have different widths, and one call takes one ``top_n``), so every
+    challenger pass sees ``champion=None`` and the paired metric is skipped.
+    The result was ``topn_alpha_vs_champion: null`` on every arm on every
+    board — the most powerful statistic the design makes available, never
+    computed (alpha-engine-config-I8263).
+
+    **Why it is worth more than any unpaired metric here.** ``spec`` and the
+    champion pick from the SAME universe on the SAME date under the SAME
+    market. Differencing them date by date cancels the common market factor, so
+    the variance of the difference is a small fraction of the variance of
+    either leg. At the observation counts this slot will ever have — a weekly
+    cut is ~52 a year — that is the difference between needing tens of
+    observations and needing hundreds. Comparing two independently-estimated
+    means is not a substitute: it is comparable across count-matched arms, but
+    it throws away the pairing the count-matched same-date design was built to
+    create (champion-challenger-policy.md §4).
+
+    Callers MUST hold the two arms at the same width. A paired difference
+    between a 60-wide arm and a 20-wide champion measures breadth, not the
+    selection rule, and the count-match guard exists upstream precisely so this
+    function never has to guess.
+    """
+    return _topn_alpha_metric(
+        spec, champion, realized, top_n, overlap_lags=overlap_lags,
+    )
 
 
 def score_leaderboard(
@@ -596,6 +749,7 @@ def score_leaderboard(
     benchmark_ticker: str | None = "SPY",
     min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
     population_returns: Mapping[str, float] | None = None,
+    overlap_lags: int | None = None,
 ) -> dict:
     """Score the champion (if any) + every challenger on the cutover-gate
     objectives, joined to ``realized`` (``{date: {ticker: forward_return}}``).
@@ -645,18 +799,20 @@ def score_leaderboard(
 
     def _row(spec: SpecHistory, is_champion: bool) -> dict:
         try:
-            rank_ic = _rank_ic_metric(spec, realized)
+            rank_ic = _rank_ic_metric(spec, realized, overlap_lags=overlap_lags)
             alpha_vs_champion = None if (is_champion or champion is None) else _topn_alpha_metric(
-                spec, champion, realized, top_n,
+                spec, champion, realized, top_n, overlap_lags=overlap_lags,
             )
             alpha_vs_benchmark = (
-                _topn_alpha_vs_benchmark_metric(spec, realized, top_n, benchmark_ticker)
+                _topn_alpha_vs_benchmark_metric(
+                    spec, realized, top_n, benchmark_ticker, overlap_lags=overlap_lags,
+                )
                 if benchmark_ticker else None
             )
             # None unless the caller supplied genuine full-population returns —
             # never derived from the pick-narrowed `realized` map.
             alpha_vs_population = _topn_alpha_vs_population_metric(
-                spec, realized, top_n, population_returns,
+                spec, realized, top_n, population_returns, overlap_lags=overlap_lags,
             )
             n_scored = sum(
                 1 for d in spec.by_date if realized.get(d)
@@ -727,6 +883,7 @@ def score_multi_horizon(
     min_dates_for_inference: int = MIN_DATES_FOR_INFERENCE,
     horizon_notes: Mapping[int, tuple[str, str]] | None = None,
     population_by_horizon: Mapping[int, Mapping[str, float]] | None = None,
+    cohort_spacing_days: int | None = None,
 ) -> dict:
     """Score every arm at EVERY horizon in ``horizons_days`` and assemble one
     leaderboard artifact. PURE — no I/O.
@@ -779,6 +936,12 @@ def score_multi_horizon(
     primary: dict | None = None
 
     for h in horizons_days:
+        # Each horizon gets its OWN overlap correction, because overlap is a
+        # property of (horizon, cohort spacing) and the horizons here span
+        # 21..252 sessions against the same weekly cohort. Applying one lag
+        # count across all three would under-correct the long horizons — which
+        # are the MORE distorted ones, not less (alpha-engine-config-I8263).
+        lags = overlap_lags_for(h, cohort_spacing_days)
         scored = score_leaderboard(
             champion,
             challengers,
@@ -788,6 +951,7 @@ def score_multi_horizon(
             benchmark_ticker=benchmark_ticker,
             min_dates_for_inference=min_dates_for_inference,
             population_returns=(population_by_horizon or {}).get(h),
+            overlap_lags=lags,
         )
         if primary is None:
             primary = scored
@@ -798,6 +962,11 @@ def score_multi_horizon(
                 "status": status,
                 "reason": reason,
                 "n_dates": scored["n_dates"],
+                # Declared per block so a reader never has to infer whether this
+                # horizon's observations were independent. `overlap_lags: 0`
+                # means genuinely non-overlapping, not "not checked".
+                "overlap_lags": lags,
+                "observations_overlap": lags > 0,
                 "specs": scored["specs"],
             }
         )
