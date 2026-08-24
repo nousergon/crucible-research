@@ -1,10 +1,11 @@
-"""Weekly promotion engine for the scanner cut pair — and its refusal to decide
-on an immature horizon (alpha-engine-config-I7826, child of I7823 step 2).
+"""Weekly promotion engine for the scanner cut slot — deciding on the CHAINED
+WEEKLY SERIES, with the long forward horizons demoted to vetoes
+(alpha-engine-config-I8261, Brian's ruling 2026-08-24; originally I7826).
 
-WHAT THIS DECIDES. ``attractiveness_top_60`` and ``tech_score_top_60`` are two
-arms of ONE slot, count-matched at 60 (SCANNER_CONTRACT.md §1, Brian's ruling
-2026-08-20). Whichever performs better holds the sector-team feed. This module
-is the only writer of the pointer that says which:
+WHAT THIS DECIDES. The promotable arms of the scanner-cut slot are count-matched
+at 60 (SCANNER_CONTRACT.md §1, Brian's ruling 2026-08-20). Whichever performs
+better holds the sector-team feed. This module is the only writer of the pointer
+that says which:
 
     ``s3://{bucket}/config/scanner_cut_champion.json``
 
@@ -12,19 +13,79 @@ read by ``scoring/universe_membership.py::live_cut_champion`` /
 ``resolve_feed_cut`` (crucible-research#670). The pointer, its reader and its
 default already existed; this module supplies the DECISION.
 
-WHY REFUSING IS THE DELIVERABLE, NOT A CAVEAT. ``tech_score_top_60`` was first
-emitted 2026-08-20. The horizons matching the scanner's ~1-year objective are
-126 and 252 sessions, so neither is measurable for months. The 21-session block
-matures first and is exactly the horizon Brian's momentum-zero ruling removed
-from the champion's ranking: on ``alpha-engine-config-I7580`` a −0.264 IC at 21
-days drove a live change that nine years of history inverted (+3% to +6%/yr at
-126–252 days). An engine that promotes on the first number to arrive reproduces
-that error weekly, on a schedule, with a decision record that looks correct.
+WHAT CHANGED ON 2026-08-24, AND WHY (Brian's ruling on I8261)
+-------------------------------------------------------------
+Brian: *"shouldn't we just be tracking performance weekly?"* — and then, in
+words: decide on the chained weekly series; the paired weekly difference vs
+champion is the decision metric; keep 126 and 252 as corroborating vetoes once
+mature, not as the decision basis; retire ``forbidden_horizons_days`` as moot.
 
-So the 21-session horizon is **structurally excluded** from this decision
-(``forbidden_horizons_days``, asserted at import), and a decision horizon that
-has not matured produces an explicit written ``hold`` — never a promotion, and
-never a silence.
+The horizon axis — 21 vs 126 vs 252 — was the wrong axis. The cut is re-formed
+WEEKLY, so:
+
+1. **A forward-window horizon measures a hold that never happens.** A
+   126-session forward return from a cohort date describes a six-month hold
+   that the weekly re-cut guarantees is replaced ~25 times inside the window.
+2. **Its observations overlap.** Weekly cohort dates against an N-session
+   window share most of their span, so consecutive observations are strongly
+   dependent. That is corrected now (alpha-engine-config-I8263) but the
+   correction costs power a non-overlapping series never loses.
+3. **The fleet's own promotion battery takes a RETURN SERIES.**
+   champion-challenger-policy.md §5.1's PSR / DSR / CSCV-PBO are statistics of
+   a return series. Overlapping cohort-date draws are not one, so those
+   sub-gates were structurally uncomputable — correctly reported
+   ``insufficient`` and non-blocking, i.e. this slot's statistical gate has
+   been switched off, silently and legitimately. A weekly holding-period
+   series is exactly the object they take.
+
+So the decision metric is now the **paired weekly difference vs the champion**,
+read from ``scoring/weekly_ledger.py``'s append-only ledger
+(``research/cuts_weekly_ledger/ledger.parquet``), aggregated over the chained
+series. PAIRED because the same-week champion leg cancels the common market
+factor and collapses the variance of the difference — at ~52 observations a
+year that is the difference between needing tens of observations and hundreds
+(champion-challenger-policy.md §4).
+
+WHAT REPLACED ``forbidden_horizons_days`` (I8261 requirement 4)
+---------------------------------------------------------------
+That field, and its import-time assertion, existed to stop a forward-window
+horizon — specifically the 21-session block — from becoming the DECISION BASIS.
+After this change no forward-window horizon is the decision basis at all: the
+decision reads a different artifact. The old guard is therefore moot, and it is
+retired rather than left standing as coverage it no longer provides.
+
+The property it held is now held by three import-time invariants, asserted
+below and named here so nothing is quietly dropped:
+
+* ``decision_source`` MUST be ``weekly_ledger.LEDGER_KEY``. The decision cannot
+  read a leaderboard horizon block because it does not read the leaderboard for
+  evidence at all — a stronger statement than "one horizon is banned".
+* ``excluded_horizons_days`` (today ``(21,)``) MUST be DISJOINT from
+  ``corroborating_horizons_days``. The 21-session block cannot even VETO, which
+  is strictly more restrictive than the retired rule: under the old design it
+  was merely barred from proposing.
+* every ``corroborating_horizons_days`` entry MUST be ≥
+  ``MIN_VETO_HORIZON_DAYS`` (126) and scored by the cuts board. A veto horizon
+  has to match the scanner's ~1-year objective, which is the substance of
+  alpha-engine-config-I7580 — a −0.264 IC at 21 days drove a live change that
+  nine years of history inverted at 126–252 days.
+
+THE VETO IS ASYMMETRIC, AND AN IMMATURE VETO IS NOT A VETO
+-----------------------------------------------------------
+126 and 252 may BLOCK a promotion the weekly series proposes. Neither may ever
+PROPOSE one — structurally, because the promotion path only consults them after
+the weekly series has already named a leader. When a veto horizon is absent,
+immature, or below the board's own evidence floor it is recorded with
+``mature: false``, ``disagrees: false`` and a note saying so: you cannot gate on
+a statistic you did not measure (champion-challenger-policy.md §5.1), and an
+uncomputed gate reported as a PASS is the defect that rule prevents. At rollout
+this is the normal state for both of them.
+
+A DEFECTIVE board is treated differently from an ABSENT one, deliberately. An
+absent veto is honestly unmeasured and non-blocking. A board reporting duplicate
+arm rows is not unmeasured — it is UNRELIABLE, and a safety mechanism that may
+be reading someone else's numbers is worse than one that is switched off. So a
+defective board holds and then raises; a missing board does not hold at all.
 
 WHY A HOLD IS WRITTEN AND NOT OMITTED. champion-challenger-policy.md §3: silent
 absence and a genuine outcome must never render identically. A pointer that
@@ -38,56 +99,39 @@ writes on EVERY evaluation, promote or hold:
     ``config/apply_audit/scanner_cut_champion/latest.json``   pointer mirror
     ``config/scanner_cut_champion.json``                      the live pointer
 
-all three carrying the same v1 document (``contracts/scanner_cut_champion.schema.json``).
-The dated record is the history series: promote→hold→promote is reconstructable
-from S3 alone, without asking anyone what the engine was thinking.
+all three carrying the same v2 document (``contracts/scanner_cut_champion.schema.json``).
 
 MEASURABILITY (principles.md §2.7). The number that says this is working is
-``arms.<arm>.n_dates_scored`` at the decision horizon, carried in every record.
-It is 0 today and climbs as cohorts mature; when both arms cross
-``min_dates_for_inference`` the engine can decide, and until then every record
-says so in ``reason``. Its ABSENCE is a missing/stale
+``arms.<arm>.n_weeks_paired`` — completed, paired weekly observations against
+the champion. It is 0 until the I8264 producer starts writing the ledger and
+climbs one per week thereafter; when every promotable arm crosses
+``min_weeks_for_inference`` the engine can decide, and until then every record
+says so in ``reason`` and prices it against a calendar in
+``decision_earliest_on``. Its ABSENCE is a missing/stale
 ``config/apply_audit/scanner_cut_champion/latest.json`` — the engine did not run
-— which is a freshness-registry row, filed as a follow-up (see the PR body); no
-data is never rendered as a promotion and never as green.
+— which is a freshness-registry row; no data is never rendered as a promotion
+and never as green.
 
-HYSTERESIS (champion-challenger-policy.md §5.2) is IMPLEMENTED here, not waived.
-The §9.3 winner-take-all delta is scoped to the selection-producer slot and its
-argument does not transfer: there the arms are re-scored weekly on a 21-day
-horizon, so a cooldown is a material fraction of the measurement window. Here
-the decision horizon is 126 sessions and the pointer moves the SECTOR TEAMS'
-research input — a 28-day cooldown is 22% of one horizon, and an oscillating
-feed makes the qualitative work downstream incomparable week to week. Both a
-margin and a cooldown are therefore cheap and are applied.
-
-WHY NOT ``crucible-backtester/optimizer/champion_promotion.py`` (the issue asks
-for a stated reason, policy-shared-code second-adoption). Three, in order:
-(1) §2 — that engine serves the SELECTION-PRODUCER slot, and slots are separate
-axes that must never be conflated; its ``VALID_CHAMPIONS``, its evidence source
-(a backtester-internal counterfactual computed inside ``evaluate.py``) and its
-policy (winner-take-all, no hysteresis, per the §9.3 delta) are all wrong for
-this slot. (2) Both this engine's INPUT (``research/cuts_leaderboard/{date}.json``)
-and its OUTPUT (the pointer ``universe_membership`` reads) live in this repo;
-running the decision from the backtester would put a cross-repo hop on both
-sides of a decision neither end owns. (3) It runs on the Saturday Evaluator, not
-on the scanner run that produces the board. What is shared is the SHAPE — the
-unconditional audit record, the machine-readable block reason, the pointer
-write-order — and that shape is mirrored here deliberately.
+HYSTERESIS (champion-challenger-policy.md §5.2) is IMPLEMENTED here, not waived,
+and the cutover deliberately changes the BASIS and not the BAR. See
+``promotion_margin`` below for the units conversion, which is carried on every
+record so a reader never has to do it.
 
 FAIL-LOUD (AGENTS.md). ``decide_cut_champion`` is pure and never swallows: an
-input it cannot interpret (a board missing its ``horizons`` list, duplicate rows
-for one arm, a row naming an arm outside ``PROMOTABLE_CUTS``) is a DEFECT, and a
-defect still produces a written ``hold`` record carrying it — after which
-``run_cut_promotion`` RAISES ``CutPromotionError``. Record first, then fail: a
-defect that also erases the evidence of itself is the worse of the two failures.
-An IMMATURE or THIN horizon is not a defect — it is the expected state for
-months — and is a plain hold with no raise and no alert.
+input it cannot interpret is a DEFECT, and a defect still produces a written
+``hold`` record carrying it — after which ``run_cut_promotion`` RAISES
+``CutPromotionError``. Record first, then fail: a defect that also erases the
+evidence of itself is the worse of the two failures. An ABSENT ledger, an
+IMMATURE veto and a THIN weekly series are not defects — they are the expected
+state for weeks — and are plain holds with no raise and no alert.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
@@ -97,6 +141,8 @@ from nousergon_lib.trading_calendar import add_trading_days
 from scoring.leaderboard_scoring import (
     HORIZON_OK,
     LONG_HORIZONS_DAYS,
+    confidence_for,
+    date_clustered_stats,
     duplicate_arm_rows,
     slot_spec,
 )
@@ -109,10 +155,28 @@ from scoring.universe_membership import (
     _client,
     live_cut_champion,
 )
+from scoring.weekly_ledger import (
+    LEDGER_COLS,
+    LEDGER_KEY,
+    LEDGER_VERSION,
+    chained_log_return,
+    paired_weekly_differences,
+    read_ledger,
+)
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+"""v1 → v2 on the I8261 cutover.
+
+Not an additive change: the decision BASIS moved from a leaderboard forward
+horizon to the weekly ledger, so ``horizon_days`` / ``primary_metric`` /
+``arms.*`` no longer mean what a v1 reader would take them to mean, and several
+v1 ``reason_code`` slugs describe conditions that can no longer arise. Silently
+redefining them under ``schema_version: 1`` is precisely how a multi-year
+decision series becomes uninterpretable.
+"""
+
 PRODUCER = "crucible-research/scoring/cut_promotion.py"
 
 AUDIT_DATED_KEY = "config/apply_audit/scanner_cut_champion/{date}.json"
@@ -122,19 +186,36 @@ CUTS_LEADERBOARD_KEY = "research/cuts_leaderboard/{date}.json"
 DECISION_PROMOTE = "promote"
 DECISION_HOLD = "hold"
 
-# Machine-readable hold reasons. A prose ``reason`` is for the human reading the
-# artifact; this is what a sweep, a console adapter or a test matches on. Never
-# reuse a slug for a different condition — a renamed slug is a schema bump.
+DECISION_CADENCE_WEEKLY = "weekly"
+
+# The name of the decision metric, carried on every record and on every arm. It
+# is deliberately long: a reader who sees only this string must be able to tell
+# WHAT was differenced (net, i.e. after transaction cost), AGAINST WHAT (the
+# serving champion), and AT WHAT CADENCE (weekly, non-overlapping).
+DECISION_METRIC = "paired_weekly_net_log_return_vs_champion"
+
+# The lowest forward horizon that may hold a VETO. Below this the horizon does
+# not match the scanner's ~1-year objective, which is the substance of
+# alpha-engine-config-I7580. This is one of the three invariants that replaced
+# the retired ``forbidden_horizons_days`` assertion.
+MIN_VETO_HORIZON_DAYS = 126
+
+# Trading sessions in a scanner week. The ledger's weeks are bounded by
+# consecutive cut effective dates, not by a fixed count — see
+# ``weekly_ledger.holding_period`` — so this is used for ONE thing only:
+# projecting ``decision_earliest_on`` onto a calendar. It is never used to
+# measure a week that has already happened.
+SESSIONS_PER_WEEK = 5
+
+# Machine-readable outcome slugs. A prose ``reason`` is for the human reading
+# the artifact; this is what a sweep, a console adapter or a test matches on.
+# Never reuse a slug for a different condition — a renamed slug is a schema bump.
 REASON_PROMOTED = "promoted"
 REASON_CHAMPION_LEADS = "champion_already_leads"
-REASON_BOARD_MISSING = "board_missing"
-REASON_BOARD_UNMEASURABLE = "board_unmeasurable"
-REASON_HORIZON_IMMATURE = "decision_horizon_immature"
-REASON_HORIZON_UNMEASURABLE = "decision_horizon_unmeasurable"
-REASON_ARM_ROW_MISSING = "arm_row_missing"
 REASON_NO_PROMOTABLE_CHALLENGER = "no_promotable_challenger"
-REASON_ARM_METRIC_MISSING = "arm_metric_missing"
-REASON_INSUFFICIENT_DATES = "insufficient_dates"
+REASON_LEDGER_MISSING = "weekly_ledger_missing"
+REASON_LEDGER_ARM_MISSING = "weekly_ledger_arm_missing"
+REASON_INSUFFICIENT_WEEKS = "insufficient_weeks"
 REASON_MARGIN_NOT_MET = "margin_not_met"
 REASON_COOLDOWN_ACTIVE = "cooldown_active"
 REASON_CORROBORATION_DISAGREES = "corroborating_horizon_disagrees"
@@ -142,18 +223,29 @@ REASON_BOARD_DEFECTIVE = "board_defective"
 
 HOLD_REASON_CODES: tuple[str, ...] = (
     REASON_CHAMPION_LEADS,
-    REASON_BOARD_MISSING,
-    REASON_BOARD_UNMEASURABLE,
-    REASON_HORIZON_IMMATURE,
-    REASON_HORIZON_UNMEASURABLE,
-    REASON_ARM_ROW_MISSING,
     REASON_NO_PROMOTABLE_CHALLENGER,
-    REASON_ARM_METRIC_MISSING,
-    REASON_INSUFFICIENT_DATES,
+    REASON_LEDGER_MISSING,
+    REASON_LEDGER_ARM_MISSING,
+    REASON_INSUFFICIENT_WEEKS,
     REASON_MARGIN_NOT_MET,
     REASON_COOLDOWN_ACTIVE,
     REASON_CORROBORATION_DISAGREES,
     REASON_BOARD_DEFECTIVE,
+)
+
+# Retired with the v1 basis (alpha-engine-config-I8261). Kept as a NAMED set,
+# not deleted outright, so a reader of an archived v1 record can resolve a slug
+# this module no longer emits, and so a future author cannot re-mint one of
+# these strings for a different condition. Asserted disjoint from the live set
+# at import.
+RETIRED_V1_REASON_CODES: tuple[str, ...] = (
+    "board_missing",
+    "board_unmeasurable",
+    "decision_horizon_immature",
+    "decision_horizon_unmeasurable",
+    "arm_row_missing",
+    "arm_metric_missing",
+    "insufficient_dates",
 )
 
 
@@ -175,7 +267,7 @@ class CutPromotionSlot:
     ``LEADERBOARD_SLOTS["cuts"]``: that spec describes a MEASUREMENT surface
     whose arms are the funnel's own stages and explicitly *not competing*
     (``per_arm_width=True``). This slot is a subset of that board's arms — the
-    two count-matched 60s — which ARE competing. §2 forbids conflating the two;
+    count-matched 60s — which ARE competing. §2 forbids conflating the two;
     sharing one dataclass would have.
     """
 
@@ -185,34 +277,51 @@ class CutPromotionSlot:
     # never disagree about who is eligible.
     arms: tuple[str, ...]
     default_champion: str
-    # Where the evidence comes from, and what is read off it.
-    leaderboard_id: str
+
+    # ── The decision basis (alpha-engine-config-I8261) ────────────────────────
+    # WHERE the decision reads its evidence. This field, and the import-time
+    # assertion pinning it to weekly_ledger.LEDGER_KEY, is the first of the
+    # three invariants that replaced `forbidden_horizons_days`: no forward
+    # horizon can be the decision basis because no leaderboard is.
+    decision_source: str
+    decision_cadence: str
     primary_metric: str
-    # The horizon the decision is taken at. 126 sessions ≈ 6 months — the
-    # SHORTER of the two horizons that match the scanner's ~1-year objective,
-    # chosen over 252 because it matures first and 252 then serves as the
-    # corroborating check below. Grading a ~1-year thesis on anything shorter
-    # marks it on a horizon it was not built for (alpha-engine-config-I7540).
-    decision_horizon_days: int
-    # A mature 252-session block may VETO a promotion the 126 block proposes,
-    # but never propose one on its own. Asymmetric on purpose: the failure
-    # being defended against is a short horizon overturning a long one
-    # (I7580), so the longer horizon gets a veto and not a vote.
-    corroborating_horizon_days: int
-    # Never a decision input, at any confidence, for any reason. Asserted at
-    # import (below) and by tests/test_cut_promotion.py.
-    forbidden_horizons_days: tuple[int, ...]
-    # Evidence floor per arm, inherited from the board's own slot spec so the
-    # engine can never demand less evidence than the board calls comparable.
-    min_dates_for_inference: int
-    # Hysteresis (§5.2). Margin is in the primary metric's own units — a mean
-    # realized log-return lift over the horizon — so 0.005 is 50 bps of
-    # 126-session lift the challenger must clear the incumbent by. Set at the
-    # smallest value that is not noise at n≈5 date clusters rather than at a
-    # significance test: §5 rejects a publication-grade gate for an operational
-    # loop, and the cooldown already bounds oscillation.
+    # The ledger column differenced against the champion's SAME column in the
+    # SAME week. Net, not gross: at weekly rebalance turnover is first-order and
+    # the arms in this slot have wildly different churn (42% vs 76%
+    # week-over-week retention, measured 2026-07-27, EXPERIMENTS.md). An arm
+    # that wins gross and loses net is the classic trap, and deciding on gross
+    # would be a worse answer than the forward returns it replaces because it
+    # would look decisive.
+    ledger_return_column: str
+    # Evidence floor, in COMPLETED PAIRED WEEKS. Weeks, not cohort dates: the
+    # observations abut rather than overlap, so each one is an independent
+    # cluster in fact and not by assumption.
+    min_weeks_for_inference: int
+
+    # ── The vetoes (Brian's ruling: "corroborating vetoes once mature") ───────
+    # A mature block at any of these horizons may BLOCK a promotion the weekly
+    # series proposes. None of them may ever propose one — enforced
+    # structurally, since they are consulted only after the weekly series has
+    # named a leader. An immature one is recorded non-blocking (§5.1).
+    corroborating_horizons_days: tuple[int, ...]
+    corroborating_leaderboard_id: str
+    corroborating_metric: str
+    corroborating_min_dates: int
+
+    # Horizons that are SCORED every cycle and are neither a decision input nor
+    # a veto. Successor to `forbidden_horizons_days` and strictly stronger: the
+    # old field barred 21d from PROPOSING, this one bars it from vetoing too.
+    # Asserted disjoint from `corroborating_horizons_days` at import.
+    excluded_horizons_days: tuple[int, ...]
+
+    # ── Hysteresis (§5.2) ────────────────────────────────────────────────────
+    # In the DECISION METRIC's own units: a mean weekly paired net log-return
+    # difference vs the champion. See PROMOTION_MARGIN_NOTE for the conversion
+    # from the retired 126-session units, which is carried on every record.
     promotion_margin: float
     cooldown_days: int
+
     # Arms that are SCORED every cycle but cannot hold the feed. Declared here
     # so a reader of this row can tell "measured and ineligible" from "not
     # measured at all" without going to another module (ARCHITECTURE §140).
@@ -223,23 +332,46 @@ class CutPromotionSlot:
 
 
 # First cohort date on repaired fundamentals (alpha-engine-config-I8255): the
-# vendor-fundamentals cross-section this engine's evidence is scored on was
-# degenerate before this date, so no decision horizon can mature earlier than
-# this many TRADING SESSIONS after it, regardless of how many pre-repair dates
-# a leaderboard already carries. ``decision_earliest_on`` below is derived
-# from it so a reader does not have to do the session arithmetic themselves
+# vendor-fundamentals cross-section this slot's evidence is scored on was
+# degenerate before this date. No weekly observation earlier than this is
+# admissible evidence, so ``decision_earliest_on`` is derived from it rather
+# than from whatever history a store happens to carry
 # (alpha-engine-config-I8257).
 FIRST_COHORT_DATE = date(2026, 8, 20)
 
-# The 21-session horizon is structurally forbidden as a decision input
-# (``forbidden_horizons_days`` above), but it is scored every cycle and the
-# number exists. Every date scored on it so far predates FIRST_COHORT_DATE, so
-# it was measured on the pre-repair fundamentals cross-section
-# (alpha-engine-config-I8255), and its reported t_stat used an iid standard
-# error over overlapping windows that inflates |t| by roughly
-# sqrt(lags+1) (alpha-engine-config-I8263, fixed in crucible-research-PR732).
-# ``excluded_horizons`` carries this caveat with the number so a reader of the
-# promotion record cannot mistake it for a clean read on the arm.
+# Retired hysteresis bar, kept as a literal so the conversion below is
+# auditable rather than asserted. 0.005 was 50 bps of mean lift over a
+# 126-session forward window.
+LEGACY_MARGIN_PER_126_SESSIONS = 0.005
+LEGACY_DECISION_HORIZON_DAYS = 126
+
+PROMOTION_MARGIN_NOTE = (
+    "Units: mean WEEKLY paired net log-return difference vs the champion "
+    "(the decision metric's own units), NOT a lift over a forward window. "
+    f"Derived to preserve the retired bar exactly: {LEGACY_MARGIN_PER_126_SESSIONS} "
+    f"of mean lift over {LEGACY_DECISION_HORIZON_DAYS} sessions is "
+    f"{LEGACY_DECISION_HORIZON_DAYS}/{SESSIONS_PER_WEEK} = "
+    f"{LEGACY_DECISION_HORIZON_DAYS // SESSIONS_PER_WEEK}.2 weeks, so the "
+    "same economic bar per unit of time is 0.005/25.2 ≈ 0.0002 per week "
+    "(≈2 bps/week, ≈1.0%/yr at 52 weeks). The I8261 cutover deliberately "
+    "changes the decision BASIS and not the BAR — importing a different bar "
+    "under cover of a mechanism change would make the two effects "
+    "indistinguishable afterwards. The margin is NOT a significance test and "
+    "is not sized to the noise floor: champion-challenger-policy.md §5 "
+    "rejects a publication-grade gate for an operational loop, and "
+    "min_weeks_for_inference plus cooldown_days are what bound oscillation. "
+    "The paired series' clustered mean/se/t_stat are recorded on every arm so "
+    "a reader can see whether the margin was cleared with or without "
+    "statistical support, without that being a gate."
+)
+
+# The forward horizons this slot SCORES but neither decides on nor vetoes with.
+# Every date scored at 21d so far predates FIRST_COHORT_DATE, so it was measured
+# on the pre-repair fundamentals cross-section (alpha-engine-config-I8255), and
+# its reported t_stat used an iid standard error over overlapping windows that
+# inflates |t| by roughly sqrt(lags+1) (alpha-engine-config-I8263, fixed in
+# crucible-research-PR732). ``excluded_horizons`` carries this caveat WITH the
+# number so a reader of the promotion record cannot mistake it for a clean read.
 CONTAMINATION_CAVEAT = (
     "every date scored at this horizon so far predates the 2026-08-20 "
     "fundamentals repair and was measured on the degenerate pre-repair "
@@ -254,62 +386,126 @@ CUT_PROMOTION_SLOT = CutPromotionSlot(
     arms=PROMOTABLE_CUTS,
     observe_only_arms=OBSERVE_ONLY_CUTS,
     default_champion=DEFAULT_CUT_CHAMPION,
-    leaderboard_id="cuts",
-    primary_metric="topn_alpha_vs_population",
-    decision_horizon_days=126,
-    corroborating_horizon_days=252,
-    forbidden_horizons_days=(21,),
-    min_dates_for_inference=slot_spec("cuts").min_dates_for_inference,
-    promotion_margin=0.005,
+    decision_source=LEDGER_KEY,
+    decision_cadence=DECISION_CADENCE_WEEKLY,
+    primary_metric=DECISION_METRIC,
+    ledger_return_column="net_log_return",
+    min_weeks_for_inference=slot_spec("cuts").min_dates_for_inference,
+    corroborating_horizons_days=(126, 252),
+    corroborating_leaderboard_id="cuts",
+    corroborating_metric=slot_spec("cuts").primary_metric,
+    corroborating_min_dates=slot_spec("cuts").min_dates_for_inference,
+    excluded_horizons_days=(21,),
+    promotion_margin=0.0002,
     cooldown_days=28,
     count_matched_width=60,
 )
 
-# Import-time invariants. Each of these is a way the engine could silently start
-# deciding on the wrong evidence, so none of them is left to a test alone.
-if CUT_PROMOTION_SLOT.decision_horizon_days in CUT_PROMOTION_SLOT.forbidden_horizons_days:
+# ── Import-time invariants ────────────────────────────────────────────────────
+# Each is a way the engine could silently start deciding on the wrong evidence,
+# so none is left to a test alone. The first three are the named successors to
+# the retired ``forbidden_horizons_days`` assertion (see the module docstring).
+if CUT_PROMOTION_SLOT.decision_source != LEDGER_KEY:
     raise AssertionError(
-        "the scanner-cut decision horizon may never be a forbidden horizon — "
-        "alpha-engine-config-I7580 is what that produces"
+        "the scanner-cut decision must read the weekly ledger and nothing else "
+        f"({LEDGER_KEY}). A decision sourced from a leaderboard horizon block "
+        "measures a hold the weekly re-cut guarantees never happens "
+        "(alpha-engine-config-I8261, Brian's ruling 2026-08-24)"
     )
-for _h in (
-    CUT_PROMOTION_SLOT.decision_horizon_days,
-    CUT_PROMOTION_SLOT.corroborating_horizon_days,
+if set(CUT_PROMOTION_SLOT.excluded_horizons_days) & set(
+    CUT_PROMOTION_SLOT.corroborating_horizons_days
 ):
+    raise AssertionError(
+        "a horizon may not be BOTH structurally excluded and a corroborating "
+        "veto — the 21-session block that produced alpha-engine-config-I7580 "
+        "must not be able to block a promotion any more than propose one"
+    )
+for _h in CUT_PROMOTION_SLOT.corroborating_horizons_days:
+    if _h < MIN_VETO_HORIZON_DAYS:
+        raise AssertionError(
+            f"corroborating horizon {_h} is below MIN_VETO_HORIZON_DAYS="
+            f"{MIN_VETO_HORIZON_DAYS} — a veto horizon must match the scanner's "
+            "~1-year objective (alpha-engine-config-I7580)"
+        )
     if _h not in LONG_HORIZONS_DAYS:
         raise AssertionError(
             f"horizon {_h} is not scored by the cuts leaderboard "
-            f"(LONG_HORIZONS_DAYS={LONG_HORIZONS_DAYS}) — the engine would read "
-            "a block that is never written"
+            f"(LONG_HORIZONS_DAYS={LONG_HORIZONS_DAYS}) — the veto would read a "
+            "block that is never written"
         )
-if CUT_PROMOTION_SLOT.primary_metric != slot_spec("cuts").primary_metric:
+if CUT_PROMOTION_SLOT.corroborating_metric != slot_spec("cuts").primary_metric:
     raise AssertionError(
-        "the promotion engine ranks on a metric the cuts board does not treat "
-        "as primary — one of the two is wrong and it must not be resolved here"
+        "the veto ranks on a metric the cuts board does not treat as primary — "
+        "one of the two is wrong and it must not be resolved here"
+    )
+if CUT_PROMOTION_SLOT.ledger_return_column not in LEDGER_COLS:
+    raise AssertionError(
+        f"{CUT_PROMOTION_SLOT.ledger_return_column!r} is not a weekly-ledger "
+        f"column ({LEDGER_COLS}) — the decision would read a field that is "
+        "never written"
+    )
+if CUT_PROMOTION_SLOT.min_weeks_for_inference < 1:
+    raise AssertionError("a decision needs at least one completed paired week")
+if CUT_PROMOTION_SLOT.promotion_margin <= 0 or CUT_PROMOTION_SLOT.cooldown_days <= 0:
+    raise AssertionError(
+        "champion-challenger-policy.md §5.2 hysteresis is implemented for this "
+        "slot, not waived under the §9.3 delta — both the margin and the "
+        "cooldown must be positive"
+    )
+if set(HOLD_REASON_CODES) & set(RETIRED_V1_REASON_CODES):
+    raise AssertionError(
+        "a retired v1 reason_code has been re-minted for a live condition — a "
+        "slug means one thing forever or the decision series stops being "
+        "readable across schema versions"
     )
 
 
 @dataclass
 class ArmEvidence:
-    """What the board says about one arm at one horizon. Every field is copied
-    from the board verbatim; nothing is derived, so a reader can join this back
-    to ``research/cuts_leaderboard/{date}.json`` and see the same numbers.
+    """What the WEEKLY LEDGER says about one arm, paired against the champion.
 
-    ``horizon_days`` and ``metric`` (alpha-engine-config-I8257) make
-    ``n_dates_scored`` self-qualifying: without them, ``0`` reads as "never
-    scored" to anyone who has not also opened the leaderboard and matched it
-    to ``CUT_PROMOTION_SLOT.decision_horizon_days`` by hand — which is exactly
-    the misread that let an 8-date, t=-4.41 result at 21 sessions look
-    indistinguishable from a dead measurement loop at 126.
+    Every field is self-qualifying by construction (alpha-engine-config-I8257,
+    carried forward to the new basis): ``metric``, ``cadence`` and ``source``
+    travel with the numbers, so ``n_weeks_paired: 0`` reads as "0 paired weeks
+    on the weekly ledger", never as an unqualified zero a reader has to join
+    back to a registry to interpret.
     """
 
-    n_dates_scored: int = 0
-    confidence: str = "insufficient"
-    topn_alpha_vs_population_mean: float | None = None
-    t_stat: float | None = None
     present: bool = False
-    horizon_days: int = 0
+    is_champion: bool = False
+    # How many ledger rows this arm has at the current LEDGER_VERSION.
+    n_weeks_scored: int = 0
+    # How many of those pair against a champion row for the SAME week with both
+    # legs carrying the decision column. This is the measurability surface.
+    n_weeks_paired: int = 0
+    weeks_dropped_unpaired: int = 0
+    weeks_dropped_window_mismatch: int = 0
+    weeks_dropped_stale_version: int = 0
+    # The decision number, and the chained read of the same series.
+    mean_paired_log_return: float | None = None
+    chained_paired_log_return: float | None = None
+    se: float | None = None
+    t_stat: float | None = None
+    se_method: str | None = None
+    first_week: str | None = None
+    last_week: str | None = None
+    confidence: str = "insufficient"
+    # DIAGNOSTIC, never the decision input. `weekly_ledger.paired_weekly_
+    # differences` differences this arm's chosen column against the
+    # `champion_log_return` leg carried inside the arm's OWN row — and that leg
+    # is a GROSS basket return (weekly_ledger.build_week_row computes it with
+    # equal_weight_log_return and applies no cost). Differencing a NET arm
+    # against a GROSS champion charges the challenger's transaction cost and
+    # not the incumbent's, which is a systematic bias against the challenger in
+    # a slot whose arms differ mainly in churn. The decision therefore joins
+    # champion rows explicitly and differences net-against-net; this field
+    # records what the embedded leg would have said, so the gap is visible
+    # rather than argued about. Producer-side fix tracked with I8264.
+    mean_vs_embedded_champion_leg: float | None = None
+    n_weeks_vs_embedded_champion_leg: int = 0
     metric: str = ""
+    cadence: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -321,24 +517,21 @@ class CutPromotionDecision:
     champion_before: str
     reason: str
     reason_code: str
-    horizon_days: int
     decided_on: str
     arms: dict[str, ArmEvidence] = field(default_factory=dict)
     last_promoted_on: str | None = None
     corroborating: dict[str, Any] | None = None
     defect: str | None = None
-    # alpha-engine-config-I8257 deliverables 2-3. Both are set unconditionally
-    # on every evaluation, promote or hold — the same §3 discipline as the
-    # rest of this record: a field only present sometimes reads as a claim
-    # about the times it is absent.
     excluded_horizons: dict[str, dict] = field(default_factory=dict)
     decision_earliest_on: str = ""
+    ledger: dict[str, Any] = field(default_factory=dict)
 
     def to_document(self, *, leaderboard_key: str | None = None) -> dict:
+        slot = CUT_PROMOTION_SLOT
         return {
             "schema_version": SCHEMA_VERSION,
             "producer": PRODUCER,
-            "slot_id": CUT_PROMOTION_SLOT.slot_id,
+            "slot_id": slot.slot_id,
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "decided_on": self.decided_on,
             "decision": self.decision,
@@ -346,81 +539,397 @@ class CutPromotionDecision:
             "champion_before": self.champion_before,
             "reason": self.reason,
             "reason_code": self.reason_code,
-            "horizon_days": self.horizon_days,
-            "primary_metric": CUT_PROMOTION_SLOT.primary_metric,
+            # The decision basis, stated on the record rather than implied by
+            # the module that wrote it (principles.md §2.1 — reconstructable
+            # from durable artifacts alone).
+            "decision_metric": slot.primary_metric,
+            "decision_cadence": slot.decision_cadence,
+            "decision_source": slot.decision_source,
+            "decision_column": slot.ledger_return_column,
             "last_promoted_on": self.last_promoted_on,
             "leaderboard_key": leaderboard_key,
             "arms": {name: asdict(ev) for name, ev in self.arms.items()},
             "hysteresis": {
-                "promotion_margin": CUT_PROMOTION_SLOT.promotion_margin,
-                "cooldown_days": CUT_PROMOTION_SLOT.cooldown_days,
-                "corroborating_horizon_days": CUT_PROMOTION_SLOT.corroborating_horizon_days,
-                "min_dates_for_inference": CUT_PROMOTION_SLOT.min_dates_for_inference,
+                "promotion_margin": slot.promotion_margin,
+                "promotion_margin_units": (
+                    "mean weekly paired net log-return difference vs champion"
+                ),
+                "promotion_margin_note": PROMOTION_MARGIN_NOTE,
+                "cooldown_days": slot.cooldown_days,
+                "min_weeks_for_inference": slot.min_weeks_for_inference,
+                "corroborating_horizons_days": list(slot.corroborating_horizons_days),
             },
             "corroborating": self.corroborating,
             "defect": self.defect,
             "excluded_horizons": self.excluded_horizons,
             "decision_earliest_on": self.decision_earliest_on,
+            "ledger": self.ledger,
         }
 
 
-# ── The decision, pure ────────────────────────────────────────────────────────
+# ── Reading the ledger ────────────────────────────────────────────────────────
 
 
-def _block_for(board: dict, horizon: int) -> dict | None:
-    for block in board.get("horizons") or []:
+def _clean(value: Any) -> Any:
+    """pandas renders a missing float as NaN, and NaN is not None.
+
+    A NaN reaching the decision would compare False against every threshold and
+    propagate silently through a mean — a missing observation rendering as a
+    number. Every ledger cell is normalised here, once, on the way in.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
+
+
+def ledger_rows_from_frame(frame: Any) -> list[dict]:
+    """A ledger DataFrame → plain records, NaN normalised to None.
+
+    Kept separate from :func:`read_weekly_ledger_rows` so the pure decision
+    path can be handed records built by a test without pandas in the loop.
+    """
+    if frame is None:
+        return []
+    rows: list[dict] = []
+    for record in frame.to_dict("records"):
+        rows.append({k: _clean(v) for k, v in record.items()})
+    return rows
+
+
+def read_weekly_ledger_rows(
+    *, bucket: str | None = None, s3_client: Any = None
+) -> list[dict] | None:
+    """The weekly ledger as records, or ``None`` when it has never been written.
+
+    ``None``, not ``[]``. The ledger is not yet written by anything — the
+    producer is being wired concurrently (alpha-engine-config-I8264) — so an
+    absent store is the EXPECTED state today, and it must render as "no
+    measurement exists" and never as an empty-but-healthy series
+    (champion-challenger-policy.md §7.2). ``read_ledger`` already draws that
+    distinction; this preserves it rather than collapsing it into a list.
+    """
+    frame = read_ledger(bucket=bucket, s3_client=s3_client)
+    if frame is None:
+        return None
+    return ledger_rows_from_frame(frame)
+
+
+def _rows_by_arm(
+    rows: Sequence[Mapping[str, Any]], arm: str
+) -> tuple[list[dict], int]:
+    """This arm's rows at the CURRENT ledger version, and how many were dropped
+    for carrying an older one.
+
+    A row written under an earlier ``LEDGER_VERSION`` may define a column
+    differently (that is the only thing the version is bumped for), so mixing
+    versions in one mean silently averages two different quantities. Older rows
+    sit ALONGSIDE the current ones by design; the decision reads the current
+    ones and REPORTS the count it set aside, because a silently narrowed
+    sample is indistinguishable from a short history.
+    """
+    keep: list[dict] = []
+    stale = 0
+    for row in rows:
+        if row.get("arm") != arm:
+            continue
+        version = row.get("ledger_version")
+        if version is not None and int(version) != LEDGER_VERSION:
+            stale += 1
+            continue
+        keep.append(dict(row))
+    keep.sort(key=lambda r: str(r.get("week_start") or ""))
+    return keep, stale
+
+
+def _paired_series(
+    arm_rows: Sequence[Mapping[str, Any]],
+    champion_rows: Sequence[Mapping[str, Any]],
+    *,
+    column: str,
+) -> tuple[list[float], list[str], int, int]:
+    """``(differences, weeks, dropped_unpaired, dropped_window_mismatch)``.
+
+    NET against NET, both legs read from the two arms' own ledger rows and
+    joined on ``week_start``. See ``ArmEvidence.mean_vs_embedded_champion_leg``
+    for why the ledger's in-row ``champion_log_return`` is a diagnostic and not
+    this.
+
+    A week where either leg is missing the column is DROPPED and counted, never
+    substituted with a zero: substituting would manufacture a week in which the
+    arm exactly matched the champion. A week whose two rows disagree about
+    ``week_end`` is also dropped and counted separately — the holding period
+    ends when the next cut lands, so two arms reporting different ends for the
+    same start are not describing the same window, and differencing them
+    compares different spans (champion-challenger-policy.md §4, same cohort
+    dates).
+    """
+    champ_by_week = {str(r.get("week_start")): r for r in champion_rows}
+    diffs: list[float] = []
+    weeks: list[str] = []
+    unpaired = 0
+    mismatched = 0
+    for row in arm_rows:
+        week = str(row.get("week_start"))
+        champ = champ_by_week.get(week)
+        if champ is None:
+            unpaired += 1
+            continue
+        if row.get("week_end") != champ.get("week_end"):
+            mismatched += 1
+            continue
+        mine = row.get(column)
+        theirs = champ.get(column)
+        if mine is None or theirs is None:
+            unpaired += 1
+            continue
+        try:
+            diffs.append(float(mine) - float(theirs))
+        except (TypeError, ValueError):
+            unpaired += 1
+            continue
+        weeks.append(week)
+    return diffs, weeks, unpaired, mismatched
+
+
+def _arm_evidence(
+    *,
+    arm: str,
+    arm_rows: Sequence[Mapping[str, Any]],
+    champion_rows: Sequence[Mapping[str, Any]],
+    stale: int,
+    slot: CutPromotionSlot,
+    is_champion: bool,
+) -> ArmEvidence:
+    """One arm's paired weekly evidence. Pure."""
+    diffs, weeks, unpaired, mismatched = _paired_series(
+        arm_rows, champion_rows, column=slot.ledger_return_column
+    )
+    # `overlap_lags=0` is a CLAIM, and it is true here for the first time: the
+    # ledger's weeks abut (each ends where the next begins), so "each date =
+    # one independent cluster" — `date_clustered_stats`'s own contract, written
+    # for exactly this shape — holds in fact rather than by assumption. The
+    # same call on a forward-window series would need a HAC SE
+    # (alpha-engine-config-I8263).
+    stats = date_clustered_stats(diffs, overlap_lags=0) if diffs else None
+    embedded = paired_weekly_differences(
+        arm_rows, column=slot.ledger_return_column
+    )
+    return ArmEvidence(
+        present=True,
+        is_champion=is_champion,
+        n_weeks_scored=len(arm_rows),
+        n_weeks_paired=len(diffs),
+        weeks_dropped_unpaired=unpaired,
+        weeks_dropped_window_mismatch=mismatched,
+        weeks_dropped_stale_version=stale,
+        mean_paired_log_return=(stats or {}).get("mean"),
+        chained_paired_log_return=chained_log_return(diffs) if diffs else None,
+        se=(stats or {}).get("se"),
+        t_stat=(stats or {}).get("t_stat"),
+        se_method=(stats or {}).get("se_method"),
+        first_week=(weeks[0] if weeks else None),
+        last_week=(weeks[-1] if weeks else None),
+        confidence=confidence_for(len(diffs), slot.min_weeks_for_inference),
+        mean_vs_embedded_champion_leg=(
+            sum(embedded) / len(embedded) if embedded else None
+        ),
+        n_weeks_vs_embedded_champion_leg=len(embedded),
+        metric=slot.primary_metric,
+        cadence=slot.decision_cadence,
+        source=slot.decision_source,
+    )
+
+
+# ── The vetoes ────────────────────────────────────────────────────────────────
+
+
+def _block_for(board: dict | None, horizon: int) -> dict | None:
+    for block in (board or {}).get("horizons") or []:
         if block.get("horizon_days") == horizon:
             return block
     return None
 
 
-def _rows_for(block: dict, arm: str) -> list[dict]:
-    return [r for r in block.get("specs") or [] if r.get("name") == arm]
+def _rows_for(block: dict | None, arm: str) -> list[dict]:
+    return [r for r in (block or {}).get("specs") or [] if r.get("name") == arm]
 
 
-def _evidence(row: dict, *, horizon_days: int, metric: str) -> ArmEvidence:
+def _board_number(row: dict, metric: str) -> tuple[float | None, float | None, int]:
     m = row.get(metric)
     mean = m.get("mean") if isinstance(m, dict) else None
     t_stat = m.get("t_stat") if isinstance(m, dict) else None
-    return ArmEvidence(
-        n_dates_scored=int(row.get("n_dates_scored") or 0),
-        confidence=str(row.get("confidence") or "insufficient"),
-        topn_alpha_vs_population_mean=(float(mean) if mean is not None else None),
-        t_stat=(float(t_stat) if t_stat is not None else None),
-        present=True,
-        horizon_days=horizon_days,
-        metric=metric,
+    return (
+        (float(mean) if mean is not None else None),
+        (float(t_stat) if t_stat is not None else None),
+        int(row.get("n_dates_scored") or 0),
     )
 
 
-def _excluded_horizons(board: dict | None, slot: CutPromotionSlot) -> dict[str, dict]:
-    """Per arm, what the FORBIDDEN horizons measured and why they are not a
-    decision input (alpha-engine-config-I8257 deliverable 2).
+def _veto_horizon(
+    board: dict | None, slot: CutPromotionSlot, proposed: str, horizon: int
+) -> dict:
+    """What ONE long horizon says, when it is in a position to say anything.
 
-    Written unconditionally, including when there is no board at all — a
-    reader must not have to open a second artifact to learn either that the
-    excluded number exists or that it is contaminated. Keyed
+    An absent, immature or thin block is recorded with ``mature: false`` and
+    ``disagrees: false`` — an unmeasured veto is not a veto
+    (champion-challenger-policy.md §5.1: you cannot gate on a statistic you did
+    not measure, and an uncomputed gate reported as a PASS is the defect that
+    rule prevents). At rollout this is the normal state for both horizons, and
+    the record says so in words rather than leaving a reader to infer it from a
+    null.
+    """
+    base = {
+        "horizon_days": horizon,
+        "metric": slot.corroborating_metric,
+        "role": "veto_only",
+        "leader": None,
+        "disagrees": False,
+        "mature": False,
+    }
+    block = _block_for(board, horizon)
+    if board is None:
+        return {
+            **base,
+            "status": "absent",
+            "note": (
+                "no cuts leaderboard was available this evaluation; the veto is "
+                "UNMEASURED and therefore non-blocking (§5.1). It does not hold "
+                "the decision: the decision does not come from this board."
+            ),
+        }
+    if block is None:
+        return {
+            **base,
+            "status": "absent",
+            "note": (
+                f"the cuts leaderboard carries no {horizon}d block; the veto is "
+                "unmeasured and non-blocking (§5.1)."
+            ),
+        }
+    if block.get("status") != HORIZON_OK:
+        return {
+            **base,
+            "status": block.get("status"),
+            "note": (
+                f"the {horizon}d block reports status="
+                f"{block.get('status')!r} ({block.get('reason')}); the veto is "
+                "unmeasured and non-blocking (§5.1). This is the expected state "
+                "until the cohort matures."
+            ),
+        }
+    arms: dict[str, dict] = {}
+    for arm in slot.arms:
+        rows = _rows_for(block, arm)
+        if len(rows) != 1:
+            return {
+                **base,
+                "status": block.get("status"),
+                "note": (
+                    f"{arm} has {len(rows)} rows at {horizon}d, so no single "
+                    "number is the arm's; the veto is unmeasured and "
+                    "non-blocking (§5.1)."
+                ),
+            }
+        mean, t_stat, n_dates = _board_number(rows[0], slot.corroborating_metric)
+        arms[arm] = {
+            "mean": mean,
+            "t_stat": t_stat,
+            "n_dates_scored": n_dates,
+            "confidence": str(rows[0].get("confidence") or "insufficient"),
+        }
+    if any(
+        a["mean"] is None or a["n_dates_scored"] < slot.corroborating_min_dates
+        for a in arms.values()
+    ):
+        return {
+            **base,
+            "status": block.get("status"),
+            "arms": arms,
+            "note": (
+                f"at least one arm is below the board's evidence floor "
+                f"({slot.corroborating_min_dates} dates) at {horizon}d; the veto "
+                "is unmeasured and non-blocking (§5.1)."
+            ),
+        }
+    leader = max(arms.items(), key=lambda kv: (kv[1]["mean"], kv[0]))[0]
+    return {
+        **base,
+        "status": block.get("status"),
+        "mature": True,
+        "leader": leader,
+        "disagrees": leader != proposed,
+        "arms": arms,
+        "note": (
+            f"mature at {horizon}d; it may BLOCK the weekly series' proposal and "
+            "may never make one."
+        ),
+    }
+
+
+def _corroboration(
+    board: dict | None, slot: CutPromotionSlot, proposed: str
+) -> dict:
+    """Every veto horizon, and whether any of them blocks ``proposed``."""
+    horizons = {
+        str(h): _veto_horizon(board, slot, proposed, h)
+        for h in slot.corroborating_horizons_days
+    }
+    blocked_by = [
+        int(h) for h, entry in horizons.items() if entry.get("disagrees")
+    ]
+    mature = [int(h) for h, entry in horizons.items() if entry.get("mature")]
+    return {
+        "role": "veto_only",
+        "proposed": proposed,
+        "horizons": horizons,
+        "mature_horizons": sorted(mature),
+        "blocking": bool(blocked_by),
+        "blocked_by": sorted(blocked_by),
+        "note": (
+            "126 and 252 are corroborating vetoes, not the decision basis "
+            "(Brian's ruling 2026-08-24, alpha-engine-config-I8261). A mature "
+            "block may refuse a promotion the weekly series proposes; none may "
+            "propose one. An immature block is recorded non-blocking."
+        ),
+    }
+
+
+def _excluded_horizons(board: dict | None, slot: CutPromotionSlot) -> dict[str, dict]:
+    """Per arm, what the horizons that are NEITHER a decision input NOR a veto
+    measured, and why they are excluded (alpha-engine-config-I8257 deliverable
+    2, carried forward to the I8261 basis).
+
+    Written unconditionally, including when there is no board at all — a reader
+    must not have to open a second artifact to learn either that the excluded
+    number exists or that it is contaminated. Keyed
     ``{arm: {str(horizon_days): {...}}}``.
     """
     out: dict[str, dict] = {}
     for arm in slot.arms:
         entries: dict[str, dict] = {}
-        for horizon in slot.forbidden_horizons_days:
+        for horizon in slot.excluded_horizons_days:
             block = _block_for(board, horizon) if board else None
             base_reason = (
-                f"forbidden_horizon: {slot.slot_id} decides at "
-                f"{slot.decision_horizon_days}d, never at {horizon}d — "
-                "promoting on the first horizon to mature reproduces the "
-                "alpha-engine-config-I7580 error on a weekly schedule "
-                "(structurally excluded, asserted at import)."
+                f"excluded_horizon: {slot.slot_id} decides on the chained "
+                f"weekly series ({slot.primary_metric}) and vetoes with "
+                f"{list(slot.corroborating_horizons_days)}d — {horizon}d is "
+                "neither. It may not propose a promotion and it may not block "
+                "one: it is the block that produced "
+                "alpha-engine-config-I7580 (structurally excluded, asserted at "
+                "import)."
             )
             if block is None:
                 entries[str(horizon)] = {
                     "horizon_days": horizon,
                     "n_dates_scored": 0,
-                    "topn_alpha_vs_population_mean": None,
+                    "mean": None,
                     "t_stat": None,
-                    "excluded_reason": f"{base_reason} No {horizon}d block on this board.",
+                    "metric": slot.corroborating_metric,
+                    "excluded_reason": (
+                        f"{base_reason} No {horizon}d block available."
+                    ),
                 }
                 continue
             rows = _rows_for(block, arm)
@@ -428,414 +937,389 @@ def _excluded_horizons(board: dict | None, slot: CutPromotionSlot) -> dict[str, 
                 entries[str(horizon)] = {
                     "horizon_days": horizon,
                     "n_dates_scored": 0,
-                    "topn_alpha_vs_population_mean": None,
+                    "mean": None,
                     "t_stat": None,
+                    "metric": slot.corroborating_metric,
                     "excluded_reason": (
-                        f"{base_reason} {len(rows)} rows for {arm!r} at {horizon}d "
-                        "— no single row to report."
+                        f"{base_reason} {len(rows)} rows for {arm!r} at "
+                        f"{horizon}d — no single row to report."
                     ),
                 }
                 continue
-            ev = _evidence(rows[0], horizon_days=horizon, metric=slot.primary_metric)
+            mean, t_stat, n_dates = _board_number(rows[0], slot.corroborating_metric)
             reason = base_reason
-            if ev.n_dates_scored:
+            if n_dates:
                 reason = f"{base_reason} {CONTAMINATION_CAVEAT}."
             entries[str(horizon)] = {
                 "horizon_days": horizon,
-                "n_dates_scored": ev.n_dates_scored,
-                "topn_alpha_vs_population_mean": ev.topn_alpha_vs_population_mean,
-                "t_stat": ev.t_stat,
+                "n_dates_scored": n_dates,
+                "mean": mean,
+                "t_stat": t_stat,
+                "metric": slot.corroborating_metric,
                 "excluded_reason": reason,
             }
         out[arm] = entries
     return out
 
 
+# ── The decision, pure ────────────────────────────────────────────────────────
+
+
+def decision_earliest_on(slot: CutPromotionSlot = CUT_PROMOTION_SLOT) -> str:
+    """The earliest date the weekly series could carry ``min_weeks_for_inference``
+    completed observations for every arm.
+
+    Derived from the WEEKLY series (alpha-engine-config-I8261 requirement 2),
+    not from a forward horizon: ``min_weeks_for_inference`` weeks of
+    ~``SESSIONS_PER_WEEK`` trading sessions each, projected from
+    ``FIRST_COHORT_DATE`` onto the NYSE calendar so holidays are priced in. The
+    v1 basis put this at 2027-02-22 (126 sessions after the same start); the
+    weekly basis puts it five months earlier.
+
+    A ceiling, not a promise: it says the evidence CANNOT exist before this
+    date, never that it will exist on it. A missed weekly run pushes the real
+    date out and the ledger's own ``n_weeks_paired`` is what says where it
+    actually stands.
+    """
+    return add_trading_days(
+        FIRST_COHORT_DATE, slot.min_weeks_for_inference * SESSIONS_PER_WEEK
+    ).isoformat()
+
+
 def _leader(arms: dict[str, ArmEvidence]) -> str:
-    """The arm with the higher mean lift. Ties resolve to the incumbent by the
-    caller (a tie never clears the margin), so this is only ever consulted when
-    the two means differ."""
-    return max(
-        arms.items(),
-        key=lambda kv: (kv[1].topn_alpha_vs_population_mean or float("-inf"), kv[0]),
-    )[0]
+    """The arm with the highest mean paired difference. The champion's own
+    paired difference is 0.0 by construction (it is differenced against
+    itself), so a challenger must be strictly positive to lead — and a tie
+    resolves to the incumbent, which is what hysteresis means before the margin
+    is even consulted.
+
+    The ``is None`` test is deliberate and load-bearing: the champion's own mean
+    is EXACTLY 0.0, and ``x or -inf`` sends a falsy zero to negative infinity —
+    which would rank the incumbent below every challenger, including one that is
+    losing. Caught by ``test_an_exact_tie_resolves_to_the_incumbent`` before this
+    shipped; an unmeasured arm (``None``) is what ranks last, not a flat one.
+    """
+
+    def rank(kv: tuple[str, ArmEvidence]) -> tuple[float, int, str]:
+        mean = kv[1].mean_paired_log_return
+        # Incumbency, not alphabetical order, breaks a tie. Ranking on the name
+        # made 'tech_score_top_60' beat 'attractiveness_top_60' on an EXACT
+        # draw, which moves the sector-team feed on no evidence at all — the
+        # opposite of what hysteresis is for.
+        return (
+            float("-inf") if mean is None else float(mean),
+            1 if kv[1].is_champion else 0,
+            kv[0],
+        )
+
+    return max(arms.items(), key=rank)[0]
 
 
 def decide_cut_champion(
     *,
-    board: dict | None,
+    ledger_rows: Sequence[Mapping[str, Any]] | None,
+    board: dict | None = None,
     champion_before: str,
     decided_on: str,
     last_promoted_on: str | None = None,
     slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
 ) -> CutPromotionDecision:
-    """Decide, from an already-loaded cuts leaderboard. Pure: no S3, no clock.
+    """Decide, from an already-loaded weekly ledger. Pure: no S3, no clock.
+
+    ``ledger_rows`` is the DECISION evidence. ``board`` — a cuts leaderboard —
+    is consulted only for the long-horizon vetoes and the excluded-horizon
+    report; its absence is not a hold, because an unmeasured veto is not a veto
+    (§5.1).
 
     Every exit produces a record. There is no path that returns nothing, and no
-    path that promotes without both arms clearing ``min_dates_for_inference`` at
-    ``decision_horizon_days``.
+    path that promotes without every arm clearing ``min_weeks_for_inference``
+    paired weeks on the decision column.
     """
 
-    # Computed once, up front: neither depends on which branch below fires,
-    # and both must be on EVERY record — including the earliest holds, where
-    # a reader most needs to know this is not a stuck loop
-    # (alpha-engine-config-I8257 deliverables 2-3).
-    decision_earliest_on = add_trading_days(
-        FIRST_COHORT_DATE, slot.decision_horizon_days
-    ).isoformat()
+    # Computed once, up front: neither depends on which branch below fires, and
+    # both must be on EVERY record — including the earliest holds, where a
+    # reader most needs to know this is not a stuck loop.
+    earliest = decision_earliest_on(slot)
     excluded = _excluded_horizons(board, slot)
 
-    def hold(code: str, reason: str, *, arms=None, corroborating=None, defect=None):
+    def _ledger_meta(rows, arms_seen=None, present=True) -> dict:
+        return {
+            "key": slot.decision_source,
+            "ledger_version": LEDGER_VERSION,
+            "present": present,
+            "rows_read": (len(rows) if rows is not None else 0),
+            "column": slot.ledger_return_column,
+            "arms_present": sorted(arms_seen or []),
+        }
+
+    def hold(
+        code: str,
+        reason: str,
+        *,
+        arms=None,
+        corroborating=None,
+        defect=None,
+        ledger=None,
+    ):
         return CutPromotionDecision(
             decision=DECISION_HOLD,
             champion=champion_before,
             champion_before=champion_before,
             reason=reason,
             reason_code=code,
-            horizon_days=slot.decision_horizon_days,
             decided_on=decided_on,
             arms=arms
             or {
-                a: ArmEvidence(horizon_days=slot.decision_horizon_days, metric=slot.primary_metric)
+                a: ArmEvidence(
+                    metric=slot.primary_metric,
+                    cadence=slot.decision_cadence,
+                    source=slot.decision_source,
+                    is_champion=(a == champion_before),
+                )
                 for a in slot.arms
             },
             last_promoted_on=last_promoted_on,
             corroborating=corroborating,
             defect=defect,
             excluded_horizons=excluded,
-            decision_earliest_on=decision_earliest_on,
+            decision_earliest_on=earliest,
+            ledger=ledger if ledger is not None else _ledger_meta(ledger_rows or []),
         )
 
-    # ── WHOLE-BOARD integrity runs BEFORE the registry check ───────────────
-    # A duplicate arm row is a PRODUCER fault, and a producer fault is true
-    # whether or not a decision was available to take. Ordering this after the
-    # `len(slot.arms) < 2` hold below made a defective board render as the quiet
-    # `no_promotable_challenger` — a benign-looking verdict that fails no run and
-    # names no defect — the moment alpha-engine-config-I8060 left the slot with a
-    # single promotable arm. That is this module's own stated worse failure:
-    # "a defect that also erases the evidence of itself".
+    # ── WHOLE-BOARD integrity, before anything else ────────────────────────────
+    # The board is now only the VETO source, and a missing one is legitimately
+    # non-blocking. A board reporting duplicate arm rows is a different thing:
+    # it is not unmeasured, it is UNRELIABLE, and a safety mechanism that may be
+    # reading someone else's numbers is worse than one that is switched off. So
+    # a duplicate anywhere disqualifies the board and holds — the engine cannot
+    # establish that the rows it DOES read came from the pass it thinks they
+    # did (alpha-engine-config-I8026 deliverable 3; the 2026-08-18/19 artifacts
+    # doubled two funnel stages in the 21d block alone).
     #
-    # Guarded on `board` being present so it cannot mask the registry condition
-    # when there is no artifact at all — which is what the ordering below was
-    # protecting, and which still holds.
+    # Ordered ahead of the registry check because a producer fault is true
+    # whether or not a decision was available to take, and rendering it as the
+    # quiet `no_promotable_challenger` is this module's own stated worse
+    # failure: "a defect that also erases the evidence of itself".
     if board:
-        _early_dupes = duplicate_arm_rows(board)
-        if _early_dupes:
+        board_dupes = duplicate_arm_rows(board)
+        if board_dupes:
             return hold(
                 REASON_BOARD_DEFECTIVE,
                 f"cuts leaderboard {decided_on} reports duplicate arm rows "
-                f"({', '.join(_early_dupes)}) — including on surfaces this engine "
-                "does not decide from. A board that counts any arm twice cannot be "
-                f"shown to have counted the others once. {champion_before!r} holds "
-                "and the run fails loud. Reported ahead of any registry-shape hold: "
-                "a producer fault is true whether or not a decision was available.",
-                defect=f"duplicate arm rows: {', '.join(_early_dupes)}",
+                f"({', '.join(board_dupes)}) — including on surfaces this engine "
+                "does not veto from. A board that counts any arm twice cannot be "
+                "shown to have counted the others once, so the long-horizon veto "
+                "cannot be trusted this cycle. An ABSENT veto is non-blocking; a "
+                f"CORRUPT one is not. {champion_before!r} holds and the run fails "
+                "loud.",
+                defect=f"duplicate arm rows: {', '.join(board_dupes)}",
             )
 
-    # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───
-    # Brian ruling 2026-08-21: `tech_score_top_60` is observe-only until it has
-    # weeks of measured performance. With one promotable arm there is nothing to
-    # decide, and the engine must SAY so rather than fall through to the
-    # comparison path and report `champion_already_leads` — which is a claim
-    # about evidence, made where no comparison happened. Two states that mean
-    # different things must not render identically (§3).
-    #
-    # This is checked before the board, deliberately: it is true of the REGISTRY
-    # and does not depend on any evidence, so a missing board must not mask it.
-    # The record is still written on every evaluation, so "the engine is armed
-    # and waiting" stays visible instead of looking like a dead loop.
+    # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───────
+    # Brian ruling 2026-08-21, reaffirmed 2026-08-24 on I8261: `tech_score_top_60`
+    # stays observe-only until it has a scored cohort. Arming an automatic
+    # pointer write before the evidence exists re-creates the condition that
+    # ruling was made about. With one promotable arm there is nothing to decide,
+    # and the engine must SAY so rather than fall through to a comparison path
+    # and report `champion_already_leads` — a claim about evidence, made where
+    # no comparison happened. Two states that mean different things must not
+    # render identically (§3).
     if len(slot.arms) < 2:
         observe = ", ".join(slot.observe_only_arms) or "none"
         return hold(
             REASON_NO_PROMOTABLE_CHALLENGER,
             f"the scanner-cut slot has one promotable arm ({champion_before!r}) "
             f"and no promotable challenger, so there is no decision to take on "
-            f"{decided_on}. Observe-only arms, scored every cycle and ineligible "
-            f"to hold the feed: {observe}. Restoring one of them to "
-            f"PROMOTABLE_CUTS is a one-line registry edit and is the ONLY thing "
-            "standing between this hold and a live decision — the evidence is "
-            "accumulating either way.",
+            f"{decided_on} — on any metric, at any cadence. Observe-only arms, "
+            f"scored every cycle and ineligible to hold the feed: {observe}. "
+            "Restoring one of them to PROMOTABLE_CUTS is a one-line registry "
+            "edit and is the ONLY thing standing between this hold and a live "
+            "decision — the weekly evidence accumulates either way.",
         )
 
-    if not board:
+    # ── The weekly ledger ──────────────────────────────────────────────────────
+    if ledger_rows is None:
         return hold(
-            REASON_BOARD_MISSING,
-            f"no research/cuts_leaderboard for {decided_on} — the engine holds "
-            f"{champion_before!r} rather than decide from no evidence. This is a "
-            "hold, not a silence: the record you are reading is the proof the "
-            "engine ran.",
+            REASON_LEDGER_MISSING,
+            f"no weekly ledger at {slot.decision_source} on {decided_on}, so the "
+            f"decision metric ({slot.primary_metric}) has no observations. "
+            f"{champion_before!r} holds. This is a hold, not a silence: the "
+            "record you are reading is the proof the engine ran. The ledger's "
+            "producer is being wired under alpha-engine-config-I8264; until it "
+            "writes, an absent store is the EXPECTED state and must never "
+            "render as an empty-but-healthy series "
+            "(champion-challenger-policy.md §7.2).",
+            ledger=_ledger_meta(None, present=False),
         )
 
-    status = board.get("status")
-    if status and status != "ok":
-        return hold(
-            REASON_BOARD_UNMEASURABLE,
-            f"cuts leaderboard for {decided_on} reports status={status!r} "
-            f"({board.get('reason')}) — no arm is scorable, so {champion_before!r} holds.",
-        )
-
-    if "horizons" not in board:
-        return hold(
-            REASON_BOARD_DEFECTIVE,
-            f"cuts leaderboard for {decided_on} carries no 'horizons' list — this "
-            "is a pre-multi-horizon artifact shape and the engine will not read a "
-            "top-level block whose horizon it cannot verify.",
-            defect="cuts_leaderboard missing 'horizons'",
-        )
-
-    # WHOLE-BOARD integrity, before any row is read. The per-arm duplicate
-    # check below covers `slot.arms` in the decision block only, which is
-    # exactly the surface the live duplicates were NOT on: the 2026-08-18 and
-    # 08-19 artifacts doubled `attractiveness_top_20` and
-    # `scanner_gate_baseline_60` — two funnel STAGES — in the 21d block, a
-    # horizon this engine structurally never reads. So a board known to be
-    # defective produced a decision record that said nothing about it, for two
-    # cycles (alpha-engine-config-I8026 deliverable 3).
-    #
-    # A duplicate anywhere is a producer fault of unknown shape, so it
-    # disqualifies the board rather than only the rows it touched: the engine
-    # cannot establish that the rows it DOES read came from the pass it thinks
-    # they did.
-    board_dupes = duplicate_arm_rows(board)
-    if board_dupes:
-        return hold(
-            REASON_BOARD_DEFECTIVE,
-            f"cuts leaderboard {decided_on} reports duplicate arm rows "
-            f"({', '.join(board_dupes)}) — including on surfaces this engine "
-            "does not decide from. A board that counts any arm twice cannot be "
-            f"shown to have counted the others once. {champion_before!r} holds "
-            "and the run fails loud.",
-            defect=f"duplicate arm rows: {', '.join(board_dupes)}",
-        )
-
-    block = _block_for(board, slot.decision_horizon_days)
-    if block is None:
-        return hold(
-            REASON_BOARD_DEFECTIVE,
-            f"cuts leaderboard for {decided_on} has no {slot.decision_horizon_days}-session "
-            f"block. The engine decides at that horizon and nowhere else; the "
-            f"{slot.forbidden_horizons_days} block is structurally excluded "
-            "(alpha-engine-config-I7580).",
-            defect=f"no {slot.decision_horizon_days}d horizon block on the cuts leaderboard",
-        )
-
-    # Rows first, so an immature hold still reports each arm's real n_dates —
-    # that count IS the measurability surface, and suppressing it while holding
-    # would leave nobody able to tell how far off a decision is.
-    arms: dict[str, ArmEvidence] = {}
-    duplicated: list[str] = []
-    missing: list[str] = []
+    per_arm: dict[str, list[dict]] = {}
+    stale_counts: dict[str, int] = {}
     for arm in slot.arms:
-        rows = _rows_for(block, arm)
-        if len(rows) > 1:
-            duplicated.append(f"{arm}×{len(rows)}")
-            arms[arm] = ArmEvidence(
-                horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
-            )
-            continue
-        if not rows:
-            missing.append(arm)
-            arms[arm] = ArmEvidence(
-                horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
-            )
-            continue
-        arms[arm] = _evidence(
-            rows[0], horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
-        )
+        per_arm[arm], stale_counts[arm] = _rows_by_arm(ledger_rows, arm)
+    ledger_meta = _ledger_meta(
+        ledger_rows, arms_seen=[a for a in slot.arms if per_arm[a]]
+    )
 
-    if duplicated:
-        return hold(
-            REASON_BOARD_DEFECTIVE,
-            f"cuts leaderboard {decided_on} emits duplicate rows at "
-            f"{slot.decision_horizon_days}d for {', '.join(duplicated)} — a board "
-            "that reports one arm twice cannot say which number is the arm's "
-            "(alpha-engine-config-I7631/I7819). Holding and failing loud.",
-            arms=arms,
-            defect=f"duplicate rows: {', '.join(duplicated)}",
-        )
-
-    block_status = block.get("status")
-    if block_status != HORIZON_OK:
-        code = (
-            REASON_HORIZON_IMMATURE
-            if block_status == "immature"
-            else REASON_HORIZON_UNMEASURABLE
-        )
-        counts = ", ".join(f"{a}.n_dates_scored={arms[a].n_dates_scored}" for a in slot.arms)
-        return hold(
-            code,
-            f"{slot.decision_horizon_days}d horizon reports status={block_status!r} "
-            f"on {decided_on}: {block.get('reason')} ({counts}). "
-            f"{champion_before!r} holds. Promoting on the "
-            f"{slot.forbidden_horizons_days[0]}d block instead is the "
-            "alpha-engine-config-I7580 error on a weekly schedule and is refused "
-            "by construction, not by judgement.",
-            arms=arms,
-        )
-
+    champion_rows = per_arm.get(champion_before) or []
+    missing = [a for a in slot.arms if not per_arm[a]]
     if missing:
+        stale_note = ", ".join(
+            f"{a}: {stale_counts[a]} row(s) set aside at an older ledger_version"
+            for a in missing
+            if stale_counts[a]
+        )
         return hold(
-            REASON_ARM_ROW_MISSING,
-            f"{', '.join(missing)} has no row in the {slot.decision_horizon_days}d "
-            f"block on {decided_on} — an arm that is not scored is not a "
-            "challenger (champion-challenger-policy.md §3), and a comparison "
-            f"against a missing row is not a comparison. {champion_before!r} holds.",
-            arms=arms,
+            REASON_LEDGER_ARM_MISSING,
+            f"{', '.join(missing)} has no weekly-ledger row at "
+            f"ledger_version={LEDGER_VERSION} on {decided_on} — an arm that is "
+            "not scored is not a challenger (champion-challenger-policy.md §3), "
+            "and a paired difference against an absent leg is not a difference. "
+            f"{champion_before!r} holds."
+            + (f" {stale_note}." if stale_note else ""),
+            ledger=ledger_meta,
         )
 
-    no_metric = [a for a in slot.arms if arms[a].topn_alpha_vs_population_mean is None]
-    if no_metric:
-        return hold(
-            REASON_ARM_METRIC_MISSING,
-            f"{', '.join(no_metric)} carries no {slot.primary_metric} at "
-            f"{slot.decision_horizon_days}d on {decided_on} — a real number "
-            f"against a null is not a comparison. {champion_before!r} holds.",
-            arms=arms,
+    arms: dict[str, ArmEvidence] = {}
+    for arm in slot.arms:
+        arms[arm] = _arm_evidence(
+            arm=arm,
+            arm_rows=per_arm[arm],
+            champion_rows=champion_rows,
+            stale=stale_counts[arm],
+            slot=slot,
+            is_champion=(arm == champion_before),
         )
 
-    thin = [a for a in slot.arms if arms[a].n_dates_scored < slot.min_dates_for_inference]
+    thin = [a for a in slot.arms if arms[a].n_weeks_paired < slot.min_weeks_for_inference]
     if thin:
-        counts = ", ".join(f"{a}.n_dates_scored={arms[a].n_dates_scored}" for a in thin)
+        counts = ", ".join(f"{a}.n_weeks_paired={arms[a].n_weeks_paired}" for a in thin)
         return hold(
-            REASON_INSUFFICIENT_DATES,
-            f"{slot.decision_horizon_days}d horizon immature for inference: {counts} "
-            f"< min_dates_for_inference={slot.min_dates_for_inference}. A per-date "
-            "mean below that floor is an anecdote, not an inference "
-            f"(alpha-engine-config-I7542). {champion_before!r} holds.",
+            REASON_INSUFFICIENT_WEEKS,
+            f"the weekly series is immature for inference: {counts} < "
+            f"min_weeks_for_inference={slot.min_weeks_for_inference}. Below that "
+            "floor a mean of paired weekly differences is an anecdote, not an "
+            f"inference (alpha-engine-config-I7542). {champion_before!r} holds. "
+            f"The evidence cannot exist before {earliest} — first admissible "
+            f"cohort {FIRST_COHORT_DATE.isoformat()} "
+            "(alpha-engine-config-I8255) plus "
+            f"{slot.min_weeks_for_inference} weekly holding periods — so a run "
+            "of holds until then is the loop working, not stuck.",
             arms=arms,
+            ledger=ledger_meta,
         )
 
     leader = _leader(arms)
-    champ_mean = arms[champion_before].topn_alpha_vs_population_mean
-    if champ_mean is None:  # pragma: no cover — no_metric above already returned
-        return hold(
-            REASON_ARM_METRIC_MISSING,
-            f"the incumbent {champion_before!r} has no {slot.primary_metric}.",
-            arms=arms,
-        )
     if leader == champion_before:
+        champ_note = (
+            ", ".join(
+                f"{a}={arms[a].mean_paired_log_return:+.6f}"
+                for a in slot.arms
+                if a != champion_before and arms[a].mean_paired_log_return is not None
+            )
+            or "no challenger measured"
+        )
         return hold(
             REASON_CHAMPION_LEADS,
-            f"the incumbent {champion_before!r} still leads at {slot.decision_horizon_days}d "
-            f"({slot.primary_metric} mean {champ_mean:+.6f}). Nothing to promote.",
+            f"no challenger has a positive mean weekly paired difference against "
+            f"the incumbent {champion_before!r} over "
+            f"{arms[champion_before].n_weeks_paired} weeks ({champ_note}). "
+            "Nothing to promote.",
             arms=arms,
+            ledger=ledger_meta,
         )
 
-    lead_mean = arms[leader].topn_alpha_vs_population_mean or 0.0
-    margin = lead_mean - champ_mean
+    # The leader's mean IS the margin: the series is already differenced against
+    # the champion, so no second subtraction is needed and none is done. That is
+    # the point of pairing — the common market factor is gone from the number
+    # the margin is compared against.
+    margin = float(arms[leader].mean_paired_log_return or 0.0)
+    chained = arms[leader].chained_paired_log_return
 
-    # The long horizon's VETO, evaluated before the margin so a disagreement is
-    # reported as a disagreement rather than swallowed by a margin failure.
+    # The vetoes, evaluated BEFORE the margin so a disagreement is reported as a
+    # disagreement rather than swallowed by a margin failure.
     corroborating = _corroboration(board, slot, leader)
-    if corroborating and corroborating.get("disagrees"):
+    if corroborating["blocking"]:
+        blocked = ", ".join(f"{h}d" for h in corroborating["blocked_by"])
+        leaders = ", ".join(
+            f"{h}d→{corroborating['horizons'][h]['leader']!r}"
+            for h in sorted(corroborating["horizons"])
+            if corroborating["horizons"][h].get("disagrees")
+        )
         return hold(
             REASON_CORROBORATION_DISAGREES,
-            f"{leader!r} leads at {slot.decision_horizon_days}d by {margin:+.6f}, but the "
-            f"mature {slot.corroborating_horizon_days}d horizon puts "
-            f"{corroborating.get('leader')!r} ahead. A shorter horizon does not "
-            "overturn a longer one in this slot — that inversion is exactly "
-            f"alpha-engine-config-I7580. {champion_before!r} holds.",
+            f"{leader!r} leads the weekly series by {margin:+.6f}/week over "
+            f"{arms[leader].n_weeks_paired} paired weeks, but the mature "
+            f"{blocked} horizon puts a different arm ahead ({leaders}). A "
+            "corroborating horizon holds a veto and not a vote: it cannot "
+            "propose a promotion, and it can refuse one "
+            f"(alpha-engine-config-I7580). {champion_before!r} holds.",
             arms=arms,
             corroborating=corroborating,
+            ledger=ledger_meta,
         )
 
     if margin < slot.promotion_margin:
         return hold(
             REASON_MARGIN_NOT_MET,
-            f"{leader!r} leads {champion_before!r} at {slot.decision_horizon_days}d by "
-            f"{margin:+.6f}, under the promotion margin {slot.promotion_margin:+.6f} "
-            "(champion-challenger-policy.md §5.2 hysteresis). Leading is not enough; "
-            "a feed that oscillates on noise makes the sector teams' work "
-            "incomparable week to week.",
+            f"{leader!r} leads {champion_before!r} by {margin:+.6f} per week "
+            f"(chained {chained:+.6f} over {arms[leader].n_weeks_paired} weeks), "
+            f"under the promotion margin {slot.promotion_margin:+.6f} in the same "
+            "units — a mean weekly paired net log-return difference "
+            "(champion-challenger-policy.md §5.2 hysteresis). Leading is not "
+            "enough; a feed that oscillates on noise makes the sector teams' "
+            "work incomparable week to week.",
             arms=arms,
             corroborating=corroborating,
+            ledger=ledger_meta,
         )
 
     if last_promoted_on:
-        elapsed = (date.fromisoformat(decided_on) - date.fromisoformat(last_promoted_on)).days
+        elapsed = (
+            date.fromisoformat(decided_on) - date.fromisoformat(last_promoted_on)
+        ).days
         if elapsed < slot.cooldown_days:
             return hold(
                 REASON_COOLDOWN_ACTIVE,
-                f"{leader!r} clears the margin ({margin:+.6f}) but the pointer last moved "
-                f"{elapsed}d ago on {last_promoted_on}, inside the {slot.cooldown_days}d "
-                "cooldown (§5.2). Held; the challenger keeps accruing evidence and "
-                "is re-evaluated next cycle.",
+                f"{leader!r} clears the margin ({margin:+.6f}/week) but the "
+                f"pointer last moved {elapsed}d ago on {last_promoted_on}, inside "
+                f"the {slot.cooldown_days}d cooldown (§5.2). Held; the challenger "
+                "keeps accruing weekly evidence and is re-evaluated next cycle.",
                 arms=arms,
                 corroborating=corroborating,
+                ledger=ledger_meta,
             )
 
+    mature = corroborating["mature_horizons"]
+    veto_note = (
+        f"corroborating horizons {mature} mature and not contradicting"
+        if mature
+        else (
+            "no corroborating horizon is mature yet, so none applied — an "
+            "unmeasured veto is not a veto (§5.1) and is never counted as a pass"
+        )
+    )
     return CutPromotionDecision(
         decision=DECISION_PROMOTE,
         champion=leader,
         champion_before=champion_before,
         reason=(
-            f"{leader!r} beats {champion_before!r} at {slot.decision_horizon_days}d on "
-            f"{slot.primary_metric} by {margin:+.6f} (≥ margin {slot.promotion_margin}), "
-            f"both arms scored on ≥{slot.min_dates_for_inference} dates, "
-            f"{slot.corroborating_horizon_days}d horizon not contradicting, cooldown clear."
+            f"{leader!r} beats {champion_before!r} on {slot.primary_metric} by "
+            f"{margin:+.6f} per week (chained {chained:+.6f} over "
+            f"{arms[leader].n_weeks_paired} paired weeks, "
+            f"{arms[leader].first_week}→{arms[leader].last_week}), at or above "
+            f"the margin {slot.promotion_margin}; every arm scored on "
+            f"≥{slot.min_weeks_for_inference} paired weeks; {veto_note}; cooldown "
+            "clear."
         ),
         reason_code=REASON_PROMOTED,
-        horizon_days=slot.decision_horizon_days,
         decided_on=decided_on,
         arms=arms,
         last_promoted_on=decided_on,
         corroborating=corroborating,
         excluded_horizons=excluded,
-        decision_earliest_on=decision_earliest_on,
+        decision_earliest_on=earliest,
+        ledger=ledger_meta,
     )
-
-
-def _corroboration(board: dict, slot: CutPromotionSlot, proposed: str) -> dict | None:
-    """What the long horizon says, when it is in a position to say anything.
-
-    Returns ``None`` when the corroborating block is absent, immature, or thin
-    for either arm — an unmeasured veto is not a veto (§5.1: you cannot gate on
-    a statistic you did not measure), and at rollout this is the normal state.
-    """
-    block = _block_for(board, slot.corroborating_horizon_days)
-    if block is None or block.get("status") != HORIZON_OK:
-        return {
-            "horizon_days": slot.corroborating_horizon_days,
-            "status": (block or {}).get("status", "absent"),
-            "leader": None,
-            "disagrees": False,
-            "note": "not mature enough to veto; no corroboration applied",
-        }
-    arms: dict[str, ArmEvidence] = {}
-    for arm in slot.arms:
-        rows = _rows_for(block, arm)
-        if len(rows) != 1:
-            return {
-                "horizon_days": slot.corroborating_horizon_days,
-                "status": block.get("status"),
-                "leader": None,
-                "disagrees": False,
-                "note": f"{arm} has {len(rows)} rows; no corroboration applied",
-            }
-        arms[arm] = _evidence(
-            rows[0], horizon_days=slot.corroborating_horizon_days, metric=slot.primary_metric
-        )
-    if any(
-        ev.topn_alpha_vs_population_mean is None
-        or ev.n_dates_scored < slot.min_dates_for_inference
-        for ev in arms.values()
-    ):
-        return {
-            "horizon_days": slot.corroborating_horizon_days,
-            "status": block.get("status"),
-            "leader": None,
-            "disagrees": False,
-            "note": "below min_dates_for_inference; no corroboration applied",
-        }
-    leader = _leader(arms)
-    return {
-        "horizon_days": slot.corroborating_horizon_days,
-        "status": block.get("status"),
-        "leader": leader,
-        "disagrees": leader != proposed,
-        "arms": {name: asdict(ev) for name, ev in arms.items()},
-        "note": "mature; vetoes a disagreeing promotion",
-    }
 
 
 # ── I/O ───────────────────────────────────────────────────────────────────────
@@ -851,43 +1335,42 @@ def _get_json(s3: Any, bucket: str, key: str) -> dict | None:
     return json.loads(body)
 
 
-def reconcile_arms_with_leaderboard(doc: dict, board: dict | None) -> list[str]:
-    """Every ``arms.<arm>.n_dates_scored`` in a WRITTEN record must equal the
-    row for that arm at the SAME ``horizon_days`` in the leaderboard the
-    record cites (alpha-engine-config-I8257).
+def reconcile_arms_with_ledger(
+    doc: dict, ledger_rows: Sequence[Mapping[str, Any]] | None
+) -> list[str]:
+    """Every ``arms.<arm>.n_weeks_paired`` in a WRITTEN record must equal what
+    the ledger it cites actually supports.
 
-    This is the check nothing enforced before: a promotion record and the
-    leaderboard it names disagreeing at different horizons is exactly the
-    misread this module was filed to fix (0 scored at 126d read against 8
-    scored at 21d as if they were the same number). Returns the list of
-    mismatches; empty means every arm reconciles.
+    Successor to ``reconcile_arms_with_leaderboard``, which checked the same
+    property against the v1 decision source (alpha-engine-config-I8257). The
+    source moved; the property did not, and deleting the guard with the source
+    would have removed the only thing that catches a record and its own cited
+    evidence disagreeing — the misread this module was originally filed to fix.
+
+    Returns the list of mismatches; empty means every arm reconciles.
     """
-    if not board:
+    if ledger_rows is None:
         return []
+    champion = doc.get("champion_before")
+    column = doc.get("decision_column") or CUT_PROMOTION_SLOT.ledger_return_column
+    champion_rows, _ = _rows_by_arm(ledger_rows, str(champion))
     mismatches: list[str] = []
     for arm, ev in (doc.get("arms") or {}).items():
         if not ev.get("present"):
-            # present=False means the decision path never read a row for this
-            # arm at this horizon at all (board_missing, no_promotable_
-            # challenger's registry-only short-circuit, etc.) — the record is
-            # not claiming n_dates_scored reflects the board, so there is
-            # nothing here to reconcile.
+            # present=False means the decision path never read ledger rows for
+            # this arm at all (ledger absent, the registry-only short-circuit,
+            # a defective board). The record is not claiming n_weeks_paired
+            # reflects the ledger, so there is nothing here to reconcile.
             continue
-        horizon = ev.get("horizon_days")
-        block = _block_for(board, horizon) if horizon is not None else None
-        rows = _rows_for(block, arm) if block is not None else []
-        if len(rows) != 1:
-            # A missing/duplicate row at this horizon is reported by the
-            # board-integrity holds above; this guard only checks agreement
-            # where a single row exists to compare against.
-            continue
-        board_n = int(rows[0].get("n_dates_scored") or 0)
-        record_n = ev.get("n_dates_scored")
-        if record_n != board_n:
+        arm_rows, _ = _rows_by_arm(ledger_rows, arm)
+        diffs, _weeks, _unpaired, _mismatched = _paired_series(
+            arm_rows, champion_rows, column=column
+        )
+        if ev.get("n_weeks_paired") != len(diffs):
             mismatches.append(
-                f"{arm}: record reports n_dates_scored={record_n} at {horizon}d, "
-                f"but the cited leaderboard's row for {arm!r} at {horizon}d reports "
-                f"{board_n}"
+                f"{arm}: record reports n_weeks_paired={ev.get('n_weeks_paired')} "
+                f"on column {column!r}, but the cited ledger supports "
+                f"{len(diffs)} paired week(s) against {champion!r}"
             )
     return mismatches
 
@@ -902,20 +1385,27 @@ def read_cut_champion_record(*, bucket: str | None = None, s3_client: Any = None
     return _get_json(_client(s3_client), _bucket(bucket), CUT_CHAMPION_POINTER_KEY)
 
 
+_UNSET = object()
+
+
 def run_cut_promotion(
     decided_on: str,
     *,
     bucket: str | None = None,
     s3_client: Any = None,
     leaderboard: dict | None = None,
+    ledger_rows: Any = _UNSET,
     slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
 ) -> dict:
     """Decide and WRITE, unconditionally. Returns the written document.
 
     ``leaderboard`` lets the caller hand in the board it just built (the scanner
-    handler does), so the decision reads the exact artifact this run produced
-    rather than re-fetching a key that may not have landed. Absent, the dated
-    key for ``decided_on`` is read; an absent key is a ``hold``, never a silence.
+    handler does), so the vetoes read the exact artifact this run produced
+    rather than re-fetching a key that may not have landed. ``ledger_rows``
+    likewise; ``_UNSET`` (the default) reads the ledger from S3, and an explicit
+    ``None`` means "no ledger", which is a hold. The two are distinguished on
+    purpose — passing ``None`` to mean "go and read it" is how an absent store
+    would come to look like a caller's choice.
 
     Raises :class:`CutPromotionError` AFTER writing when the record carries a
     defect — the defect is durable before the process is allowed to fail.
@@ -929,8 +1419,14 @@ def run_cut_promotion(
 
     key = CUTS_LEADERBOARD_KEY.format(date=decided_on)
     board = leaderboard if leaderboard is not None else _get_json(s3, b, key)
+    rows = (
+        read_weekly_ledger_rows(bucket=b, s3_client=s3)
+        if ledger_rows is _UNSET
+        else ledger_rows
+    )
 
     decision = decide_cut_champion(
+        ledger_rows=rows,
         board=board,
         champion_before=champion_before,
         decided_on=decided_on,
@@ -954,13 +1450,16 @@ def run_cut_promotion(
 
     logger.info(
         "[cut_promotion] metric cut_promotion_decision decision=%s champion=%s "
-        "reason_code=%s horizon=%s %s",
+        "reason_code=%s metric=%s cadence=%s %s",
         doc["decision"],
         doc["champion"],
         doc["reason_code"],
-        doc["horizon_days"],
+        doc["decision_metric"],
+        doc["decision_cadence"],
         " ".join(
-            f"{a}_n_dates_scored={doc['arms'][a]['n_dates_scored']}" for a in CUT_PROMOTION_SLOT.arms
+            f"{a}_n_weeks_paired={doc['arms'][a]['n_weeks_paired']}"
+            for a in slot.arms
+            if a in doc["arms"]
         ),
     )
 
@@ -971,15 +1470,15 @@ def run_cut_promotion(
             f"{AUDIT_DATED_KEY.format(date=decided_on)} before this raise."
         )
 
-    # Reconciliation guard (alpha-engine-config-I8257 deliverable 4). Written
-    # AFTER the record lands, same discipline as the defect raise above: the
-    # record itself is the evidence a future reader needs, so it must survive
-    # even the failure that says something about it disagreed.
-    mismatches = reconcile_arms_with_leaderboard(doc, board)
+    # Reconciliation guard. Written AFTER the record lands, same discipline as
+    # the defect raise above: the record itself is the evidence a future reader
+    # needs, so it must survive even the failure that says something about it
+    # disagreed.
+    mismatches = reconcile_arms_with_ledger(doc, rows)
     if mismatches:
         raise CutPromotionError(
             f"scanner-cut promotion record for {decided_on} disagrees with the "
-            f"leaderboard it cites ({key}) at the SAME horizon: "
+            f"weekly ledger it cites ({slot.decision_source}): "
             f"{'; '.join(mismatches)}. The record was written to "
             f"{AUDIT_DATED_KEY.format(date=decided_on)} before this raise."
         )
