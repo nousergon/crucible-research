@@ -7,7 +7,8 @@
   "required": [
     "schema_version", "producer", "slot_id", "decided_on", "decision",
     "champion", "champion_before", "reason", "reason_code", "horizon_days",
-    "primary_metric", "arms", "hysteresis"
+    "primary_metric", "arms", "hysteresis", "excluded_horizons",
+    "decision_earliest_on"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -81,7 +82,10 @@
       "description": "Every PROMOTABLE arm, ALWAYS — including on a hold and including when an arm scored nothing (champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted). n_dates_scored is the measurability surface: it is 0 at rollout and climbing it past min_dates_for_inference is the precondition for any promotion. `required` names only attractiveness_top_60 because PROMOTABLE_CUTS shrank to it on 2026-08-21 (alpha-engine-config-I8060); tech_score_top_60 remains valid here and records written while it was promotable still validate. OBSERVE-ONLY arms are deliberately NOT carried in this block — this record is about the decision, and their evidence lives on research/cuts_leaderboard/{date}.json, which scores every arm of the slot. The reason string names them so a reader is not left inferring they went away.",
       "additionalProperties": {
         "type": "object",
-        "required": ["n_dates_scored", "confidence", "topn_alpha_vs_population_mean", "present"],
+        "required": [
+          "n_dates_scored", "confidence", "topn_alpha_vs_population_mean",
+          "present", "horizon_days", "metric"
+        ],
         "properties": {
           "n_dates_scored": { "type": "integer", "minimum": 0 },
           "confidence": { "enum": ["ok", "thin", "insufficient"] },
@@ -90,6 +94,14 @@
           "present": {
             "type": "boolean",
             "description": "False when the arm had no row on the board at the decision horizon — distinct from a row present with a null metric."
+          },
+          "horizon_days": {
+            "const": 126,
+            "description": "alpha-engine-config-I8257: the horizon n_dates_scored and the other fields on this arm were read at. Always equal to the top-level horizon_days / CUT_PROMOTION_SLOT.decision_horizon_days — carried here too so n_dates_scored is self-qualifying without a reader having to join back to the slot registry to know that 0 means '0 at 126d', not '0, ever'."
+          },
+          "metric": {
+            "const": "topn_alpha_vs_population",
+            "description": "The metric topn_alpha_vs_population_mean / t_stat were read from, alongside horizon_days, so the pair (metric, horizon_days) fully qualifies every number on the arm."
           }
         }
       }
@@ -112,6 +124,29 @@
     "defect": {
       "type": ["string", "null"],
       "description": "Set when the board could not be honestly interpreted (missing horizons list, no decision-horizon block, duplicate rows for one arm). The record is written FIRST and run_cut_promotion then raises CutPromotionError — a defect must never erase the evidence of itself."
+    },
+    "excluded_horizons": {
+      "type": "object",
+      "description": "alpha-engine-config-I8257 deliverable 2. Per PROMOTABLE arm, what the STRUCTURALLY FORBIDDEN horizons (forbidden_horizons_days, today just 21d) measured and why they are not a decision input — written on every evaluation, including when there is no board. Keyed {arm: {str(horizon_days): entry}}. Exists so a reader does not have to open research/cuts_leaderboard/{date}.json to learn that an excluded number exists, or that it is measured on a contaminated sample (every 21d date scored so far predates the 2026-08-20 fundamentals repair, alpha-engine-config-I8255, and its t_stat used an iid standard error over overlapping windows that inflates |t| by roughly sqrt(lags+1), alpha-engine-config-I8263 / crucible-research-PR732).",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "required": ["horizon_days", "n_dates_scored", "excluded_reason"],
+          "properties": {
+            "horizon_days": { "type": "integer" },
+            "n_dates_scored": { "type": "integer", "minimum": 0 },
+            "topn_alpha_vs_population_mean": { "type": ["number", "null"] },
+            "t_stat": { "type": ["number", "null"] },
+            "excluded_reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "decision_earliest_on": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "alpha-engine-config-I8257 deliverable 3. FIRST_COHORT_DATE (2026-08-20, alpha-engine-config-I8255) plus decision_horizon_days NYSE trading sessions — the earliest date this slot could possibly clear decision_horizon_immature, independent of how many cycles have already held. Turns a run of holds from reading as a possibly-stuck loop into a status a reader can price against a calendar."
     }
   }
 }

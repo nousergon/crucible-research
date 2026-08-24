@@ -27,10 +27,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from nousergon_lib.trading_calendar import add_trading_days  # noqa: E402
+
 from scoring.cut_promotion import (  # noqa: E402
     AUDIT_DATED_KEY,
     AUDIT_LATEST_KEY,
+    CONTAMINATION_CAVEAT,
     CUT_PROMOTION_SLOT,
+    FIRST_COHORT_DATE,
     REASON_BOARD_DEFECTIVE,
     REASON_BOARD_MISSING,
     REASON_CHAMPION_LEADS,
@@ -43,6 +47,7 @@ from scoring.cut_promotion import (  # noqa: E402
     REASON_PROMOTED,
     CutPromotionError,
     decide_cut_champion,
+    reconcile_arms_with_leaderboard,
     run_cut_promotion,
 )
 from scoring.leaderboard_scoring import LONG_HORIZONS_DAYS, slot_spec  # noqa: E402
@@ -609,3 +614,182 @@ def test_the_live_no_challenger_record_validates_against_the_frozen_schema():
     doc = run_cut_promotion(DATE, bucket="b", s3_client=s3)
     assert doc["reason_code"] == REASON_NO_PROMOTABLE_CHALLENGER
     jsonschema.validate(doc, _schema())
+
+
+# ── alpha-engine-config-I8257: the record's arms are self-qualifying ─────────
+#
+# RED on the pre-fix cut_promotion.py (verified by stashing these three
+# deliverables and re-running): `ArmEvidence` carried no `horizon_days` /
+# `metric`, `to_document()` emitted no `excluded_horizons` / `decision_
+# earliest_on` key, and `reconcile_arms_with_leaderboard` did not exist at
+# all — every test below either KeyErrors, AttributeErrors on the missing
+# name, or (for the schema tests) fails `jsonschema.validate` on the newly
+# `required` fields.
+
+
+def test_every_arm_carries_its_own_horizon_and_metric():
+    """I8257 deliverable 1: n_dates_scored must be self-qualifying without a
+    reader joining back to CUT_PROMOTION_SLOT.decision_horizon_days by hand —
+    the exact join the misread in the issue skipped."""
+    s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board(champ=(0.010, 30), chal=(0.100, 30))})
+    with patch("scoring.universe_membership.PROMOTABLE_CUTS", TWO_ARM_SLOT.arms):
+        doc = run_cut_promotion(DATE, bucket="b", s3_client=s3, slot=TWO_ARM_SLOT)
+    for arm in (CHAMP, CHALLENGER):
+        assert doc["arms"][arm]["horizon_days"] == CUT_PROMOTION_SLOT.decision_horizon_days
+        assert doc["arms"][arm]["metric"] == CUT_PROMOTION_SLOT.primary_metric
+
+
+def test_a_hold_that_never_reads_the_board_still_stamps_horizon_and_metric():
+    """Even the registry-only no_promotable_challenger hold — which never
+    reads a row — must not leave n_dates_scored=0 unqualified."""
+    d = decide_cut_champion(board=None, champion_before=CHAMP, decided_on=DATE)
+    assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER
+    for ev in d.arms.values():
+        assert ev.horizon_days == CUT_PROMOTION_SLOT.decision_horizon_days
+        assert ev.metric == CUT_PROMOTION_SLOT.primary_metric
+        assert ev.present is False
+
+
+def test_excluded_horizons_carries_the_21d_measurement_with_its_caveat():
+    """I8257 deliverable 2: the forbidden 21d block IS measured every cycle
+    (the fixture always populates it with a landslide for the challenger) —
+    the record must carry that number, why it is not a decision input, and
+    the contamination caveat, rather than making a reader open the
+    leaderboard to learn any of the three."""
+    s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board(champ=(0.010, 30), chal=(0.100, 30))})
+    with patch("scoring.universe_membership.PROMOTABLE_CUTS", TWO_ARM_SLOT.arms):
+        doc = run_cut_promotion(DATE, bucket="b", s3_client=s3, slot=TWO_ARM_SLOT)
+    excl = doc["excluded_horizons"]
+    for arm in (CHAMP, CHALLENGER):
+        entry = excl[arm]["21"]
+        assert entry["horizon_days"] == 21
+        assert entry["n_dates_scored"] == 30
+        assert CONTAMINATION_CAVEAT in entry["excluded_reason"]
+        assert "alpha-engine-config-I7580" in entry["excluded_reason"]
+    # 126 — the DECISION horizon — is never in the excluded block: it is the
+    # one horizon that IS a decision input.
+    assert "126" not in excl[CHAMP]
+
+
+def test_excluded_horizons_is_written_even_with_no_board():
+    """Unconditional, same discipline as the rest of this record (§3): a
+    missing board must not make the excluded-horizons block disappear."""
+    d = decide_cut_champion(
+        board=None, champion_before=CHAMP, decided_on=DATE, slot=TWO_ARM_SLOT
+    )
+    assert d.reason_code == REASON_BOARD_MISSING
+    entry = d.excluded_horizons[CHAMP]["21"]
+    assert entry["n_dates_scored"] == 0
+    assert "No 21d block" in entry["excluded_reason"]
+
+
+def test_decision_earliest_on_is_first_cohort_plus_decision_horizon_sessions():
+    """I8257 deliverable 3: turns 'hold, no promotable challenger' from a
+    status that reads as possibly-imminent into one a reader can price
+    against a calendar."""
+    expected = add_trading_days(
+        FIRST_COHORT_DATE, CUT_PROMOTION_SLOT.decision_horizon_days
+    ).isoformat()
+    d = decide_cut_champion(board=None, champion_before=CHAMP, decided_on=DATE)
+    assert d.decision_earliest_on == expected
+    # ~6 months of trading sessions after 2026-08-20 lands in early 2027, not
+    # next week — pins the concrete fact from the issue body.
+    assert expected.startswith("2027-")
+
+
+def test_decision_earliest_on_does_not_move_with_decided_on():
+    """It is a property of the SLOT (FIRST_COHORT_DATE + decision_horizon_days),
+    never of when a given cycle happens to run — otherwise a run today and a
+    run next week would disagree about when the horizon matures."""
+    d1 = decide_cut_champion(board=None, champion_before=CHAMP, decided_on=DATE)
+    d2 = decide_cut_champion(board=None, champion_before=CHAMP, decided_on="2026-09-05")
+    assert d1.decision_earliest_on == d2.decision_earliest_on
+
+
+# ── I8257 deliverable 4: the reconciliation guard ─────────────────────────────
+
+
+def test_reconcile_catches_an_arm_whose_record_disagrees_with_its_own_horizon():
+    """Direct unit test on the guard. RED on pre-fix cut_promotion.py:
+    `reconcile_arms_with_leaderboard` does not exist there at all."""
+    board = _board(champ=(0.010, 30), chal=(0.100, 30))
+    doc = {
+        "arms": {
+            CHAMP: {
+                "n_dates_scored": 0,  # WRONG — the board reports 30 at 126d
+                "horizon_days": 126,
+                "present": True,
+            }
+        }
+    }
+    mismatches = reconcile_arms_with_leaderboard(doc, board)
+    assert len(mismatches) == 1
+    assert CHAMP in mismatches[0]
+    assert "126" in mismatches[0]
+    assert "30" in mismatches[0]
+
+
+def test_reconcile_is_silent_when_the_record_agrees():
+    board = _board(champ=(0.010, 30), chal=(0.100, 30))
+    doc = {
+        "arms": {
+            CHAMP: {"n_dates_scored": 30, "horizon_days": 126, "present": True},
+        }
+    }
+    assert reconcile_arms_with_leaderboard(doc, board) == []
+
+
+def test_reconcile_ignores_arms_the_decision_never_read():
+    """present=False means the decision path never consulted the board for
+    this arm at all (board_missing, the registry-only no_promotable_challenger
+    short-circuit) — nothing to reconcile, and this must not false-positive."""
+    board = _board(champ=(0.010, 30), chal=(0.100, 30))
+    doc = {
+        "arms": {
+            CHAMP: {"n_dates_scored": 0, "horizon_days": 126, "present": False},
+        }
+    }
+    assert reconcile_arms_with_leaderboard(doc, board) == []
+
+
+def test_run_cut_promotion_fails_when_the_written_record_disagrees_with_the_board():
+    """End-to-end: a corrupted read path (simulated here — decide_cut_champion
+    itself never produces this, by construction) must not reach S3 unchallenged.
+    The record is still WRITTEN first (FAIL-LOUD §: record before raise), then
+    the process fails loud rather than serving a self-contradicting artifact
+    silently."""
+    s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board(champ=(0.010, 30), chal=(0.100, 30))})
+
+    def _bad_evidence(row, *, horizon_days, metric):
+        from scoring.cut_promotion import ArmEvidence
+
+        return ArmEvidence(
+            n_dates_scored=999,  # deliberately wrong vs. the board's real 30
+            confidence="ok",
+            topn_alpha_vs_population_mean=row.get(metric, {}).get("mean")
+            if isinstance(row.get(metric), dict)
+            else None,
+            t_stat=None,
+            present=True,
+            horizon_days=horizon_days,
+            metric=metric,
+        )
+
+    with patch("scoring.universe_membership.PROMOTABLE_CUTS", TWO_ARM_SLOT.arms), patch(
+        "scoring.cut_promotion._evidence", side_effect=_bad_evidence
+    ):
+        with pytest.raises(CutPromotionError, match="disagrees with the leaderboard"):
+            run_cut_promotion(DATE, bucket="b", s3_client=s3, slot=TWO_ARM_SLOT)
+
+    # Record-first-then-fail: the corrupted record is durable, not swallowed.
+    assert f"config/apply_audit/scanner_cut_champion/{DATE}.json" in s3.written
+    written = s3.written[f"config/apply_audit/scanner_cut_champion/{DATE}.json"]
+    assert written["arms"][CHAMP]["n_dates_scored"] == 999
+
+
+def test_the_schema_requires_excluded_horizons_and_decision_earliest_on():
+    schema = _schema()
+    assert "excluded_horizons" in schema["required"]
+    assert "decision_earliest_on" in schema["required"]
+    assert "horizon_days" in schema["properties"]["arms"]["additionalProperties"]["required"]
+    assert "metric" in schema["properties"]["arms"]["additionalProperties"]["required"]

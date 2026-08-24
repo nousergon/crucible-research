@@ -92,6 +92,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
+from nousergon_lib.trading_calendar import add_trading_days
+
 from scoring.leaderboard_scoring import (
     HORIZON_OK,
     LONG_HORIZONS_DAYS,
@@ -220,6 +222,33 @@ class CutPromotionSlot:
     count_matched_width: int
 
 
+# First cohort date on repaired fundamentals (alpha-engine-config-I8255): the
+# vendor-fundamentals cross-section this engine's evidence is scored on was
+# degenerate before this date, so no decision horizon can mature earlier than
+# this many TRADING SESSIONS after it, regardless of how many pre-repair dates
+# a leaderboard already carries. ``decision_earliest_on`` below is derived
+# from it so a reader does not have to do the session arithmetic themselves
+# (alpha-engine-config-I8257).
+FIRST_COHORT_DATE = date(2026, 8, 20)
+
+# The 21-session horizon is structurally forbidden as a decision input
+# (``forbidden_horizons_days`` above), but it is scored every cycle and the
+# number exists. Every date scored on it so far predates FIRST_COHORT_DATE, so
+# it was measured on the pre-repair fundamentals cross-section
+# (alpha-engine-config-I8255), and its reported t_stat used an iid standard
+# error over overlapping windows that inflates |t| by roughly
+# sqrt(lags+1) (alpha-engine-config-I8263, fixed in crucible-research-PR732).
+# ``excluded_horizons`` carries this caveat with the number so a reader of the
+# promotion record cannot mistake it for a clean read on the arm.
+CONTAMINATION_CAVEAT = (
+    "every date scored at this horizon so far predates the 2026-08-20 "
+    "fundamentals repair and was measured on the degenerate pre-repair "
+    "cross-section (alpha-engine-config-I8255); the reported t_stat also used "
+    "an iid standard error over overlapping windows that inflates |t| by "
+    "roughly sqrt(lags+1) (alpha-engine-config-I8263, crucible-research-PR732) "
+    "— this is not a clean read on the arm"
+)
+
 CUT_PROMOTION_SLOT = CutPromotionSlot(
     slot_id="scanner_cut",
     arms=PROMOTABLE_CUTS,
@@ -264,13 +293,23 @@ if CUT_PROMOTION_SLOT.primary_metric != slot_spec("cuts").primary_metric:
 class ArmEvidence:
     """What the board says about one arm at one horizon. Every field is copied
     from the board verbatim; nothing is derived, so a reader can join this back
-    to ``research/cuts_leaderboard/{date}.json`` and see the same numbers."""
+    to ``research/cuts_leaderboard/{date}.json`` and see the same numbers.
+
+    ``horizon_days`` and ``metric`` (alpha-engine-config-I8257) make
+    ``n_dates_scored`` self-qualifying: without them, ``0`` reads as "never
+    scored" to anyone who has not also opened the leaderboard and matched it
+    to ``CUT_PROMOTION_SLOT.decision_horizon_days`` by hand — which is exactly
+    the misread that let an 8-date, t=-4.41 result at 21 sessions look
+    indistinguishable from a dead measurement loop at 126.
+    """
 
     n_dates_scored: int = 0
     confidence: str = "insufficient"
     topn_alpha_vs_population_mean: float | None = None
     t_stat: float | None = None
     present: bool = False
+    horizon_days: int = 0
+    metric: str = ""
 
 
 @dataclass
@@ -288,6 +327,12 @@ class CutPromotionDecision:
     last_promoted_on: str | None = None
     corroborating: dict[str, Any] | None = None
     defect: str | None = None
+    # alpha-engine-config-I8257 deliverables 2-3. Both are set unconditionally
+    # on every evaluation, promote or hold — the same §3 discipline as the
+    # rest of this record: a field only present sometimes reads as a claim
+    # about the times it is absent.
+    excluded_horizons: dict[str, dict] = field(default_factory=dict)
+    decision_earliest_on: str = ""
 
     def to_document(self, *, leaderboard_key: str | None = None) -> dict:
         return {
@@ -314,6 +359,8 @@ class CutPromotionDecision:
             },
             "corroborating": self.corroborating,
             "defect": self.defect,
+            "excluded_horizons": self.excluded_horizons,
+            "decision_earliest_on": self.decision_earliest_on,
         }
 
 
@@ -331,17 +378,77 @@ def _rows_for(block: dict, arm: str) -> list[dict]:
     return [r for r in block.get("specs") or [] if r.get("name") == arm]
 
 
-def _evidence(row: dict) -> ArmEvidence:
-    metric = row.get(CUT_PROMOTION_SLOT.primary_metric)
-    mean = metric.get("mean") if isinstance(metric, dict) else None
-    t_stat = metric.get("t_stat") if isinstance(metric, dict) else None
+def _evidence(row: dict, *, horizon_days: int, metric: str) -> ArmEvidence:
+    m = row.get(metric)
+    mean = m.get("mean") if isinstance(m, dict) else None
+    t_stat = m.get("t_stat") if isinstance(m, dict) else None
     return ArmEvidence(
         n_dates_scored=int(row.get("n_dates_scored") or 0),
         confidence=str(row.get("confidence") or "insufficient"),
         topn_alpha_vs_population_mean=(float(mean) if mean is not None else None),
         t_stat=(float(t_stat) if t_stat is not None else None),
         present=True,
+        horizon_days=horizon_days,
+        metric=metric,
     )
+
+
+def _excluded_horizons(board: dict | None, slot: CutPromotionSlot) -> dict[str, dict]:
+    """Per arm, what the FORBIDDEN horizons measured and why they are not a
+    decision input (alpha-engine-config-I8257 deliverable 2).
+
+    Written unconditionally, including when there is no board at all — a
+    reader must not have to open a second artifact to learn either that the
+    excluded number exists or that it is contaminated. Keyed
+    ``{arm: {str(horizon_days): {...}}}``.
+    """
+    out: dict[str, dict] = {}
+    for arm in slot.arms:
+        entries: dict[str, dict] = {}
+        for horizon in slot.forbidden_horizons_days:
+            block = _block_for(board, horizon) if board else None
+            base_reason = (
+                f"forbidden_horizon: {slot.slot_id} decides at "
+                f"{slot.decision_horizon_days}d, never at {horizon}d — "
+                "promoting on the first horizon to mature reproduces the "
+                "alpha-engine-config-I7580 error on a weekly schedule "
+                "(structurally excluded, asserted at import)."
+            )
+            if block is None:
+                entries[str(horizon)] = {
+                    "horizon_days": horizon,
+                    "n_dates_scored": 0,
+                    "topn_alpha_vs_population_mean": None,
+                    "t_stat": None,
+                    "excluded_reason": f"{base_reason} No {horizon}d block on this board.",
+                }
+                continue
+            rows = _rows_for(block, arm)
+            if len(rows) != 1:
+                entries[str(horizon)] = {
+                    "horizon_days": horizon,
+                    "n_dates_scored": 0,
+                    "topn_alpha_vs_population_mean": None,
+                    "t_stat": None,
+                    "excluded_reason": (
+                        f"{base_reason} {len(rows)} rows for {arm!r} at {horizon}d "
+                        "— no single row to report."
+                    ),
+                }
+                continue
+            ev = _evidence(rows[0], horizon_days=horizon, metric=slot.primary_metric)
+            reason = base_reason
+            if ev.n_dates_scored:
+                reason = f"{base_reason} {CONTAMINATION_CAVEAT}."
+            entries[str(horizon)] = {
+                "horizon_days": horizon,
+                "n_dates_scored": ev.n_dates_scored,
+                "topn_alpha_vs_population_mean": ev.topn_alpha_vs_population_mean,
+                "t_stat": ev.t_stat,
+                "excluded_reason": reason,
+            }
+        out[arm] = entries
+    return out
 
 
 def _leader(arms: dict[str, ArmEvidence]) -> str:
@@ -369,6 +476,15 @@ def decide_cut_champion(
     ``decision_horizon_days``.
     """
 
+    # Computed once, up front: neither depends on which branch below fires,
+    # and both must be on EVERY record — including the earliest holds, where
+    # a reader most needs to know this is not a stuck loop
+    # (alpha-engine-config-I8257 deliverables 2-3).
+    decision_earliest_on = add_trading_days(
+        FIRST_COHORT_DATE, slot.decision_horizon_days
+    ).isoformat()
+    excluded = _excluded_horizons(board, slot)
+
     def hold(code: str, reason: str, *, arms=None, corroborating=None, defect=None):
         return CutPromotionDecision(
             decision=DECISION_HOLD,
@@ -378,10 +494,16 @@ def decide_cut_champion(
             reason_code=code,
             horizon_days=slot.decision_horizon_days,
             decided_on=decided_on,
-            arms=arms or {a: ArmEvidence() for a in slot.arms},
+            arms=arms
+            or {
+                a: ArmEvidence(horizon_days=slot.decision_horizon_days, metric=slot.primary_metric)
+                for a in slot.arms
+            },
             last_promoted_on=last_promoted_on,
             corroborating=corroborating,
             defect=defect,
+            excluded_horizons=excluded,
+            decision_earliest_on=decision_earliest_on,
         )
 
     # ── WHOLE-BOARD integrity runs BEFORE the registry check ───────────────
@@ -507,13 +629,19 @@ def decide_cut_champion(
         rows = _rows_for(block, arm)
         if len(rows) > 1:
             duplicated.append(f"{arm}×{len(rows)}")
-            arms[arm] = ArmEvidence()
+            arms[arm] = ArmEvidence(
+                horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
+            )
             continue
         if not rows:
             missing.append(arm)
-            arms[arm] = ArmEvidence()
+            arms[arm] = ArmEvidence(
+                horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
+            )
             continue
-        arms[arm] = _evidence(rows[0])
+        arms[arm] = _evidence(
+            rows[0], horizon_days=slot.decision_horizon_days, metric=slot.primary_metric
+        )
 
     if duplicated:
         return hold(
@@ -652,6 +780,8 @@ def decide_cut_champion(
         arms=arms,
         last_promoted_on=decided_on,
         corroborating=corroborating,
+        excluded_horizons=excluded,
+        decision_earliest_on=decision_earliest_on,
     )
 
 
@@ -682,7 +812,9 @@ def _corroboration(board: dict, slot: CutPromotionSlot, proposed: str) -> dict |
                 "disagrees": False,
                 "note": f"{arm} has {len(rows)} rows; no corroboration applied",
             }
-        arms[arm] = _evidence(rows[0])
+        arms[arm] = _evidence(
+            rows[0], horizon_days=slot.corroborating_horizon_days, metric=slot.primary_metric
+        )
     if any(
         ev.topn_alpha_vs_population_mean is None
         or ev.n_dates_scored < slot.min_dates_for_inference
@@ -717,6 +849,47 @@ def _get_json(s3: Any, bucket: str, key: str) -> dict | None:
             return None
         raise
     return json.loads(body)
+
+
+def reconcile_arms_with_leaderboard(doc: dict, board: dict | None) -> list[str]:
+    """Every ``arms.<arm>.n_dates_scored`` in a WRITTEN record must equal the
+    row for that arm at the SAME ``horizon_days`` in the leaderboard the
+    record cites (alpha-engine-config-I8257).
+
+    This is the check nothing enforced before: a promotion record and the
+    leaderboard it names disagreeing at different horizons is exactly the
+    misread this module was filed to fix (0 scored at 126d read against 8
+    scored at 21d as if they were the same number). Returns the list of
+    mismatches; empty means every arm reconciles.
+    """
+    if not board:
+        return []
+    mismatches: list[str] = []
+    for arm, ev in (doc.get("arms") or {}).items():
+        if not ev.get("present"):
+            # present=False means the decision path never read a row for this
+            # arm at this horizon at all (board_missing, no_promotable_
+            # challenger's registry-only short-circuit, etc.) — the record is
+            # not claiming n_dates_scored reflects the board, so there is
+            # nothing here to reconcile.
+            continue
+        horizon = ev.get("horizon_days")
+        block = _block_for(board, horizon) if horizon is not None else None
+        rows = _rows_for(block, arm) if block is not None else []
+        if len(rows) != 1:
+            # A missing/duplicate row at this horizon is reported by the
+            # board-integrity holds above; this guard only checks agreement
+            # where a single row exists to compare against.
+            continue
+        board_n = int(rows[0].get("n_dates_scored") or 0)
+        record_n = ev.get("n_dates_scored")
+        if record_n != board_n:
+            mismatches.append(
+                f"{arm}: record reports n_dates_scored={record_n} at {horizon}d, "
+                f"but the cited leaderboard's row for {arm!r} at {horizon}d reports "
+                f"{board_n}"
+            )
+    return mismatches
 
 
 def read_cut_champion_record(*, bucket: str | None = None, s3_client: Any = None) -> dict | None:
@@ -795,6 +968,19 @@ def run_cut_promotion(
         raise CutPromotionError(
             f"scanner-cut promotion held on a DEFECTIVE board for {decided_on}: "
             f"{decision.defect}. The hold record was written to "
+            f"{AUDIT_DATED_KEY.format(date=decided_on)} before this raise."
+        )
+
+    # Reconciliation guard (alpha-engine-config-I8257 deliverable 4). Written
+    # AFTER the record lands, same discipline as the defect raise above: the
+    # record itself is the evidence a future reader needs, so it must survive
+    # even the failure that says something about it disagreed.
+    mismatches = reconcile_arms_with_leaderboard(doc, board)
+    if mismatches:
+        raise CutPromotionError(
+            f"scanner-cut promotion record for {decided_on} disagrees with the "
+            f"leaderboard it cites ({key}) at the SAME horizon: "
+            f"{'; '.join(mismatches)}. The record was written to "
             f"{AUDIT_DATED_KEY.format(date=decided_on)} before this raise."
         )
     return doc
