@@ -184,7 +184,44 @@ class ThinktankClient:
                 callsite_id=callsite_id,
                 api_key=api_key,
                 client_factory=(self._adapt_client_factory() if self.client_factory is not None else None),
-                max_retries=3,
+                # max_retries=10, was 3 (alpha-engine-config-I8351).
+                #
+                # THIS BOUNDS A RESTART, NOT A RATE LIMIT. The OpenAI SDK's
+                # backoff is 0.5s, 1s, 2s, 4s, then 8s per attempt, so 3
+                # retries span 3.2 SECONDS. The dependency it is retrying
+                # against — the LiteLLM router — takes about FIFTY seconds to
+                # come back (config generation, git pull, prisma migrate), and
+                # it is restarted by ordinary merges: `router-config-deploy.yml`
+                # fires on any alpha-engine-config registry merge, at whatever
+                # hour that merge happens.
+                #
+                # Measured 2026-08-25. Two runs died this way, 17 minutes
+                # apart, each after real work:
+                #
+                #   deploy 17:02:35 -> router stop 17:04:38 -> 502 -> ABORTED
+                #                      after 4 thesis writes
+                #   deploy 17:18:03 -> router stop 17:21:03 -> 502 -> ABORTED
+                #                      after 6 thesis writes
+                #
+                # Both retried for 3.2s against a ~50s outage and gave up with
+                # 46 seconds still to go. This run is ~50 minutes, NOT
+                # resumable, spot-priced, and withholds
+                # `challenger_selection/latest.json` on abort — so the
+                # asymmetry is total: waiting a minute costs a minute, and not
+                # waiting costs the run, the box, the spend already incurred,
+                # and another day of the arm's only health signal being stale.
+                #
+                # 10 retries span ~55s (0.5+1+2+4+8*6), which clears the
+                # measured restart with margin. It fits: the box budget is
+                # 5400s with a terminal-write reserve, and `timeout=180.0`
+                # still bounds each individual attempt.
+                #
+                # NOT raised fleet-wide, deliberately. A Lambda with a
+                # 15-minute ceiling must not sit in a minute of backoff; this
+                # is the long-lived box, which is the caller that benefits.
+                # `_STRUCTURED_ATTEMPTS` above is a DIFFERENT budget — it
+                # bounds schema/body corrective retries, not availability.
+                max_retries=10,
                 timeout=180.0,
                 cost_sink=self.cost_sink,
             )
