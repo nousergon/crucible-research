@@ -467,6 +467,37 @@ class UniverseMembershipError(RuntimeError):
 # a one-line flip rather than a producer migration. Hence a declared setting
 # with an env override, so the Scanner Lambda can move without a deploy.
 #
+# Brian's ruling 2026-08-27 takes that flip: "scanner should not be recreated
+# daily, the top companies should be the same companies for a week, until the
+# weekly sf updates the scanner choices." The default is now WEEKLY.
+#
+# Why the default and not the env override. Since alpha-engine-config-I7811
+# removed the Scanner from the weekday preopen SF, the cut has been weekly in
+# PRACTICE — but only because the Lambda happens to be invoked once a week.
+# The cadence setting still read ``daily``, so ``should_recut`` returned True on
+# every invocation and any SECOND invocation inside one ISO week re-formed the
+# whole membership. That is not hypothetical: the 2026-08-22 weekly cycle ran
+# four times (one scheduled execution, then ``watch-rerun-2026-08-22-1/-2/-3``),
+# and each re-cut clobbered the previous membership under the same pointer keys.
+# ``load_universe.py``'s own docstring records the consequence measured on
+# 2026-08-07 — four names the predictions were stamped ``attractiveness_top_20``
+# with were absent from the membership that survived.
+#
+# I6666 named this exactly: the cadence was "an emergent property of how often
+# the Lambda runs". Setting the env var would have left it that way, one
+# untracked console edit from reverting, and invisible to anything that reads
+# the code. The default is where a standing ruling belongs; the env override
+# survives for a temporary deviation, which is what an override is for.
+#
+# Day-over-day churn this removes, from the 2026-08-21 membership's own
+# ``turnover.per_cut`` block (prior_run_date 2026-08-20):
+#   attractiveness_top_20      45% retained — 11 of 20 names replaced in ONE day
+#   attractiveness_top_25      40% retained
+#   scanner_gate_baseline_60   80% retained
+# Against a 21-trading-day prediction horizon, a 20-name cut replacing half its
+# members daily cannot hold a position long enough to realize the forecast it
+# was selected on.
+#
 # The artifact is written EVERY run under both settings (see
 # ``resolve_cut_refresh``) — a carry-forward still writes. That is deliberate:
 # it keeps ``universe_membership_latest`` honest at cadence ``weekday_sf``
@@ -475,7 +506,7 @@ class UniverseMembershipError(RuntimeError):
 CADENCE_DAILY = "daily"
 CADENCE_WEEKLY = "weekly"
 CUT_REFRESH_CADENCES = frozenset({CADENCE_DAILY, CADENCE_WEEKLY})
-DEFAULT_CUT_REFRESH_CADENCE = CADENCE_DAILY
+DEFAULT_CUT_REFRESH_CADENCE = CADENCE_WEEKLY
 
 
 def cut_refresh_cadence() -> str:
