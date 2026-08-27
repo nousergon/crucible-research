@@ -527,19 +527,43 @@ def _prior(effective_date: str) -> dict:
     return m
 
 
-def test_default_cadence_is_daily(monkeypatch):
-    """Live behaviour must be unchanged on merge."""
+def test_default_cadence_is_weekly(monkeypatch):
+    """Brian's ruling 2026-08-27: the cut holds for a week.
+
+    The DEFAULT carries the ruling, not the env var. Before this, the cut was
+    weekly only because the Scanner Lambda happened to be invoked weekly
+    (alpha-engine-config-I7811 took it off the weekday SF) — the cadence
+    setting still said ``daily``, so a second invocation inside one ISO week
+    re-formed the whole membership. The 2026-08-22 cycle ran four times.
+    """
     monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
-    assert DEFAULT_CUT_REFRESH_CADENCE == CADENCE_DAILY
-    assert cut_refresh_cadence() == CADENCE_DAILY
+    assert DEFAULT_CUT_REFRESH_CADENCE == CADENCE_WEEKLY
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+
+
+def test_repeat_invocation_inside_one_week_does_not_recut(monkeypatch):
+    """The property the default flip actually buys: idempotence.
+
+    Under ``daily`` this was False on every call, so re-running the weekly SF
+    (a routine recovery action — 2026-08-22 saw three re-runs after two
+    failures) silently re-formed the cut each time and clobbered the prior
+    membership under the same pointer keys.
+    """
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    prior = _prior("2026-08-21")  # Friday, ISO week 34
+    # Same-day re-run, and every later weekday of that same ISO week.
+    assert should_recut("2026-08-21", prior) is False
+    assert should_recut("2026-08-22", prior) is False
+    # First run of the NEXT ISO week re-cuts.
+    assert should_recut("2026-08-24", prior) is True
 
 
 def test_env_var_flips_the_cadence_without_a_code_change(monkeypatch):
-    """The whole point of the issue: one switch, no deploy."""
-    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "weekly")
-    assert cut_refresh_cadence() == CADENCE_WEEKLY
-    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "  WEEKLY  ")
-    assert cut_refresh_cadence() == CADENCE_WEEKLY
+    """The override survives for a temporary deviation from the default."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "daily")
+    assert cut_refresh_cadence() == CADENCE_DAILY
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "  DAILY  ")
+    assert cut_refresh_cadence() == CADENCE_DAILY
 
 
 def test_unrecognised_cadence_raises_rather_than_defaulting(monkeypatch):
@@ -654,7 +678,8 @@ def test_weekly_end_to_end_holds_the_cut_and_still_writes_both_keys(monkeypatch)
 
 
 def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
-    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    """The daily branch still works — reachable now via the env override only."""
+    monkeypatch.setenv("SCANNER_CUT_REFRESH_CADENCE", "daily")
     s3 = _ReadableFakeS3(seed=_prior("2026-07-20"))
     monkeypatch.setattr(
         "scoring.universe_membership.attractiveness_for_run",
@@ -664,6 +689,31 @@ def test_daily_end_to_end_recuts_and_stamps_today(monkeypatch):
     written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
     assert written["cut_refresh_cadence"] == CADENCE_DAILY
     assert written["cut_effective_date"] == _RUN_DATE
+
+
+def test_default_end_to_end_holds_the_cut_within_one_iso_week(monkeypatch):
+    """Live behaviour AFTER the 2026-08-27 default flip, with no env var set.
+
+    ``_RUN_DATE`` (2026-07-24, Fri) and the seeded prior (2026-07-20, Mon) are
+    the same ISO week, so this run must CARRY the prior cut rather than form a
+    new one — and must still write the artifact, so a missed Scanner run stays
+    visible as a missing artifact rather than as a held cut
+    (alpha-engine-config-I6651).
+    """
+    monkeypatch.delenv("SCANNER_CUT_REFRESH_CADENCE", raising=False)
+    s3 = _ReadableFakeS3(seed=_prior("2026-07-20"))
+    monkeypatch.setattr(
+        "scoring.universe_membership.attractiveness_for_run",
+        lambda run_date, **kw: _attractiveness(),
+    )
+    compute_and_write_universe_membership(_RUN_DATE, _scanner_cut(), bucket="b", s3_client=s3)
+    written = json.loads(s3.puts[f"universe_membership/{_RUN_DATE}/membership.json"])
+    assert written["cut_refresh_cadence"] == CADENCE_WEEKLY
+    # The cut is the PRIOR week's, carried — not re-formed on this run's date.
+    assert written["cut_effective_date"] == "2026-07-20"
+    # ...and the artifact is still written under this run's own date.
+    assert written["run_date"] == _RUN_DATE
+    assert f"universe_membership/{_RUN_DATE}/membership.json" in s3.puts
 
 
 # ── 7. The funnel as a READ contract (alpha-engine-config-I7842) ──────────────
