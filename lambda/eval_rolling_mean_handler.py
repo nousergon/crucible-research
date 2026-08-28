@@ -99,6 +99,106 @@ def _emit_producer_failure_alert(*, producer: str, artifact: str, exc: BaseExcep
         )
 
 
+# --------------------------------------------------------------------------- #
+# Bounding the secondary aggregations (alpha-engine-config#9102)
+# --------------------------------------------------------------------------- #
+#
+# This handler's PRIMARY deliverable — the rolling mean — completes in ~1.5s.
+# Four best-effort aggregations hang off it, and two of them (agent_quality,
+# producer_leaderboard) scan an S3 corpus that GROWS every cycle, through a bare
+# ``boto3.client("s3")`` carrying botocore's defaults: connect_timeout=60,
+# read_timeout=60, legacy retries up to 5. Neither logs anything between
+# entering its try block and finishing, so a slow scan is indistinguishable from
+# a hang while it is happening.
+#
+# Measured on 2026-08-28: this state's `REPORT` durations ran 22-37s for seven
+# invocations, then 120s, then 65s, then hit the 300s ceiling — the shape of a
+# scan outgrowing its budget, not a network blip. When it hit the ceiling the SF
+# recorded `States.Timeout`, `MarkEvalRollingMeanDegraded` fired, and the whole
+# research/predictor branch fail-opened, so a run that HAD produced its primary
+# deliverable terminated DEGRADED.
+#
+# The carve-out that lets these fail without sinking the rolling mean is
+# legitimate. What was missing is that the carve-out only covered EXCEPTIONS: a
+# block that never returns is not an exception, so it consumed the budget of the
+# thing it was not allowed to sink. A secondary aggregation now cannot spend more
+# than its own deadline, and blowing that deadline is recorded on exactly the
+# surface an exception would have used — never swallowed.
+_SECONDARY_DEADLINE_S = 45.0
+
+
+def _bounded_client(service: str):
+    """An AWS client that cannot hang open-endedly.
+
+    Worst case per call is ~(connect + read) * attempts, so a wedged endpoint
+    costs seconds rather than minutes. Mirrors the bound flow-doctor applies to
+    its own notifier clients (flow-doctor#93, 0.16.2).
+    """
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        service,
+        config=Config(
+            connect_timeout=5,
+            read_timeout=15,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
+
+
+def _run_bounded(name: str, artifact: str, fn, deadline_s: float = _SECONDARY_DEADLINE_S) -> dict:
+    """Run a secondary aggregation under a wall-clock deadline.
+
+    Returns the block's own result dict, or a TIMEOUT/ERROR record. The worker is
+    a daemon thread so a blown deadline cannot hold the invocation open either —
+    abandoning it is the whole point, and a non-daemon worker would reintroduce
+    the defect one layer down.
+
+    A blown deadline is NOT a silent degrade: it logs at ERROR and goes on the
+    same machine-readable alert bus an exception would, because a producer that
+    quietly stops producing is the failure mode this handler has already been
+    bitten by twice (the two-month `agent_quality` date-type bug, #8177).
+    """
+    import threading
+
+    box: dict = {}
+
+    def _work() -> None:
+        try:
+            box["ok"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's side
+            box["exc"] = exc
+
+    logger.info("[eval_rolling_mean_handler] %s start (deadline %.0fs)", name, deadline_s)
+    worker = threading.Thread(target=_work, name=f"secondary-{name}", daemon=True)
+    started = datetime.now(UTC)
+    worker.start()
+    worker.join(deadline_s)
+    elapsed = (datetime.now(UTC) - started).total_seconds()
+
+    if worker.is_alive():
+        logger.error(
+            "[eval_rolling_mean_handler] %s EXCEEDED its %.0fs deadline (%.1fs elapsed) "
+            "and was abandoned — %s will not be written this cycle. The rolling mean "
+            "is unaffected; this is recorded so a growing scan cannot silently eat "
+            "the stage budget again (alpha-engine-config#9102).",
+            name, deadline_s, elapsed, artifact,
+        )
+        _emit_producer_failure_alert(
+            producer=name,
+            artifact=artifact,
+            exc=TimeoutError(f"{name} exceeded its {deadline_s:.0f}s deadline"),
+        )
+        return {"status": "TIMEOUT", "deadline_s": deadline_s, "elapsed_s": round(elapsed, 1)}
+
+    if "exc" in box:
+        raise box["exc"]
+
+    logger.info("[eval_rolling_mean_handler] %s done in %.1fs", name, elapsed)
+    return box["ok"]
+
+
 def _ensure_init() -> None:
     """Defer expensive init to first invocation. Mirrors lambda/handler.py
     + lambda/eval_judge_handler.py — Lambda init phase 10s ceiling."""
@@ -304,18 +404,26 @@ def _run(event, context):
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         dual = now_dual()
-        s3c = boto3.client("s3")
-        artifact = build_agent_quality(
-            s3c, bucket,
-            date.fromisoformat(dual.trading_day),
-            run_date=date.fromisoformat(dual.calendar_date),
-        )
-        key = write_agent_quality(s3c, bucket, artifact)
-        graded = sorted(k for k, v in artifact.items() if isinstance(v, dict) and "value" in v)
-        agent_quality = {"status": "OK", "key": key, "graded_components": graded}
-        logger.info(
-            "[eval_rolling_mean_handler] agent_quality wrote %s (%d graded: %s)",
-            key, len(graded), ",".join(graded) or "(none — no signals/evals this run)",
+        s3c = _bounded_client("s3")
+
+        def _build_agent_quality() -> dict:
+            artifact = build_agent_quality(
+                s3c, bucket,
+                date.fromisoformat(dual.trading_day),
+                run_date=date.fromisoformat(dual.calendar_date),
+            )
+            key = write_agent_quality(s3c, bucket, artifact)
+            graded = sorted(
+                k for k, v in artifact.items() if isinstance(v, dict) and "value" in v
+            )
+            logger.info(
+                "[eval_rolling_mean_handler] agent_quality wrote %s (%d graded: %s)",
+                key, len(graded), ",".join(graded) or "(none — no signals/evals this run)",
+            )
+            return {"status": "OK", "key": key, "graded_components": graded}
+
+        agent_quality = _run_bounded(
+            "agent_quality", "backtest/{date}/agent_quality.json", _build_agent_quality,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         # The primary deliverable (the rolling mean) still survives a failure
@@ -362,17 +470,25 @@ def _run(event, context):
 
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         dual = now_dual()
-        s3c = boto3.client("s3")
-        lb = build_producer_leaderboard(s3c, bucket, dual.trading_day)
-        producer_leaderboard = {
-            "status": lb.get("status"),
-            "key": lb.get("key"),
-            "n_dates": (lb.get("leaderboard") or {}).get("n_dates"),
-        }
-        logger.info(
-            "[eval_rolling_mean_handler] producer_leaderboard status=%s key=%s n_dates=%s",
-            producer_leaderboard["status"], producer_leaderboard["key"],
-            producer_leaderboard["n_dates"],
+        s3c = _bounded_client("s3")
+
+        def _build_producer_leaderboard() -> dict:
+            lb = build_producer_leaderboard(s3c, bucket, dual.trading_day)
+            block = {
+                "status": lb.get("status"),
+                "key": lb.get("key"),
+                "n_dates": (lb.get("leaderboard") or {}).get("n_dates"),
+            }
+            logger.info(
+                "[eval_rolling_mean_handler] producer_leaderboard status=%s key=%s n_dates=%s",
+                block["status"], block["key"], block["n_dates"],
+            )
+            return block
+
+        producer_leaderboard = _run_bounded(
+            "producer_leaderboard",
+            "the research producer champion/challenger leaderboard",
+            _build_producer_leaderboard,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         logger.error(

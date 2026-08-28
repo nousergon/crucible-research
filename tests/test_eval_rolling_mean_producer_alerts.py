@@ -116,11 +116,22 @@ def test_every_swallow_path_alerts() -> None:
     """
     source = _HANDLER_PATH.read_text()
     error_blocks = source.count('= {"status": "ERROR", "error": str(exc)}')
+    # alpha-engine-config#9102 added a SECOND kind of swallow: a secondary
+    # aggregation that neither returns nor raises, abandoned at its deadline by
+    # `_run_bounded`. An exception was never the only way one of these can stop
+    # producing — a growing S3 scan simply ran until the Step Function timed out
+    # — so the deadline path is counted here as the alerting site it is, rather
+    # than left outside the class this test exists to pin.
+    deadline_paths = source.count('"status": "TIMEOUT"')
     emitter_calls = source.count("_emit_producer_failure_alert(")
-    # one definition + one call per block
-    assert emitter_calls == error_blocks + 1, (
-        f"{error_blocks} best-effort failure paths but {emitter_calls - 1} alert "
-        "calls — a swallow path is silent"
+    # one definition + one call per swallow path, of either kind
+    assert emitter_calls == error_blocks + deadline_paths + 1, (
+        f"{error_blocks} exception paths + {deadline_paths} deadline paths but "
+        f"{emitter_calls - 1} alert calls — a swallow path is silent"
+    )
+    assert deadline_paths >= 1, (
+        "the deadline swallow path disappeared — a secondary aggregation can "
+        "once again run until the SF budget is gone (alpha-engine-config#9102)"
     )
     for producer in EXPECTED_PRODUCERS:
         assert f'producer="{producer}"' in source, (
