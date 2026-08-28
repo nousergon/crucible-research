@@ -18,6 +18,7 @@ on:
       - 'flow-doctor.yaml'
       - 'freshness.py'
       - 'graph/**'
+      - 'invocation_budget.py'
       - 'lambda/**'
       - 'memory/**'
       - 'observe_alerts.py'

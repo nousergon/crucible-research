@@ -570,6 +570,18 @@ build_and_deploy_main() {
         --function-name "$FUNCTION_MAIN" \
         --image-uri "$IMAGE_URI" \
         --region "$REGION" > /dev/null
+      aws lambda wait function-updated --function-name "$FUNCTION_MAIN" --region "$REGION" 2>/dev/null || sleep 5
+      # alpha-engine-config-I9102 (class sweep). The declared sizing lived ONLY
+      # in the create branch, so a merge could never re-size a function that
+      # already exists — the declaration described a provisioning event, not the
+      # live function. Values are the ones this file already declares on create
+      # and the ones the live function already carries (measured 2026-08-28), so
+      # this is a no-op today and a corrective the day either drifts.
+      aws lambda update-function-configuration \
+        --function-name "$FUNCTION_MAIN" \
+        --timeout 900 \
+        --memory-size 1024 \
+        --region "$REGION" > /dev/null
     else
       # Zip → Image migration: delete and recreate
       echo "  Migrating from zip to container image..."
@@ -778,6 +790,18 @@ build_and_deploy_alerts() {
         --function-name "$FUNCTION_ALERTS" \
         --image-uri "$IMAGE_URI" \
         --region "$REGION" > /dev/null
+      aws lambda wait function-updated --function-name "$FUNCTION_ALERTS" --region "$REGION" 2>/dev/null || sleep 5
+      # alpha-engine-config-I9102 (class sweep). The declared sizing lived ONLY
+      # in the create branch, so a merge could never re-size a function that
+      # already exists — the declaration described a provisioning event, not the
+      # live function. Values are the ones this file already declares on create
+      # and the ones the live function already carries (measured 2026-08-28), so
+      # this is a no-op today and a corrective the day either drifts.
+      aws lambda update-function-configuration \
+        --function-name "$FUNCTION_ALERTS" \
+        --timeout 60 \
+        --memory-size 256 \
+        --region "$REGION" > /dev/null
     else
       # Zip → Image migration
       echo "  Migrating from zip to container image..."
@@ -835,9 +859,17 @@ deploy_eval_judge() {
       --region "$REGION" > /dev/null
     echo "  Waiting for code update to complete..."
     aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
+    # alpha-engine-config-I9102 (class sweep). The declared sizing lived ONLY
+    # in the create branch, so a merge could never re-size a function that
+    # already exists — the declaration described a provisioning event, not the
+    # live function. Values are the ones this file already declares on create
+    # and the ones the live function already carries (measured 2026-08-28), so
+    # this is a no-op today and a corrective the day either drifts.
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_EVAL_JUDGE" \
       --image-config "$IMAGE_CONFIG" \
+      --timeout 900 \
+      --memory-size 1024 \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -902,9 +934,44 @@ deploy_eval_rolling_mean() {
       --region "$REGION" > /dev/null
     echo "  Waiting for code update to complete..."
     aws lambda wait function-updated --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" 2>/dev/null || sleep 5
+    # alpha-engine-config-I9102. Timeout 300 -> 900 (Lambda service maximum),
+    # memory 512 -> 1024 MB, ephemeral storage 512 -> 2048 MB — and ALL THREE
+    # applied on EVERY UPDATE, not only on create. Until this PR the create
+    # branch carried the only `--timeout`/`--memory-size` in this function, so
+    # the sizing here described a function that was provisioned once and could
+    # never be re-sized by a merge (the same defect deploy_rationale_clustering
+    # calls out above, still live on this one).
+    #
+    # Why each number, measured from this function's own CloudWatch REPORT
+    # lines rather than chosen to make a ceiling recede:
+    #
+    #   timeout 900   The handler now SELF-DEADLINES: every secondary
+    #                 aggregation runs under `invocation_budget.run_bounded`
+    #                 and the stage returns its primary deliverable whatever
+    #                 they do. A self-deadlining function is pinned at the
+    #                 service maximum so the SF state can carry a guard band
+    #                 ABOVE it — the same posture as replay-concordance and
+    #                 eval-judge-process (alpha-engine-config-I7181), asserted
+    #                 by nousergon-data/tests/test_sf_lambda_timeout_ordering.py.
+    #                 The ceiling is now a backstop behind a real budget, not
+    #                 the budget itself.
+    #   memory 1024   Peak was 406 MB of 512 on 2026-08-21 and -22 (79%) BEFORE
+    #                 the agent_quality block could run at all, and that block
+    #                 opens a 356 MB SQLite snapshot. Lambda scales CPU with
+    #                 memory, so 512 MB also throttled the S3 download that
+    #                 hung the 2026-08-28 run for 298 seconds.
+    #   ephemeral 2048  evals.judge_outcome_ic.open_research_db downloads
+    #                 s3://alpha-engine-research/research.db — 356 MB on
+    #                 2026-08-28 and growing weekly — into /tmp, which
+    #                 defaulted to 512 MB. That is 70% of the disk consumed by
+    #                 one file that gets bigger every week; the same shape put
+    #                 an Errno 28 into a deploy canary on 2026-08-26.
     aws lambda update-function-configuration \
       --function-name "$FUNCTION_EVAL_ROLLING_MEAN" \
       --image-config "$IMAGE_CONFIG" \
+      --timeout 900 \
+      --memory-size 1024 \
+      --ephemeral-storage '{"Size":2048}' \
       --region "$REGION" > /dev/null
   else
     aws lambda create-function \
@@ -913,8 +980,9 @@ deploy_eval_rolling_mean() {
       --code "ImageUri=$IMAGE_URI" \
       --image-config "$IMAGE_CONFIG" \
       --role "$ROLE_ARN" \
-      --timeout 300 \
-      --memory-size 512 \
+      --timeout 900 \
+      --memory-size 1024 \
+      --ephemeral-storage '{"Size":2048}' \
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_EVAL_ROLLING_MEAN deployed (CMD=eval_rolling_mean_handler.handler)."
