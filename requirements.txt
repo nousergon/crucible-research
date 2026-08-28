@@ -53,7 +53,7 @@ requests-ratelimiter~=0.10
 # argument-free WARN (see the fixed-in-the-same-PR exception log). A
 # capability this repo calls directly belongs in its own dependency graph,
 # not borrowed from another package's transitive closure.
-pyarrow>=17.0  # floor matches edgartools' own pin so both resolve one wheel
+pyarrow>=25.0.1  # floor matches edgartools' own pin so both resolve one wheel
 pandas~=2.2
 numpy~=2.5
 requests~=2.34
