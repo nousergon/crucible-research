@@ -258,7 +258,8 @@ def effective_capture_ceiling_date(anchor_date: str) -> str:
     a trading-day-counting question, not a wall-clock-elapsed one, and
     silently drifts off the settle guarantee across long weekends.
     """
-    from datetime import date as _date, timedelta
+    from datetime import date as _date
+    from datetime import timedelta
 
     from krepis.trading_calendar import is_trading_day
 

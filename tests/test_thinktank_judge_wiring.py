@@ -215,8 +215,9 @@ def test_effective_capture_ceiling_date_clears_the_write_lag():
     # straight to expand_lookback_dates, whose newest returned date is
     # `previous_trading_day(anchor)` — exactly the partition that had not
     # been written yet.
-    from krepis.trading_calendar import previous_trading_day
     from datetime import date as _date
+
+    from krepis.trading_calendar import previous_trading_day
 
     unsafe_newest = str(previous_trading_day(_date(2026, 8, 29)))
     assert unsafe_newest == "2026-08-28"
