@@ -280,7 +280,7 @@ class TestBuildBatchRequestContract:
         build_batches_request_params (unchanged by this lift). Assert
         the composed result is identical to manually re-deriving it via
         the golden per-piece functions."""
-        artifact = _make_artifact("sector_quant:technology")
+        artifact = _make_artifact("thinktank_thesis")
         cid = judge_mod.encode_custom_id(
             judged_agent_id=artifact.agent_id, run_id=artifact.run_id,
             judge_model="claude-haiku-4-5",

@@ -126,7 +126,7 @@ class TestBuildBatchRequest:
     def test_returns_anthropic_batch_request_shape(self):
         from evals.judge import build_batch_request, encode_custom_id
 
-        artifact = _make_artifact("sector_quant:technology")
+        artifact = _make_artifact("thinktank_thesis")
         cid = encode_custom_id(
             judged_agent_id=artifact.agent_id,
             run_id=artifact.run_id,
@@ -176,7 +176,7 @@ class TestBuildBatchRequest:
         ``model_json_schema()`` proves the indirection is intact."""
         from evals.judge import build_batch_request, encode_custom_id
 
-        artifact = _make_artifact("ic_cio")
+        artifact = _make_artifact("thinktank_theme")
         cid = encode_custom_id(
             judged_agent_id=artifact.agent_id,
             run_id=artifact.run_id,

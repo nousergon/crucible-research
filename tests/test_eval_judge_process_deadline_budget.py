@@ -34,6 +34,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from evals import judge as judge_mod
+from evals import orchestrator as orch
 from evals.orchestrator import (
     PROCESS_LLM_ITEM_FLOOR_S,
     PROCESS_STREAM_ITEM_FLOOR_S,
@@ -44,7 +46,20 @@ from tests.test_eval_orchestrator_batch import (
     _make_batch_result_malformed_stringified,
     _make_batch_result_succeeded,
     _make_capture_dict,
+    _synthetic_resolve_rubric_for_agent,
 )
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_rubric_map(monkeypatch):
+    """Same test seam as test_eval_orchestrator_batch.py (alpha-engine-
+    config-I9330) — this module reuses that file's ``_make_capture_dict``
+    fixture data (pre-2026-07-12 research-graph agent_id labels) but is a
+    separate pytest module, so its autouse fixture doesn't carry over;
+    redeclared here rather than moved to conftest.py to keep the mapping
+    visibly paired with the fixture data that depends on it."""
+    monkeypatch.setattr(orch, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent)
+    monkeypatch.setattr(judge_mod, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent)
 
 
 @pytest.fixture

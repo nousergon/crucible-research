@@ -12,42 +12,13 @@ the skip-eval emit path produces the right ``judge_skip_reason``.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
 from nousergon_lib.decision_capture import (
     DecisionArtifact,
     FullPromptContext,
     ModelMetadata,
 )
 
-from evals.judge import _is_degenerate_input, evaluate_artifact
-from tests.test_eval_judge import _openai_response, _openai_tool_call
-
-
-def _patch_llm_client(judge_mod, fake_client):
-    """Patch ``judge_mod.LLMClient`` so it builds a REAL ``krepis.llm.LLMClient``
-    over *fake_client*.
-
-    alpha-engine-config#5223 moved the judge off a bare ``openai.OpenAI`` onto
-    the shared chokepoint, so ``patch.object(judge_mod, "OpenAI", ...)`` no
-    longer intercepts anything. Substituting the TRANSPORT rather than the whole
-    client keeps these tests exercising the real krepis call path — including
-    its null-choices guard and retry classification — while assertions on
-    ``fake_client.chat.completions.create.call_args`` still hold.
-    """
-    from krepis.llm import LLMClient as _RealLLMClient
-
-    def _factory(spec, **kwargs):
-        kwargs.pop("client_factory", None)
-        return _RealLLMClient(spec, client_factory=lambda _s, _k: fake_client, **kwargs)
-
-    return patch.object(judge_mod, "LLMClient", side_effect=_factory)
-
-
-def _spec_of(mock_llm_cls):
-    """The ModelSpec the judge handed to LLMClient — where base_url/api_key
-    configuration lives now that the judge no longer builds OpenAI(...)."""
-    return mock_llm_cls.call_args.args[0]
+from evals.judge import _is_degenerate_input
 
 
 def _artifact(
@@ -225,66 +196,21 @@ class TestUnknownAgentTypeFallsThrough:
 
 
 # ── Sync path emits the skip artifact + skips the LLM call ─────────────
-
-
-class TestEvaluateArtifactDegenerateInputShortCircuit:
-    def test_thesis_update_degenerate_input_skips_llm_call(self, monkeypatch):
-        """End-to-end: a degenerate thesis_update artifact routed
-        through ``evaluate_artifact`` produces a skip-eval with
-        ``judge_skip_reason='degenerate_input'`` and never invokes the
-        LLM."""
-        from evals import judge as judge_mod
-
-        snap = {
-            "prior_thesis": {"thesis_summary": ""},
-            "news_data": {"articles": []},
-            "analyst_data": None,
-        }
-        artifact = _artifact("thesis_update:tech:MCK", snap)
-
-        fake_client = MagicMock()
-        with _patch_llm_client(judge_mod, fake_client):
-            eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
-
-        # No LLM call was made — the gate short-circuited
-        fake_client.chat.completions.create.assert_not_called()
-
-        assert eval_result.judge_skip_reason == "degenerate_input"
-        assert eval_result.dimension_scores == []
-        assert "degenerate" in (eval_result.overall_reasoning or "").lower()
-
-    def test_non_degenerate_does_not_short_circuit(self, monkeypatch):
-        """Sanity check: a normal artifact with substantive inputs
-        proceeds to the LLM call (and isn't accidentally caught by the
-        gate)."""
-        from evals import judge as judge_mod
-
-        snap = {
-            "prior_thesis": {"thesis_summary": "AMAT is well-positioned..."},
-            "news_data": {"articles": []},
-            "analyst_data": None,
-        }
-        artifact = _artifact("thesis_update:tech:AMAT", snap)
-
-        from evals.judge import RubricEvalLLMOutput
-
-        fake_parsed = RubricEvalLLMOutput(
-            dimension_scores=[
-                {"dimension": "regression_check", "score": 4, "reasoning": "ok"},
-            ],
-            overall_reasoning="passed",
-        )
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = _openai_response(
-            finish_reason="tool_calls",
-            tool_calls=[_openai_tool_call("RubricEvalLLMOutput", fake_parsed.model_dump())],
-        )
-
-        with _patch_llm_client(judge_mod, fake_client):
-            eval_result = evaluate_artifact(artifact, api_key="sk-or-test")
-
-        # LLM call was made
-        fake_client.chat.completions.create.assert_called_once()
-        # Got a real eval, not a skip
-        assert eval_result.judge_skip_reason is None
-        assert len(eval_result.dimension_scores) == 1
+#
+# alpha-engine-config-I9330 (2026-08-29): the end-to-end
+# degenerate-input-short-circuit tests that lived here drove
+# ``evaluate_artifact`` with ``thesis_update:*`` agent_ids. Since
+# ``resolve_rubric_for_agent`` retired that family (and
+# sector_quant/sector_qual/sector_peer_review/macro_economist/ic_cio
+# alongside it), ``evaluate_artifact`` now raises "No rubric mapped"
+# for all of them BEFORE reaching ``_is_degenerate_input`` — the
+# per-family branches above are exercised only by this file's UNIT
+# tests (which call ``_is_degenerate_input`` directly, bypassing
+# rubric resolution) and are otherwise unreachable in production.
+# Neither live family (thinktank_thesis / thinktank_theme) has a
+# degenerate-input definition, so there is currently no live agent
+# for which this end-to-end path can be exercised. Follow-up filed to
+# retire ``_is_degenerate_input``'s now-dead branches (and this file's
+# now-parallel-dead per-family unit tests above) as the same class of
+# defect I9330 already retired from ``resolve_rubric_for_agent`` —
+# alpha-engine-config-I9382.

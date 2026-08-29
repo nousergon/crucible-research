@@ -124,15 +124,15 @@ class TestEvaluateArtifactOpenRouter:
         )
 
         with _patch_llm_client(judge_mod, fake_client) as mock_llm_cls:
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact_openrouter(
                 artifact,
                 api_key="sk-or-test",
-                judged_artifact_s3_key="decision_artifacts/2026/05/09/sector_quant:technology/r1.json",
+                judged_artifact_s3_key="decision_artifacts/2026/05/09/thinktank_thesis/r1.json",
             )
 
         assert isinstance(result, RubricEvalArtifact)
-        assert result.judged_agent_id == "sector_quant:technology"
+        assert result.judged_agent_id == "thinktank_thesis"
         assert result.judge_model == OPENROUTER_SHADOW.logical_key
         assert result.judge_request_model == OPENROUTER_SHADOW.request_model
         assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
@@ -177,7 +177,7 @@ class TestEvaluateArtifactOpenRouter:
         ]
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
 
         assert isinstance(result, RubricEvalArtifact)
@@ -197,7 +197,7 @@ class TestEvaluateArtifactOpenRouter:
         )
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact_openrouter(
                     artifact,
@@ -228,7 +228,7 @@ class TestEvaluateArtifactOpenRouter:
         ]
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             with caplog.at_level("WARNING"):
                 judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
 
@@ -250,7 +250,7 @@ class TestEvaluateArtifactOpenRouter:
             ),
         ]
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
         assert isinstance(result, RubricEvalArtifact)
 
@@ -273,7 +273,7 @@ class TestEvaluateArtifactOpenRouter:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key=None)
 
         assert isinstance(result, RubricEvalArtifact)
@@ -283,7 +283,7 @@ class TestEvaluateArtifactOpenRouter:
 
         fake_client = MagicMock()
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             artifact.agent_output = {}
             result = judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-or-test")
 
