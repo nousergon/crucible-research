@@ -125,6 +125,42 @@ COMPARISON_NO_COMMON_COHORT = "no_common_cohort"   # the intersection is empty
 COMPARISON_WIDTH_MISMATCH = "width_mismatch"   # paired across widths measures breadth
 COMPARISON_PARTIAL_COHORT = "partial_cohort"   # see `apply_cohort_intersection`
 
+# Two ADDITIVE axes landed in the same week and they answer different
+# questions — keep both, and do not collapse them:
+#
+#   comparison    (I9274) — can this row be compared AGAINST THE CHAMPION?
+#                           A width mismatch or an empty intersection is a
+#                           property of the PAIR.
+#   measurability (I9307) — can this arm produce a comparable output AT ALL?
+#                           A property of the ARM, true even with no champion.
+#
+# An arm can be `comparison: ok` and `measurability: unmeasurable` only in the
+# degenerate case where nothing is comparable; the reverse — measurable but not
+# comparable — is the common one and is exactly why they are separate.
+# Per-spec MEASURABILITY vocabulary (alpha-engine-config-I9307). A THIRD axis,
+# deliberately separate from both ``confidence`` (how much evidence stands
+# behind this row) and the leaderboard-level ``status`` (did the measurement
+# run at all), because the defect it exists to name is invisible on either:
+#
+#   confidence says  "this arm has little evidence"        -> keep watching
+#   measurability says "this arm CANNOT produce evidence"  -> fix it
+#
+# The champion arm `scanner_predictor_direct` was scored from an artifact whose
+# live producer is empty-by-contract. It could not score, ever. For seven weeks
+# it rendered `thin` — a word that means "not enough yet", i.e. a state that
+# resolves itself by waiting. Nothing waited it out because nothing was coming.
+#
+# champion-challenger-policy.md §7.2: an unmeasurable result must fail LOUD,
+# never render as an empty success. §3: silent absence and a genuine zero must
+# never render identically.
+MEASURABILITY_MEASURED = "measured"
+MEASURABILITY_UNMEASURABLE = "unmeasurable"
+
+# An arm scoring nothing among the most recent ``COHORT_LAG_UNMEASURABLE_DATES``
+# dates on which the cohort DID score is structurally behind, not thin. Three
+# weekly cycles is deliberately short: the defect this catches ran for seven.
+COHORT_LAG_UNMEASURABLE_DATES = 3
+
 
 class LeaderboardIntegrityError(RuntimeError):
     """A leaderboard artifact violates a structural invariant every consumer
@@ -309,6 +345,63 @@ def confidence_for(n_dates_scored: int | None, min_dates_for_inference: int) -> 
     if n < min_dates_for_inference:
         return CONFIDENCE_THIN
     return CONFIDENCE_OK
+
+
+def measurability_for(
+    spec: "SpecHistory",
+    dates_scored: Sequence[str],
+    cohort_dates: Sequence[str],
+) -> tuple[str, str | None]:
+    """``(measurability, reason)`` for one arm (alpha-engine-config-I9307).
+
+    Three ways an arm is UNMEASURABLE rather than merely thin:
+
+    1. **The loader already knows.** ``spec.unmeasurable_reason`` is set — the
+       arm's declared score source cannot carry its output, or its shadow
+       prefix held nothing across the whole window. Most specific, so it wins.
+    2. **It scored nothing at all** while a cohort exists. An arm with a cohort
+       to score against and zero scored dates has not "not enough evidence yet";
+       it produced no comparable output. ``insufficient`` alone said only the
+       former.
+    3. **It is structurally behind the cohort.** It scored no date among the
+       most recent ``COHORT_LAG_UNMEASURABLE_DATES`` on which the cohort scored.
+       This is the rung that would have caught the seven-week defect at week
+       three: the champion's last scored date was 2026-07-17 while every other
+       arm scored 08-14, 08-21 and 08-28, and its row still said ``thin``.
+
+    Everything else is ``measured`` — including a genuinely thin arm, which is a
+    legitimate result that resolves by waiting. Keeping those two apart is the
+    whole point: one is a state, the other is a defect.
+    """
+    if spec.unmeasurable_reason:
+        return MEASURABILITY_UNMEASURABLE, spec.unmeasurable_reason
+
+    cohort = sorted(cohort_dates)
+    if not cohort:
+        # No cohort at all is a LEADERBOARD-level condition, already handled by
+        # the producers' `unmeasurable` status + alert. Not an arm's fault.
+        return MEASURABILITY_MEASURED, None
+
+    scored = sorted(dates_scored)
+    if not scored:
+        return (
+            MEASURABILITY_UNMEASURABLE,
+            f"scored 0 of {len(cohort)} cohort date(s) — the arm produced no "
+            "comparable output on any date the cohort covers, which is an "
+            "absence, not thin evidence",
+        )
+
+    recent = cohort[-COHORT_LAG_UNMEASURABLE_DATES:]
+    if not (set(scored) & set(recent)):
+        return (
+            MEASURABILITY_UNMEASURABLE,
+            f"last scored {scored[-1]}, but scored none of the {len(recent)} "
+            f"most recent cohort date(s) ({', '.join(recent)}) — the arm has "
+            "stopped producing comparable output; its remaining dates are "
+            "residue, not a thin-but-live record",
+        )
+
+    return MEASURABILITY_MEASURED, None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -554,6 +647,14 @@ class SpecHistory:
     # non-producer board (scanner, cuts) unchanged.
     promotion_eligible: bool = True
     ineligible_reason: str | None = None
+    # Set by the LOADER when it already knows the arm cannot produce a
+    # comparable output — a declared score source that cannot carry the arm's
+    # picks, or a shadow prefix with nothing in it across the whole window
+    # (alpha-engine-config-I9307). ``None`` means "the loader saw no structural
+    # obstacle"; scoring may still derive one from the cohort (see
+    # :func:`measurability_for`). Non-None ALWAYS wins: a reason the loader can
+    # name is more specific than one inferred from a date count.
+    unmeasurable_reason: str | None = None
 
 
 def _signal_for_ic(day: SpecDay) -> dict[str, float]:
@@ -1134,6 +1235,9 @@ def score_leaderboard(
             n_intersection = len(
                 [d for d in spec.by_date if realized_intersection.get(d)]
             )
+            measurability, unmeasurable_reason = measurability_for(
+                spec, dates_scored, dates_with_join,
+            )
             return {
                 "name": spec.name,
                 "kind": spec.kind,
@@ -1156,6 +1260,12 @@ def score_leaderboard(
                 # alpha-engine-config-I7542 — how much evidence stands behind
                 # this row. Additive: every numeric field above is unchanged.
                 "confidence": confidence_for(n_scored, min_dates_for_inference),
+                # alpha-engine-config-I9307 — whether this arm CAN produce
+                # comparable output at all. A separate axis from `confidence`
+                # on purpose: `thin` is a state that resolves by waiting,
+                # `unmeasurable` is a defect that does not.
+                "measurability": measurability,
+                "unmeasurable_reason": unmeasurable_reason,
             }
         except Exception as exc:  # noqa: BLE001 — observe artifact, per-spec isolation
             logger.warning(
@@ -1176,6 +1286,10 @@ def score_leaderboard(
                 "promotion_eligible": spec.promotion_eligible,
                 "ineligible_reason": spec.ineligible_reason,
                 "confidence": CONFIDENCE_INSUFFICIENT,
+                # A spec whose scoring RAISED produced no comparable output for
+                # a reason we can name — that is unmeasurable, never thin.
+                "measurability": MEASURABILITY_UNMEASURABLE,
+                "unmeasurable_reason": f"scoring raised: {exc}",
                 "error": str(exc),
             }
 
@@ -1195,6 +1309,16 @@ def score_leaderboard(
         "cohort_intersection": intersection,
         "n_dates_intersection": len(intersection),
         "specs": spec_rows,
+        # alpha-engine-config-I9307 — the arms that CANNOT be measured, named
+        # at board level so a consumer (and the producers' alert path) does not
+        # have to walk `specs` to discover that the comparison is missing a
+        # side. An empty list is the healthy state and is emitted every cycle:
+        # an absent field would be unmeasured, not fine.
+        "unmeasurable_arms": [
+            {"name": r["name"], "kind": r["kind"], "reason": r.get("unmeasurable_reason")}
+            for r in spec_rows
+            if r.get("measurability") == MEASURABILITY_UNMEASURABLE
+        ],
     }
     # The cohort INTERSECTION, and every cross-arm figure narrowed to it
     # (alpha-engine-config-I9274). Applied here rather than at each producer so

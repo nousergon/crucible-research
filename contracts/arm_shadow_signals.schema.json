@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousergon.ai/schemas/alpha-engine/arm_shadow_signals.v1.json",
+  "title": "Champion/challenger arm shadow signals (selection-producer slot, v1)",
+  "description": "The COMPARABLE artifact for one arm of the selection-producer slot on one cohort date: s3://alpha-engine-research/signals_shadow/{arm}/{date}/signals.json. Written by crucible-research (producers/runner.py, via each ProducerSpec.build) for every registered arm on every weekly pass, regardless of which arm the pointer currently serves (champion-challenger-policy.md §3). Consumed by crucible-research/scoring/leaderboard_producers.py::_picks_by_date, which reduces it to ENTER picks ranked by score. The prefix predates this schema (no_agent_quant and single_agent_quant have written it since config#1221); v1 codifies the shape they already emit and that the shared scorer already reads, so it is a lift of an implicit contract rather than a new artifact. Written now because alpha-engine-config-I9307 added two more producers to it (the filling arms scanner_predictor_direct and scanner_top20_predictor) and an implicit contract with four writers is the M0 boundary case that gets a versioned schema. Evolution is ADDITIVE-ONLY per the S3 Contract Safety rule.",
+  "type": "object",
+  "required": ["date", "producer", "signals"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version stamp. Optional on artifacts written before this schema existed; every writer should emit it."
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "The COHORT date this arm's picks are for — the date the leaderboard joins forward returns against. It must match the {date} path segment; a mismatch makes the arm's record unverifiable."
+    },
+    "run_date": {
+      "type": "string",
+      "description": "When the artifact was generated (dual-track per DATE_CONVENTIONS.md). Distinct from `date`: a backfilled shadow carries a run_date far later than its cohort date, and conflating the two is what makes a backfill indistinguishable from a live write."
+    },
+    "producer": {
+      "type": "string",
+      "description": "The arm that produced these picks, NAMED (champion-challenger-policy.md §7.5) rather than left to be inferred from the S3 prefix. A hardcoded literal here is the defect §7.5 exists to prevent: every prediction row was once annotated watchlist_source: 'scanner_candidate' after the champion had moved."
+    },
+    "architecture_version": {
+      "type": "string",
+      "description": "The implementation shape behind the picks (e.g. sector_teams, filling_arm_shadow_v1)."
+    },
+    "signals": {
+      "type": "object",
+      "description": "Per-ticker decisions, keyed by ticker. THE scored surface: the leaderboard takes every entry whose signal == 'ENTER' and whose score is numeric, ranks them by score descending, and that ranking IS the arm's submission. An arm that writes this object with no ENTER entry has recorded a MISS (it legitimately selected nothing), which is different from not writing the artifact at all (an absence) — champion-challenger-policy.md §3 requires the two to stay distinguishable, which is why an absent artifact is never synthesized as an empty one.",
+      "additionalProperties": { "$ref": "#/$defs/shadow_signal_entry" }
+    },
+    "buy_candidates": {
+      "type": "array",
+      "description": "The ENTER entries as a list, mirroring the live signals.json shape so a reader can use either surface.",
+      "items": { "$ref": "#/$defs/shadow_signal_entry" }
+    },
+    "population": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The full pool the arm ranked, in rank order. Carried so a reader can tell an arm that ranked 60 names and took 10 from one that only ever saw 10 — the difference between a selection rule and a narrow feed."
+    },
+    "arm_pool": {
+      "type": "object",
+      "description": "Provenance of the comparison. An arm scored on a short pool must not read as an arm that chose badly, and that distinction is only recoverable from the artifact if the pool is recorded on it.",
+      "properties": {
+        "pool_source": { "type": "string", "description": "Which durable input the pool came from (e.g. research_free_parquet, predictor_cut:attractiveness_top_20). Names the cut rather than hardcoding it, so the arm follows the cut when research moves it." },
+        "pool_size": { "type": "integer", "minimum": 0 },
+        "n_ranked": { "type": "integer", "minimum": 0 },
+        "n_selected": { "type": "integer", "minimum": 0 },
+        "top_n": { "type": "integer", "minimum": 1, "description": "The width this arm actually serves. Count-matching (§4) is asserted at the leaderboard, but the served width belongs on the artifact: an arm compared at a width it does not serve is measuring a rule nobody runs." }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "shadow_signal_entry": {
+      "type": "object",
+      "required": ["ticker", "signal", "score"],
+      "additionalProperties": true,
+      "properties": {
+        "ticker": { "type": "string" },
+        "signal": {
+          "type": "string",
+          "description": "ENTER is the only value the leaderboard scores; every other value is carried but ignored by the scorer."
+        },
+        "score": {
+          "type": "number",
+          "description": "The arm's own conviction for this name. Only its ORDER is load-bearing — the scorer uses it to rank and to compute the rank-IC, never its level, so two arms with different score bands are still comparable."
+        },
+        "predicted_alpha": { "type": ["number", "null"], "description": "The underlying quantity the ranking came from, where the arm has one. Forensics: without it, a score is unattributable to its source." },
+        "champion_arm": { "type": "string", "description": "Arm name repeated per entry, so a row remains attributable after it is merged into another artifact." }
+      }
+    }
+  }
+}

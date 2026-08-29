@@ -145,19 +145,43 @@ def _seeded_producer_arms() -> tuple[str, ...]:
 
     return tuple(s.name for s in challenger_producers())
 
+# The arm the pointer names in this fixture. Seeded explicitly rather than
+# left to the registry fallback, so the test states which arm it is scoring —
+# and so the champion's picks land at the same prefix every challenger's do
+# (alpha-engine-config-I9307).
+_STANDIN_CHAMPION = "scanner_predictor_direct"
+
 
 def _seed_producer_cohort(client, entries: list[str]) -> None:
+    _put_json(
+        client,
+        "config/producer_champion.json",
+        {"schema_version": 1, "champion": _STANDIN_CHAMPION},
+    )
     for d in entries:
+        # alpha-engine-config-I9307: the champion is read from its own shadow
+        # prefix like every other arm, never from the live signals artifact.
         _put_json(
             client,
-            f"signals/{d}/signals.json",
+            f"signals_shadow/{_STANDIN_CHAMPION}/{d}/signals.json",
             {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("A", 0.9), ("B", 0.5), ("C", 0.1)]}},
         )
-        for arm in _seeded_producer_arms():
+        # Their derived arm list (I9281) — never a literal that goes stale when
+        # the register moves. Each arm gets a membership that DIFFERS from the
+        # champion's rather than being a re-ordering of it: a challenger that
+        # resolves the champion's exact set is a vacuous comparison
+        # (champion-challenger-policy.md §4) and the board's own vacuity guard
+        # correctly alerts on it. Before alpha-engine-config-I9307 the champion
+        # resolved to None here, so that guard was never exercised.
+        _members = {"A", "B", "C"}
+        for _i, arm in enumerate(a for a in _seeded_producer_arms() if a != _STANDIN_CHAMPION):
+            picks = sorted(_members - {sorted(_members)[_i % len(_members)]})
             _put_json(
                 client,
                 f"signals_shadow/{arm}/{d}/signals.json",
-                {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
+                {"signals": {t: {"signal": "ENTER", "score": 0.9 - 0.4 * j}
+                             for j, t in enumerate(picks)}},
+            )
             )
 
 
@@ -290,7 +314,7 @@ class TestLongHorizonImmaturityIsHonest:
             build_producer_leaderboard(
                 s3, _BUCKET, "2026-08-17", top_n=2, closes_panel_loader=panel.loader()
             )
-        assert alert.call_count == 0
+        assert alert.call_count == 0, [c.kwargs.get('message') for c in alert.call_args_list]
         assert digest.call_count == 0, (
             "every registered arm wrote a shadow here; the only zero-cohort "
             "arm is the RETIRED one, which is permanently zero by construction"
@@ -413,6 +437,13 @@ _ADDITIVE_SINCE_CAPTURE = (
     "promotion_eligible",
     "ineligible_reason",
     "comparison_status",
+    # alpha-engine-config-I9307 — whether the arm CAN produce comparable output
+    # at all. A different question from `comparison_status`, which asks whether
+    # this row can be compared against the CHAMPION; see the note in
+    # scoring/leaderboard_scoring.py. Purely additive: it says something new
+    # about the row without touching any protected number.
+    "measurability",
+    "unmeasurable_reason",
 )
 
 # Additive keys at the TOP level of the leaderboard dict, same rule. This is the
@@ -433,6 +464,7 @@ _ADDITIVE_TOP_LEVEL_SINCE_CAPTURE = (
     "cohort_intersection_dates",
     "cohort_intersection_first",
     "cohort_intersection_last",
+    "unmeasurable_arms",  # alpha-engine-config-I9307
 )
 
 # Additive fields added INSIDE a metric block, rather than alongside it. Same

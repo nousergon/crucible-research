@@ -510,10 +510,16 @@ class TestProducerLeaderboardProducer:
         monkeypatch.setattr("producers.registry.champion_producer", lambda: standin)
 
         entry = "2026-06-01"
-        # live champion signals.json + one shadow challenger.
+        # The champion's shadow + one challenger's shadow. alpha-engine-config
+        # -I9307: this fixture used to seed the champion at
+        # ``signals/{date}/signals.json`` — the LIVE artifact — which encoded
+        # the very defect that issue closes. The live artifact's producer is
+        # empty-by-contract and carries no ENTER pick, so a champion read from
+        # there scores nothing; every arm, champion included, is now read from
+        # its own ``signals_shadow/{arm}/`` prefix.
         _put_json(
             s3,
-            f"signals/{entry}/signals.json",
+            f"signals_shadow/standin_champion/{entry}/signals.json",
             {
                 "signals": {
                     "A": {"signal": "ENTER", "score": 90},
