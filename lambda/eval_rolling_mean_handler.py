@@ -397,7 +397,8 @@ def _run(event, context):
     # site too, so a reader does not have to trust the coercion to see it.
     agent_quality: dict
     try:
-        import boto3
+        # boto3 is imported by _bounded_client, not here — every client in this
+        # handler must carry an explicit timeout Config (alpha-engine-config#9102).
         from nousergon_lib.dates import now_dual
 
         from scripts.build_agent_quality import build_agent_quality, write_agent_quality
@@ -463,7 +464,8 @@ def _run(event, context):
     # (full closure of #1221/#1223 = the OBSERVATION_REGISTRY cohort gate).
     producer_leaderboard: dict
     try:
-        import boto3
+        # boto3 is imported by _bounded_client, not here — every client in this
+        # handler must carry an explicit timeout Config (alpha-engine-config#9102).
         from nousergon_lib.dates import now_dual
 
         from scoring.leaderboard_producers import build_producer_leaderboard
