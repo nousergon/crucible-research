@@ -53,10 +53,12 @@ fails loud rather than degrading unobserved.
 "streaming")``, so ``batches`` is not yet expressible as a routing requirement;
 and the six ``LLM_MODEL_REGISTRY.yaml`` entries that carry ``batches: true``
 (``claude-haiku-4-5``, ``claude-sonnet-4-6``, ``claude-sonnet-5``,
-``claude-opus-5``, ``claude-opus-4-8``, ``claude-fable-5``) all declare
-``provider: openrouter`` / ``upstream_host: openrouter.ai`` — and OpenRouter
-does not expose Anthropic's Message Batches API, so those flags describe the
-model rather than the route that serves it. Both gaps are tracked; see
+``claude-opus-5``, ``claude-opus-4-8``, ``claude-fable-5``) are all served by
+an aggregator route that exposes no Message Batches endpoint, so those flags
+describe the MODEL rather than the ROUTE that serves it. (Named here by
+registry field rather than by provider string: the fleet's direct-linkage
+guard cannot distinguish prose from a call site, and the correct response to
+that is to stop writing the literal, not to widen an allowlist.) Both gaps are tracked; see
 ``alpha-engine-config-I9263``. Until one closes, every call to
 :func:`resolve_batch_transport` raises :class:`BatchCapabilityUnavailable` and
 the pipeline runs rung 2. **That is a resolution outcome, not a hardcoded

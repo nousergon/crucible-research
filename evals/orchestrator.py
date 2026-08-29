@@ -57,6 +57,15 @@ from evals.judge import (
     persist_eval_artifact,
     resolve_rubric_for_agent,
 )
+from evals.judge_batch_transport import (
+    BatchCapabilityUnavailable,
+    batch_client_for_route,
+    build_degradation_record,
+    is_sync_batch_id,
+    persist_degradation_record,
+    resolve_batch_transport,
+    sync_batch_id,
+)
 from evals.judge_models import request_model_for
 from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
 from graph.state_schemas import RubricEvalArtifact
@@ -852,17 +861,6 @@ def _persist_client_side_skips(
                 })
 
     return skipped_empty_input, skipped_degenerate_input, persisted, failed
-
-
-from evals.judge_batch_transport import (
-    BatchCapabilityUnavailable,
-    batch_client_for_route,
-    build_degradation_record,
-    is_sync_batch_id,
-    persist_degradation_record,
-    resolve_batch_transport,
-    sync_batch_id,
-)
 
 
 def _submit_via_sync_rung(
