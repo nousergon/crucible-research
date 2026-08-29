@@ -855,6 +855,59 @@ def _arm_evidence(
     )
 
 
+def _evidence_and_meta(
+    ledger_rows: Sequence[Mapping[str, Any]] | None,
+    slot: CutPromotionSlot,
+    champion_before: str,
+    ledger_meta_fn,
+) -> tuple[dict[str, ArmEvidence] | None, dict | None]:
+    """Per-arm ledger evidence plus the ledger meta block, or ``(None, None)``.
+
+    Extracted so a branch that ends the evaluation BEFORE the decision path —
+    today only ``no_promotable_challenger`` — still reports what the ledger
+    holds. A hold that is a registry state must still carry the measurement,
+    or the record denies evidence it was handed
+    (champion-challenger-policy.md §3, alpha-engine-config-I9276).
+
+    Returns ``(None, None)`` when there is no ledger, so the caller falls
+    through to ``hold()``'s own defaults rather than manufacturing an empty
+    block that would claim a read that never happened.
+    """
+    if ledger_rows is None:
+        return None, None
+    per_arm: dict[str, list[dict]] = {}
+    stale_counts: dict[str, int] = {}
+    for arm in slot.arms:
+        per_arm[arm], stale_counts[arm] = _rows_by_arm(ledger_rows, arm)
+    champion_rows = per_arm.get(champion_before) or []
+    arms: dict[str, ArmEvidence] = {}
+    for arm in slot.arms:
+        if per_arm[arm]:
+            arms[arm] = _arm_evidence(
+                arm=arm,
+                arm_rows=per_arm[arm],
+                champion_rows=champion_rows,
+                stale=stale_counts[arm],
+                slot=slot,
+                is_champion=(arm == champion_before),
+            )
+        else:
+            # No rows at the current LEDGER_VERSION — a MISS, recorded as one,
+            # and `weeks_dropped_stale_version` says whether rows exist at an
+            # older version rather than leaving "absent" ambiguous.
+            arms[arm] = ArmEvidence(
+                is_champion=(arm == champion_before),
+                weeks_dropped_stale_version=stale_counts[arm],
+                metric=slot.primary_metric,
+                cadence=slot.decision_cadence,
+                source=slot.decision_source,
+            )
+    meta = ledger_meta_fn(
+        ledger_rows, arms_seen=[a for a in slot.arms if per_arm[a]]
+    )
+    return arms, meta
+
+
 # ── The vetoes ────────────────────────────────────────────────────────────────
 
 
@@ -1345,6 +1398,31 @@ def decide_cut_champion(
             or "none — every scored arm is promotion-eligible, so this hold "
             "means the slot itself has only one arm"
         )
+        # The registry state stops the DECISION; it does not stop the
+        # MEASUREMENT (champion-challenger-policy.md §3, and this record's own
+        # contract: "n_weeks_paired is the measurability surface"). Before
+        # alpha-engine-config-I9276 this branch returned ahead of the ledger
+        # read, so `hold()`'s all-zero default ArmEvidence went out on the
+        # record — and a record written while the ledger ALREADY held a scored
+        # week for the champion still read `present: false, n_weeks_scored: 0`.
+        # Measured on config/apply_audit/scanner_cut_champion/2026-08-28.json:
+        # `ledger.rows_read: 5`, `arms_present: []`, champion `present: false`,
+        # while research/cuts_weekly_ledger/ledger.parquet carried
+        # attractiveness_top_60 for 2026-08-21..2026-08-28 with
+        # net_log_return 0.002985. The record contradicted its own ledger
+        # block, and the one number saying how far off a real decision is read
+        # zero when it was not. Silent absence and a genuine zero must never
+        # render identically (§3) — least of all on the surface that exists to
+        # tell them apart.
+        #
+        # This branch is UNREACHABLE on today's register (I9272 made every
+        # scored arm promotable) and the evidence read is kept anyway: the
+        # branch exists precisely for the day an exclusion shrinks the
+        # promotable set back to one, and on that day the record must carry
+        # real numbers rather than the zeros that made I9276 invisible.
+        arms_ev, ledger_meta = _evidence_and_meta(
+            ledger_rows, slot, champion_before, _ledger_meta
+        )
         return hold(
             REASON_NO_PROMOTABLE_CHALLENGER,
             f"the scanner-cut slot has one promotable arm ({champion_before!r}) "
@@ -1353,6 +1431,8 @@ def decide_cut_champion(
             f"{', '.join(slot.scored_arms)}. Excluded from promotion, with "
             f"reasons: {excluded_note}. The weekly evidence accumulates either "
             "way; what is missing is a second arm allowed to win.",
+            arms=arms_ev,
+            ledger=ledger_meta,
         )
 
     # ── The weekly ledger ──────────────────────────────────────────────────────
