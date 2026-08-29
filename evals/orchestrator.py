@@ -231,6 +231,70 @@ def expand_lookback_dates(date: str, lookback_days: int) -> list[str]:
     return out
 
 
+# Calendar days between a capture partition's trading day and the day its
+# write is GUARANTEED complete. Think Tank writes day D's captures on
+# **D+1 at ~14:35 UTC** (measured 2026-08-29, alpha-engine-config-I9331,
+# from `decision_artifacts/2026/08/27/` written 2026-08-28 14:37-15:16 UTC
+# and `.../08/28/` written 2026-08-29 14:33-14:49 UTC). The weekly judge
+# enters `EvalJudgeSubmitWeekly` at ~05:11 UTC — hours before that day's
+# write. A window anchored on the run day must therefore never treat
+# anything newer than (anchor - 2 calendar days) as safe: one day clears
+# the producer's own write, the second clears the fact that the judge's
+# entry time is EARLY in its run day, not end-of-day. Do not narrow this
+# to 1 without re-measuring both wall-clock times.
+CAPTURE_WRITE_SETTLE_DAYS = 2
+
+
+def effective_capture_ceiling_date(anchor_date: str) -> str:
+    """The newest capture-partition TRADING day guaranteed already written
+    when a stage anchored on ``anchor_date`` runs (I9331).
+
+    ``anchor_date`` minus ``CAPTURE_WRITE_SETTLE_DAYS`` calendar days,
+    rounded back to the nearest actual NYSE trading day. The calendar
+    subtraction happens FIRST, against the producer's wall-clock write
+    guarantee; trading-day rounding only applies afterward, to land the
+    ceiling on a partition that can actually exist. Applying
+    ``previous_trading_day`` twice instead is NOT equivalent — it answers
+    a trading-day-counting question, not a wall-clock-elapsed one, and
+    silently drifts off the settle guarantee across long weekends.
+    """
+    from datetime import date as _date
+    from datetime import timedelta
+
+    from krepis.trading_calendar import is_trading_day
+
+    y, m, d = (int(x) for x in anchor_date.split("-"))
+    ceiling = _date(y, m, d) - timedelta(days=CAPTURE_WRITE_SETTLE_DAYS)
+    while not is_trading_day(ceiling):
+        ceiling -= timedelta(days=1)
+    return str(ceiling)
+
+
+def compute_judge_window_dates(anchor_date: str, lookback_days: int) -> list[str]:
+    """The full set of capture-partition dates safe to judge in one batch
+    anchored on ``anchor_date`` (I9331) — the write-settled ceiling plus
+    the ``lookback_days`` trading days before it (newest first).
+
+    This is the ONLY place a judge invocation should turn an anchor date
+    into a capture window; ``eval_judge_submit_handler`` calls this
+    instead of expanding ``expand_lookback_dates`` directly off the raw
+    anchor, which is what silently excluded the newest trading day's
+    captures forever (I9331) — the anchor is frequently a non-trading day
+    (the weekly SF's Saturday execution) and, even when it is a trading
+    day, is not yet safely written.
+
+    Continuity across weekly cycles: shifting the ceiling back
+    ``CAPTURE_WRITE_SETTLE_DAYS`` calendar days does not create a
+    permanent gap — the day it defers (typically the Friday immediately
+    before a Saturday run) is a TRADING day squarely inside next week's
+    unchanged ``lookback_days``-deep window, which starts from a ceiling
+    five trading days later. It is deferred by one cycle, never dropped,
+    and ``load_already_judged_keys`` makes the overlap idempotent.
+    """
+    ceiling = effective_capture_ceiling_date(anchor_date)
+    return [ceiling] + expand_lookback_dates(ceiling, lookback_days)
+
+
 def _build_capture_prefix(date: str) -> str:
     """``decision_artifacts/{Y}/{M}/{D}/`` — partition layout that
     ``alpha_engine_lib.decision_capture`` writes to."""
@@ -613,11 +677,38 @@ def build_batch_plan(
     # (with agent_id_prefixes to avoid re-judging already-judged families).
     all_dates = [date] + [d for d in (extra_dates or []) if d != date]
     capture_keys: list[str] = []
+    # I9331 deliverable 3: per-date counts so an expected-but-unwritten
+    # partition is a NAMED finding rather than being indistinguishable
+    # from "no work that day". Counted here, off the SAME listing calls
+    # already made for `capture_keys`, so this costs nothing extra.
+    capture_partition_counts: dict[str, int] = {}
     for _d in all_dates:
-        capture_keys.extend(
-            list_capture_keys(
-                s3, date=_d, bucket=bucket, agent_id_prefixes=agent_id_prefixes
-            )
+        _date_keys = list_capture_keys(
+            s3, date=_d, bucket=bucket, agent_id_prefixes=agent_id_prefixes
+        )
+        capture_partition_counts[_d] = len(_date_keys)
+        capture_keys.extend(_date_keys)
+
+    # A TRADING day in the window with zero captures is either a
+    # genuinely idle day or a partition that has not landed yet — both
+    # legitimate, but neither may pass as a silent absence (I9331,
+    # principles.md §2.7: no data is never rendered as green). A
+    # non-trading day (the raw anchor is frequently one, e.g. the
+    # weekly SF's Saturday) is expected to be empty and is not a finding.
+    from krepis.trading_calendar import is_trading_day as _is_trading_day
+
+    empty_trading_day_partitions = [
+        _d for _d in all_dates
+        if capture_partition_counts[_d] == 0
+        and _is_trading_day(datetime.strptime(_d, "%Y-%m-%d").date())
+    ]
+    if empty_trading_day_partitions:
+        logger.error(
+            "[batch_plan] %d expected trading-day partition(s) came back "
+            "EMPTY at judge time: %s — either a genuinely idle day or an "
+            "unwritten producer partition; verify before trusting "
+            "week-over-week coverage (alpha-engine-config-I9331)",
+            len(empty_trading_day_partitions), empty_trading_day_partitions,
         )
     # Already-judged dedup (Brian, 2026-07-02): a multi-date lookback
     # re-enumerates partitions that earlier batches partially judged
@@ -754,6 +845,8 @@ def build_batch_plan(
         "capture_keys_total": len(capture_keys),
         "skipped_unmapped": skipped_unmapped,
         "skipped_already_judged": skipped_already_judged,
+        "capture_partition_counts": capture_partition_counts,
+        "empty_trading_day_partitions": empty_trading_day_partitions,
         "client_side_skips": client_side_skips,
         "plan_entries": plan_entries,
         "requests": requests,

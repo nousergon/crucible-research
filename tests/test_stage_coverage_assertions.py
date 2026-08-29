@@ -438,7 +438,14 @@ class TestEvalJudgeSubmitCoverage:
             patch.object(submit_mod, "_ensure_init"),
             patch("anthropic.Anthropic", return_value=MagicMock()),
             patch("boto3.client", return_value=MagicMock()),
-            patch("evals.orchestrator.build_batch_plan", return_value={"capture_keys_total": 5, "skipped_unmapped": 0}),
+            patch(
+                "evals.orchestrator.build_batch_plan",
+                return_value={
+                    "capture_keys_total": 5, "skipped_unmapped": 0,
+                    "capture_partition_counts": {"2026-05-16": 5},
+                    "empty_trading_day_partitions": [],
+                },
+            ),
             patch("evals.orchestrator._persist_client_side_skips", return_value=(0, 0, None, [])),
             patch("evals.orchestrator.submit_batch", return_value=_submit_result()),
         ):
