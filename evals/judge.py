@@ -201,44 +201,41 @@ loud failure for the operator to diagnose."""
 
 def resolve_rubric_for_agent(agent_id: str) -> str | None:
     """Return the rubric prompt name for ``agent_id``, or ``None`` if
-    the agent type is intentionally unevaluated.
+    the agent type is unmapped — either genuinely unevaluated, or a
+    retired agent family.
 
-    Mapping mirrors the captured agent_id taxonomy (see
-    The retired research graph's sector_team_node + cio_node + macro_economist_node):
+    RETIRED 2026-08-29 (alpha-engine-config-I9330): the six branches for
+    ``sector_quant:{team_id}``, ``sector_qual:{team_id}``,
+    ``sector_peer_review:{team_id}``, ``thesis_update:{team}:{ticker}``,
+    ``macro_economist``, and ``ic_cio`` belonged to the LangGraph
+    sector-team/macro/IC research graph retired 2026-07-12 in favor of
+    Think Tank. Measured 2026-08-29 against the trailing 7-day capture
+    window: 83 artifacts, ALL Think Tank (71 ``thinktank_thesis`` + 12
+    ``thinktank_theme``) — zero artifacts of any retired family. Do not
+    re-add these branches from an old prompt asset or docstring without
+    first confirming the sector-team/macro/IC graph is live again; if it
+    is, the correct fix is re-adding the mapping AND removing this note,
+    not resurrecting one branch from memory.
 
-      sector_quant:{team_id}        → eval_rubric_sector_quant
-      sector_qual:{team_id}         → eval_rubric_sector_qual
-      sector_peer_review:{team_id}  → eval_rubric_sector_peer_review
-      macro_economist               → eval_rubric_macro_economist
-      ic_cio                        → eval_rubric_ic_cio
-      thesis_update:{team}:{ticker} → eval_rubric_thesis_update
+    Unknown agent_ids (this includes every retired family above, and any
+    genuinely-unevaluated agent type such as ``executor:*``) return
+    ``None`` so the caller can skip cleanly (``skipped_unmapped``) rather
+    than crash on rubric lookup or silently grade with the wrong rubric —
+    that clean-skip behavior is load-bearing for the weekly run
+    (``evals/orchestrator.py``'s ``skipped_unmapped`` counters) and must
+    never become a raise or a default fallback.
 
-    Unknown agent_ids return None so the caller can skip cleanly
-    rather than crash on rubric lookup.
+    Live families:
 
-    The thesis_update rubric was added 2026-05-05 after confirming the
-    held-stock update is alpha-load-bearing: executor's position_sizer
-    reads conviction (0.7× multiplier on declining); eod_reconcile reads
-    bull_case (EOD email rationale). Silent regression in this output
-    directly costs alpha through wrong sizing on held positions, so the
-    rubric makes the regression visible weeks before it shows up in
-    alpha-vs-SPY.
+      thinktank_thesis  → eval_rubric_thinktank_thesis
+      thinktank_theme   → eval_rubric_thinktank_theme
+
+    Think-tank ids (config#1579 P2) are deliberately COARSE (not
+    per-ticker/per-theme) so the rolling-mean floor's >=3-samples-per-combo
+    gate is met; ticker/theme identity rides in run_id + the snapshot.
     """
-    if agent_id.startswith("sector_quant:"):
-        return "eval_rubric_sector_quant"
-    if agent_id.startswith("sector_qual:"):
-        return "eval_rubric_sector_qual"
-    if agent_id.startswith("sector_peer_review:"):
-        return "eval_rubric_sector_peer_review"
-    if agent_id.startswith("thesis_update:"):
-        return "eval_rubric_thesis_update"
-    if agent_id == "macro_economist":
-        return "eval_rubric_macro_economist"
-    if agent_id == "ic_cio":
-        return "eval_rubric_ic_cio"
-    # Think-tank family (config#1579 P2) — deliberately COARSE ids (not
-    # per-ticker/per-theme) so the rolling-mean floor's >=3-samples-per-combo
-    # gate is met; ticker/theme identity rides in run_id + the snapshot.
+    # Think-tank family — the only agent families still producing
+    # artifacts (measured 2026-08-29, see docstring above).
     if agent_id == "thinktank_thesis":
         return "eval_rubric_thinktank_thesis"
     if agent_id == "thinktank_theme":

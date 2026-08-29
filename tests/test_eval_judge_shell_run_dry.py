@@ -140,7 +140,9 @@ class TestSubmitDry:
              patch("boto3.client"), \
              patch("evals.orchestrator.build_batch_plan",
                    return_value={"capture_keys_total": 0,
-                                 "skipped_unmapped": 0}), \
+                                 "skipped_unmapped": 0,
+                                 "capture_partition_counts": {},
+                                 "empty_trading_day_partitions": []}), \
              patch("evals.orchestrator._persist_client_side_skips",
                    return_value=(0, 0, [], [])), \
              patch("evals.orchestrator.submit_batch",
