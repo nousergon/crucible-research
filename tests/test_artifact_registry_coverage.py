@@ -196,6 +196,26 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # against that repo's private-docs on 2026-08-20, and opening a fourth
     # against work in flight is what the engagement protocol forbids.
     "scoring/cut_promotion.py": 1,
+    # Scanner-SPEC promotion decision (alpha-engine-config-I9273). 1 PUT site
+    # (the loop over the dated audit key, the latest.json mirror and the live
+    # pointer config/scanner_spec_champion.json). LOAD-BEARING, and more so
+    # than its cut-slot sibling above: the pointer is what
+    # data/scanner_specs.py::live_champion_spec resolves the LIVE candidate
+    # RANKING from, so an absent or stale pointer is not a degraded panel — it
+    # is the scanner ranking on a champion nobody chose. The record is written
+    # on EVERY evaluation — promote, demote or hold — precisely so a dead
+    # engine is distinguishable from an engine that decided to hold
+    # (champion-challenger-policy.md §3). Before this producer existed the
+    # champion moved only by a hand-edit of LIVE_CHAMPION, which is how
+    # alpha-engine-config-I7808 produced four weeks of a leaderboard scoring an
+    # arm against itself: the ABSENCE of this artifact is precisely the bug
+    # class this guard exists for. ARTIFACT_REGISTRY.yaml rows for
+    # config_scanner_spec_champion + config_apply_audit_scanner_spec_champion
+    # (liveness_via the audit latest.json, cadence = the scanner-leaderboard
+    # leaf state) are handed to the session's single private-docs PR rather
+    # than opened as a competing one against work in flight — the same call the
+    # cut slot's pin records above, and tracked on alpha-engine-config-I9273.
+    "scoring/spec_promotion.py": 1,
     # One-time historical backfill of the membership artifact. Writes the DATED
     # key only (never the latest pointer the predictor resolves from) — an
     # operator-invoked reconstruction script, not a pipeline producer, hence no
