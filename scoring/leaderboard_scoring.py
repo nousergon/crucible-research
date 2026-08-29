@@ -109,6 +109,58 @@ CONFIDENCE_OK = "ok"
 CONFIDENCE_THIN = "thin"
 CONFIDENCE_INSUFFICIENT = "insufficient"
 
+# Per-row CROSS-ARM comparability vocabulary (alpha-engine-config-I9274).
+# A fourth vocabulary on purpose, and the reason is the defect: ``confidence``
+# answers "how much evidence stands behind THIS row" and was being read as an
+# answer to "can this row be compared against the champion's". Those are
+# different questions with different remedies, and conflating them is what let
+# ``scanner/leaderboard/2026-08-28.json`` publish the champion at
+# ``topn_alpha_vs_population`` mean 0.031348, t 11.41, beside two challengers
+# at ``confidence: insufficient`` — with nothing on the artifact saying the two
+# sides share ZERO cohort dates and are therefore not comparable at all.
+COMPARISON_OK = "ok"
+COMPARISON_SELF = "self"                       # this row IS the champion
+COMPARISON_NO_CHAMPION = "no_champion"         # the board registers no champion
+COMPARISON_NO_COMMON_COHORT = "no_common_cohort"   # the intersection is empty
+COMPARISON_WIDTH_MISMATCH = "width_mismatch"   # paired across widths measures breadth
+COMPARISON_PARTIAL_COHORT = "partial_cohort"   # see `apply_cohort_intersection`
+
+# Two ADDITIVE axes landed in the same week and they answer different
+# questions — keep both, and do not collapse them:
+#
+#   comparison    (I9274) — can this row be compared AGAINST THE CHAMPION?
+#                           A width mismatch or an empty intersection is a
+#                           property of the PAIR.
+#   measurability (I9307) — can this arm produce a comparable output AT ALL?
+#                           A property of the ARM, true even with no champion.
+#
+# An arm can be `comparison: ok` and `measurability: unmeasurable` only in the
+# degenerate case where nothing is comparable; the reverse — measurable but not
+# comparable — is the common one and is exactly why they are separate.
+# Per-spec MEASURABILITY vocabulary (alpha-engine-config-I9307). A THIRD axis,
+# deliberately separate from both ``confidence`` (how much evidence stands
+# behind this row) and the leaderboard-level ``status`` (did the measurement
+# run at all), because the defect it exists to name is invisible on either:
+#
+#   confidence says  "this arm has little evidence"        -> keep watching
+#   measurability says "this arm CANNOT produce evidence"  -> fix it
+#
+# The champion arm `scanner_predictor_direct` was scored from an artifact whose
+# live producer is empty-by-contract. It could not score, ever. For seven weeks
+# it rendered `thin` — a word that means "not enough yet", i.e. a state that
+# resolves itself by waiting. Nothing waited it out because nothing was coming.
+#
+# champion-challenger-policy.md §7.2: an unmeasurable result must fail LOUD,
+# never render as an empty success. §3: silent absence and a genuine zero must
+# never render identically.
+MEASURABILITY_MEASURED = "measured"
+MEASURABILITY_UNMEASURABLE = "unmeasurable"
+
+# An arm scoring nothing among the most recent ``COHORT_LAG_UNMEASURABLE_DATES``
+# dates on which the cohort DID score is structurally behind, not thin. Three
+# weekly cycles is deliberately short: the defect this catches ran for seven.
+COHORT_LAG_UNMEASURABLE_DATES = 3
+
 
 class LeaderboardIntegrityError(RuntimeError):
     """A leaderboard artifact violates a structural invariant every consumer
@@ -293,6 +345,63 @@ def confidence_for(n_dates_scored: int | None, min_dates_for_inference: int) -> 
     if n < min_dates_for_inference:
         return CONFIDENCE_THIN
     return CONFIDENCE_OK
+
+
+def measurability_for(
+    spec: SpecHistory,
+    dates_scored: Sequence[str],
+    cohort_dates: Sequence[str],
+) -> tuple[str, str | None]:
+    """``(measurability, reason)`` for one arm (alpha-engine-config-I9307).
+
+    Three ways an arm is UNMEASURABLE rather than merely thin:
+
+    1. **The loader already knows.** ``spec.unmeasurable_reason`` is set — the
+       arm's declared score source cannot carry its output, or its shadow
+       prefix held nothing across the whole window. Most specific, so it wins.
+    2. **It scored nothing at all** while a cohort exists. An arm with a cohort
+       to score against and zero scored dates has not "not enough evidence yet";
+       it produced no comparable output. ``insufficient`` alone said only the
+       former.
+    3. **It is structurally behind the cohort.** It scored no date among the
+       most recent ``COHORT_LAG_UNMEASURABLE_DATES`` on which the cohort scored.
+       This is the rung that would have caught the seven-week defect at week
+       three: the champion's last scored date was 2026-07-17 while every other
+       arm scored 08-14, 08-21 and 08-28, and its row still said ``thin``.
+
+    Everything else is ``measured`` — including a genuinely thin arm, which is a
+    legitimate result that resolves by waiting. Keeping those two apart is the
+    whole point: one is a state, the other is a defect.
+    """
+    if spec.unmeasurable_reason:
+        return MEASURABILITY_UNMEASURABLE, spec.unmeasurable_reason
+
+    cohort = sorted(cohort_dates)
+    if not cohort:
+        # No cohort at all is a LEADERBOARD-level condition, already handled by
+        # the producers' `unmeasurable` status + alert. Not an arm's fault.
+        return MEASURABILITY_MEASURED, None
+
+    scored = sorted(dates_scored)
+    if not scored:
+        return (
+            MEASURABILITY_UNMEASURABLE,
+            f"scored 0 of {len(cohort)} cohort date(s) — the arm produced no "
+            "comparable output on any date the cohort covers, which is an "
+            "absence, not thin evidence",
+        )
+
+    recent = cohort[-COHORT_LAG_UNMEASURABLE_DATES:]
+    if not (set(scored) & set(recent)):
+        return (
+            MEASURABILITY_UNMEASURABLE,
+            f"last scored {scored[-1]}, but scored none of the {len(recent)} "
+            f"most recent cohort date(s) ({', '.join(recent)}) — the arm has "
+            "stopped producing comparable output; its remaining dates are "
+            "residue, not a thin-but-live record",
+        )
+
+    return MEASURABILITY_MEASURED, None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -538,6 +647,14 @@ class SpecHistory:
     # non-producer board (scanner, cuts) unchanged.
     promotion_eligible: bool = True
     ineligible_reason: str | None = None
+    # Set by the LOADER when it already knows the arm cannot produce a
+    # comparable output — a declared score source that cannot carry the arm's
+    # picks, or a shadow prefix with nothing in it across the whole window
+    # (alpha-engine-config-I9307). ``None`` means "the loader saw no structural
+    # obstacle"; scoring may still derive one from the cohort (see
+    # :func:`measurability_for`). Non-None ALWAYS wins: a reason the loader can
+    # name is more specific than one inferred from a date count.
+    unmeasurable_reason: str | None = None
 
 
 def _signal_for_ic(day: SpecDay) -> dict[str, float]:
@@ -831,6 +948,194 @@ def cohort_intersection(
         return []
     return sorted(set.intersection(*current.values()))
 
+# ── TWO windows, deliberately, and neither may wear the other's name ─────────
+#
+# This module now carries two cohort-window functions, because the two callers
+# are asking different questions and merging them would answer one with the
+# other — the failure this whole arc has been about.
+#
+#   cohort_intersection(champion, challengers, realized)   [above, from #762]
+#       The PROMOTION window. Filters to promotion-eligible arms and drops an
+#       arm that has gone quiet (STALE_ARM_EXCLUSION_DATES) from CONSTRAINING
+#       the window, so one dead arm cannot collapse every comparison into a
+#       no-contest (alpha-engine-config-I9279/-I9282). Deliberately RELAXED,
+#       and correct for deciding.
+#
+#   strict_cohort_intersection(arms, realized)             [below, from #760]
+#       The REPORTED window. Every arm handed to it must have scored, with no
+#       eligibility filter and no staleness relaxation. Deliberately STRICT,
+#       and correct for reporting.
+#
+# The reported number takes the STRICT rule. Publishing the relaxed window as
+# the block's stated intersection would claim more common ground than exists —
+# a board asserting comparability it does not have, which is worse than the
+# union it replaces because it looks like it was checked. A window may be
+# relaxed to reach a DECISION; it may never be relaxed to make a NUMBER larger.
+#
+# WHY THIS MATTERS RIGHT NOW, MEASURED 2026-08-29: `scoring/spec_promotion.py`
+# (merged, #761) reads `cohort_intersection_dates` and FALLS BACK TO `n_dates`
+# — the UNION — when it is absent. Nothing on main writes that field, so the
+# fallback is taken on every run today and the spec slot's evidence floor is
+# currently reading the union as if it were the intersection: 7 where the truth
+# is 0. `apply_cohort_intersection` below is what writes it.
+
+def scored_dates_for(
+    spec: SpecHistory, realized: Mapping[str, Mapping[str, float]],
+) -> set[str]:
+    """The dates this arm actually contributed at this horizon.
+
+    Exactly the predicate behind the row's ``n_dates_scored``, lifted to one
+    named function so the intersection below and the count on the row can never
+    disagree — two independent spellings of "scored" is the shape that put a
+    union count and a per-arm count on the same block reading as one number.
+    """
+    return {d for d in spec.by_date if realized.get(d)}
+
+
+def strict_cohort_intersection(
+    arms: Sequence[SpecHistory], realized: Mapping[str, Mapping[str, float]],
+) -> list[str]:
+    """The dates on which EVERY arm in ``arms`` scored, sorted.
+
+    champion-challenger-policy.md §4: *"arms are scored over the intersection
+    of dates where all arms produced output, and the intersection is reported
+    alongside the metric."* The boards reported the UNION and called it
+    ``n_dates``, so a champion with a live cohort running back to July and a
+    challenger registered last week rendered on one block as though they had
+    been measured against each other.
+
+    Empty ``arms`` yields ``[]`` — no arms is not "every date", and returning
+    the union there would be the same conflation one level down.
+    """
+    if not arms:
+        return []
+    common: set[str] | None = None
+    for arm in arms:
+        dates = scored_dates_for(arm, realized)
+        common = dates if common is None else (common & dates)
+        if not common:
+            return []
+    return sorted(common or ())
+
+
+def apply_cohort_intersection(
+    block: dict,
+    arms: Sequence[SpecHistory],
+    realized: Mapping[str, Mapping[str, float]],
+    *,
+    champion: SpecHistory | None,
+    top_n: int | Mapping[str, int],
+    overlap_lags: int | None = None,
+) -> list[str]:
+    """Record the block's cohort intersection and narrow every CROSS-ARM figure
+    to it, in place. Returns the intersection dates.
+
+    Emitted on the block (alpha-engine-config-I9274):
+
+    * ``cohort_intersection_dates`` — how many dates every arm scored,
+    * ``cohort_intersection_first`` / ``_last`` — its span, ``None`` when empty,
+    * ``cohort_union_dates`` — the existing ``n_dates``, restated under a name
+      that says which of the two it is.
+
+    ``n_dates`` is deliberately NOT renamed. ``crucible-dashboard``'s
+    ``loaders/s3_loader.py`` and live ``gate:data`` predicates poll it, and a
+    rename would break both to fix a rendering. The sibling field is added
+    alongside; the union keeps its name and its meaning.
+
+    ``topn_alpha_vs_champion`` is then recomputed over the intersection ONLY,
+    and every row carries a ``comparison_status`` saying why it holds what it
+    holds. Where the intersection is empty the figure is ``None`` and the
+    status is ``no_common_cohort`` — a state distinct from
+    ``confidence: insufficient``, which today carries both "this arm scored
+    little" and "this arm cannot be compared" and lets a reader take the first
+    for the second.
+
+    The champion's OWN dates are never dropped: ``n_dates_scored``,
+    ``realized_rank_ic``, ``topn_alpha_vs_benchmark`` and
+    ``topn_alpha_vs_population`` all keep the arm's full honest history
+    (champion-challenger-policy.md §3 — a promoted arm keeps its series). Only
+    the cross-arm comparison narrows, because only the cross-arm comparison is
+    the thing that needs common ground.
+
+    ``top_n`` may be one width for the whole block, or a per-arm mapping (the
+    cuts board scores each arm at its own width). A challenger whose width
+    differs from the champion's keeps a null at ``width_mismatch``: a paired
+    difference across widths measures breadth, not the selection rule.
+    """
+    rows = block.get("specs") or []
+    inter = strict_cohort_intersection(arms, realized)
+    block["cohort_intersection_dates"] = len(inter)
+    block["cohort_intersection_first"] = inter[0] if inter else None
+    block["cohort_intersection_last"] = inter[-1] if inter else None
+    block["cohort_union_dates"] = block.get("n_dates")
+
+    by_name = {a.name: a for a in arms}
+    widths = top_n if isinstance(top_n, Mapping) else None
+
+    def _width(name: str) -> int | None:
+        if widths is None:
+            return int(top_n)  # type: ignore[arg-type]
+        w = widths.get(name)
+        return int(w) if w else None
+
+    champ_width = _width(champion.name) if champion is not None else None
+    restricted = {d: realized[d] for d in inter if d in realized}
+
+    for row in rows:
+        name = row.get("name")
+        if "error" in row:
+            # The per-spec fail-soft row already says the scoring RAISED. It
+            # must not also be given a comparison verdict it never earned.
+            row["comparison_status"] = None
+            continue
+        if champion is not None and name == champion.name:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_SELF
+            continue
+        if champion is None:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_CHAMPION
+            continue
+        arm = by_name.get(name)
+        if arm is None:
+            # A row with no arm behind it cannot be compared and must not be
+            # left carrying a stale figure from a wider pass.
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_COMMON_COHORT
+            continue
+        width = _width(name)
+        if width is None or champ_width is None or width != champ_width:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_WIDTH_MISMATCH
+            continue
+        if not inter:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_COMMON_COHORT
+            continue
+        paired = _topn_alpha_metric(
+            arm, champion, restricted, width, overlap_lags=overlap_lags,
+        )
+        row["topn_alpha_vs_champion"] = paired
+        n_paired = (paired or {}).get("n_dates") or 0
+        if paired is None or n_paired != len(inter):
+            # LOUD, never silent (§7.2). Every date in the intersection was
+            # scored by both arms, so a paired difference should exist on each;
+            # a shortfall means a date whose top-N picks had no realized return
+            # on one side, and the figure is then NOT the block's stated
+            # intersection. Say so on the row rather than publish a number
+            # under a denominator that does not hold.
+            logger.error(
+                "[leaderboard] arm %r paired vs champion %r covered %s of the "
+                "block's %s intersection dates at %sd — the figure is reported "
+                "as partial_cohort rather than under the block's stated "
+                "intersection (alpha-engine-config-I9274)",
+                name, champion.name, n_paired, len(inter),
+                block.get("horizon_days"),
+            )
+            row["comparison_status"] = COMPARISON_PARTIAL_COHORT
+        else:
+            row["comparison_status"] = COMPARISON_OK
+    return inter
 
 def score_leaderboard(
     champion: SpecHistory | None,
@@ -930,6 +1235,9 @@ def score_leaderboard(
             n_intersection = len(
                 [d for d in spec.by_date if realized_intersection.get(d)]
             )
+            measurability, unmeasurable_reason = measurability_for(
+                spec, dates_scored, dates_with_join,
+            )
             return {
                 "name": spec.name,
                 "kind": spec.kind,
@@ -952,6 +1260,12 @@ def score_leaderboard(
                 # alpha-engine-config-I7542 — how much evidence stands behind
                 # this row. Additive: every numeric field above is unchanged.
                 "confidence": confidence_for(n_scored, min_dates_for_inference),
+                # alpha-engine-config-I9307 — whether this arm CAN produce
+                # comparable output at all. A separate axis from `confidence`
+                # on purpose: `thin` is a state that resolves by waiting,
+                # `unmeasurable` is a defect that does not.
+                "measurability": measurability,
+                "unmeasurable_reason": unmeasurable_reason,
             }
         except Exception as exc:  # noqa: BLE001 — observe artifact, per-spec isolation
             logger.warning(
@@ -972,6 +1286,10 @@ def score_leaderboard(
                 "promotion_eligible": spec.promotion_eligible,
                 "ineligible_reason": spec.ineligible_reason,
                 "confidence": CONFIDENCE_INSUFFICIENT,
+                # A spec whose scoring RAISED produced no comparable output for
+                # a reason we can name — that is unmeasurable, never thin.
+                "measurability": MEASURABILITY_UNMEASURABLE,
+                "unmeasurable_reason": f"scoring raised: {exc}",
                 "error": str(exc),
             }
 
@@ -980,7 +1298,7 @@ def score_leaderboard(
     for ch in challengers:
         spec_rows.append(_row(ch, is_champion=False))
 
-    return {
+    out = {
         "champion": champion.name if champion is not None else None,
         "horizon_days": horizon_days,
         "top_n": top_n,
@@ -991,7 +1309,32 @@ def score_leaderboard(
         "cohort_intersection": intersection,
         "n_dates_intersection": len(intersection),
         "specs": spec_rows,
+        # alpha-engine-config-I9307 — the arms that CANNOT be measured, named
+        # at board level so a consumer (and the producers' alert path) does not
+        # have to walk `specs` to discover that the comparison is missing a
+        # side. An empty list is the healthy state and is emitted every cycle:
+        # an absent field would be unmeasured, not fine.
+        "unmeasurable_arms": [
+            {"name": r["name"], "kind": r["kind"], "reason": r.get("unmeasurable_reason")}
+            for r in spec_rows
+            if r.get("measurability") == MEASURABILITY_UNMEASURABLE
+        ],
     }
+    # The cohort INTERSECTION, and every cross-arm figure narrowed to it
+    # (alpha-engine-config-I9274). Applied here rather than at each producer so
+    # a direct caller of this function cannot get a board without it — the
+    # scanner and producer boards score every arm in one pass and are covered
+    # by this alone. The cuts board scores one arm per pass and RE-APPLIES it
+    # over the merged arm set, where the whole block is finally in scope.
+    apply_cohort_intersection(
+        out,
+        [a for a in (champion, *challengers) if a is not None],
+        realized,
+        champion=champion,
+        top_n=top_n,
+        overlap_lags=overlap_lags,
+    )
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1116,6 +1459,14 @@ def score_multi_horizon(
                 "status": status,
                 "reason": reason,
                 "n_dates": scored["n_dates"],
+                # The cohort intersection for THIS horizon (alpha-engine-config
+                # -I9274). Per horizon, never per board: an arm can be inside
+                # the 21d intersection and outside the 126d one, because a
+                # longer horizon scores only the older, matured cohort dates.
+                "cohort_union_dates": scored["cohort_union_dates"],
+                "cohort_intersection_dates": scored["cohort_intersection_dates"],
+                "cohort_intersection_first": scored["cohort_intersection_first"],
+                "cohort_intersection_last": scored["cohort_intersection_last"],
                 # Declared per block so a reader never has to infer whether this
                 # horizon's observations were independent. `overlap_lags: 0`
                 # means genuinely non-overlapping, not "not checked".

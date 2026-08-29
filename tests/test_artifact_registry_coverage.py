@@ -43,6 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Captured 2026-05-27.
 EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "archive/manager.py": 5,
+    # alpha-engine-config-I9307 — one PUT, to the SAME
+    # signals_shadow/{arm}/{date}/signals.json prefix archive/manager.py
+    # already writes and the registry already declares
+    # (research_signals_shadow_*). This is a deliberate one-off backfill entry
+    # point, not a scheduled producer: the weekly pass writes these arms'
+    # shadows through producers/runner.py like every other challenger.
+    "scripts/backfill_filling_arm_shadows.py": 1,
     # research/{run_date}/self_test.json (the §2.3a numeric-correctness verdict)
     # + ops/checks/ae-research-self-test/latest.json (its console envelope).
     # BOTH REGISTERED in ARTIFACT_REGISTRY.yaml as research_self_test /
@@ -114,6 +121,20 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # way — the transport record for a run sits beside that run's plan — so it
     # rides the same already-registered prefix rather than opening a new one.
     "evals/judge_batch_transport.py": 1,
+    # Eval-judge spot run record (alpha-engine-config-I9309). One PUT:
+    # `decision_artifacts/_eval_batch_plans/{date}/spot_run.json`, the durable
+    # statement of what the spot run covered — planned vs graded, the coverage
+    # verdict, and the transport rung. Written BEFORE the coverage verdict is
+    # enforced, deliberately: on the failing path it is the only artifact that
+    # explains the failure, so writing it afterwards would mean the runs most
+    # needing evidence leave none.
+    #
+    # Same already-grandfathered prefix as the plan manifest and the
+    # degradation record above (`decision_artifacts/_eval_batch_plans/`,
+    # variable {date} cardinality) — one listing answers what was planned,
+    # what transport served it, and what it covered, rather than making a
+    # reader know three prefixes.
+    "evals/judge_spot_run.py": 1,
     # Phase B weekly judge-sensitivity scorecard (config#752). Single PUT
     # site (loop over dated + latest json/md keys in emit_perturbation_report)
     # writing decision_artifacts/_perturbation/_report/{date,latest}/
