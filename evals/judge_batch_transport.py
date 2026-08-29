@@ -183,10 +183,12 @@ def resolve_batch_transport(
     # suite's autouse router stub patches ``krepis.router.resolve_group_spec``,
     # and a module-level ``from krepis.router import ...`` would bind the name
     # before any per-test monkeypatch could intercept it.
-    from evals.judge import JUDGE_EXEC_CONTEXT, JUDGE_MODEL_GROUP
+    from evals.judge import JUDGE_MODEL_GROUP, judge_exec_context
 
     group = group or JUDGE_MODEL_GROUP
-    exec_context = exec_context or JUDGE_EXEC_CONTEXT
+    # alpha-engine-config-I9309: resolved per call, so the same image asks the
+    # router the right question from a Lambda and from the spot box.
+    exec_context = exec_context or judge_exec_context()
 
     try:
         from krepis.model_registry import CapabilityUnavailableError
