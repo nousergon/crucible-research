@@ -24,7 +24,6 @@ from producers.registry import (
 from thinktank.ledger import record_thesis_write
 from thinktank.schemas import CoverageLedger, LedgerEntry
 
-
 # ── I9282: the missing re-cover half ────────────────────────────────────────
 
 

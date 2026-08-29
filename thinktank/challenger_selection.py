@@ -55,7 +55,6 @@ import logging
 from datetime import date
 
 from observe_alerts import publish_observe_alert
-
 from thinktank import (
     CHALLENGER_SELECTION_KEY_TMPL,
     CHALLENGER_SELECTION_LATEST_KEY,
