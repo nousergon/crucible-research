@@ -26,10 +26,45 @@ from nousergon_lib.decision_capture import (
     ModelMetadata,
 )
 
+from evals import orchestrator as orch
 from graph.state_schemas import (
     RubricDimensionScore,
     RubricEvalArtifact,
 )
+
+# ── Rubric-mapping test seam (alpha-engine-config-I9330) ───────────────────
+#
+# This suite tests orchestrator MECHANICS — batch counting, Haiku/Sonnet
+# escalation, dedup, empty-input skip — using agent_id strings
+# (sector_quant, sector_qual, macro_economist, ic_cio, thesis_update)
+# that trace back to the pre-2026-07-12 research graph. Those strings are
+# arbitrary test labels here, not a claim about which agent families the
+# production judge currently supports — the mechanics being tested don't
+# care WHICH rubric family an agent_id maps to, only whether it maps to
+# one at all. Hardcoding them meant this suite was silently coupled to
+# ``evals.judge.resolve_rubric_for_agent``'s real taxonomy: when I9330
+# retired six of its eight branches, every "mapped" fixture below became
+# genuinely unmapped and every count-based assertion went wrong for a
+# reason unrelated to what this suite exists to test. This synthetic map
+# decouples the two so a future rubric-family retirement doesn't require
+# touching orchestrator tests again.
+_TEST_MAPPED_PREFIXES = (
+    "sector_quant", "sector_qual", "sector_peer_review",
+    "macro_economist", "ic_cio", "thesis_update",
+)
+
+
+def _synthetic_resolve_rubric_for_agent(agent_id: str) -> str | None:
+    for prefix in _TEST_MAPPED_PREFIXES:
+        if agent_id == prefix or agent_id.startswith(f"{prefix}:"):
+            return f"eval_rubric_test_{prefix}"
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_rubric_map(monkeypatch):
+    monkeypatch.setattr(orch, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent)
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 

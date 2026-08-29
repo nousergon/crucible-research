@@ -24,6 +24,61 @@ from nousergon_lib.decision_capture import (
     ModelMetadata,
 )
 
+from evals import judge as judge_mod
+from evals import orchestrator as orch
+
+# ── Rubric-mapping test seam (alpha-engine-config-I9330) ───────────────────
+#
+# Same rationale as tests/test_eval_orchestrator.py: this suite exercises
+# ``build_batch_plan``/``submit_batch``/``process_batch_results`` MECHANICS
+# (custom_id round-trip, plan-manifest persistence, empty-input skip,
+# Sonnet escalation tail) using pre-2026-07-12 research-graph agent_id
+# strings as arbitrary test labels — the mechanics don't care which
+# rubric family an agent_id maps to. Decoupling from the real
+# ``evals.judge.resolve_rubric_for_agent`` taxonomy means a future rubric
+# retirement (like I9330's own six-branch retirement) doesn't silently
+# turn every "mapped" fixture here into "unmapped" and break counts for
+# a reason unrelated to what this suite tests. ``_is_degenerate_input``
+# is intentionally NOT patched — ``_make_capture_dict``'s per-family
+# ``input_data_snapshot`` shapes are built to match its real, still-live
+# per-family branches, and that coupling is the thing under test in the
+# empty/degenerate-input skip cases below. Patched on BOTH modules:
+# ``build_batch_plan`` (orchestrator.py) and ``build_batch_request``
+# (judge.py) each independently call ``resolve_rubric_for_agent`` as a
+# bare name resolved in their OWN module globals — patching only one
+# leaves the other calling the real (post-I9330) production mapping.
+#
+# Maps back to the ORIGINAL (retired) rubric prompt names, not a
+# synthetic placeholder: unlike ``evaluate_corpus`` (stubbed at
+# ``evaluate_artifact``, never touches a real prompt file),
+# ``build_batch_request`` calls ``load_prompt(rubric_name)`` for real —
+# a synthetic name would 404. The retired rubric prompt files still
+# exist in alpha-engine-config as of this PR (I9330 is scoped to
+# crucible-research's ``resolve_rubric_for_agent`` only; retiring the
+# prompt assets themselves is a separate, private-repo follow-up).
+_TEST_RUBRIC_MAP = {
+    "sector_quant": "eval_rubric_sector_quant",
+    "sector_qual": "eval_rubric_sector_qual",
+    "sector_peer_review": "eval_rubric_sector_peer_review",
+    "macro_economist": "eval_rubric_macro_economist",
+    "ic_cio": "eval_rubric_ic_cio",
+    "thesis_update": "eval_rubric_thesis_update",
+}
+
+
+def _synthetic_resolve_rubric_for_agent(agent_id: str) -> str | None:
+    for prefix, rubric in _TEST_RUBRIC_MAP.items():
+        if agent_id == prefix or agent_id.startswith(f"{prefix}:"):
+            return rubric
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_rubric_map(monkeypatch):
+    monkeypatch.setattr(orch, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent)
+    monkeypatch.setattr(judge_mod, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent)
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 

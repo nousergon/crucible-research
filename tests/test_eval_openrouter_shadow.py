@@ -22,8 +22,31 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from evals import openrouter_shadow as shadow_mod
 from graph.state_schemas import RubricDimensionScore, RubricEvalArtifact
-from tests.test_eval_orchestrator import _make_capture, _make_eval
+from tests.test_eval_orchestrator import (
+    _make_capture,
+    _make_eval,
+    _synthetic_resolve_rubric_for_agent,
+)
+
+# ── Rubric-mapping test seam (alpha-engine-config-I9330) ───────────────────
+#
+# Same rationale as tests/test_eval_orchestrator.py — this suite reuses
+# that module's pre-2026-07-12 research-graph fixture labels
+# (sector_quant, ic_cio) as arbitrary "mapped" identifiers to test
+# ``run_shadow_judge_over_date``'s mapped/unmapped counting, and
+# ``evals.openrouter_shadow`` holds its OWN independent binding of
+# ``resolve_rubric_for_agent`` (a separate ``from evals.judge import
+# resolve_rubric_for_agent``), so it needs its own patch.
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_rubric_map(monkeypatch):
+    monkeypatch.setattr(
+        shadow_mod, "resolve_rubric_for_agent", _synthetic_resolve_rubric_for_agent,
+    )
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
