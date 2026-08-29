@@ -49,7 +49,7 @@ delta is recorded here rather than left implied:
 * **Cost the SOTA path imposes:** a cross-repo change (``nousergon-lib`` +
   ``crucible-backtester`` + ``crucible-research``) with a merge order through a
   branch that is not mine, to move code that is already correct.
-* **Tracked follow-up:** ``alpha-engine-config-I9285`` — lift this module into
+* **Tracked follow-up:** ``alpha-engine-config-I9312`` — lift this module into
   ``nousergon-lib`` and retire ``champion_digest.py`` onto it. Until then this
   file is the SECOND implementation of the shape and it says so.
 
