@@ -1283,6 +1283,19 @@ def process_batch_results(
     failed = [f for f in failed if f.get("stage") != "empty_input_skip"]
     metric_emission_failures = 0
     persisted_keys: list[str] = []
+    # Coverage ledger (alpha-engine-config-I9309). Every plan entry whose
+    # judge eval was PERSISTED, by custom_id. A set, not a counter, because
+    # the three rungs that can grade an entry — the batch stream, the sync
+    # rung, and the parse-retry tail — are not mutually exclusive: a stream
+    # item that failed to parse and was then recovered by the retry tail must
+    # count once, and a counter incremented at each site would report 101%
+    # coverage on exactly the week the retry tail earned its keep.
+    #
+    # The Sonnet-escalation tail deliberately does NOT record here: it emits a
+    # SECOND eval for an entry the Haiku pass already graded, so counting it
+    # would let escalations paper over an ungraded entry elsewhere. Coverage
+    # is measured over plan entries, and each entry is graded exactly once.
+    graded_custom_ids: set[str] = set()
     haiku_evals_by_agent_run: dict[tuple[str, str], RubricEvalArtifact] = {}
 
     # Deadline bookkeeping. Each phase keeps its OWN latency sample —
@@ -1456,6 +1469,7 @@ def process_batch_results(
                     prefix=eval_prefix,
                 )
                 persisted_keys.append(pkey)
+                graded_custom_ids.add(entry["custom_id"])
                 if entry["judge_model"] == haiku_model:
                     haiku_evaluated += 1
                     haiku_evals_by_agent_run[
@@ -1511,6 +1525,7 @@ def process_batch_results(
                 sync_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
             )
             persisted_keys.append(pkey)
+            graded_custom_ids.add(entry["custom_id"])
             sync_fallback_evaluated += 1
             if entry["judge_model"] == haiku_model:
                 haiku_evaluated += 1
@@ -1587,6 +1602,7 @@ def process_batch_results(
                 retry_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
             )
             persisted_keys.append(pkey)
+            graded_custom_ids.add(entry["custom_id"])
             parse_retry_recovered += 1
             if entry["judge_model"] == haiku_model:
                 haiku_evaluated += 1
@@ -1715,17 +1731,45 @@ def process_batch_results(
         skipped_empty_input *= 2
 
     budget_stopped = bool(budget_stopped_phases)
+
+    # ── Coverage verdict (alpha-engine-config-I9309) ─────────────────────
+    #
+    # Brian's ruling 2026-08-29: "perhaps if the lambda times out then we
+    # need to put the judge on a spot instance." The reasoning that governs
+    # HOW it is built is his 2026-08-14 ruling about the Director — "director
+    # should NEVER time out, if it times out it FAILS" — recorded with the
+    # rationale that retries and larger ceilings are out of scope as fixes
+    # BECAUSE they make a latency regression survivable instead of visible.
+    #
+    # Grading 10 of 85 artifacts and reporting `degraded` was precisely that
+    # anti-pattern: an honest field on a stage that still returned success, so
+    # a tenfold capacity shortfall cost the pipeline nothing and paged nobody.
+    # These fields are the same measurement promoted to a VERDICT. The
+    # transport rung stays honestly reported (`degraded_transport`) — that is
+    # a legitimate degradation, recorded and priced. Coverage is now pass/fail:
+    # `evals.judge_coverage.enforce_coverage` reads these fields and raises.
+    #
+    # Reported on every rung, including a clean one, because a field that
+    # appears only when something is wrong is indistinguishable from a field
+    # nobody emitted (principles.md §2.7: no data is never rendered as green).
+    plan_entry_count = len(plan["plan_entries"])
+    ungraded = [
+        e for e in plan["plan_entries"]
+        if e["custom_id"] not in graded_custom_ids
+    ]
     logger.info(
         "[batch_process] done batch_id=%s date=%s haiku=%d sonnet=%d "
         "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
         "parse_retry_recovered=%d metric_emission_failures=%d "
         "degraded_transport=%s sync_fallback_evaluated=%d "
-        "complete=%s budget_stopped_phases=%s",
+        "complete=%s budget_stopped_phases=%s "
+        "coverage=%d/%d ungraded=%d",
         batch_id, date, haiku_evaluated, sonnet_evaluated,
         plan.get("skipped_unmapped", 0), skipped_empty_input, len(failed),
         parse_retry_recovered, metric_emission_failures,
         is_sync_batch_id(batch_id), sync_fallback_evaluated,
         not budget_stopped, budget_stopped_phases or "-",
+        len(graded_custom_ids), plan_entry_count, len(ungraded),
     )
 
     return {
@@ -1756,6 +1800,28 @@ def process_batch_results(
         "budget_stopped": budget_stopped,
         "budget_stopped_phases": budget_stopped_phases,
         "n_skipped_for_budget": n_skipped_for_budget,
+        # Coverage ledger — see the block above `plan_entry_count`.
+        # `plan_entry_count` is the corpus this pass was ASKED to grade
+        # (1:1 with `plan["requests"]`, client-side skips already excluded,
+        # so it is never inflated by artifacts that were deliberately not
+        # judged). `plan_entries_graded` is what it DID grade. Equality is
+        # the pass condition; the shortfall list names the misses so a reader
+        # does not have to diff two S3 listings to learn which agents lost
+        # their eval this week.
+        "plan_entry_count": plan_entry_count,
+        "plan_entries_graded": len(graded_custom_ids),
+        "plan_entries_ungraded": len(ungraded),
+        "coverage_complete": not ungraded,
+        "ungraded_entries": [
+            {
+                "custom_id": e["custom_id"],
+                "agent_id": e["agent_id"],
+                "run_id": e["run_id"],
+                "judge_model": e["judge_model"],
+                "capture_s3_key": e["capture_s3_key"],
+            }
+            for e in ungraded
+        ],
         "failed": failed,
         "persisted_keys": persisted_keys,
         "haiku_model": haiku_model,
