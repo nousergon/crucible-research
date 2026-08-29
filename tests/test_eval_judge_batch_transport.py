@@ -5,7 +5,7 @@ fund the anthropic account, at this point we shouldn't be using the anthropic
 api at all."*
 
 Every test here fails against the pre-migration code, where
-``eval_judge_submit_handler``, ``eval_judge_poll_handler`` and
+``eval_judge_submit_handler``, the retired ``eval_judge_poll_handler`` and
 ``eval_judge_process_handler`` each built ``anthropic.Anthropic(
 api_key=ANTHROPIC_API_KEY)`` at the call site and one vendor's billing state
 took down a whole Step Function branch (three times: alpha-engine-config-I7448,
@@ -54,8 +54,10 @@ class TestNoProviderSDKAtTheCallSite:
 
     @pytest.mark.parametrize("relpath", [
         "lambda/eval_judge_submit_handler.py",
-        "lambda/eval_judge_poll_handler.py",
-        "lambda/eval_judge_process_handler.py",
+        # Poll and Process are no longer Lambdas (alpha-engine-config-I9329);
+        # the Process leg's substrate-independent entrypoint carries the same
+        # no-direct-SDK obligation and takes their place here.
+        "evals/judge_spot_run.py",
         "evals/orchestrator.py",
         "evals/judge_batch_transport.py",
     ])

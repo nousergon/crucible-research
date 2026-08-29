@@ -109,6 +109,52 @@ def _persist_run_record(record: dict, *, bucket: str, s3_client=None) -> str:
     return key
 
 
+def _stage_coverage(*, run_date: str, window_start) -> dict:
+    """EvalJudgeProcess's stage-coverage self-assertion, OBSERVE MODE ONLY.
+
+    Carried over from ``lambda/eval_judge_process_handler.py`` when that
+    handler was retired (alpha-engine-config-I9329). The SF stage did not go
+    away — only its substrate did — so the assertion must not go away either:
+    a stage that stops emitting a coverage verdict is indistinguishable, on
+    the console, from a stage that found nothing wrong (config-I7214,
+    sf-pipeline-policy.md §2.3a).
+
+    One thing IMPROVES on the substrate move. The Lambda had no ``run_date``
+    on its event and had to recover the execution identity from
+    ``plan_s3_key``'s ``{date}`` path segment, recording UNMEASURED whenever
+    that failed (alpha-engine-config-I8155). Here the SF passes ``--date``
+    directly, so the identity is first-class and that whole recovery path is
+    gone.
+
+    Never raises: an observer that can kill the stage it observes is worse
+    than no observer. Every failure degrades to UNMEASURED **with a reason**,
+    which is a value the console can render — not silence.
+    """
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        return assert_stage_coverage(
+            "EvalJudgeProcess", run_date=run_date, window_start=window_start,
+        )
+    except ImportError as exc:
+        logger.error("[judge_spot_run] stage-coverage assertion unavailable: %s", exc)
+        return {
+            "stage": "EvalJudgeProcess",
+            "status": "UNMEASURED",
+            "reason": f"assertion unavailable: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+        logger.error(
+            "[judge_spot_run] stage-coverage assertion raised for "
+            "EvalJudgeProcess: %s: %s", type(exc).__name__, exc,
+        )
+        return {
+            "stage": "EvalJudgeProcess",
+            "status": "UNMEASURED",
+            "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+        }
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="python -m evals.judge_spot_run",
@@ -222,6 +268,13 @@ def main(argv: list[str] | None = None) -> int:
         "substrate": "ec2-spot",
         "exec_context": os.environ.get("KREPIS_EXEC_CONTEXT") or "(unset)",
         "coverage": verdict,
+        # config-I7214: the stage's own coverage verdict, observe mode. It
+        # rides in the run record because that is this substrate's durable
+        # surface — the Lambda returned it in its result payload, and a spot
+        # run has no result payload to return.
+        "stage_coverage": _stage_coverage(
+            run_date=args.date, window_start=started,
+        ),
         # The transport rung is reported here too, and separately from the
         # coverage verdict, so the two are never read as one number.
         "degraded_transport": summary.get("degraded_transport"),

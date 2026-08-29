@@ -14,6 +14,13 @@ flag short-circuit:
 
 Mirrors ``tests/test_eval_judge_handler.py`` /
 ``tests/test_rationale_clustering_handler.py`` handler-load style.
+
+**Scope narrowed by alpha-engine-config-I9329.** The chain was
+Submit → Poll → Process. Poll and Process are retired as Lambdas — Poll was
+residue of the retired async batch API, and Process moved substrate to a spot
+box, whose dry path is ``python -m evals.judge_spot_run --preflight-only``
+(an on-box flag, covered on the box, not an event key covered here). What is
+left is Submit and rationale clustering.
 """
 
 from __future__ import annotations
@@ -52,24 +59,6 @@ def _load_handler(filename: str, module_name: str):
 def submit_mod():
     mod = _load_handler(
         "eval_judge_submit_handler.py", "lambda_eval_judge_submit_handler"
-    )
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def poll_mod():
-    mod = _load_handler(
-        "eval_judge_poll_handler.py", "lambda_eval_judge_poll_handler"
-    )
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def process_mod():
-    mod = _load_handler(
-        "eval_judge_process_handler.py", "lambda_eval_judge_process_handler"
     )
     mod._init_done = False
     yield mod
@@ -185,67 +174,6 @@ class TestSubmitDry:
         assert result.get("dry_run") is not True
 
 
-# ── eval_judge_poll ──────────────────────────────────────────────────
-
-
-class TestPollDry:
-    def test_dry_flag_no_anthropic_terminal_ended(self, poll_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.poll_batch") as poll_batch:
-            result = poll_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID, DRY_FLAG: True},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        poll_batch.assert_not_called()
-        assert result["processing_status"] == "ended"
-        assert result["exceeded_max_wait"] is False
-        assert result["dry_run"] is True
-
-    def test_dry_sentinel_batch_id_alone_short_circuits(self, poll_mod):
-        # Even without the flag, the threaded sentinel batch_id is dry.
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.poll_batch") as poll_batch:
-            result = poll_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID}, context=None
-            )
-        anthropic_cls.assert_not_called()
-        poll_batch.assert_not_called()
-        assert result["processing_status"] == "ended"
-
-
-# ── eval_judge_process ───────────────────────────────────────────────
-
-
-class TestProcessDry:
-    def test_dry_no_anthropic_no_s3_read_returns_ok(self, process_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.process_batch_results") as proc:
-            result = process_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID,
-                 "plan_s3_key": None, DRY_FLAG: True},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        # process_batch_results does the S3 plan get_object + stream +
-        # per-artifact persist — must never be called on the dry path.
-        proc.assert_not_called()
-        assert result["status"] == "OK"
-        assert result["dry_run"] is True
-        assert result["summary"]["persisted_keys"] == []
-
-    def test_dry_via_threaded_sentinel_without_flag(self, process_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.process_batch_results") as proc:
-            result = process_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID, "plan_s3_key": None},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        proc.assert_not_called()
-        assert result["status"] == "OK"
-
-
 # ── rationale_clustering ─────────────────────────────────────────────
 
 
@@ -309,14 +237,14 @@ class TestRationaleClusteringDry:
 
 
 class TestBootStillRuns:
-    def test_all_four_handlers_import_clean(
-        self, submit_mod, poll_mod, process_mod, clustering_mod
+    def test_both_remaining_handlers_import_clean(
+        self, submit_mod, clustering_mod
     ):
         # Each fixture exec_module'd the handler file (running its
         # module-level imports + setup_logging + flow-doctor wiring).
         # If any import/bootstrap broke, the fixture would have raised
         # before reaching here — that IS the shell-run smoke.
-        for mod in (submit_mod, poll_mod, process_mod, clustering_mod):
+        for mod in (submit_mod, clustering_mod):
             assert hasattr(mod, "handler")
             assert callable(mod.handler)
 
