@@ -109,6 +109,22 @@ CONFIDENCE_OK = "ok"
 CONFIDENCE_THIN = "thin"
 CONFIDENCE_INSUFFICIENT = "insufficient"
 
+# Per-row CROSS-ARM comparability vocabulary (alpha-engine-config-I9274).
+# A fourth vocabulary on purpose, and the reason is the defect: ``confidence``
+# answers "how much evidence stands behind THIS row" and was being read as an
+# answer to "can this row be compared against the champion's". Those are
+# different questions with different remedies, and conflating them is what let
+# ``scanner/leaderboard/2026-08-28.json`` publish the champion at
+# ``topn_alpha_vs_population`` mean 0.031348, t 11.41, beside two challengers
+# at ``confidence: insufficient`` — with nothing on the artifact saying the two
+# sides share ZERO cohort dates and are therefore not comparable at all.
+COMPARISON_OK = "ok"
+COMPARISON_SELF = "self"                       # this row IS the champion
+COMPARISON_NO_CHAMPION = "no_champion"         # the board registers no champion
+COMPARISON_NO_COMMON_COHORT = "no_common_cohort"   # the intersection is empty
+COMPARISON_WIDTH_MISMATCH = "width_mismatch"   # paired across widths measures breadth
+COMPARISON_PARTIAL_COHORT = "partial_cohort"   # see `apply_cohort_intersection`
+
 
 class LeaderboardIntegrityError(RuntimeError):
     """A leaderboard artifact violates a structural invariant every consumer
@@ -757,6 +773,165 @@ def paired_alpha_vs_champion(
     )
 
 
+def scored_dates_for(
+    spec: SpecHistory, realized: Mapping[str, Mapping[str, float]],
+) -> set[str]:
+    """The dates this arm actually contributed at this horizon.
+
+    Exactly the predicate behind the row's ``n_dates_scored``, lifted to one
+    named function so the intersection below and the count on the row can never
+    disagree — two independent spellings of "scored" is the shape that put a
+    union count and a per-arm count on the same block reading as one number.
+    """
+    return {d for d in spec.by_date if realized.get(d)}
+
+
+def cohort_intersection(
+    arms: Sequence[SpecHistory], realized: Mapping[str, Mapping[str, float]],
+) -> list[str]:
+    """The dates on which EVERY arm in ``arms`` scored, sorted.
+
+    champion-challenger-policy.md §4: *"arms are scored over the intersection
+    of dates where all arms produced output, and the intersection is reported
+    alongside the metric."* The boards reported the UNION and called it
+    ``n_dates``, so a champion with a live cohort running back to July and a
+    challenger registered last week rendered on one block as though they had
+    been measured against each other.
+
+    Empty ``arms`` yields ``[]`` — no arms is not "every date", and returning
+    the union there would be the same conflation one level down.
+    """
+    if not arms:
+        return []
+    common: set[str] | None = None
+    for arm in arms:
+        dates = scored_dates_for(arm, realized)
+        common = dates if common is None else (common & dates)
+        if not common:
+            return []
+    return sorted(common or ())
+
+
+def apply_cohort_intersection(
+    block: dict,
+    arms: Sequence[SpecHistory],
+    realized: Mapping[str, Mapping[str, float]],
+    *,
+    champion: SpecHistory | None,
+    top_n: int | Mapping[str, int],
+    overlap_lags: int | None = None,
+) -> list[str]:
+    """Record the block's cohort intersection and narrow every CROSS-ARM figure
+    to it, in place. Returns the intersection dates.
+
+    Emitted on the block (alpha-engine-config-I9274):
+
+    * ``cohort_intersection_dates`` — how many dates every arm scored,
+    * ``cohort_intersection_first`` / ``_last`` — its span, ``None`` when empty,
+    * ``cohort_union_dates`` — the existing ``n_dates``, restated under a name
+      that says which of the two it is.
+
+    ``n_dates`` is deliberately NOT renamed. ``crucible-dashboard``'s
+    ``loaders/s3_loader.py`` and live ``gate:data`` predicates poll it, and a
+    rename would break both to fix a rendering. The sibling field is added
+    alongside; the union keeps its name and its meaning.
+
+    ``topn_alpha_vs_champion`` is then recomputed over the intersection ONLY,
+    and every row carries a ``comparison_status`` saying why it holds what it
+    holds. Where the intersection is empty the figure is ``None`` and the
+    status is ``no_common_cohort`` — a state distinct from
+    ``confidence: insufficient``, which today carries both "this arm scored
+    little" and "this arm cannot be compared" and lets a reader take the first
+    for the second.
+
+    The champion's OWN dates are never dropped: ``n_dates_scored``,
+    ``realized_rank_ic``, ``topn_alpha_vs_benchmark`` and
+    ``topn_alpha_vs_population`` all keep the arm's full honest history
+    (champion-challenger-policy.md §3 — a promoted arm keeps its series). Only
+    the cross-arm comparison narrows, because only the cross-arm comparison is
+    the thing that needs common ground.
+
+    ``top_n`` may be one width for the whole block, or a per-arm mapping (the
+    cuts board scores each arm at its own width). A challenger whose width
+    differs from the champion's keeps a null at ``width_mismatch``: a paired
+    difference across widths measures breadth, not the selection rule.
+    """
+    rows = block.get("specs") or []
+    inter = cohort_intersection(arms, realized)
+    block["cohort_intersection_dates"] = len(inter)
+    block["cohort_intersection_first"] = inter[0] if inter else None
+    block["cohort_intersection_last"] = inter[-1] if inter else None
+    block["cohort_union_dates"] = block.get("n_dates")
+
+    by_name = {a.name: a for a in arms}
+    widths = top_n if isinstance(top_n, Mapping) else None
+
+    def _width(name: str) -> int | None:
+        if widths is None:
+            return int(top_n)  # type: ignore[arg-type]
+        w = widths.get(name)
+        return int(w) if w else None
+
+    champ_width = _width(champion.name) if champion is not None else None
+    restricted = {d: realized[d] for d in inter if d in realized}
+
+    for row in rows:
+        name = row.get("name")
+        if "error" in row:
+            # The per-spec fail-soft row already says the scoring RAISED. It
+            # must not also be given a comparison verdict it never earned.
+            row["comparison_status"] = None
+            continue
+        if champion is not None and name == champion.name:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_SELF
+            continue
+        if champion is None:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_CHAMPION
+            continue
+        arm = by_name.get(name)
+        if arm is None:
+            # A row with no arm behind it cannot be compared and must not be
+            # left carrying a stale figure from a wider pass.
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_COMMON_COHORT
+            continue
+        width = _width(name)
+        if width is None or champ_width is None or width != champ_width:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_WIDTH_MISMATCH
+            continue
+        if not inter:
+            row["topn_alpha_vs_champion"] = None
+            row["comparison_status"] = COMPARISON_NO_COMMON_COHORT
+            continue
+        paired = _topn_alpha_metric(
+            arm, champion, restricted, width, overlap_lags=overlap_lags,
+        )
+        row["topn_alpha_vs_champion"] = paired
+        n_paired = (paired or {}).get("n_dates") or 0
+        if paired is None or n_paired != len(inter):
+            # LOUD, never silent (§7.2). Every date in the intersection was
+            # scored by both arms, so a paired difference should exist on each;
+            # a shortfall means a date whose top-N picks had no realized return
+            # on one side, and the figure is then NOT the block's stated
+            # intersection. Say so on the row rather than publish a number
+            # under a denominator that does not hold.
+            logger.error(
+                "[leaderboard] arm %r paired vs champion %r covered %s of the "
+                "block's %s intersection dates at %sd — the figure is reported "
+                "as partial_cohort rather than under the block's stated "
+                "intersection (alpha-engine-config-I9274)",
+                name, champion.name, n_paired, len(inter),
+                block.get("horizon_days"),
+            )
+            row["comparison_status"] = COMPARISON_PARTIAL_COHORT
+        else:
+            row["comparison_status"] = COMPARISON_OK
+    return inter
+
+
 def score_leaderboard(
     champion: SpecHistory | None,
     challengers: Sequence[SpecHistory],
@@ -869,7 +1044,7 @@ def score_leaderboard(
     for ch in challengers:
         spec_rows.append(_row(ch, is_champion=False))
 
-    return {
+    out = {
         "champion": champion.name if champion is not None else None,
         "horizon_days": horizon_days,
         "top_n": top_n,
@@ -877,6 +1052,21 @@ def score_leaderboard(
         "n_dates": len(dates_with_join),
         "specs": spec_rows,
     }
+    # The cohort INTERSECTION, and every cross-arm figure narrowed to it
+    # (alpha-engine-config-I9274). Applied here rather than at each producer so
+    # a direct caller of this function cannot get a board without it — the
+    # scanner and producer boards score every arm in one pass and are covered
+    # by this alone. The cuts board scores one arm per pass and RE-APPLIES it
+    # over the merged arm set, where the whole block is finally in scope.
+    apply_cohort_intersection(
+        out,
+        [a for a in (champion, *challengers) if a is not None],
+        realized,
+        champion=champion,
+        top_n=top_n,
+        overlap_lags=overlap_lags,
+    )
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1001,6 +1191,14 @@ def score_multi_horizon(
                 "status": status,
                 "reason": reason,
                 "n_dates": scored["n_dates"],
+                # The cohort intersection for THIS horizon (alpha-engine-config
+                # -I9274). Per horizon, never per board: an arm can be inside
+                # the 21d intersection and outside the 126d one, because a
+                # longer horizon scores only the older, matured cohort dates.
+                "cohort_union_dates": scored["cohort_union_dates"],
+                "cohort_intersection_dates": scored["cohort_intersection_dates"],
+                "cohort_intersection_first": scored["cohort_intersection_first"],
+                "cohort_intersection_last": scored["cohort_intersection_last"],
                 # Declared per block so a reader never has to infer whether this
                 # horizon's observations were independent. `overlap_lags: 0`
                 # means genuinely non-overlapping, not "not checked".

@@ -120,6 +120,17 @@ def _matured_to_126_panel() -> tuple[_Panel, list[str]]:
     return panel, entries
 
 
+# EVERY registered challenger arm, not just one (alpha-engine-config-I9281).
+# The fixture used to seed `signals_shadow/thinktank_coverage/` alone while
+# `RESEARCH_PRODUCERS` also registers `no_agent_quant` and
+# `single_agent_quant` — so the "an immature long horizon does not alert" lock
+# below was standing over a fixture that genuinely exhibited a DIFFERENT
+# condition (two registered arms with no cohort artifact at all). The lock is
+# about an immature HORIZON; it must be seeded with a cohort that is immature
+# rather than one that is missing, or it locks the wrong thing in place.
+_SEEDED_PRODUCER_ARMS = ("thinktank_coverage", "no_agent_quant", "single_agent_quant")
+
+
 def _seed_producer_cohort(client, entries: list[str]) -> None:
     for d in entries:
         _put_json(
@@ -127,11 +138,12 @@ def _seed_producer_cohort(client, entries: list[str]) -> None:
             f"signals/{d}/signals.json",
             {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("A", 0.9), ("B", 0.5), ("C", 0.1)]}},
         )
-        _put_json(
-            client,
-            f"signals_shadow/thinktank_coverage/{d}/signals.json",
-            {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
-        )
+        for arm in _SEEDED_PRODUCER_ARMS:
+            _put_json(
+                client,
+                f"signals_shadow/{arm}/{d}/signals.json",
+                {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
+            )
 
 
 # ── I7540: every horizon is scored, each with its own n_dates ─────────────────
@@ -243,6 +255,14 @@ class TestLongHorizonImmaturityIsHonest:
         findings — the same reasoning that keeps the primary horizon's
         immature case silent.
 
+        The fixture seeds EVERY registered challenger arm (alpha-engine-config
+        -I9281): a fixture where two of the three registered arms wrote no
+        shadow at all exhibits the registered-arm-never-wrote condition, not an
+        immature horizon, so "no alert" over it locked a claim this test does
+        not make. Both channels are asserted silent — the page AND the
+        surveillance digest — because the honest-immaturity rule is about the
+        condition, not about which channel it would have reached.
+
         PRE-FIX: GREEN — no long horizon exists to alert about. A lock against
         the wrong fix (alerting on honest immaturity), stated as such rather
         than counted among the red guards."""
@@ -250,11 +270,16 @@ class TestLongHorizonImmaturityIsHonest:
 
         panel, entries = _matured_to_126_panel()
         _seed_producer_cohort(s3, entries)
-        with patch("scoring.leaderboard_producers.publish_observe_alert") as alert:
+        with patch("scoring.leaderboard_producers.publish_observe_alert") as alert, \
+                patch("ops_alerts.publish_ops_digest") as digest:
             build_producer_leaderboard(
                 s3, _BUCKET, "2026-08-17", top_n=2, closes_panel_loader=panel.loader()
             )
         assert alert.call_count == 0
+        assert digest.call_count == 0, (
+            "every registered arm wrote a shadow here; the only zero-cohort "
+            "arm is the RETIRED one, which is permanently zero by construction"
+        )
 
     def test_a_long_horizon_the_source_cannot_serve_never_sinks_the_21d_series(self, s3):
         """§3 continuity: failing the whole leaderboard because the panel cannot
@@ -349,7 +374,27 @@ def _continuity_fixture():
 #   topn_alpha_vs_population   alpha-engine-config-I7576 — lift vs the scored
 #                              population, alongside (never instead of) the
 #                              unchanged SPY series
-_ADDITIVE_SINCE_CAPTURE = ("confidence", "topn_alpha_vs_population")
+#   comparison_status          alpha-engine-config-I9274 — WHY this row holds
+#                              the paired figure it holds. Genuinely additive on
+#                              this pinned fixture: both arms score all six
+#                              dates, so the cohort intersection IS the union
+#                              and `topn_alpha_vs_champion` is arithmetically
+#                              unchanged (the pinned {-0.02, se 0.0, n 6} still
+#                              stands above). The field says the comparison is
+#                              `ok` on a basis the block now states, where
+#                              before the basis was unstated.
+_ADDITIVE_SINCE_CAPTURE = ("confidence", "topn_alpha_vs_population", "comparison_status")
+
+# Top-level fields added after the capture, on the same terms. The cohort
+# intersection restates the block's comparison basis; `n_dates` — the field
+# crucible-dashboard and the live gate:data predicates poll — is untouched, and
+# this lock is what proves it (alpha-engine-config-I9274).
+_ADDITIVE_TOP_LEVEL_SINCE_CAPTURE = (
+    "cohort_union_dates",
+    "cohort_intersection_dates",
+    "cohort_intersection_first",
+    "cohort_intersection_last",
+)
 
 # Additive fields added INSIDE a metric block, rather than alongside it. Same
 # rule as above and the same test: each must carry new information about the
@@ -396,7 +441,10 @@ class TestTwentyOneDayContinuity:
         counted among the red guards."""
         champ, chals, realized = _continuity_fixture()
         lb = score_leaderboard(champ, chals, realized, top_n=2, horizon_days=21, benchmark_ticker="SPY")
-        got = {k: v for k, v in lb.items() if k != "specs"}
+        got = {
+            k: v for k, v in lb.items()
+            if k != "specs" and k not in _ADDITIVE_TOP_LEVEL_SINCE_CAPTURE
+        }
         expected = {k: v for k, v in _PRE_CHANGE_21D.items() if k != "specs"}
         assert got == expected
         assert [_numeric_only(r) for r in lb["specs"]] == _PRE_CHANGE_21D["specs"]

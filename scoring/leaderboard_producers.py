@@ -108,8 +108,8 @@ from scoring.leaderboard_scoring import (
     LeaderboardIntegrityError,
     SpecDay,
     SpecHistory,
+    apply_cohort_intersection,
     duplicate_arm_rows,
-    paired_alpha_vs_champion,
     population_return_from_panel,
     score_multi_horizon,
     slot_spec,
@@ -641,6 +641,97 @@ def _annotate_horizon_maturity(
         )
 
 
+# A RETIRED arm has no shadow prefix because it correctly stopped writing one
+# — its code was deleted under champion-challenger-policy.md §6 and its
+# registry row is kept as the historical record, not as a live competitor. It
+# is therefore permanently zero-cohort by construction, and routing it as a
+# gap would make this class a guaranteed daily false positive on its first run
+# (observability-policy.md §7.2: "a false-positive generator in a watchdog is
+# worse than no watchdog"). Measured 2026-08-29 on
+# `research/producer_leaderboard/2026-08-28.json`: the ONLY zero-cohort arm on
+# any live board is `agentic_sector_teams`, kind="retired" since 2026-07-12,
+# with no `signals_shadow/agentic_sector_teams/` prefix in S3 at all. Every
+# LIVE arm was scoring (`no_agent_quant` 6 dates, `single_agent_quant` 6,
+# `thinktank_coverage` 4).
+_ROUTABLE_ARM_KINDS = ("champion", "challenger")
+
+
+def _route_no_cohort_arms(
+    leaderboard_id: str,
+    no_cohort: list[str],
+    by_name: dict[str, SpecHistory],
+    as_of: str,
+) -> None:
+    """Route the "registered arm emitted no cohort artifact at all" class
+    (alpha-engine-config-I9281).
+
+    **Tier: surveillance digest, not a page.** observability-policy.md §7.2 —
+    a page is for something actionable NOW that cannot wait for the next time
+    the console is read. A registered arm that has never written a shadow is a
+    slow-moving structural fact: it is equally true tomorrow, its remedy is a
+    tracked backlog item, and paging it would restate that item every day for
+    as long as it takes to execute (§7.4a forbids exactly that). It is
+    delivered on the silent surveillance channel — flow-doctor forum topic,
+    ``disable_notification=True``, no SNS page — which is the destination this
+    repo already uses for standing structural findings
+    (``lambda/alerts_handler`` surveillance rollups).
+
+    **Cardinality: ONE grouped notification per board per day**, not one per
+    arm and not one per horizon. §7.2a forbids "a per-member fan-out where a
+    group notification is available, including the shape where a loop over
+    failures calls the alert primitive once per iteration". The members share
+    a causal key — one board build, one shadow-writing path — so they are one
+    group, and the digest carries the full member list and count exactly as
+    §7.2a requires of a group notification. This is strictly stronger than the
+    per-arm dedup key I9281 proposed: it closes the horizon multiplier the
+    issue names AND the member multiplier the policy names.
+
+    **Suppression is a delivery decision, never a recording one** (§7.2a): the
+    ERROR log above and ``arms_no_cohort`` on every horizon block are emitted
+    for every arm regardless, retired arms included, so nothing is hidden from
+    the artifact or the console — only the operator's phone is spared.
+    """
+    routable = [
+        n for n in no_cohort
+        if (by_name.get(n) is None or by_name[n].kind in _ROUTABLE_ARM_KINDS)
+    ]
+    if not routable:
+        return
+    try:
+        from ops_alerts import publish_ops_digest
+
+        publish_ops_digest(
+            [
+                f"{name!r} — registered {by_name[name].kind if name in by_name else 'arm'}, "
+                "no cohort artifact on any date; unscored at every horizon"
+                for name in routable
+            ],
+            header=(
+                f"[leaderboard] {leaderboard_id}: {len(routable)} registered arm(s) "
+                f"emitted NO cohort artifact at all on {as_of} — "
+                "champion-challenger-policy.md §3, an arm that is not scored is "
+                "not a challenger, it is a rumour. Visible on every horizon "
+                "block as `arms_no_cohort`. Owning item: alpha-engine-config"
+                "-I9281 (routing) / -I9255 (umbrella)."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=f"{leaderboard_id}_leaderboard_arms_no_cohort:{as_of}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Secondary observability on an observe-only path, and the ONLY thing
+        # lost is delivery: (a) the failure mode swallowed is a digest publish
+        # that did not send; (b) the board is still written and every arm still
+        # carries `arms_no_cohort` and an ERROR log line, so the primary
+        # deliverable is untouched; (c) the recording surface is this WARN plus
+        # the CW Logs alarm over it — the same contract `publish_observe_alert`
+        # already declares for this path.
+        logger.warning(
+            "[leaderboard] %s no-cohort digest publish failed on %s: %s — the "
+            "ERROR log + `arms_no_cohort` on the artifact remain the surface",
+            leaderboard_id, as_of, exc,
+        )
+
+
 def _annotate_arm_measurement_gaps(
     leaderboard_id: str,
     blocks: list[dict],
@@ -690,16 +781,6 @@ def _annotate_arm_measurement_gaps(
     no_cohort = sorted(
         name for name, arm in by_name.items() if not arm.by_date
     )
-    #
-    # Recorded and logged here, deliberately NOT alerted in this change. A
-    # registered arm that writes no shadow at all is a real defect
-    # (champion-challenger-policy.md §3: "an arm that is not scored is not a
-    # challenger, it is a rumour"), but the producer slot has three such arms
-    # today, so arming a page here would publish a standing daily alert whose
-    # tier and destination nobody has chosen. Making the state VISIBLE on the
-    # artifact is this change's deliverable; routing it is alpha-engine-config
-    # -I9281, which owns that decision rather than inheriting it as a side
-    # effect.
     for name in no_cohort:
         logger.error(
             "[leaderboard] %s arm %r emitted NO cohort dates at all on %s — a "
@@ -707,6 +788,7 @@ def _annotate_arm_measurement_gaps(
             "horizon (champion-challenger-policy.md §3)",
             leaderboard_id, name, as_of,
         )
+    _route_no_cohort_arms(leaderboard_id, no_cohort, by_name, as_of)
     for block in blocks:
         h = block["horizon_days"]
         unmeasured = sorted({
@@ -1936,33 +2018,14 @@ def build_cuts_leaderboard(
             for block in scored.get("horizons", []):
                 for row in block.get("specs", []):
                     row["top_n"] = width
-            # ── The PAIRED difference vs the champion (I8263) ──────────────
-            # The single-arm pass structure above hands every challenger
-            # `champion=None`, so `score_leaderboard` skips the paired metric
-            # and `topn_alpha_vs_champion` was null on every arm on every board
-            # ever written. It is computed HERE, outside the pass, where both
-            # arms are in scope.
-            #
-            # WIDTH-GATED, not width-adjusted: a paired difference between arms
-            # of different widths measures breadth rather than the selection
-            # rule, so an arm whose width differs from the champion's keeps a
-            # null and is not silently compared at the wrong question
-            # (champion-challenger-policy.md §4).
-            if (
-                not is_champion
-                and champion_arm_obj is not None
-                and (widths.get(champion_arm_obj.name) or 0) == width
-            ):
-                for block in scored.get("horizons", []):
-                    h = block["horizon_days"]
-                    realized_h = realized_by_horizon.get(h) or {}
-                    paired = paired_alpha_vs_champion(
-                        arm, champion_arm_obj, realized_h, width,
-                        overlap_lags=block.get("overlap_lags") or 0,
-                    )
-                    for row in block.get("specs", []):
-                        if row.get("name") == arm.name:
-                            row["topn_alpha_vs_champion"] = paired
+            # The PAIRED difference vs the champion (I8263) is NOT computed
+            # here. The single-arm pass structure hands every challenger
+            # `champion=None`, so `score_leaderboard` skips it — but computing
+            # it per pass would compute it over the PAIR's shared dates, which
+            # is not the block's cohort intersection once a third arm exists
+            # (alpha-engine-config-I9274). It is applied ONCE below, after the
+            # merge, where every arm on the block is finally in scope and the
+            # intersection can be taken over all of them.
             if merged is None:
                 merged = scored
                 continue
@@ -1997,6 +2060,34 @@ def build_cuts_leaderboard(
                 d for arm in arms for d in arm.by_date if realized_h.get(d)
             })
         merged["n_dates"] = primary_block["n_dates"]
+        # Now that every arm's rows are merged onto one block, take the cohort
+        # INTERSECTION over the whole arm set and narrow every cross-arm figure
+        # to it (alpha-engine-config-I9274, champion-challenger-policy.md §4).
+        # This is where `topn_alpha_vs_champion` is produced on this board:
+        # per-arm widths are handed in so the width gate that I8263 established
+        # is applied inside the one helper rather than duplicated here.
+        # Measured 2026-08-28: this board read `n_dates: 11` at 21d while 4 of
+        # its 7 arms scored ZERO dates, and published an 11-date paired figure
+        # for `scanner_champion_60` on a block whose all-arm intersection is 0.
+        for block in merged["horizons"]:
+            apply_cohort_intersection(
+                block,
+                arms,
+                realized_by_horizon.get(block["horizon_days"]) or {},
+                champion=champion_arm_obj,
+                top_n=widths,
+                overlap_lags=block.get("overlap_lags") or 0,
+            )
+        # The top level carries the primary block's rows (same dicts), so its
+        # own cohort fields must be restated from that block rather than left
+        # holding whichever single-arm pass seeded `merged`.
+        for _k in (
+            "cohort_union_dates",
+            "cohort_intersection_dates",
+            "cohort_intersection_first",
+            "cohort_intersection_last",
+        ):
+            merged[_k] = primary_block[_k]
         _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
         _annotate_arm_measurement_gaps("cuts", merged["horizons"], arms, date_str)
         _annotate_cut_cadence(merged["horizons"], arms, realized_by_horizon)
