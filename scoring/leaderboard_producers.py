@@ -658,6 +658,15 @@ def _annotate_arm_measurement_gaps(
     makes that gap an explicit, machine-checkable field rather than something
     a reader has to notice by scanning every row's ``confidence``.
 
+    Applied to ALL THREE boards since alpha-engine-config-I9275. It was wired
+    into ``build_cuts_leaderboard`` alone for four weeks, so the same defect
+    was visible on one board and invisible on the other two — measured
+    2026-08-29 on ``scanner/leaderboard/2026-08-28.json``, whose 21-session
+    block read ``status: "ok"``, ``n_dates: 7`` while BOTH registered
+    challengers sat at ``n_dates_scored: 0`` and no field said so. Fixing the
+    board where the defect was noticed and leaving its siblings is the
+    instance-not-class failure engagement-protocol-policy.md §5 forbids.
+
     Each unmeasured arm is then classified exactly as
     ``_overdue_zero_cohort_reason`` classifies a whole block: ``immature``
     (that arm's own oldest cohort has not aged past this horizon yet —
@@ -668,6 +677,36 @@ def _annotate_arm_measurement_gaps(
     broken IS a defect and must.
     """
     by_name = {a.name: a for a in arms}
+    # An arm with NO cohort dates at all is a different finding from an arm
+    # whose matured cohorts scored nothing, and it is HORIZON-INDEPENDENT: the
+    # arm emitted no shadow artifact, so it is equally unscored at 21, 126 and
+    # 252 sessions. Firing `_overdue_zero_cohort_reason`'s no-dates branch once
+    # per arm per HORIZON turns one condition into three identical pages
+    # (measured: 3 arms x 3 horizons = 9 alerts on a single producer-board
+    # build). The condition is real and is exactly the registered-but-never-
+    # writing defect champion-challenger-policy.md §3 names, so it is recorded
+    # on every block as `arms_no_cohort` and alerted ONCE per arm per day, on a
+    # dedup key that carries no horizon.
+    no_cohort = sorted(
+        name for name, arm in by_name.items() if not arm.by_date
+    )
+    #
+    # Recorded and logged here, deliberately NOT alerted in this change. A
+    # registered arm that writes no shadow at all is a real defect
+    # (champion-challenger-policy.md §3: "an arm that is not scored is not a
+    # challenger, it is a rumour"), but the producer slot has three such arms
+    # today, so arming a page here would publish a standing daily alert whose
+    # tier and destination nobody has chosen. Making the state VISIBLE on the
+    # artifact is this change's deliverable; routing it is alpha-engine-config
+    # -I9281, which owns that decision rather than inheriting it as a side
+    # effect.
+    for name in no_cohort:
+        logger.error(
+            "[leaderboard] %s arm %r emitted NO cohort dates at all on %s — a "
+            "registered arm that writes no shadow artifact is unscored at every "
+            "horizon (champion-challenger-policy.md §3)",
+            leaderboard_id, name, as_of,
+        )
     for block in blocks:
         h = block["horizon_days"]
         unmeasured = sorted({
@@ -676,9 +715,12 @@ def _annotate_arm_measurement_gaps(
         })
         block["arms_total"] = len(block["specs"])
         block["arms_unmeasured"] = unmeasured
+        block["arms_no_cohort"] = [n for n in no_cohort if n in unmeasured]
         for name in unmeasured:
             arm = by_name.get(name)
             arm_dates = sorted(arm.by_date) if arm is not None else []
+            if not arm_dates:
+                continue  # reported once above, horizon-independently
             overdue = _overdue_zero_cohort_reason(arm_dates, h, as_of)
             if overdue is None:
                 continue  # genuine immaturity — self-resolving, not a defect
@@ -1421,6 +1463,16 @@ def build_scanner_leaderboard(
             cohort_spacing_days=median_cohort_spacing_days(dates),
         )
         _annotate_horizon_maturity("scanner", leaderboard["horizons"], dates, date_str, horizons[0])
+        # `champion` is None on the producer board while RESEARCH_PRODUCERS
+        # registers no kind=="champion" entry (config-I2993/I2998), so the arm
+        # list is filtered rather than indexed — an absent champion must not
+        # take out the per-arm gap annotation for the arms that DO exist.
+        _annotate_arm_measurement_gaps(
+            "scanner",
+            leaderboard["horizons"],
+            [a for a in (champion, *challengers) if a is not None],
+            date_str,
+        )
         leaderboard["leaderboard_id"] = "scanner"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
@@ -2100,6 +2152,16 @@ def build_producer_leaderboard(
             cohort_spacing_days=median_cohort_spacing_days(dates),
         )
         _annotate_horizon_maturity("producer", leaderboard["horizons"], dates, date_str, horizons[0])
+        # `champion` is None on the producer board while RESEARCH_PRODUCERS
+        # registers no kind=="champion" entry (config-I2993/I2998), so the arm
+        # list is filtered rather than indexed — an absent champion must not
+        # take out the per-arm gap annotation for the arms that DO exist.
+        _annotate_arm_measurement_gaps(
+            "producer",
+            leaderboard["horizons"],
+            [a for a in (champion, *challengers) if a is not None],
+            date_str,
+        )
         leaderboard["leaderboard_id"] = "producer"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
