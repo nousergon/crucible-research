@@ -100,7 +100,20 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # (same rationale as evals/control_bands.py above).
     "evals/judge_reanchor.py": 1,
     "evals/last_week_scorecard.py": 2,
-    "evals/orchestrator.py": 2,
+    # 3 since alpha-engine-config-I9263 (2026-08-29). The third PUT is the
+    # batch-plan manifest written under the synthetic `sync-{date}` batch id
+    # when the judge degrades to the synchronous rung — the SAME artifact
+    # class and the SAME `decision_artifacts/_eval_batch_plans/` prefix the
+    # other two already write, differing only in the batch id embedded in the
+    # key, so no new ARTIFACT_REGISTRY row is warranted.
+    "evals/orchestrator.py": 3,
+    # Judge transport-degradation record (alpha-engine-config-I9263). One PUT:
+    # `decision_artifacts/_eval_batch_plans/{date}/degradation.json`, written
+    # only when the eval judge drops from the batch rung to the synchronous
+    # one. Co-located with the batch-plan manifests above and read the same
+    # way — the transport record for a run sits beside that run's plan — so it
+    # rides the same already-registered prefix rather than opening a new one.
+    "evals/judge_batch_transport.py": 1,
     # Phase B weekly judge-sensitivity scorecard (config#752). Single PUT
     # site (loop over dated + latest json/md keys in emit_perturbation_report)
     # writing decision_artifacts/_perturbation/_report/{date,latest}/

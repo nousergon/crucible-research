@@ -854,14 +854,106 @@ def _persist_client_side_skips(
     return skipped_empty_input, skipped_degenerate_input, persisted, failed
 
 
+from evals.judge_batch_transport import (
+    BatchCapabilityUnavailable,
+    batch_client_for_route,
+    build_degradation_record,
+    is_sync_batch_id,
+    persist_degradation_record,
+    resolve_batch_transport,
+    sync_batch_id,
+)
+
+
+def _submit_via_sync_rung(
+    plan: dict[str, Any],
+    *,
+    s3: Any,
+    unavailable: BatchCapabilityUnavailable,
+) -> dict[str, Any]:
+    """Second rung of the judge degradation ladder (alpha-engine-config-I9263).
+
+    No batch route is available, so the plan is not submitted anywhere: it is
+    persisted under a ``sync-{date}`` batch id and ``process_batch_results``
+    judges every entry through the router-addressed synchronous judge.
+
+    Three things happen here and all three are load-bearing:
+
+    1. **The plan manifest is still written**, under the synthetic id, so
+       Process reads its input from exactly the same place on either rung and
+       the client-side skip markers Submit already persisted still apply.
+    2. **A durable degradation record is written to S3.** Unguarded on purpose
+       — see ``persist_degradation_record``. If the evidence cannot be written,
+       the stage fails rather than degrading unobserved.
+    3. **``degraded`` and the record ride out on the return value**, so the
+       Step Function stage output carries the fact without a reader having to
+       go looking in S3 or CloudWatch Logs for it.
+    """
+    bucket = plan["bucket"]
+    date = plan["date"]
+    batch_id = sync_batch_id(date)
+    plan_key = _build_batch_plan_key(date=date, batch_id=batch_id)
+    s3.put_object(
+        Bucket=bucket,
+        Key=plan_key,
+        Body=json.dumps(plan, default=str, indent=2).encode("utf-8"),
+    )
+    record = build_degradation_record(
+        date=date,
+        reason=unavailable.reason,
+        group=unavailable.group,
+        capability=unavailable.capability,
+        exec_context=unavailable.exec_context,
+        request_count=len(plan["requests"]),
+        plan_s3_key=plan_key,
+    )
+    degradation_key = persist_degradation_record(
+        record, bucket=bucket, s3_client=s3,
+    )
+    return {
+        "batch_id": batch_id,
+        "processing_status": "ended_sync",
+        "plan_s3_key": plan_key,
+        "request_count": len(plan["requests"]),
+        "degraded": True,
+        "degradation_s3_key": degradation_key,
+        "degradation": record,
+    }
+
+
 def submit_batch(
     plan: dict[str, Any],
     *,
-    anthropic_client: Any,
+    batch_client: Any = None,
     s3_client: Any | None = None,
+    exec_context: str | None = None,
 ) -> dict[str, Any]:
-    """Submit the plan as one Anthropic message batch and persist the
-    plan manifest to S3 keyed by the returned batch_id.
+    """Submit the plan through the batch rung, or degrade to the sync rung.
+
+    **alpha-engine-config-I9263 (Brian ruling 2026-08-29: "I will not fund
+    the anthropic account, at this point we shouldn\'t be using the anthropic
+    api at all").** This function no longer receives a provider SDK client
+    built at the Lambda call site. It asks the router whether the judge\'s
+    model group can serve the ``batches`` CAPABILITY from this execution
+    context (``evals.judge_batch_transport.resolve_batch_transport``) and
+    takes one of two declared rungs:
+
+    * **Batch rung** — a router-resolved batch-capable route. ``batch_client``
+      is an explicit override (test seam, and the wiring point for a future
+      krepis batch client); when it is ``None`` the router is asked.
+    * **Sync rung** — when no batch route is available, the plan manifest is
+      written under a ``sync-{date}`` batch id, a DURABLE degradation record
+      is persisted beside it, and ``degraded: True`` plus the record are
+      returned on the result so the Step Function stage output carries them.
+      ``process_batch_results`` then judges every plan entry through
+      ``evals.judge.evaluate_artifact``, which is already fully
+      router-addressed (alpha-engine-config-I6559).
+
+    The sync rung costs ~2x per judged artifact — the batch rung bills at half
+    rate (``_BATCH_PRICE_MULTIPLIER``) and the sync rung at the standard rate.
+    That is why the degradation is recorded rather than absorbed: a transport
+    swap that doubles the bill and changes the series it produced must be
+    legible from a durable artifact, never inferred from a log line.
 
     Idempotency: not retried on submit failure here — the Submit
     Lambda's SF state has its own Retry/Catch posture. Each
@@ -900,12 +992,22 @@ def submit_batch(
             "request_count": 0,
         }
 
+    if batch_client is None:
+        try:
+            spec, route = resolve_batch_transport(exec_context=exec_context)
+        except BatchCapabilityUnavailable as exc:
+            return _submit_via_sync_rung(plan, s3=s3, unavailable=exc)
+        # A batch route resolved but nothing can drive it — a fleet defect,
+        # NOT a degradation. Falling through to the sync rung here would spend
+        # 2x while hiding a broken batch route behind a "degraded" label.
+        batch_client = batch_client_for_route(spec, route)
+
     logger.info(
         "[batch_submit] submitting %d requests for date=%s "
         "(force_sonnet_pass=%s)",
         len(requests), date, plan["force_sonnet_pass"],
     )
-    batch = anthropic_client.messages.batches.create(requests=requests)
+    batch = batch_client.messages.batches.create(requests=requests)
     batch_id = batch.id if hasattr(batch, "id") else batch["id"]
 
     plan_key = _build_batch_plan_key(date=date, batch_id=batch_id)
@@ -926,7 +1028,7 @@ def submit_batch(
 def poll_batch(
     *,
     batch_id: str,
-    anthropic_client: Any,
+    batch_client: Any = None,
 ) -> dict[str, Any]:
     """Retrieve the batch's current ``processing_status`` and request
     counts. Used by the Poll Lambda — the SF Choice that follows
@@ -937,8 +1039,14 @@ def poll_batch(
     "ended_at": str | None}``. ``ended`` is the terminal status; any
     other value (``in_progress``, ``canceling``) means keep polling.
     """
-    if batch_id.startswith("empty-"):
-        # Synthetic batch from an empty-plan run — already terminal.
+    if batch_id.startswith("empty-") or is_sync_batch_id(batch_id):
+        # Synthetic batch id — an empty-plan run, or a run that took the
+        # SYNCHRONOUS rung (alpha-engine-config-I9263). Neither has a
+        # provider-side batch to poll, so both are already terminal and the SF
+        # Choice routes straight to Process. Request counts are zero here by
+        # construction: on the sync rung the work has not happened yet, and
+        # reporting a non-zero count for work Process still has to do would
+        # make a not-yet-run pass look finished.
         return {
             "processing_status": "ended",
             "request_counts": {
@@ -947,7 +1055,7 @@ def poll_batch(
             },
             "ended_at": None,
         }
-    batch = anthropic_client.messages.batches.retrieve(batch_id)
+    batch = batch_client.messages.batches.retrieve(batch_id)
     # ``mode='json'`` coerces datetime → ISO-8601 string so the Lambda
     # response marshaller doesn't blow up. Plain ``model_dump()`` returns
     # Python ``datetime`` objects on ``created_at`` / ``ended_at`` /
@@ -1077,7 +1185,7 @@ def process_batch_results(
     batch_id: str,
     plan_s3_key: str,
     bucket: str = _BUCKET_DEFAULT,
-    anthropic_client: Any = None,
+    batch_client: Any = None,
     s3_client: Any | None = None,
     cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
@@ -1163,6 +1271,14 @@ def process_batch_results(
     # evaluate_artifact retry after the stream (fresh decoder sample via
     # the sync path's own MAX_JUDGE_RETRIES) before being terminal-failed.
     parse_retry_queue: list[tuple[dict, str]] = []
+    # Sync rung (alpha-engine-config-I9263): no provider batch was submitted,
+    # so EVERY plan entry is judged here through ``evaluate_artifact``. Seeded
+    # before the (skipped) stream so the deadline bookkeeping below sees the
+    # real workload rather than an empty one.
+    sync_fallback_queue: list[dict] = (
+        list(plan["plan_entries"]) if is_sync_batch_id(batch_id) else []
+    )
+    sync_fallback_evaluated = 0
     # Strip the empty_input_skip entries from `failed` — those are
     # successes (skip-marker eval persisted in Submit) not failures.
     # Preserve any `load` failures from the plan stage as failures.
@@ -1207,8 +1323,12 @@ def process_batch_results(
     stream_latencies_ms: list[int] = []
     stream_processed = 0
     _item_t0: float | None = None
-    if not batch_id.startswith("empty-") and plan["requests"]:
-        for result in anthropic_client.messages.batches.results(batch_id):
+    if (
+        not batch_id.startswith("empty-")
+        and not is_sync_batch_id(batch_id)
+        and plan["requests"]
+    ):
+        for result in batch_client.messages.batches.results(batch_id):
             # Close out the PREVIOUS item's latency here rather than at the
             # bottom of the loop: the body has several `continue` paths, and
             # a sample taken only on the fall-through path would measure the
@@ -1358,6 +1478,62 @@ def process_batch_results(
                     "stage": "batch_persist",
                     "error": str(exc),
                 })
+
+    # ── Sync rung (alpha-engine-config-I9263) ────────────────────────────
+    # Every plan entry judged through ``evaluate_artifact`` — the SAME judge,
+    # rubric and output shape the batch rung produced, over the router-resolved
+    # `low` group (alpha-engine-config-I6559) rather than a provider batch API.
+    #
+    # No item cap. The parse-retry tail below carries `_PARSE_RETRY_CAP` as a
+    # COST guard on an anomaly (a handful of malformed responses); here the
+    # whole corpus is the expected workload, so a cap would silently thin the
+    # eval set on a normal run. The deadline check bounds it instead, and a
+    # truncated pass reports `complete=False` exactly as every other phase does.
+    sync_latencies_ms: list[int] = []
+    for _sync_i, entry in enumerate(sync_fallback_queue):
+        affordable, needed = _next_item_affordable(
+            remaining_s, sync_latencies_ms, floor_s=PROCESS_LLM_ITEM_FLOOR_S,
+        )
+        if not affordable:
+            _stop_for_budget(
+                "sync_fallback", len(sync_fallback_queue) - _sync_i, needed,
+            )
+            break
+        _sync_t0 = time.time()
+        try:
+            artifact = _load_capture_artifact(
+                s3, key=entry["capture_s3_key"], bucket=bucket,
+            )
+            sync_eval = evaluate_artifact(
+                artifact, judge_run_id=judge_run_id,
+                judge_model=entry["judge_model"],
+                judged_artifact_s3_key=entry["capture_s3_key"],
+            )
+            pkey = persist_eval_artifact(
+                sync_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
+            )
+            persisted_keys.append(pkey)
+            sync_fallback_evaluated += 1
+            if entry["judge_model"] == haiku_model:
+                haiku_evaluated += 1
+                haiku_evals_by_agent_run[
+                    (entry["agent_id"], entry["run_id"])
+                ] = sync_eval
+            elif entry["judge_model"] == sonnet_model:
+                sonnet_evaluated += 1
+            _try_emit(sync_eval)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[batch_process] sync-rung judge FAILED for agent_id=%s "
+                "judge=%s", entry["agent_id"], entry["judge_model"],
+            )
+            failed.append({
+                "key": entry["capture_s3_key"],
+                "agent_id": entry["agent_id"],
+                "stage": "sync_fallback_judge",
+                "error": str(exc),
+            })
+        sync_latencies_ms.append(int((time.time() - _sync_t0) * 1000))
 
     # Sync retry tail for batch parse failures (config#1650). The batch
     # path had NO analog of the sync path's MAX_JUDGE_RETRIES: a judge
@@ -1545,10 +1721,12 @@ def process_batch_results(
         "[batch_process] done batch_id=%s date=%s haiku=%d sonnet=%d "
         "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
         "parse_retry_recovered=%d metric_emission_failures=%d "
+        "degraded_transport=%s sync_fallback_evaluated=%d "
         "complete=%s budget_stopped_phases=%s",
         batch_id, date, haiku_evaluated, sonnet_evaluated,
         plan.get("skipped_unmapped", 0), skipped_empty_input, len(failed),
         parse_retry_recovered, metric_emission_failures,
+        is_sync_batch_id(batch_id), sync_fallback_evaluated,
         not budget_stopped, budget_stopped_phases or "-",
     )
 
@@ -1563,6 +1741,15 @@ def process_batch_results(
         "skipped_empty_input": skipped_empty_input,
         "metric_emission_failures": metric_emission_failures,
         "parse_retry_recovered": parse_retry_recovered,
+        # Transport rung this pass actually ran on (alpha-engine-config-I9263).
+        # `degraded_transport` is what a console or alarm reads to tell a
+        # half-price batch pass from a full-price synchronous one; the count
+        # says how much of the corpus the sync rung carried. Reported on BOTH
+        # rungs — False/0 on the batch rung — because a field that only appears
+        # when something is wrong is indistinguishable from a field nobody
+        # emitted (principles.md §2.7: no data is never rendered as green).
+        "degraded_transport": is_sync_batch_id(batch_id),
+        "sync_fallback_evaluated": sync_fallback_evaluated,
         # sf-pipeline-policy.md §2.3a — a pass that covered less of the
         # corpus than it was asked to must say so, in a field a machine
         # reads. `complete` is False whenever any phase stopped on budget,
