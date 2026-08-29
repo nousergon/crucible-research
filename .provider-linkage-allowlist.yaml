@@ -1,0 +1,385 @@
+# .provider-linkage-allowlist.yaml — pre-cleared direct-provider-linkage
+# matches for the fleet-wide guard (nousergon-lib scripts/provider_linkage_
+# guard.py; caller: .github/workflows/provider-linkage-guard.yml).
+#
+# Brian's ruling 2026-08-29, verbatim: "the entire nous ergon system should
+# now be running through the krepis router... we should have no other
+# parallel setups, it should all funnel through the krepis router."
+# Tracker: alpha-engine-config-I9294 (spine) / -I9302 (this repo's baseline
+# sweep). Schema: nousergon-lib scripts/provider_linkage_guard.py::load_allowlist.
+#
+# Every entry below is either (a) historical/documentation prose describing
+# a migrated-away-from pattern, or a test asserting that pattern's ABSENCE —
+# never a live call site the guard should be catching — or (b) a genuinely
+# live match in a file this session was explicitly told NOT to edit (a
+# sibling agent's in-flight work, or a named-but-out-of-scope defect already
+# tracked elsewhere), carrying its own tracking reference and a short expiry
+# so it stays visible rather than quietly widening.
+schema_version: 1
+entries:
+  - path: .github/workflows/judge-perturbation-smoke.yml
+    pattern: openrouter:env_key
+    reason: >-
+      Historical prose in header comments (migrated to krepis under
+      alpha-engine-config-I7880) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: .openrouter-allowlist.yaml
+    pattern: openrouter:base_url
+    reason: >-
+      This file's own entries document historical OpenRouter-guard reasoning
+      in prose (naming openrouter.ai and OPENROUTER_API_KEY as the pattern
+      that guard cleared) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: .openrouter-allowlist.yaml
+    pattern: openrouter:env_key
+    reason: >-
+      Same file, same reason as the base_url entry above — its reason prose
+      names OPENROUTER_API_KEY literally. Baseline sweep for alpha-engine-
+      config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: agents/langchain_utils.py
+    pattern: openai:sdk_client
+    reason: >-
+      make_agent_llm's `return ChatOpenAI(...)` is bound to `spec.base_url`
+      / `spec.api_key`, both resolved by krepis.router.resolve_group_spec —
+      the sanctioned OpenAI-wire transport binding to the router edge
+      (model-router-policy §2 layer 5), not a call site addressing OpenAI
+      directly. Same shape the guard's own docstring names as legitimate.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: agents/langchain_utils.py
+    pattern: openrouter:base_url
+    reason: >-
+      Docstring prose warning about a hypothetical fallthrough-to-openrouter.ai
+      failure mode this factory's own guard (raises rather than degrades)
+      exists to prevent — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: agents/sector_teams/sector_team.py
+    pattern: anthropic:sdk_client
+    reason: >-
+      Comment describing an AST-scan guard that asserts every ChatAnthropic(...)
+      call site in agents/ carries a required kwarg — no live ChatAnthropic(
+      construction exists anywhere in this repo (measured: only this comment
+      and graph/llm_cost_tracker.py's docstring mention the symbol). Baseline
+      sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: config.py
+    pattern: anthropic:env_key
+    reason: >-
+      `ANTHROPIC_API_KEY: str = get_secret(...)` is a config LOADER field, not
+      a call site — no live ChatAnthropic/anthropic.Anthropic construction
+      reads it (measured: zero live constructors in this repo). Consumers
+      that still touch the field are manual/dev-only tooling, each with its
+      own allowlist entry below. Retiring the field itself is a config.py
+      edit outside this session's scope (crucible-research-I9302 named only
+      scripts/measure_cache_prefixes.py, thinktank/, and this workflow).
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: config.py
+    pattern: openrouter:env_key
+    reason: >-
+      Same shape as the openrouter-guard's own pre-existing allowance for this
+      line (.openrouter-allowlist.yaml, alpha-engine-config-I7864) — a config
+      loader field, not a live call site. Baseline sweep for alpha-engine-
+      config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  # ── sibling-owned: lambda/eval_judge_*, evals/judge.py, evals/judge_batch_
+  # transport.py (added by the same PR759 migration) and their tests. PR759
+  # (alpha-engine-config-I9263) merged 2026-08-29 retiring the direct-
+  # Anthropic construction these matches describe; the remaining hits are
+  # docstring/comment prose from that migration, or test literals asserting
+  # its absence. This session was instructed not to edit these files —
+  # short expiry so a follow-up pass re-audits the prose rather than this
+  # allowance quietly outliving its own justification.
+  - path: evals/judge_batch_transport.py
+    pattern: anthropic:env_key
+    reason: >-
+      Docstring prose describing the retired `anthropic.Anthropic(api_key=
+      ANTHROPIC_API_KEY)` construction this module (PR759, alpha-engine-
+      config-I9263, merged 2026-08-29) replaced — not a live call site.
+      Sibling-owned; not edited this session.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+  - path: evals/judge_batch_transport.py
+    pattern: anthropic:sdk_client
+    reason: >-
+      Same docstring, same migration (PR759, alpha-engine-config-I9263) — not
+      a live call site. Sibling-owned; not edited this session.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+  - path: lambda/eval_judge_handler.py
+    pattern: anthropic:env_key
+    reason: >-
+      Comment explaining import ordering relative to ANTHROPIC_API_KEY's
+      SSM-loaded value — not a live env-var read at this line. Sibling-owned
+      (lambda/eval_judge_*); not edited this session.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+  - path: tests/test_eval_judge_batch_transport.py
+    pattern: anthropic:env_key
+    reason: >-
+      Test literal asserting the retired pattern's ABSENCE from the source
+      (structural test for PR759, alpha-engine-config-I9263) — not a live
+      call site. Sibling-owned; not edited this session.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+  - path: tests/test_eval_judge_batch_transport.py
+    pattern: anthropic:sdk_client
+    reason: >-
+      Same structural test, same reason as the env_key entry above. Sibling-
+      owned; not edited this session.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+
+  - path: evals/judge.py
+    pattern: deepseek:base_url
+    reason: >-
+      Docstring prose reporting a measured live-egress-proxy finding
+      ("api.deepseek.com ... discard it silently") — not a live call site;
+      evals/judge.py addresses models through krepis.router exclusively.
+      Sibling-owned (named in this session's boundary); not edited.
+    expires: "2026-09-05"
+    tracking: alpha-engine-config-I9263
+
+  - path: graph/llm_cost_tracker.py
+    pattern: anthropic:sdk_client
+    reason: >-
+      Two docstring mentions of `ChatAnthropic(...)` describing a callback-
+      attachment convention — no live ChatAnthropic( construction exists
+      anywhere in this repo (measured). Baseline sweep for alpha-engine-
+      config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: infrastructure/deploy.sh
+    pattern: openrouter:env_key
+    reason: >-
+      Comment prose (per the pre-existing .openrouter-allowlist.yaml entry,
+      alpha-engine-config-I7864) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: lambda/openrouter_shadow_handler.py
+    pattern: openrouter:env_key
+    reason: >-
+      Docstring prose (per the pre-existing .openrouter-allowlist.yaml entry,
+      alpha-engine-config-I7864) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  # ── preflight.py — a KNOWN, tracked, out-of-scope defect (I9302 item 2):
+  # the weekly Lambda's preflight still hard-gates on ANTHROPIC_API_KEY, a
+  # credential its runtime no longer reads post-router-migration (I7005).
+  # Real and live, not prose — allowlisted with a short fuse rather than
+  # fixed here because this session's file scope named only scripts/
+  # measure_cache_prefixes.py, thinktank/, and the guard workflow/allowlist.
+  - path: preflight.py
+    pattern: anthropic:env_key
+    reason: >-
+      KNOWN live defect, not prose: the weekly-mode preflight hard-requires
+      ANTHROPIC_API_KEY (preflight.py::run, "weekly" mode) though
+      agents/langchain_utils.py::make_agent_llm migrated to
+      krepis.router.resolve_group_spec under alpha-engine-config-I7005 and no
+      longer reads it — filed as alpha-engine-config-I9302 item 2. Out of
+      this session's file scope (only scripts/measure_cache_prefixes.py,
+      thinktank/, and the guard workflow/allowlist were in scope).
+    expires: "2026-09-12"
+    tracking: alpha-engine-config-I9302
+  - path: tests/test_preflight.py
+    pattern: anthropic:env_key
+    reason: >-
+      Asserts the CURRENT (defective) preflight behaviour named above — will
+      need updating alongside preflight.py's fix. Same tracking, same
+      out-of-scope reason.
+    expires: "2026-09-12"
+    tracking: alpha-engine-config-I9302
+
+  - path: producers/single_agent.py
+    pattern: openrouter:base_url
+    reason: >-
+      Docstring prose (per the pre-existing .openrouter-allowlist.yaml entry,
+      alpha-engine-config-I7864) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: scripts/live_validate_openrouter_judge.py
+    pattern: openai:sdk_client
+    reason: >-
+      Docstring prose naming the DIRECT-linkage pattern this script was
+      migrated off of (alpha-engine-config-I7880) — not a live call site;
+      it now resolves through krepis.router.resolve_group_spec's `low`
+      group. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: scripts/live_validate_openrouter_judge.py
+    pattern: openrouter:base_url
+    reason: >-
+      Same docstring, same migration (alpha-engine-config-I7880) — not a
+      live call site. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: scripts/regen_golden_traces.py
+    pattern: anthropic:env_key
+    reason: >-
+      `--help` text / comment on a manual, ad-hoc, non-CI-wired dev script
+      ("Needs ANTHROPIC_API_KEY" to capture a real trace) — not an automated
+      call site. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: scripts/run_rag_retrieval_eval.py
+    pattern: anthropic:env_key
+    reason: >-
+      Comment noting the LLM-judge path also needs ANTHROPIC_API_KEY — this
+      script itself does not read it; describes a dependency of a manual,
+      non-CI-wired eval tool. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: scripts/smoke_eval_judge.py
+    pattern: anthropic:env_key
+    reason: >-
+      Comment on a `.env`-loading step of a manual, non-CI-wired smoke script
+      — not an automated call site. Baseline sweep for alpha-engine-config-
+      I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/live_smoke/judge_perturbation_smoke.py
+    pattern: openrouter:env_key
+    reason: >-
+      Docstring prose (per the pre-existing .openrouter-allowlist.yaml entry,
+      alpha-engine-config-I7880) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: tests/live_smoke/judge_perturbation_smoke_openrouter.py
+    pattern: openrouter:env_key
+    reason: >-
+      Docstring prose (per the pre-existing .openrouter-allowlist.yaml entry,
+      alpha-engine-config-I7880) — not a live call site. Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_agent_llm_factory.py
+    pattern: openrouter:base_url
+    reason: >-
+      Test asserting the direct-OpenRouter class's ABSENCE (per the pre-
+      existing .openrouter-allowlist.yaml entry, alpha-engine-config-I7864)
+      — not a live call site. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: tests/test_agent_llm_factory.py
+    pattern: openrouter:env_key
+    reason: >-
+      Same test file, same reason as the base_url entry above. Baseline
+      sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_eval_judge_openrouter.py
+    pattern: openrouter:env_key
+    reason: >-
+      Test asserting OPENROUTER_API_KEY's absence/irrelevance to the eval-
+      judge sync path — not a live call site. Baseline sweep for alpha-
+      engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_eval_judge_router_addressing.py
+    pattern: openrouter:env_key
+    reason: >-
+      Structural test asserting evals/judge.py binds no OPENROUTER_API_KEY —
+      the literal names the forbidden pattern in a docstring/assert message,
+      not a live read. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_judge_perturbation.py
+    pattern: anthropic:env_key
+    reason: >-
+      Comment noting a manual, non-CI-wired live-smoke test needs
+      ANTHROPIC_API_KEY plus gitignored rubric prompts — not an automated
+      call site. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_llm_request_timeout.py
+    pattern: anthropic:sdk_client
+    reason: >-
+      Comment describing a static AST guard over ChatAnthropic(...) call
+      sites — no live construction exists (measured). Baseline sweep for
+      alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_no_openai_sdk_fork.py
+    pattern: openai:sdk_client
+    reason: >-
+      This repo's own pre-existing guard test's docstring, naming the exact
+      pattern class it asserts absent — the sibling test to this fleet-wide
+      guard. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_no_secret_environ_reads.py
+    pattern: anthropic:env_key
+    reason: >-
+      Data literal in a frozenset of secret NAMES this guard test asserts are
+      never read via bare os.environ.get — not a live read. Baseline sweep
+      for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+  - path: tests/test_no_secret_environ_reads.py
+    pattern: openrouter:env_key
+    reason: >-
+      Same data literal, same guard test, different secret name. Baseline
+      sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_research_outcome_migration_parity.py
+    pattern: anthropic:env_key
+    reason: >-
+      `stub_config.ANTHROPIC_API_KEY = "test-key"` sets an attribute on a test
+      STUB config object for a migration-parity fixture — not a live secret
+      read. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_single_agent_producer.py
+    pattern: openrouter:env_key
+    reason: >-
+      Test asserting producers/single_agent.py binds no OPENROUTER_API_KEY —
+      per the pre-existing .openrouter-allowlist.yaml precedent, alpha-
+      engine-config-I7864. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302
+
+  - path: tests/test_thinktank_group_addressing.py
+    pattern: openrouter:env_key
+    reason: >-
+      Docstring/comment prose describing the pre-I6367 pinned-provider
+      failure mode this test file's OWN suite exists to guard against — not
+      a live env-var read. Baseline sweep for alpha-engine-config-I9302.
+    expires: "2026-11-28"
+    tracking: alpha-engine-config-I9302

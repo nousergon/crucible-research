@@ -1,4 +1,4 @@
-"""Think Tank tiers addressed by capability group rather than a pinned provider.
+"""Think Tank tiers addressed by capability group — the ONLY addressing mode.
 
 Brian's ruling 2026-08-03 (alpha-engine-config-I6367): no agent may be
 directly linked to OpenRouter. Before this, all four Think Tank tiers pinned
@@ -9,6 +9,14 @@ being written entirely.
 
 The group's chain has no OpenRouter primary, so the same event would not have
 touched a group-addressed run at all.
+
+**alpha-engine-config-I9302 (item 3), 2026-08-29:** the pinned form itself —
+kept expressible after I6367 "so a tier can be held on a specific model
+deliberately" — was removed. It was measured DORMANT (the live private config
+carries no ``providers:`` block) but remained fully wired machinery that
+reinstated direct provider linkage, bypassing the router, on one config edit.
+Brian's ruling that day was unconditional: no second routing plane outside
+the krepis router, full stop.
 """
 
 from __future__ import annotations
@@ -33,39 +41,26 @@ from thinktank.settings import (  # noqa: E402
 class TestParseTier:
     def test_group_addressed_tier(self):
         tier = _parse_tier("thesis", {"group": "med", "max_tokens": 8000})
-        assert tier.is_group_addressed
         assert tier.group == "med"
-        assert tier.provider is None and tier.model is None
 
-    def test_pinned_tier_still_parses(self):
-        """The pinned form stays expressible — a tier may be held on a
-        specific model deliberately, and that choice should be visible in the
-        config rather than implied by its absence."""
-        tier = _parse_tier("thesis", {
-            "provider": "openrouter", "model": "x/y", "max_tokens": 8000,
-            "price_in_per_m": 0.1, "price_out_per_m": 0.2,
-        })
-        assert not tier.is_group_addressed
-        assert tier.model == "x/y"
-
-    def test_both_forms_is_rejected(self):
-        """Not resolved by precedence: one of the two would be silently
-        ignored, and which one is exactly the sort of fact discovered during
-        an incident."""
-        with pytest.raises(ValueError, match="BOTH"):
+    def test_a_retired_pinned_key_is_rejected(self):
+        """The pinned ``provider``/``model`` addressing mode was removed
+        (alpha-engine-config-I9302) — a config authored against it must fail
+        loud, not have the keys silently dropped."""
+        with pytest.raises(ValueError, match="provider"):
             _parse_tier("thesis", {
-                "group": "med", "provider": "openrouter", "model": "x/y",
-                "max_tokens": 8000,
+                "provider": "openrouter", "model": "x/y", "max_tokens": 8000,
+                "price_in_per_m": 0.1, "price_out_per_m": 0.2,
             })
 
-    def test_neither_form_is_rejected(self):
-        with pytest.raises(ValueError, match="neither"):
+    def test_missing_group_is_rejected(self):
+        with pytest.raises(ValueError, match="group"):
             _parse_tier("thesis", {"max_tokens": 8000})
 
     def test_group_tier_carrying_stale_prices_is_rejected(self):
-        """Under group addressing the serving model is a call-time fact. A
-        leftover per-tier price literal would read as authoritative and bill
-        the wrong card the moment the chain fell through."""
+        """A leftover per-tier price literal would read as authoritative and
+        bill the wrong card the moment the chain fell through — rejected
+        alongside the rest of the retired pinned schema."""
         with pytest.raises(ValueError, match="price_in_per_m"):
             _parse_tier("thesis", {
                 "group": "med", "max_tokens": 8000, "price_in_per_m": 0.1,
@@ -79,7 +74,7 @@ def _settings(tier: TierSpec) -> ThinktankSettings:
     return ThinktankSettings(
         bucket="b", daily_new_names=1, rank_ceiling=1, sweep_chunk_size=1,
         stale_after_days=1, monthly_budget_usd_default=1.0,
-        budget_ssm_param="/p", providers={}, tiers={tier.name: tier},
+        budget_ssm_param="/p", tiers={tier.name: tier},
     )
 
 
@@ -206,26 +201,15 @@ class TestGroupAddressedCost:
                 provider_cost_usd=None,
             )
 
-    def test_pinned_tier_still_prices_from_its_literals(self):
-        tier = TierSpec(
-            name="thesis", provider="openrouter", model="x/y", max_tokens=8000,
-            price_in_per_m=1.0, price_out_per_m=2.0,
-        )
-        cost = self._client(tier)._cost_for(
-            tier, input_tokens=1_000_000, output_tokens=1_000_000,
-            served_model="ignored", provider_cost_usd=None,
-        )
-        assert cost == pytest.approx(3.0)
-
 
 # ── the config file after the flip ───────────────────────────────────────
 
 
 class TestFullyGroupAddressedConfig:
-    """A thinktank.yaml with NO `providers` block at all — the shape the file
-    takes once every tier is group-addressed (alpha-engine-config-I6373 step
-    6). Requiring an empty block would make the absence of direct provider
-    linkage look like a malformed file."""
+    """A thinktank.yaml with NO `providers` block — the only shape the file
+    can now take, since every tier is group-addressed and the pinned-provider
+    schema no longer parses at all (alpha-engine-config-I6373 step 6,
+    -I9302)."""
 
     def _write(self, tmp_path, body):
         p = tmp_path / "thinktank.yaml"
@@ -262,27 +246,9 @@ thinktank:
             "THINKTANK_CONFIG_PATH", str(self._write(tmp_path, self._NO_PROVIDERS))
         )
         s = load_settings()
-        assert s.providers == {}
         assert {n: t.group for n, t in s.tiers.items()} == {
             "sweep": "low", "thesis": "med",
         }
-        assert all(t.is_group_addressed for t in s.tiers.values())
-
-    def test_a_malformed_provider_still_hard_fails(self, tmp_path, monkeypatch):
-        """Only the TOTAL absence of the block is meaningful. A provider
-        missing base_url is a mistake and must not be tolerated by the same
-        leniency."""
-        import pytest as _pytest
-
-        from thinktank.settings import load_settings
-
-        body = self._NO_PROVIDERS.replace(
-            "  llm:\n    tiers:",
-            "  llm:\n    providers:\n      broken:\n        key_secret: X\n    tiers:",
-        )
-        monkeypatch.setenv("THINKTANK_CONFIG_PATH", str(self._write(tmp_path, body)))
-        with _pytest.raises(KeyError):
-            load_settings()
 
 
 # ── The credential half of the same contract (config-I6373) ──────────────

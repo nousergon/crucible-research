@@ -9,6 +9,23 @@ documents the shape for open-source viewers only — it is NEVER loaded.
 Explicit test/dev override: ``THINKTANK_CONFIG_PATH`` env var points at an
 alternate YAML. This is an explicit operator/test knob (same spirit as
 ``ALPHA_ENGINE_SECRETS_SOURCE=env``), not a silent example-file fallback.
+
+**alpha-engine-config-I9302 (item 3), 2026-08-29:** every tier is addressed
+by capability GROUP only. Through 2026-08-29 this module also accepted a
+pinned ``provider`` + ``model`` form (its own ``ProviderSpec``, its own price
+literals) that bypassed the krepis router entirely — a second routing plane,
+measured DORMANT (the live private config carries no ``providers:`` block,
+so it had reinstated direct provider linkage on one config edit, with no
+guard between). Brian's ruling that day was unconditional: "the entire nous
+ergon system should now be running through the krepis router ... we should
+have no other parallel setups." I9302 itself: "Prefer deletion to a guard: a
+code path that only a config edit can reach is cheaper to remove than to
+police." Removed rather than migrated onto ``krepis.router.resolve_model_spec``
+(the pinned-model sibling of ``resolve_group_spec``) because the model IDs
+this schema carried (``openai/gpt-oss-120b``, raw OpenRouter slugs) are not
+krepis registry entries — wiring that up is a registry change in
+``alpha-engine-config``, out of this repo's scope, and every live tier is
+already group-addressed with no case pending that needs it.
 """
 
 from __future__ import annotations
@@ -29,46 +46,24 @@ DEFAULT_BUCKET = os.environ.get(
     "RESEARCH_BUCKET", os.environ.get("S3_BUCKET", "alpha-engine-research")
 )
 
-
-@dataclass(frozen=True)
-class ProviderSpec:
-    """One OpenAI-compatible serving endpoint."""
-
-    name: str
-    base_url: str
-    key_secret: str  # secret name resolved via nousergon_lib.secrets.get_secret
+_RETIRED_PINNED_KEYS = ("provider", "model", "price_in_per_m", "price_out_per_m")
 
 
 @dataclass(frozen=True)
 class TierSpec:
     """One model tier (sweep / thesis / themes / pillar).
 
-    A tier is addressed EITHER by capability group (``group``) or by a pinned
-    ``provider`` + ``model`` — never both, never neither. Group addressing is
-    the target state (alpha-engine-config-I6367, Brian's 2026-08-03 ruling:
-    no agent directly linked to OpenRouter); the pinned form remains
-    expressible so a tier can be held on a specific model deliberately, with
-    that choice visible in the config rather than implied by silence.
-
-    ``price_in_per_m`` / ``price_out_per_m`` are meaningful only for a pinned
-    tier. Under group addressing the serving model is not known until the
-    response returns, so prices come from ``krepis`` keyed on the model that
-    actually served — a per-tier literal would bill the wrong card the moment
-    the chain fell through.
+    Addressed by capability GROUP only — the ``group`` field names a
+    ``low|med|high|ultra`` registry tier resolved through
+    ``krepis.router.resolve_group_spec``. Which model serves it, at which
+    endpoint, with which credential, is a registry decision resolved above
+    this file (alpha-engine-config-I6367, I9302).
     """
 
     name: str
     max_tokens: int
-    group: str | None = None
-    provider: str | None = None
-    model: str | None = None
-    price_in_per_m: float | None = None
-    price_out_per_m: float | None = None
+    group: str
     structured_outputs: bool = False  # provider/model supports response_format json_schema
-
-    @property
-    def is_group_addressed(self) -> bool:
-        return self.group is not None
 
 
 @dataclass(frozen=True)
@@ -80,7 +75,6 @@ class ThinktankSettings:
     stale_after_days: int
     monthly_budget_usd_default: float
     budget_ssm_param: str
-    providers: dict[str, ProviderSpec] = field(default_factory=dict)
     tiers: dict[str, TierSpec] = field(default_factory=dict)
     # alpha-engine-config-I6648 / products/thinktank.md §2.1. `rank_ceiling`
     # is the ENTER threshold; this is the strictly-wider EXIT threshold that
@@ -96,15 +90,6 @@ class ThinktankSettings:
             raise KeyError(
                 f"thinktank.yaml defines no LLM tier '{name}' — "
                 f"available: {sorted(self.tiers)}"
-            ) from None
-
-    def provider_for(self, tier: TierSpec) -> ProviderSpec:
-        try:
-            return self.providers[tier.provider]
-        except KeyError:
-            raise KeyError(
-                f"tier '{tier.name}' references unknown provider "
-                f"'{tier.provider}' — available: {sorted(self.providers)}"
             ) from None
 
 
@@ -164,56 +149,36 @@ def _parse_exit_rank(coverage: dict) -> int | None:
 
 
 def _parse_tier(name: str, t: dict) -> TierSpec:
-    """One tier, addressed by group XOR by pinned provider+model.
+    """One tier, addressed by capability group. Fails loud, never silently.
 
-    Both-or-neither is REJECTED rather than resolved by precedence. A tier
-    carrying a group and a pin would have one of them silently ignored, and
-    which one is exactly the sort of fact that is discovered in an incident.
+    A tier authored against the retired pinned-provider schema (``provider``
+    / ``model`` / ``price_in_per_m`` / ``price_out_per_m``, removed
+    alpha-engine-config-I9302) is REJECTED rather than having those keys
+    silently dropped — a silent drop would read as "group addressing was
+    chosen" when nobody chose it, and the config would keep loading with the
+    model choice it documents quietly discarded.
     """
+    stale = [k for k in _RETIRED_PINNED_KEYS if k in t]
+    if stale:
+        raise ValueError(
+            f"thinktank.yaml tier {name!r} carries {stale} — the pinned "
+            f"provider/model addressing mode was removed (alpha-engine-"
+            f"config-I9302, Brian's 2026-08-29 ruling: no parallel routing "
+            f"plane outside the krepis router). Address the tier by "
+            f"`group` (low|med|high|ultra) only."
+        )
+
     group = t.get("group")
-    provider = t.get("provider")
-    model = t.get("model")
-
-    if group and (provider or model):
+    if not group:
         raise ValueError(
-            f"thinktank.yaml tier {name!r} declares BOTH group={group!r} and "
-            f"a pinned provider/model — one would be silently ignored. "
-            f"Address a tier by capability group OR by a specific model."
-        )
-    if not group and not (provider and model):
-        raise ValueError(
-            f"thinktank.yaml tier {name!r} declares neither a `group` nor a "
-            f"complete `provider` + `model` pin — there is nothing to call."
-        )
-
-    if group:
-        # Prices are NOT read for a group-addressed tier: the serving model
-        # is a call-time fact, so cost is priced from the model that actually
-        # served (krepis PriceCard). Rejecting the keys outright keeps a
-        # stale literal from reading as authoritative.
-        stale = [k for k in ("price_in_per_m", "price_out_per_m") if k in t]
-        if stale:
-            raise ValueError(
-                f"thinktank.yaml tier {name!r} is group-addressed but still "
-                f"carries {stale} — under group addressing the serving model "
-                f"is not known until the response returns, and cost is priced "
-                f"from it. A per-tier literal here would bill the wrong card "
-                f"the moment the chain fell through."
-            )
-        return TierSpec(
-            name=name,
-            group=str(group),
-            max_tokens=int(t["max_tokens"]),
-            structured_outputs=bool(t.get("structured_outputs", False)),
+            f"thinktank.yaml tier {name!r} declares no `group` — there is "
+            f"nothing to call. Every tier is addressed by capability group."
         )
 
     return TierSpec(
         name=name,
-        provider=str(provider),
-        model=str(model),
+        group=str(group),
         max_tokens=int(t["max_tokens"]),
-        price_in_per_m=float(t["price_in_per_m"]),
-        price_out_per_m=float(t["price_out_per_m"]),
         structured_outputs=bool(t.get("structured_outputs", False)),
     )
 
@@ -225,16 +190,6 @@ def load_settings() -> ThinktankSettings:
         raw = yaml.safe_load(f)
     tt = raw["thinktank"]
 
-    # `providers` is OPTIONAL. A config whose tiers are all group-addressed
-    # has no provider endpoints to declare, and requiring an empty block would
-    # make the absence of direct provider linkage look like a malformed file
-    # (alpha-engine-config-I6367 — no agent directly linked to OpenRouter).
-    # Still hard-fails on a MALFORMED entry: a provider missing base_url or
-    # key_secret is a mistake, and only its total absence is meaningful.
-    providers = {
-        name: ProviderSpec(name=name, base_url=p["base_url"], key_secret=p["key_secret"])
-        for name, p in (tt["llm"].get("providers") or {}).items()
-    }
     tiers = {
         name: _parse_tier(name, t)
         for name, t in tt["llm"]["tiers"].items()
@@ -251,7 +206,6 @@ def load_settings() -> ThinktankSettings:
         stale_after_days=int(coverage.get("stale_after_days", 30)),
         monthly_budget_usd_default=float(budget["monthly_usd_default"]),
         budget_ssm_param=str(budget.get("ssm_param", "/thinktank/monthly_budget_usd")),
-        providers=providers,
         tiers=tiers,
     )
     logger.info(
