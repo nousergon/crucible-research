@@ -158,7 +158,7 @@ from scoring.universe_membership import (
     live_cut_champion,
     promotion_ineligibility_from_rank_tables,
 )
-from scoring.verdict_digest import VerdictSlot, send_verdict_digest
+from scoring.verdict_digest import VERDICT_SLOTS, send_verdict_digest
 from scoring.weekly_ledger import (
     LEDGER_COLS,
     LEDGER_KEY,
@@ -203,16 +203,16 @@ DECISION_HOLD = "hold"
 
 DECISION_CADENCE_WEEKLY = "weekly"
 
-# The delivery row for this slot (alpha-engine-config-I9278). Declared beside
-# the keys it names so a key rename cannot leave the email pointing at an object
-# that no longer exists.
-VERDICT_SLOT = VerdictSlot(
-    slot_id="scanner_cut",
-    title="Scanner cut champion/challenger",
-    pointer_key="config/scanner_cut_champion.json",
-    audit_dated_key="config/apply_audit/scanner_cut_champion/{date}.json",
-    dedup_key_prefix="scanner-cut-verdict",
-)
+# The delivery row for this slot (alpha-engine-config-I9278), resolved from the
+# module that owns delivery rather than restated here. It used to be declared
+# beside the keys it names, so that a key rename could not leave the email
+# pointing at an object that no longer exists — but a SECOND slot arrived
+# (scoring/spec_promotion.py) and two engines each holding their own row is how
+# the pair drifts. The registry is now the single place both are declared, and
+# `test_the_registry_row_names_the_keys_this_module_writes` asserts this row's
+# keys against THIS module's constants, which is the property the old placement
+# was buying.
+VERDICT_SLOT = VERDICT_SLOTS["scanner_cut"]
 
 # The name of the decision metric, carried on every record and on every arm. It
 # is deliberately long: a reader who sees only this string must be able to tell

@@ -77,6 +77,7 @@ class _Alerts:
 
 def _doc(**over) -> dict:
     base = {
+        "slot_id": "scanner_cut",
         "decided_on": DATE,
         "decision": "hold",
         "reason_code": "insufficient_weeks",
@@ -303,3 +304,111 @@ def test_the_subject_states_the_arm_count_so_a_shrinking_slot_is_visible():
     )
     subject = build_subject(d.to_document(), VERDICT_SLOT)
     assert "5 arms" in subject
+
+
+# ── The cross-module contract (alpha-engine-config-I9278) ────────────────────
+
+
+def test_every_guarded_import_of_this_module_names_a_symbol_that_exists():
+    """THE guard for this arc's near-miss.
+
+    ``scoring/spec_promotion.py`` imports from this module behind a
+    ``try/except ImportError``, because the two modules landed on sibling
+    branches. A missing MODULE and a missing SYMBOL raise the SAME exception, so
+    that guard would have gone on swallowing a symbol mismatch forever — logging
+    "verdict_digest.py not present yet" while the file sat right there, and the
+    spec slot's verdict would have silently never delivered.
+
+    That is exactly the defect alpha-engine-config-I9278 exists to retire,
+    re-created by the merge order of its own fix. A guarded import is a place
+    where a typo becomes permanent silence, so every symbol any module imports
+    from here is asserted to exist.
+
+    RED before the fix: `deliver_slot_verdict` did not exist on this module and
+    `spec_promotion` imported it.
+    """
+    import ast
+    import pathlib
+
+    import scoring.verdict_digest as vd
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    found_any = False
+    for path in (root / "scoring").glob("*.py"):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module not in ("scoring.verdict_digest", "verdict_digest"):
+                continue
+            for alias in node.names:
+                found_any = True
+                assert hasattr(vd, alias.name), (
+                    f"{path.name} imports {alias.name!r} from verdict_digest, "
+                    f"which does not export it. If that import is guarded by "
+                    f"except ImportError, the mismatch is INVISIBLE at runtime "
+                    f"and the verdict silently never delivers "
+                    f"(alpha-engine-config-I9278)."
+                )
+    assert found_any, "no module imports from verdict_digest — has it been orphaned?"
+
+
+def test_the_registry_holds_a_row_for_every_slot_that_writes_a_decision():
+    """A promotion engine whose records cannot be delivered is a registration
+    gap, not a formatting question. Both scanner slots must be renderable."""
+    from scoring.verdict_digest import VERDICT_SLOTS
+
+    assert set(VERDICT_SLOTS) == {"scanner_cut", "scanner_spec"}
+    # Per-slot dedup prefixes: a shared key would let one slot's send suppress
+    # another's inside the same 24h window.
+    prefixes = [s.dedup_key_prefix for s in VERDICT_SLOTS.values()]
+    assert len(set(prefixes)) == len(prefixes)
+
+
+def test_the_registry_row_names_the_keys_this_module_writes():
+    """The property that used to come from declaring the row beside its keys.
+
+    `cut_promotion.VERDICT_SLOT` now resolves from the registry, so a key rename
+    in one place and not the other is caught here rather than by an email
+    pointing at an S3 object that does not exist.
+    """
+    from scoring import cut_promotion as cp
+
+    assert cp.VERDICT_SLOT.audit_dated_key == cp.AUDIT_DATED_KEY
+    assert cp.VERDICT_SLOT.pointer_key == cp.CUT_CHAMPION_POINTER_KEY
+
+
+def test_a_spec_slot_record_resolves_its_own_slot_and_delivers():
+    """The merged `spec_promotion._deliver_verdict` hands over ONLY the doc, so
+    the slot must be resolvable from `slot_id` alone."""
+    from scoring.verdict_digest import deliver_slot_verdict
+
+    sink = _Sink()
+    doc = _doc(slot_id="scanner_spec", champion="momentum_sleeve",
+               champion_before="momentum_sleeve", reason_code="no_eligible_challenger")
+    assert deliver_slot_verdict(doc, send_email_fn=sink) is True
+    subject, body, kw = sink.calls[0]
+    assert "Scanner spec champion/challenger" in subject
+    assert kw["dedup_key"].startswith("scanner-spec-verdict:")
+    assert "scanner_spec_champion" in body
+
+
+def test_an_unknown_slot_id_raises_rather_than_guessing():
+    """Guessing would send an email whose subject and S3 footer describe a
+    different decision than the one in the body — a record asserting something
+    false about its own origin (§7.5)."""
+    from scoring.verdict_digest import UnknownVerdictSlot, deliver_slot_verdict
+
+    with pytest.raises(UnknownVerdictSlot) as exc:
+        deliver_slot_verdict(_doc(slot_id="predictor_model"), send_email_fn=_Sink())
+    assert "predictor_model" in str(exc.value)
+
+
+def test_the_cut_engine_still_delivers_through_the_registry_row():
+    """`cut_promotion` moved from its own VerdictSlot literal to the registry;
+    the behaviour must be identical."""
+    sink = _Sink()
+    assert send_verdict_digest(_doc(), VERDICT_SLOT, send_email_fn=sink) is True
+    subject, _, kw = sink.calls[0]
+    assert "Scanner cut champion/challenger" in subject
+    assert kw["dedup_key"] == f"scanner-cut-verdict:{DATE}"

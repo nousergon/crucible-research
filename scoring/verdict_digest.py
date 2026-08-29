@@ -357,3 +357,89 @@ def _escalate_undelivered(
             "[verdict_digest] undelivered-verdict alert publish ALSO failed for %s",
             slot.slot_id,
         )
+
+
+# ── The slot registry, and the entry point every engine calls ────────────────
+#
+# WHY THIS EXISTS AND WHY IT IS SHAPED THIS WAY (alpha-engine-config-I9278).
+# ``scoring/spec_promotion.py`` (crucible-research-PR761, merged 2026-08-29)
+# calls ``deliver_slot_verdict(doc)`` behind a guarded import, because this
+# module was landing on a sibling branch. That guard catches ``ImportError``
+# and logs "verdict_digest.py not present yet" — which, had this module shipped
+# exporting only ``send_verdict_digest(doc, slot)``, would have been caught by
+# the SAME except clause once the file existed, because a missing SYMBOL and a
+# missing MODULE both raise ``ImportError``.
+#
+# The spec slot's verdict would then have silently never delivered, forever,
+# under a log line that misattributed the cause — which is precisely the defect
+# I9278 exists to retire, re-created by the merge order of its own fix. Caught
+# by reading the merged call site rather than by trusting that two branches
+# written in parallel agreed about a name.
+#
+# So the entry point takes ONLY the document, and resolves the slot from
+# ``doc["slot_id"]``. An engine does not need to hold a ``VerdictSlot`` to be
+# delivered, and cannot pass one that disagrees with the record it just wrote.
+
+VERDICT_SLOTS: dict[str, VerdictSlot] = {
+    "scanner_cut": VerdictSlot(
+        slot_id="scanner_cut",
+        title="Scanner cut champion/challenger",
+        pointer_key="config/scanner_cut_champion.json",
+        audit_dated_key="config/apply_audit/scanner_cut_champion/{date}.json",
+        dedup_key_prefix="scanner-cut-verdict",
+    ),
+    "scanner_spec": VerdictSlot(
+        slot_id="scanner_spec",
+        title="Scanner spec champion/challenger",
+        pointer_key="config/scanner_spec_champion.json",
+        audit_dated_key="config/apply_audit/scanner_spec_champion/{date}.json",
+        dedup_key_prefix="scanner-spec-verdict",
+    ),
+}
+"""Every slot this module can deliver, keyed by the ``slot_id`` its records
+carry. Per-slot dedup prefixes deliberately: a shared key would let one slot's
+send suppress another's in the same 24h window."""
+
+
+class UnknownVerdictSlot(KeyError):
+    """A record named a slot this module cannot render.
+
+    Raised, never defaulted. Guessing a slot would send an email whose subject,
+    title and S3 footer describe a different decision than the one in the body
+    — a record asserting something false about its own origin, which is
+    champion-challenger-policy.md §7.5's rule and the fleet's dominant bug
+    class. The caller's ``except Exception`` turns this into a logged,
+    non-fatal delivery failure; the decision record is already durable.
+    """
+
+
+def deliver_slot_verdict(
+    doc: dict,
+    *,
+    console_base_url: str | None = None,
+    send_email_fn: Any = None,
+    alert_fn: Any = None,
+) -> bool:
+    """Deliver ``doc``'s verdict, resolving its slot from ``doc["slot_id"]``.
+
+    The entry point every promotion engine calls. Returns whether the digest
+    landed; see :func:`send_verdict_digest` for the delivery contract and for
+    what happens when it does not.
+    """
+    slot_id = doc.get("slot_id")
+    slot = VERDICT_SLOTS.get(str(slot_id))
+    if slot is None:
+        raise UnknownVerdictSlot(
+            f"decision record for {doc.get('decided_on')!r} carries "
+            f"slot_id={slot_id!r}, which is not one of "
+            f"{sorted(VERDICT_SLOTS)}. Refusing to render a verdict under "
+            "another slot's title and keys — an engine whose records cannot be "
+            "delivered is a registration gap, not a formatting question."
+        )
+    return send_verdict_digest(
+        doc,
+        slot,
+        console_base_url=console_base_url,
+        send_email_fn=send_email_fn,
+        alert_fn=alert_fn,
+    )
