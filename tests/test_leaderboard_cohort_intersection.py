@@ -233,8 +233,24 @@ def _seed_all_slots(client, entries: list[str], *, shadow_entries: list[str] | N
             client, f"universe_membership/{d}/universe.json",
             {"tickers": ["A", "B", "C"]},
         )
+    # The shadow-writing arms are resolved from the REGISTER, never typed out.
+    # A hardcoded list goes stale the next time an arm is registered, and it
+    # goes stale SILENTLY: the new arm simply has no cohort, which this file's
+    # own routing tests then read as a live measurement gap. That happened —
+    # alpha-engine-config-I9277 registered `scanner_predictor_direct` and
+    # `scanner_top20_predictor`, and `test_a_retired_arm_is_never_routed_as_a_gap`
+    # went red asserting "every LIVE arm scored" against a fixture that had
+    # stopped seeding two of them. Deriving the set is the fix for the CLASS.
+    #
+    # Every registered challenger gets a shadow, including whichever one is
+    # currently the live champion: the champion is scored from `signals/` and
+    # its shadow prefix is simply never read, so seeding it is harmless and
+    # removes the need for this fixture to resolve the pointer at all.
+    from producers.registry import challenger_producers
+
+    _shadow_arms = tuple(s.name for s in challenger_producers())
     for d in shadow:
-        for arm in ("no_agent_quant", "single_agent_quant", "thinktank_coverage"):
+        for arm in _shadow_arms:
             _put_json(
                 client, f"signals_shadow/{arm}/{d}/signals.json",
                 {"signals": {t: {"signal": "ENTER", "score": s}
@@ -377,9 +393,27 @@ class TestNoCohortArmsAreRoutedOnceOnTheSurveillanceTier:
             res = build_producer_leaderboard(
                 s3, _BUCKET, "2026-08-17", top_n=2, closes_panel_loader=panel.loader()
             )
+        # Two assertions, deliberately. The COUNT proves the gate is not
+        # passing vacuously; the MEMBERSHIP says which arm broke it when it
+        # does break. A bare count fails as `1 != 0` and tells a future reader
+        # nothing — which is how this test read when the register grew two
+        # challengers under it (alpha-engine-config-I9277) and the fixture
+        # stopped seeding them. `_seed_all_slots` now derives its arms from the
+        # register so that cannot recur; this message is the backstop if it
+        # somehow does.
+        routed = [
+            n for call in digest.call_args_list
+            for n in (call.kwargs.get("members") or [])
+        ]
+        assert "agentic_sector_teams" not in routed, (
+            "a RETIRED arm was routed as a measurement gap — it is permanently "
+            "zero-cohort by construction, so this class would page every day "
+            "from its first run (observability-policy §7.2 rates that worse "
+            "than no watchdog)"
+        )
         assert digest.call_count == 0, (
-            "every LIVE arm scored; the only zero-cohort arm is retired and "
-            "correctly not writing"
+            "every LIVE arm scored and the only zero-cohort arm is retired, so "
+            f"nothing should route; routed instead: {routed or digest.call_args_list}"
         )
         # Suppression is a DELIVERY decision, never a recording one (§7.2a):
         # the retired arm still appears on the artifact.

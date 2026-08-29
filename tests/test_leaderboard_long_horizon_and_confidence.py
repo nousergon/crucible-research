@@ -128,7 +128,22 @@ def _matured_to_126_panel() -> tuple[_Panel, list[str]]:
 # condition (two registered arms with no cohort artifact at all). The lock is
 # about an immature HORIZON; it must be seeded with a cohort that is immature
 # rather than one that is missing, or it locks the wrong thing in place.
-_SEEDED_PRODUCER_ARMS = ("thinktank_coverage", "no_agent_quant", "single_agent_quant")
+# DERIVED, never typed out. The literal below used to read
+# ("thinktank_coverage", "no_agent_quant", "single_agent_quant") under a comment
+# claiming it was "EVERY registered challenger arm" — true when written, false
+# the moment alpha-engine-config-I9277 registered `scanner_predictor_direct` and
+# `scanner_top20_predictor`. The two new arms then had no cohort, which is the
+# very condition this lock asserts is absent, so the lock went red for a reason
+# that had nothing to do with the property it names.
+#
+# That is the SECOND fixture in this repo to go stale the same way this session
+# (the first: `tests/test_cuts_leaderboard.py::_SlotS3`, which never seeded
+# `attractiveness_hard3_top_60`). A register is a moving target and a test that
+# restates it is a test that silently stops covering what it claims. Resolve it.
+def _seeded_producer_arms() -> tuple[str, ...]:
+    from producers.registry import challenger_producers
+
+    return tuple(s.name for s in challenger_producers())
 
 
 def _seed_producer_cohort(client, entries: list[str]) -> None:
@@ -138,7 +153,7 @@ def _seed_producer_cohort(client, entries: list[str]) -> None:
             f"signals/{d}/signals.json",
             {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("A", 0.9), ("B", 0.5), ("C", 0.1)]}},
         )
-        for arm in _SEEDED_PRODUCER_ARMS:
+        for arm in _seeded_producer_arms():
             _put_json(
                 client,
                 f"signals_shadow/{arm}/{d}/signals.json",
