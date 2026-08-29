@@ -66,8 +66,25 @@ class ResearchPreflight(BasePreflight):
     # invoke: ``scripts.aggregate_costs`` was imported by handler.py
     # (PR #81 wire-up) but the Dockerfile never copied ``scripts/``,
     # so every Lambda run logged a non-fatal WARN at the end.
+    #
+    # `krepis.router` and `agents.langchain_utils` join this table rather than
+    # becoming module-level imports (alpha-engine-config-I9302). Both are
+    # weekly-only, and importing either at module level makes the WHOLE agent
+    # graph transitively reachable from `Dockerfile.alerts`' entrypoint — the
+    # packaging guard says so, correctly, and satisfying it by COPYing twelve
+    # more packages into the alerts image would pay a real cost for a code path
+    # alerts never executes.
+    #
+    # Deferring is safe here ONLY because this table exists: it resolves the
+    # MODULE and the SYMBOL separately, which a bare guarded import cannot —
+    # `try: from x import y except ImportError` gives a rename and a missing
+    # COPY the same exception and lets the run go silently on
+    # (alpha-engine-config-I9339). Both are resolved eagerly in weekly mode,
+    # before any LLM spend.
     _DEFERRED_IMPORTS: tuple[tuple[str, str], ...] = (
         ("scripts.aggregate_costs", "aggregate_day"),
+        ("krepis.router", "resolve_group_spec"),
+        ("agents.langchain_utils", "_exec_context"),
     )
 
     def _check_deferred_imports(self) -> None:
@@ -80,20 +97,38 @@ class ResearchPreflight(BasePreflight):
         same class of "deployment-side regression."
         """
         for module_path, attr in self._DEFERRED_IMPORTS:
-            try:
-                mod = __import__(module_path, fromlist=[attr])
-                getattr(mod, attr)
-            except (ImportError, AttributeError) as exc:
-                raise RuntimeError(
-                    f"Preflight: deferred import {module_path}.{attr} "
-                    f"unresolvable: {type(exc).__name__}: {exc}. "
-                    f"Check Dockerfile COPY lines + the module's "
-                    f"__init__.py."
-                ) from exc
+            self._deferred(module_path, attr)
         log.info(
             "preflight: %d deferred imports resolved",
             len(self._DEFERRED_IMPORTS),
         )
+
+    @staticmethod
+    def _deferred(module_path: str, attr: str):
+        """Resolve one deferred (module, symbol) pair, or raise saying WHICH failed.
+
+        A missing MODULE (an un-COPY'd package) and a missing SYMBOL (a rename
+        upstream) are different faults with different fixes, and a bare
+        `try: from x import y except ImportError` gives them the same exception
+        — that conflation is alpha-engine-config-I9339. Resolved separately so
+        the error names the actual fault.
+        """
+        try:
+            mod = __import__(module_path, fromlist=[attr])
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Preflight: deferred import {module_path}.{attr} "
+                f"unresolvable — MODULE missing: {exc}. Check Dockerfile "
+                f"COPY lines + the module's __init__.py."
+            ) from exc
+        try:
+            return getattr(mod, attr)
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"Preflight: deferred import {module_path}.{attr} "
+                f"unresolvable — module imported but SYMBOL absent: {exc}. "
+                f"A rename upstream, not a packaging fault."
+            ) from exc
 
     def _check_arcticdb_universe(self) -> None:
         """Assert ArcticDB is reachable and SPY has fresh data.
@@ -164,19 +199,18 @@ class ResearchPreflight(BasePreflight):
         Resolution is what proves the run can reach a model: it exercises the
         registry, the declared execution context, and the group's membership
         in one call, and it returns the credential name the call will actually
-        use. Imports are local so this module stays importable without the LLM
-        dependencies, matching ``_check_deferred_imports``.
+        Both symbols come from ``_DEFERRED_IMPORTS`` rather than module-level
+        imports: they are weekly-only, and importing them at module level drags
+        the whole agent graph into the alerts image (see that table's note).
 
         Raises rather than degrades: a weekly run that cannot resolve its model
         classes has nothing to fall back to, and a preflight that shrugs at
         that is worse than no preflight (`model-router-policy` §5 step 3).
         """
-        from krepis.router import resolve_group_spec  # noqa: PLC0415
-
         import config  # noqa: PLC0415
-        from agents.langchain_utils import _exec_context  # noqa: PLC0415
 
-        exec_context = _exec_context()
+        resolve_group_spec = self._deferred("krepis.router", "resolve_group_spec")
+        exec_context = self._deferred("agents.langchain_utils", "_exec_context")()
         for model_class in (config.PER_STOCK_CLASS, config.STRATEGIC_CLASS):
             try:
                 spec, _route = resolve_group_spec(
@@ -190,12 +224,11 @@ class ResearchPreflight(BasePreflight):
                     f"cannot reach a model. This is the same failure the run "
                     f"would hit mid-invocation, surfaced before any spend."
                 ) from exc
-            log.info(
-                "preflight: %s -> %s (credential %s)",
-                model_class,
-                spec.model,
-                spec.api_key_env,
-            )
+            # The credential NAME is deliberately not logged. It is not a
+            # secret, but CodeQL reads `api_key_env` as sensitive and it adds
+            # nothing a failure would not already say — the resolver's own
+            # error names the credential when resolution is what failed.
+            log.info("preflight: %s resolves to %s", model_class, spec.model)
 
     def run(self) -> None:
         self.check_env_vars("AWS_REGION")
