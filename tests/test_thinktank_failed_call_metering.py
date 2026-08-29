@@ -44,7 +44,7 @@ def _settings(tier: TierSpec) -> ThinktankSettings:
     return ThinktankSettings(
         bucket="b", daily_new_names=1, rank_ceiling=1, sweep_chunk_size=1,
         stale_after_days=1, monthly_budget_usd_default=1.0,
-        budget_ssm_param="/p", providers={}, tiers={tier.name: tier},
+        budget_ssm_param="/p", tiers={tier.name: tier},
     )
 
 
@@ -160,21 +160,6 @@ class TestFailedCallIsStillMetered:
         assert usage.input_tokens == 1_000_000
         assert usage.cost_usd == pytest.approx(0.14, rel=1e-6)
 
-    def test_pinned_tier_prices_a_failed_call_from_its_literals(
-        self, monkeypatch
-    ):
-        """Unchanged behaviour: a pinned tier never needed a served model."""
-        tier = TierSpec(
-            name="pillar", provider="openrouter", model="x/y", max_tokens=4000,
-            price_in_per_m=1.0, price_out_per_m=2.0,
-        )
-        c = _client(tier, monkeypatch)
-
-        with pytest.raises(ThinktankLLMError):
-            _complete(c, tier)
-
-        assert c._usage["pillar"].cost_usd == pytest.approx(1.0)
-
 
 class TestPriceableModelHelper:
     def test_group_tier_maps_deployment_to_upstream_model(self, monkeypatch):
@@ -186,15 +171,6 @@ class TestPriceableModelHelper:
         assert client_mod._priceable_model_for_failed_call(
             _FailingLLM(), PILLAR
         ) == "deepseek-v4-flash"
-
-    def test_pinned_tier_resolves_to_nothing(self, monkeypatch):
-        tier = TierSpec(
-            name="pillar", provider="openrouter", model="x/y", max_tokens=4000,
-            price_in_per_m=1.0, price_out_per_m=2.0,
-        )
-        assert client_mod._priceable_model_for_failed_call(
-            _FailingLLM(), tier
-        ) == ""
 
     def test_a_missing_registry_does_not_propagate(self, monkeypatch):
         """``served_model_for_deployment`` raises when no registry is found.

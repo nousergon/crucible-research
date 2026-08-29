@@ -47,7 +47,6 @@ def _settings(**over) -> ThinktankSettings:
         "stale_after_days": 30,
         "monthly_budget_usd_default": 25.0,
         "budget_ssm_param": "/thinktank/monthly_budget_usd",
-        "providers": {},
         "tiers": {},
     }
     base.update(over)

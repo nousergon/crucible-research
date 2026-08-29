@@ -16,9 +16,12 @@ Boundaries (plan: alpha-engine-config/private-docs/research-thinktank-plan-26070
   the OBSERVE-ONLY substrate other challenger producers already write to
   (never read by live trading/executor/predictor); see
   ``thinktank/challenger_selection.py``.
-- Provider-agnostic by construction: OpenAI-compatible wire contract behind
-  a per-tier model registry (``thinktank.yaml``); Anthropic/OpenAI/self-hosted
-  vLLM are registry swaps, not code changes.
+- Provider-agnostic by construction: every tier names a capability GROUP in
+  ``thinktank.yaml``, resolved through ``krepis.router.resolve_group_spec``;
+  which model/provider serves it is a krepis registry swap
+  (``LLM_MODEL_REGISTRY.yaml``), never a code change here (alpha-engine-
+  config-I9302 removed an earlier pinned ``provider``+``model`` mode that
+  edited straight into ``thinktank.yaml``, bypassing the router).
 - Edge stays private: prompts load at runtime via ``agents.prompt_loader``
   (gitignored; real prompts in alpha-engine-config), tuned params live in
   the private ``alpha-engine-config/research/thinktank.yaml``.

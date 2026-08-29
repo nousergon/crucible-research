@@ -1,10 +1,12 @@
 """Provider-agnostic LLM client — the plug-and-play chokepoint.
 
-Wire contract: OpenAI-compatible chat completions. Every serving option the
-plan cares about (OpenRouter, DeepInfra, Fireworks, Together, Groq, self-hosted
-vLLM, OpenAI native, Anthropic via its OpenAI-compat endpoint) speaks it, so
-swapping models/providers is a ``thinktank.yaml`` registry edit — never a code
-change here.
+Wire contract: OpenAI-compatible chat completions. Every tier names a
+capability GROUP, resolved through ``krepis.router.resolve_group_spec`` — so
+swapping the model/provider serving a group is a krepis registry edit
+(``LLM_MODEL_REGISTRY.yaml``), never a code change here or an edit to
+``thinktank.yaml`` (alpha-engine-config-I9302 removed the older pinned
+``provider``+``model`` addressing mode that edited straight into this file's
+config).
 
 Structured outputs, portably:
 - tiers with ``structured_outputs: true`` send ``response_format=json_schema``
@@ -40,12 +42,11 @@ from krepis.llm import LLMClient, LLMError
 from krepis.llm_config import ModelSpec
 from krepis.router import resolve_group_spec, served_model_for_deployment
 from nousergon_lib import sft
-from nousergon_lib.secrets import get_secret
 from pydantic import BaseModel
 
 from thinktank import SFT_PRODUCER
 from thinktank.schemas import TierUsage
-from thinktank.settings import ProviderSpec, ThinktankSettings, TierSpec
+from thinktank.settings import ThinktankSettings, TierSpec
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +129,11 @@ class ThinktankClient:
     settings: ThinktankSettings
     run_id: str
     run_type: str = "thinktank_daily"
-    # test seam: (provider_spec, api_key) -> object exposing .chat.completions.create
-    client_factory: Callable[[ProviderSpec, str], Any] | None = None
+    # test seam: (ModelSpec, api_key) -> object exposing .chat.completions.create
+    # — krepis.llm.LLMClient's own native client_factory shape, passed straight
+    # through (alpha-engine-config-I9302: the old ProviderSpec-shaped seam and
+    # its translation layer existed only for the retired pinned-provider mode).
+    client_factory: Callable[[ModelSpec, str], Any] | None = None
     # ── I5223: cost_sink for shared telemetry (set by run.py) ────────────
     cost_sink: S3JsonlCostSink | None = None
 
@@ -150,40 +154,28 @@ class ThinktankClient:
         """
         cache_key = f"{tier.name}:{callsite_id}"
         if cache_key not in self._llm_clients:
-            if tier.is_group_addressed:
-                # The registry decides model, endpoint and credential; this
-                # module decides only which capability tier it wants and
-                # where it runs. `structured_outputs` is still ours: it is a
-                # per-tier requirement this codebase has live-verified, not a
-                # routing preference.
-                spec, _route = resolve_group_spec(
-                    tier.group,
-                    exec_context=THINKTANK_EXEC_CONTEXT,
-                    # This client is on the openai transport; asking for the
-                    # anthropic wire could hand it a URL it cannot speak.
-                    wire="openai",
-                    max_tokens=tier.max_tokens,
-                    structured_outputs=tier.structured_outputs,
-                )
-                api_key = None  # resolved by krepis from spec.api_key_env
-            else:
-                provider = self.settings.provider_for(tier)
-                api_key = get_secret(provider.key_secret)
-                spec = ModelSpec(
-                    provider=provider.name,
-                    model=tier.model,
-                    max_tokens=tier.max_tokens,
-                    base_url=provider.base_url,
-                    api_key_env=provider.key_secret,
-                    structured_outputs=tier.structured_outputs,
-                    # reasoning not used by pinned thinktank tiers — preserve
-                    # current behaviour (no explicit reasoning control).
-                )
+            # The registry decides model, endpoint and credential; this
+            # module decides only which capability tier it wants and
+            # where it runs (alpha-engine-config-I9302: the pinned-provider
+            # branch that bypassed this resolution was removed).
+            # `structured_outputs` is still ours: it is a per-tier
+            # requirement this codebase has live-verified, not a routing
+            # preference.
+            spec, _route = resolve_group_spec(
+                tier.group,
+                exec_context=THINKTANK_EXEC_CONTEXT,
+                # This client is on the openai transport; asking for the
+                # anthropic wire could hand it a URL it cannot speak.
+                wire="openai",
+                max_tokens=tier.max_tokens,
+                structured_outputs=tier.structured_outputs,
+            )
+            api_key = None  # resolved by krepis from spec.api_key_env
             client = LLMClient(
                 spec,
                 callsite_id=callsite_id,
                 api_key=api_key,
-                client_factory=(self._adapt_client_factory() if self.client_factory is not None else None),
+                client_factory=self.client_factory,
                 # max_retries=10, was 3 (alpha-engine-config-I8351).
                 #
                 # THIS BOUNDS A RESTART, NOT A RATE LIMIT. The OpenAI SDK's
@@ -227,27 +219,6 @@ class ThinktankClient:
             )
             self._llm_clients[cache_key] = client
         return self._llm_clients[cache_key]
-
-    def _adapt_client_factory(self) -> Callable[[ModelSpec, str], Any] | None:
-        """Adapt the old ``client_factory(ProviderSpec, api_key) → OpenAI``
-        test seam into the ``LLMClient`` shape ``(ModelSpec, api_key) → …``.
-
-        Only used when tests inject a factory. Returns None when no factory
-        is set, so ``LLMClient`` uses its own default construction.
-        """
-        if self.client_factory is None:
-            return None
-
-        def _adapted(spec: ModelSpec, api_key: str) -> Any:
-            # Reconstruct the old ProviderSpec shape for the test seam
-            provider = ProviderSpec(
-                name=spec.provider,
-                base_url=spec.base_url or "",
-                key_secret=spec.api_key_env or "",
-            )
-            return self.client_factory(provider, api_key)  # type: ignore[misc]
-
-        return _adapted
 
     # ── the one call surface ─────────────────────────────────────────────────
 
@@ -306,7 +277,7 @@ class ThinktankClient:
                         {"role": "user", "content": user},
                     ],
                     kwargs={
-                        "model": tier.model or tier.group,
+                        "model": tier.group,
                         "max_tokens": tier.max_tokens,
                     },
                     raw_text="",
@@ -348,7 +319,7 @@ class ThinktankClient:
                     total_in, total_out,
                 )
             raise ThinktankLLMError(
-                f"tier={tier.name} target={tier.model or tier.group} "
+                f"tier={tier.name} target={tier.group} "
                 f"agent={agent_id}: response failed after bounded retries: {exc}"
             ) from exc
 
@@ -395,13 +366,11 @@ class ThinktankClient:
     ) -> float:
         """Cost for one call, priced from what actually served it.
 
-        A pinned tier carries its own price literals and keeps using them —
-        the model is fixed, so the literal cannot drift out from under it.
-
-        A GROUP-addressed tier has no such literal and must not invent one:
-        the serving model is not known until the response returns, so pricing
-        from a per-tier constant would bill the wrong card the moment the
-        chain fell through to a fallback. Order of preference:
+        Every tier is group-addressed (alpha-engine-config-I9302), so no
+        tier carries a fixed price literal: the serving model is not known
+        until the response returns, and pricing from a per-tier constant
+        would bill the wrong card the moment the chain fell through to a
+        fallback. Order of preference:
 
         1. ``provider_cost_usd`` — what the provider itself billed. Exact.
         2. ``krepis.cost.PriceCard`` for the model that actually served.
@@ -409,12 +378,6 @@ class ThinktankClient:
            would make the monthly budget guard fail OPEN, and that guard is
            the only thing bounding this run's spend.
         """
-        if not tier.is_group_addressed:
-            return (
-                input_tokens * (tier.price_in_per_m or 0.0)
-                + output_tokens * (tier.price_out_per_m or 0.0)
-            ) / 1_000_000
-
         if provider_cost_usd is not None:
             return float(provider_cost_usd)
 
@@ -484,7 +447,7 @@ class ThinktankClient:
         self._sft_rows.setdefault(agent_id, []).append(
             _SftRow(
                 captured_at=datetime.now(UTC).isoformat(),
-                model=served_model or tier.model or tier.group or tier.name,
+                model=served_model or tier.group or tier.name,
                 call_seq=self._call_seq,
                 input_messages=messages,
                 invocation_params={k: v for k, v in kwargs.items() if k != "messages"},
@@ -587,14 +550,13 @@ def _priceable_model_for_failed_call(client: LLMClient, tier: TierSpec) -> str:
     all because the monthly budget guard reads the total — a failed call
     contributing nothing understates the run's real spend.
 
-    Returns ``""`` for a pinned tier, which prices from its own literals and
-    never needed a served model. Where the mapping itself fails, returns the
-    deployment name unchanged — unpriceable, and deliberately so: the caller
-    logs an unpriceable failed call rather than raising on it, so nothing
-    here can become the thing that masks a transport error.
+    Every tier is group-addressed (alpha-engine-config-I9302), so *tier* is
+    accepted for call-site symmetry but not otherwise needed. Where the
+    mapping itself fails, returns the deployment name unchanged —
+    unpriceable, and deliberately so: the caller logs an unpriceable failed
+    call rather than raising on it, so nothing here can become the thing that
+    masks a transport error.
     """
-    if not tier.is_group_addressed:
-        return ""
     addressed = getattr(getattr(client, "spec", None), "model", "") or ""
     if not addressed:
         return ""

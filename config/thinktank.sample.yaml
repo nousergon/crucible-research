@@ -25,29 +25,21 @@ thinktank:
     ssm_param: /thinktank/monthly_budget_usd
 
   llm:
-    providers:
-      openrouter:
-        base_url: https://openrouter.ai/api/v1
-        key_secret: OPENROUTER_API_KEY    # resolved via nousergon_lib.secrets
-      # Plug-and-play by construction — future swaps are config edits only:
-      # vllm_spot:
-      #   base_url: http://10.0.0.12:8000/v1
-      #   key_secret: VLLM_API_KEY
-      # openai:
-      #   base_url: https://api.openai.com/v1
-      #   key_secret: OPENAI_API_KEY
-      # anthropic_compat:
-      #   base_url: https://api.anthropic.com/v1
-      #   key_secret: ANTHROPIC_API_KEY
-
+    # Every tier below names a CAPABILITY GROUP (low|med|high|ultra); which
+    # model serves it, at which endpoint, with which credential, is a krepis
+    # registry decision resolved above this file
+    # (alpha-engine-config/private-docs/LLM_MODEL_REGISTRY.yaml, via the
+    # authenticated router edge) — never a provider/base_url/key literal
+    # here. Brian's ruling 2026-08-03 (alpha-engine-config-I6367) and again
+    # 2026-08-29 (alpha-engine-config-I9302): no agent may be directly linked
+    # to a provider, and no second routing plane outside the krepis router.
+    # Swapping the model serving a group is a krepis registry edit, not a
+    # change to this file.
     tiers:
       sweep:      # cheap, high-volume: daily events sweep
-        provider: openrouter
-        model: openai/gpt-oss-120b
-        max_tokens: 4000
-        price_in_per_m: 0.15
-        price_out_per_m: 0.60
-        structured_outputs: true
+        group: low
+        max_tokens: 8000
+        structured_outputs: false
       triage:     # the gate between detection and the expensive write tier
         # products/thinktank.md §2.4 (alpha-engine-config-I6649). Sits between
         # `sweep` and `thesis`: the sweep is wide and low-precision by design,
@@ -56,30 +48,21 @@ thinktank:
         # thesis's claim and the sweep's rationale, never the full evidence
         # bundle, because assembling that bundle is most of what makes the
         # write tier expensive.
-        #
-        # structured_outputs MUST stay true: TriageDecisionLLM is a two-field
-        # schema whose `escalate` boolean gates spend, and a JSON-instruction
-        # fallback that returns prose here would fail open on every call.
-        provider: openrouter
-        model: openai/gpt-oss-120b
-        max_tokens: 1000
-        price_in_per_m: 0.15
-        price_out_per_m: 0.60
-        structured_outputs: true
+        group: low
+        max_tokens: 4000
+        structured_outputs: false
       themes:     # macro + sector theme maintenance
-        provider: openrouter
-        model: qwen/qwen3-235b-a22b-instruct
-        # Keep in step with private thinktank.yaml themes ceiling
-        # (alpha-engine-config-I8239): reasoning models draw from the same
-        # budget as content; 4000 truncates to empty on themes_sector.
+        group: low
         max_tokens: 8000
-        price_in_per_m: 0.50
-        price_out_per_m: 3.00
         structured_outputs: false
       thesis:     # deep per-name thesis writing
-        provider: openrouter
-        model: deepseek/deepseek-chat-v3.1
-        max_tokens: 8000
-        price_in_per_m: 0.60
-        price_out_per_m: 1.70
+        # `med` — the heavier reasoning tier (upgradeable via a registry
+        # edit to the `med` group once bench/judge scores justify it, never
+        # a model string here).
+        group: med
+        max_tokens: 32000
+        structured_outputs: false
+      pillar:     # qualitative 6-pillar/moat structured extraction
+        group: med
+        max_tokens: 20000
         structured_outputs: false

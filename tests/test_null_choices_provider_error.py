@@ -28,6 +28,17 @@ import types
 import pytest
 from pydantic import BaseModel
 
+# Imported at module (collection) level, not lazily inside a fixture:
+# ``thinktank.client``'s own ``from krepis.router import resolve_group_spec``
+# binding must be captured BEFORE any per-test fixture (including the root
+# conftest's autouse router stub) monkeypatches ``krepis.router`` — a lazy
+# first import inside a fixture body would instead bind to whatever
+# ``krepis.router.resolve_group_spec`` already points to at that moment
+# (alpha-engine-config-I9302 fallout: this file used to import it lazily and
+# a bare-alias `stub-model` spec with no `api_key_env` leaked in, raising
+# `LLMConfigError` before ever reaching the null-choices guard under test).
+from thinktank.client import ThinktankClient  # noqa: E402
+
 
 class _NullChoicesResponse:
     """A 200 body carrying a provider error instead of choices."""
@@ -67,7 +78,7 @@ def _make_client(responses):
 
 
 def _tt_settings():
-    from thinktank.settings import ProviderSpec, ThinktankSettings, TierSpec
+    from thinktank.settings import ThinktankSettings, TierSpec
 
     return ThinktankSettings(
         bucket="alpha-engine-research",
@@ -77,15 +88,11 @@ def _tt_settings():
         stale_after_days=30,
         monthly_budget_usd_default=25.0,
         budget_ssm_param="/thinktank/monthly_budget_usd",
-        providers={"fake": ProviderSpec(name="fake", base_url="http://x", key_secret="OPENROUTER_API_KEY")},
         tiers={
             "thesis": TierSpec(
                 name="thesis",
-                provider="fake",
-                model="fake/model",
+                group="med",
                 max_tokens=100,
-                price_in_per_m=1.0,
-                price_out_per_m=2.0,
                 structured_outputs=True,
             )
         },
@@ -107,10 +114,31 @@ def _tt(monkeypatch):
     sleeps between body-level retries (krepis#93); tests assert the retry
     happened, not how long it waited.
     """
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("krepis.llm._retry_backoff_sleep", lambda _attempt: None)
 
-    from thinktank.client import ThinktankClient
+    from datetime import date as _date
+
+    import krepis.router as _kr
+    from krepis.cost import PriceCard, PriceTable
+
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "consumer-test")
+    monkeypatch.setattr(
+        _kr, "resolve_group_structured",
+        lambda *a, **k: {
+            "schema_version": 2, "group": "med", "route": "litellm_proxy",
+            "provider": "litellm", "deployment_id": "med",
+            "api_base_url": "https://router.example:8443",
+            "auth_token_type": "litellm_master_key",
+            "registry_id": "litellm:group:med",
+            "primary_registry_id": "deepseek-v4-flash-max", "params": {},
+        },
+    )
+    _price_table = PriceTable(cards=[PriceCard(
+        model_name="deepseek/deepseek-v4-flash", effective_from=_date(2026, 1, 1),
+        input_per_1m=1.0, output_per_1m=2.0,
+        cache_read_per_1m=0.0, cache_create_per_1m=0.0,
+    )])
+    monkeypatch.setattr("krepis.cost.load_default_pricing", lambda: _price_table)
 
     def build(responses):
         stub = _make_client(responses)
