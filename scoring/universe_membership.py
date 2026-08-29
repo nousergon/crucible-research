@@ -572,47 +572,180 @@ def should_recut(run_date: str, prior: dict | None, cadence: str | None = None) 
 # `config/factor_attractiveness_weights.json` (I7580).
 CUT_CHAMPION_POINTER_KEY = "config/scanner_cut_champion.json"
 
-PROMOTABLE_CUTS: tuple[str, ...] = (
-    "attractiveness_top_60",
+# ── The slot register (alpha-engine-config-I9272, Brian's ruling 2026-08-29) ──
+# Brian, verbatim: *"for the research arm, we should make all arms promote
+# eligible, including think tank"* and *"we also need to fix the predictor so
+# that all promotion arms are available."* The principle he stated twice is
+# that **an arm which is SCORED must be able to WIN**. Applied here.
+#
+# The register is now built in ONE direction and only one. The SCORED set is
+# primary — derived from the prefixes the cut builder actually emits at the
+# feed width — and promotability is a property SUBTRACTED from it by an
+# explicit, reasoned exclusion. Before this change the arrow ran the other way:
+# ``PROMOTABLE_CUTS`` was a hand-maintained literal and ``SLOT_ARMS`` was
+# ``PROMOTABLE_CUTS + OBSERVE_ONLY_CUTS``, so an arm the builder emitted and the
+# weekly ledger scored could be absent from BOTH tuples and be measured by
+# nothing that could ever act on it. That is the
+# ``thinktank_coverage``-writes-shadow-artifacts-while-unregistered defect
+# champion-challenger-policy.md §3 names — "an arm that is not scored is not a
+# challenger, it is a rumour" — in its mirror image: an arm that IS scored and
+# cannot win. :func:`assert_slot_register_covers_emitted_arms` makes the
+# recurrence impossible rather than unlikely.
+ATTRACTIVENESS_CUT_PREFIX = "attractiveness_top_"
+"""The champion basis's cut prefix. Named so the slot register can be derived
+from prefixes rather than restating arm names as literals — the same reason
+:data:`_ARM_BASIS` and :func:`arm_cut_source` exist
+(champion-challenger-policy.md §7.5, provenance true by construction)."""
+
+CUT_SLOT_ARM_PREFIXES: tuple[str, ...] = (
+    ATTRACTIVENESS_CUT_PREFIX,
+    TECH_SCORE_CUT_PREFIX,
+    MOMZERO_CUT_PREFIX,
+    CHALLENGER_CUT_PREFIX,
+    HARD3_CUT_PREFIX,
 )
-"""The arms eligible to hold the feed. Count-matched at 60 by construction.
+"""Every prefix the cut builder emits at :data:`ATTRACTIVENESS_FEED_TOP_N`.
 
-A closed set, deliberately: the pointer is writable by an automated promotion
-engine, and an unvalidated pointer is an arbitrary-cut-selection primitive one
-bad write away from feeding the sector teams something nobody chose.
+This tuple IS the slot register. ``scoring/weekly_ledger.py`` iterates
+:data:`SLOT_ARMS`, which is derived from it, so the ledger and the promotion
+engine resolve their arm list from the same object by construction and a
+scored-but-unregistered arm cannot recur (alpha-engine-config-I9272)."""
 
-**Brian ruling 2026-08-21 (alpha-engine-config-I8060): `tech_score_top_60` is
-OBSERVE-ONLY until it has weeks of measured performance.** It was made
-promotable on 2026-08-20 (I7823) and first emitted the same day, so it has
-never had a scored cohort; arming an automatic pointer write before any
-evidence exists puts the whole gate on a floor nobody has watched hold. It
-stays fully scored — see :data:`OBSERVE_ONLY_CUTS` — and returns here by
-amending this tuple, which is the only edit required.
-"""
-
-OBSERVE_ONLY_CUTS: tuple[str, ...] = (
-    f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
-    f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
-    f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
-    f"{HARD3_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}",
+SLOT_ARMS: tuple[str, ...] = tuple(
+    f"{prefix}{ATTRACTIVENESS_FEED_TOP_N}" for prefix in CUT_SLOT_ARM_PREFIXES
 )
-"""Arms that are SCORED every cycle but cannot hold the feed.
+"""Every arm of the universe-cut slot, count-matched at the feed width.
 
-champion-challenger-policy.md §3 makes measurement unconditional: promotion
-changes which arm is consumed and changes nothing about what is measured. So
-non-promotability is declared HERE, as a state, rather than left to be inferred
-from absence from :data:`PROMOTABLE_CUTS` — ARCHITECTURE §140, a disposition
-that is only an inference is not a state. `_load_cut_specs` reads this tuple, so
-an arm added here is scored by construction and cannot become the registered-
-but-unscored rumour §3 warns about.
+The scoring surface, the weekly ledger and the promotion engine all resolve
+their arm list from this, so the board and the register cannot drift."""
 
-Count-matched at :data:`ATTRACTIVENESS_FEED_TOP_N` with the promotable arm, so
-promoting one later needs no re-baselining of its history.
-"""
+CUT_ARM_PROMOTION_EXCLUSIONS: dict[str, str] = {}
+"""Arms that are SCORED but may not hold the feed — arm name → the REASON.
 
-SLOT_ARMS: tuple[str, ...] = PROMOTABLE_CUTS + OBSERVE_ONLY_CUTS
-"""Every arm of the universe-cut slot, promotable or not. The scoring surface
-resolves its arm list from this so the board and the registry cannot drift."""
+Empty as of Brian's ruling 2026-08-29 (alpha-engine-config-I9272): every scored
+arm of this slot is promotion-eligible. It is deliberately kept as a MECHANISM
+rather than deleted, because the thing being fixed is not the membership of one
+tuple — it is that non-promotability used to be expressible only as an ABSENCE
+from a list, which no artifact could report and no reader could tell from an
+oversight. An exclusion added here travels onto every decision record as
+``excluded_arms.<arm>.reason``, so a future carve-out is a stated property with
+an author and a justification, never a silence (ARCHITECTURE §140;
+champion-challenger-policy.md §3).
+
+Superseded history, kept because the reasoning is load-bearing: between
+2026-08-21 and 2026-08-29 this slot's promotable set was the single literal
+``("attractiveness_top_60",)``, per Brian's I8060 ruling that
+``tech_score_top_60`` stay observe-only "until it has weeks of measured
+performance" — arming an automatic pointer write before evidence existed. That
+concern is now held by MECHANISM rather than by registry membership, and by
+three independent ones: ``min_weeks_for_inference=5``, the 0.0002/week
+hysteresis margin, and the 28-day cooldown. None can be cleared before roughly
+2026-10-02, so restoring the arms buys a real COMPARISON at no added promotion
+risk. Membership was the wrong instrument: it suppressed the comparison, which
+is free, in order to suppress the promotion, which was already gated three
+times over."""
+
+PROMOTABLE_CUTS: tuple[str, ...] = tuple(
+    arm for arm in SLOT_ARMS if arm not in CUT_ARM_PROMOTION_EXCLUSIONS
+)
+"""The arms eligible to hold the feed.
+
+Still a CLOSED set — :func:`live_cut_champion` raises on a pointer naming
+anything outside it, because the pointer is writable by an automated engine and
+an unvalidated pointer is an arbitrary-cut-selection primitive one bad write
+away from feeding the sector teams something nobody chose. What changed is how
+the set is CONSTRUCTED: derived from the scored register minus declared
+exclusions, never typed out."""
+
+OBSERVE_ONLY_CUTS: tuple[str, ...] = tuple(
+    arm for arm in SLOT_ARMS if arm in CUT_ARM_PROMOTION_EXCLUSIONS
+)
+"""Arms that are SCORED every cycle and cannot hold the feed — the excluded
+half of :data:`SLOT_ARMS`, each carrying its reason in
+:data:`CUT_ARM_PROMOTION_EXCLUSIONS`. Empty today."""
+
+if set(PROMOTABLE_CUTS) & set(OBSERVE_ONLY_CUTS):
+    raise AssertionError(
+        "an arm cannot be both promotable and observe-only — the two tuples "
+        "partition SLOT_ARMS by CUT_ARM_PROMOTION_EXCLUSIONS and must stay disjoint"
+    )
+if set(PROMOTABLE_CUTS) | set(OBSERVE_ONLY_CUTS) != set(SLOT_ARMS):
+    raise AssertionError(
+        "PROMOTABLE_CUTS + OBSERVE_ONLY_CUTS must cover SLOT_ARMS exactly — an "
+        "arm in neither is scored by the ledger and actionable by nothing "
+        "(alpha-engine-config-I9272)"
+    )
+if unknown_exclusions := sorted(set(CUT_ARM_PROMOTION_EXCLUSIONS) - set(SLOT_ARMS)):
+    raise AssertionError(
+        f"CUT_ARM_PROMOTION_EXCLUSIONS names {unknown_exclusions}, which are not "
+        "arms of this slot. Excluding a name nothing emits is a stale carve-out "
+        "that reads as a live one."
+    )
+if any(not str(reason).strip() for reason in CUT_ARM_PROMOTION_EXCLUSIONS.values()):
+    raise AssertionError(
+        "every promotion exclusion carries a REASON — an exclusion without one "
+        "is the absence-from-a-list this register exists to retire"
+    )
+
+
+FUNNEL_STAGE_CUTS: frozenset[str] = frozenset(
+    {CHAMPION_CUT, GATE_BASELINE_CUT, GATE_LEGACY_CUT, PREDICTOR_UNIVERSE_CUT}
+)
+"""Cuts that are funnel STAGES rather than competing arms of the cut slot.
+
+Declared as a closed set so :func:`assert_slot_register_covers_emitted_arms`
+can tell a new ARM from a stage. A stage answers "which names reached this
+point"; an arm answers "how were the names ranked". They are different axes and
+scoring one against the other produces a number nobody can interpret
+(champion-challenger-policy.md §2). ``FEED_CUT_NAME`` is deliberately NOT here:
+it is both the funnel's head and the slot's champion arm, and it IS registered
+in :data:`SLOT_ARMS`."""
+
+
+def assert_slot_register_covers_emitted_arms(membership: dict, run_date: str) -> None:
+    """Raise unless every cut emitted at the feed width is a registered arm.
+
+    The guard that makes alpha-engine-config-I9272 unrepeatable. A cut emitted
+    at :data:`ATTRACTIVENESS_FEED_TOP_N` is by definition count-matched against
+    the champion and is therefore an arm of this slot; if it is not in
+    :data:`SLOT_ARMS` then the weekly ledger never scores it and the promotion
+    engine can never act on it, while the artifact advertises it as though it
+    competed. That is a well-formed artifact containing nothing
+    (champion-challenger-policy.md §7.2), and it is a producer defect decided by
+    the code and identical on every run — so it RAISES rather than being
+    recorded.
+
+    Deliberately NOT the converse: a registered arm MISSING from an artifact is
+    a legitimate per-cycle miss (no eligible names, an unavailable shadow
+    profile) and is recorded as one by the ledger, per §3.
+
+    :data:`FUNNEL_STAGE_CUTS` is excluded because a funnel STAGE emitted at the
+    feed width is not a competing arm. champion-challenger-policy.md §2 —
+    "slots are separate axes and must never be conflated" — and the cuts board
+    already encodes it (``per_arm_width=True``: the funnel's stages are
+    explicitly *not competing*). Treating ``scanner_champion_60`` as an arm of
+    this slot would put "which names were fed in" into a comparison that asks
+    "how names are ranked", which is the meaningless-number failure §2 names.
+    """
+    emitted = {
+        name
+        for name in (membership.get("cuts") or {})
+        if name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}")
+    }
+    unregistered = sorted(emitted - set(SLOT_ARMS) - FUNNEL_STAGE_CUTS)
+    if unregistered:
+        raise UniverseMembershipError(
+            f"universe membership {run_date}: cut(s) {unregistered} are emitted "
+            f"count-matched at {ATTRACTIVENESS_FEED_TOP_N} but are absent from "
+            f"SLOT_ARMS ({list(SLOT_ARMS)}). An arm the builder emits is an arm "
+            "of the slot: the weekly ledger iterates SLOT_ARMS, so an "
+            "unregistered arm is scored by nothing and promotable by nothing "
+            "while the artifact shows it competing "
+            "(alpha-engine-config-I9272). Add its prefix to "
+            "CUT_SLOT_ARM_PREFIXES; if it must not be promotable, say so in "
+            "CUT_ARM_PROMOTION_EXCLUSIONS with a reason."
+        )
+
 
 DEFAULT_CUT_CHAMPION = "attractiveness_top_60"
 """The standing champion, per Brian's ruling 2026-08-20. Serves whenever the
@@ -1305,6 +1438,42 @@ def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) ->
                 run_date, cut_name, basis, sorted(index),
             )
 
+    # ── Which promotable arms are SERVING, and which merely could ────────────
+    # alpha-engine-config-I9272. Before Brian's 2026-08-29 ruling this loop ran
+    # over a single arm — the serving one — so "promotable" and "serving" were
+    # the same set and raising on either was the same thing. They are now five
+    # arms and one feed, and the distinction is load-bearing:
+    #
+    # * the SERVING cut having no rank table is a live defect. Its consumer
+    #   resolves a rank ceiling in that basis THIS morning, so the run is red.
+    # * a NON-SERVING promotable arm having no table is not. Two of this slot's
+    #   arms (`attractiveness_momzero_top_60`, `attractiveness_mom121_top_60`)
+    #   publish no rank table BY DESIGN — their membership carries no order to
+    #   correlate — so raising on them would red every Scanner run whose
+    #   load-bearing output, the predictor's universe, is fine. That is the
+    #   trade ARCHITECTURE §140 already refused for observe-only arms; making
+    #   an arm promotable must not silently re-take it.
+    #
+    # The property the raise USED to hold — "a promotion cannot fail in a
+    # consumer on the morning it is made" — is kept, and moved to where the
+    # promotion is actually decided: :func:`promotion_ineligibility_from_rank_tables`
+    # feeds `cut_promotion.decide_cut_champion`, which records the arm
+    # INELIGIBLE with this reason on the audit artifact rather than promoting to
+    # it. A stated property with a reason, never an absence.
+    serving = FEED_CUT_NAME
+    try:
+        serving = live_cut_champion()
+    except Exception as exc:  # noqa: BLE001
+        # The pointer is unreachable from a pure-artifact caller (the backfill
+        # script, a test). Fall back to the funnel head, which is the cut the
+        # artifact itself declares as the feed, and SAY so — never silently
+        # widen or narrow what this guard covers.
+        logger.info(
+            "[universe_membership] %s: champion pointer unreadable (%s); "
+            "rank-table enforcement falls back to the funnel head %r",
+            run_date, exc, serving,
+        )
+
     for cut_name in PROMOTABLE_CUTS:
         cut = cuts.get(cut_name)
         if cut is None:
@@ -1315,6 +1484,17 @@ def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) ->
         basis = str(cut.get("basis"))
         entry = index.get(basis)
         table = membership.get(entry[0]) if entry else None
+        if (not entry or not table) and cut_name != serving:
+            logger.warning(
+                "[universe_membership] %s: promotable arm %r is ranked by %r, "
+                "for which this artifact emits no full-universe rank table "
+                "(it emits one for %s). The arm is still scored; it is recorded "
+                "INELIGIBLE for promotion this cycle with reason "
+                "'rank_table_missing' rather than redding a run whose serving "
+                "cut %r is fine (alpha-engine-config-I9272).",
+                run_date, cut_name, basis, sorted(index), serving,
+            )
+            continue
         if not entry or not table:
             raise UniverseMembershipError(
                 f"universe membership {run_date}: promotable cut {cut_name!r} is "
@@ -1328,6 +1508,42 @@ def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) ->
             )
 
 
+def promotion_ineligibility_from_rank_tables(membership: dict) -> dict[str, str]:
+    """Promotable arms this artifact cannot support a promotion TO, arm → reason.
+
+    The half of :func:`assert_rank_tables_cover_promotable_cuts` that used to be
+    a raise. A promotion hands the funnel to an arm, and the consumer of that
+    slot resolves its rank ceiling in the SERVING arm's basis — so an arm with
+    no full-universe rank table is a promotion that fails in a consumer on the
+    morning it is made (alpha-engine-config-I7843). That must still not happen;
+    what changed (alpha-engine-config-I9272) is that it is now refused at the
+    DECISION, on the record, with a reason, instead of redding a Scanner run
+    whose serving cut is perfectly healthy.
+
+    Returns ``{}`` when every promotable arm is servable — which is the answer a
+    reader needs to be able to distinguish from "nobody checked".
+    """
+    cuts = membership.get("cuts") or {}
+    index = _rank_table_index(membership)
+    out: dict[str, str] = {}
+    for cut_name in PROMOTABLE_CUTS:
+        cut = cuts.get(cut_name)
+        if cut is None:
+            continue
+        basis = str(cut.get("basis"))
+        entry = index.get(basis)
+        if not entry or not membership.get(entry[0]):
+            out[cut_name] = (
+                f"rank_table_missing: ranked by {basis!r}, for which this "
+                f"artifact emits no full-universe rank table (it emits one for "
+                f"{sorted(index)}). Promoting to it would resolve a rank ceiling "
+                f"in a basis with no table, in a consumer, on the morning the "
+                f"promotion is made (alpha-engine-config-I7843)."
+            )
+    return out
+
+
+
 def assert_cut_invariants(membership: dict, run_date: str) -> None:
     """Raise ``UniverseMembershipError`` if the artifact's cuts violate an invariant.
 
@@ -1338,6 +1554,13 @@ def assert_cut_invariants(membership: dict, run_date: str) -> None:
     as one in a freshly derived cut — guarding only the fresh path would leave
     the long-lived artifact unchecked.
     """
+    # First, because every check below is about how the arms COMPARE and this
+    # one is about whether an emitted arm is in the comparison at all
+    # (alpha-engine-config-I9272). Placed here rather than at the two call
+    # sites so the backfill path (``scripts/backfill_cut_arms.py``) is covered
+    # by construction.
+    assert_slot_register_covers_emitted_arms(membership, run_date)
+
     _cuts = membership.get("cuts") or {}
 
     # Count-match is the whole point of N=20 (alpha-engine-config-I4983): an

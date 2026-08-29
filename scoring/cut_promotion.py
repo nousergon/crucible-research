@@ -147,14 +147,18 @@ from scoring.leaderboard_scoring import (
     slot_spec,
 )
 from scoring.universe_membership import (
+    CUT_ARM_PROMOTION_EXCLUSIONS,
     CUT_CHAMPION_POINTER_KEY,
     DEFAULT_CUT_CHAMPION,
     OBSERVE_ONLY_CUTS,
     PROMOTABLE_CUTS,
+    SLOT_ARMS,
     _bucket,
     _client,
     live_cut_champion,
+    promotion_ineligibility_from_rank_tables,
 )
+from scoring.verdict_digest import VERDICT_SLOTS, send_verdict_digest
 from scoring.weekly_ledger import (
     LEDGER_COLS,
     LEDGER_KEY,
@@ -166,8 +170,19 @@ from scoring.weekly_ledger import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
-"""v1 → v2 on the I8261 cutover.
+SCHEMA_VERSION = 3
+"""v2 → v3 on the I9272 / I9284 change (Brian's ruling 2026-08-29).
+
+Not additive either. ``decision_earliest_on`` changed from a bare date STRING
+to an object carrying ``provisional`` / ``counted_from`` / ``basis``, because
+the v2 string published a floor its own ledger could not reach and no reader
+could tell (alpha-engine-config-I9284). ``excluded_arms`` and per-arm
+``eligible_for_promotion`` / ``ineligibility_reason`` were added, and the
+``arms`` block widened from the PROMOTABLE arms to every SCORED arm. A v2
+reader handed a v3 record would read the earliest-decision field as a string
+and find an object.
+
+v1 → v2 on the I8261 cutover.
 
 Not an additive change: the decision BASIS moved from a leaderboard forward
 horizon to the weekly ledger, so ``horizon_days`` / ``primary_metric`` /
@@ -187,6 +202,17 @@ DECISION_PROMOTE = "promote"
 DECISION_HOLD = "hold"
 
 DECISION_CADENCE_WEEKLY = "weekly"
+
+# The delivery row for this slot (alpha-engine-config-I9278), resolved from the
+# module that owns delivery rather than restated here. It used to be declared
+# beside the keys it names, so that a key rename could not leave the email
+# pointing at an object that no longer exists — but a SECOND slot arrived
+# (scoring/spec_promotion.py) and two engines each holding their own row is how
+# the pair drifts. The registry is now the single place both are declared, and
+# `test_the_registry_row_names_the_keys_this_module_writes` asserts this row's
+# keys against THIS module's constants, which is the property the old placement
+# was buying.
+VERDICT_SLOT = VERDICT_SLOTS["scanner_cut"]
 
 # The name of the decision metric, carried on every record and on every arm. It
 # is deliberately long: a reader who sees only this string must be able to tell
@@ -326,6 +352,18 @@ class CutPromotionSlot:
     # so a reader of this row can tell "measured and ineligible" from "not
     # measured at all" without going to another module (ARCHITECTURE §140).
     observe_only_arms: tuple[str, ...]
+    # Every arm the ledger scores, promotable or not. Evidence is built for ALL
+    # of these — champion-challenger-policy.md §3 makes measurement
+    # unconditional — while only ``arms`` may win. Before
+    # alpha-engine-config-I9272 the record carried evidence for the PROMOTABLE
+    # arms only, so an excluded arm's numbers existed on the ledger and reached
+    # no decision artifact: measured, and invisible where it mattered.
+    scored_arms: tuple[str, ...]
+    # Arm → the REASON it may not hold the feed, carried onto every record as
+    # ``excluded_arms``. Empty under Brian's ruling 2026-08-29: every scored arm
+    # of this slot is promotion-eligible. Kept as a mechanism so a future
+    # carve-out is a stated property rather than an absence from a tuple.
+    excluded_arms: Mapping[str, str]
     # §4 count-matching: every arm of the slot, promotable or not, is 60 by
     # construction.
     count_matched_width: int
@@ -385,6 +423,8 @@ CUT_PROMOTION_SLOT = CutPromotionSlot(
     slot_id="scanner_cut",
     arms=PROMOTABLE_CUTS,
     observe_only_arms=OBSERVE_ONLY_CUTS,
+    scored_arms=SLOT_ARMS,
+    excluded_arms=CUT_ARM_PROMOTION_EXCLUSIONS,
     default_champion=DEFAULT_CUT_CHAMPION,
     decision_source=LEDGER_KEY,
     decision_cadence=DECISION_CADENCE_WEEKLY,
@@ -452,6 +492,27 @@ if CUT_PROMOTION_SLOT.promotion_margin <= 0 or CUT_PROMOTION_SLOT.cooldown_days 
         "slot, not waived under the §9.3 delta — both the margin and the "
         "cooldown must be positive"
     )
+if not set(CUT_PROMOTION_SLOT.arms) <= set(CUT_PROMOTION_SLOT.scored_arms):
+    raise AssertionError(
+        "a promotable arm that the ledger does not score is a pointer target "
+        "nothing can ever justify moving to — PROMOTABLE_CUTS must be a subset "
+        "of SLOT_ARMS (alpha-engine-config-I9272)"
+    )
+if set(CUT_PROMOTION_SLOT.excluded_arms) != (
+    set(CUT_PROMOTION_SLOT.scored_arms) - set(CUT_PROMOTION_SLOT.arms)
+):
+    raise AssertionError(
+        "every scored-but-not-promotable arm must carry a REASON in "
+        "excluded_arms, and every reason must name a real exclusion. A "
+        "non-promotable arm expressible only as an absence from PROMOTABLE_CUTS "
+        "is the defect alpha-engine-config-I9272 retired: no artifact can "
+        "report it and no reader can tell it from an oversight."
+    )
+if CUT_PROMOTION_SLOT.default_champion not in CUT_PROMOTION_SLOT.arms:
+    raise AssertionError(
+        "the default champion is not promotable — live_cut_champion() would "
+        "raise on the very pointer value it falls back to"
+    )
 if set(HOLD_REASON_CODES) & set(RETIRED_V1_REASON_CODES):
     raise AssertionError(
         "a retired v1 reason_code has been re-minted for a live condition — a "
@@ -481,6 +542,20 @@ class ArmEvidence:
     weeks_dropped_unpaired: int = 0
     weeks_dropped_window_mismatch: int = 0
     weeks_dropped_stale_version: int = 0
+    # Weeks whose two rows PAIRED — same span, both present — but where one leg
+    # carried no number in the decision column. Split out from
+    # ``weeks_dropped_unpaired`` by alpha-engine-config-I9284: a missing cut and
+    # an uncomputable transaction cost are different faults and rendered
+    # identically before this field existed.
+    weeks_dropped_null_decision_column: int = 0
+    # ── Eligibility, as a STATE (alpha-engine-config-I9272) ───────────────────
+    # Whether this arm could hold the feed if it won, and if not, WHY. Never an
+    # absence: an arm the engine will not promote appears on the record saying
+    # so, because "measured and ineligible" and "not measured" are different
+    # answers to the only question a reader of this artifact is asking
+    # (champion-challenger-policy.md §3; ARCHITECTURE §140).
+    eligible_for_promotion: bool = True
+    ineligibility_reason: str | None = None
     # The decision number, and the chained read of the same series.
     mean_paired_log_return: float | None = None
     chained_paired_log_return: float | None = None
@@ -523,7 +598,8 @@ class CutPromotionDecision:
     corroborating: dict[str, Any] | None = None
     defect: str | None = None
     excluded_horizons: dict[str, dict] = field(default_factory=dict)
-    decision_earliest_on: str = ""
+    decision_earliest_on: dict[str, Any] = field(default_factory=dict)
+    excluded_arms: dict[str, dict] = field(default_factory=dict)
     ledger: dict[str, Any] = field(default_factory=dict)
 
     def to_document(self, *, leaderboard_key: str | None = None) -> dict:
@@ -563,6 +639,14 @@ class CutPromotionDecision:
             "defect": self.defect,
             "excluded_horizons": self.excluded_horizons,
             "decision_earliest_on": self.decision_earliest_on,
+            # Every arm the ledger scores that may NOT hold the feed, with
+            # the reason. Empty under Brian's ruling 2026-08-29; present as
+            # a field on every record regardless, because a reader must be
+            # able to tell "no arm is excluded" from "this record does not
+            # say" (alpha-engine-config-I9272).
+            "excluded_arms": self.excluded_arms,
+            "scored_arms": list(CUT_PROMOTION_SLOT.scored_arms),
+            "promotable_arms": list(CUT_PROMOTION_SLOT.arms),
             "ledger": self.ledger,
         }
 
@@ -648,8 +732,20 @@ def _paired_series(
     champion_rows: Sequence[Mapping[str, Any]],
     *,
     column: str,
-) -> tuple[list[float], list[str], int, int]:
-    """``(differences, weeks, dropped_unpaired, dropped_window_mismatch)``.
+) -> tuple[list[float], list[str], int, int, int]:
+    """``(differences, weeks, dropped_unpaired, dropped_window_mismatch,
+    dropped_null_decision_column)``.
+
+    The last count is split out of ``dropped_unpaired`` by
+    alpha-engine-config-I9284. "The week did not pair" and "the week had a
+    paired row that carried no NUMBER in the decision column" are different
+    conditions with different fixes — the first is a missing cut, the second is
+    an uncomputable transaction cost — and folding them into one counter made
+    them render identically. The ledger's first week (2026-08-21 → 08-28) is
+    entirely of the second kind: every arm but the champion carries
+    ``net_log_return: null`` with ``net_unavailable_reason:
+    turnover_unknown_so_cost_uncomputable``, because ``_arm_turnover`` reads
+    ``turnover.per_cut`` off an artifact that predates those arms.
 
     NET against NET, both legs read from the two arms' own ledger rows and
     joined on ``week_start``. See ``ArmEvidence.mean_vs_embedded_champion_leg``
@@ -677,6 +773,7 @@ def _paired_series(
     weeks: list[str] = []
     unpaired = 0
     mismatched = 0
+    null_column = 0
     for row in arm_rows:
         week = str(row.get("week_start"))
         champ = champ_by_week.get(week)
@@ -692,7 +789,10 @@ def _paired_series(
         mine = row.get(column)
         theirs = champ.get(column)
         if mine is None or theirs is None:
-            unpaired += 1
+            # Both rows exist and cover the same span — the week PAIRED. What
+            # is missing is the number, so this is not an unpaired week
+            # (alpha-engine-config-I9284).
+            null_column += 1
             continue
         try:
             diffs.append(float(mine) - float(theirs))
@@ -700,7 +800,7 @@ def _paired_series(
             unpaired += 1
             continue
         weeks.append(week)
-    return diffs, weeks, unpaired, mismatched
+    return diffs, weeks, unpaired, mismatched, null_column
 
 
 def _arm_evidence(
@@ -713,7 +813,7 @@ def _arm_evidence(
     is_champion: bool,
 ) -> ArmEvidence:
     """One arm's paired weekly evidence. Pure."""
-    diffs, weeks, unpaired, mismatched = _paired_series(
+    diffs, weeks, unpaired, mismatched, null_column = _paired_series(
         arm_rows, champion_rows, column=slot.ledger_return_column
     )
     # `overlap_lags=0` is a CLAIM, and it is true here for the first time: the
@@ -734,6 +834,9 @@ def _arm_evidence(
         weeks_dropped_unpaired=unpaired,
         weeks_dropped_window_mismatch=mismatched,
         weeks_dropped_stale_version=stale,
+        weeks_dropped_null_decision_column=null_column,
+        eligible_for_promotion=(arm not in slot.excluded_arms),
+        ineligibility_reason=slot.excluded_arms.get(arm),
         mean_paired_log_return=(stats or {}).get("mean"),
         chained_paired_log_return=chained_log_return(diffs) if diffs else None,
         se=(stats or {}).get("se"),
@@ -975,25 +1078,95 @@ def _excluded_horizons(board: dict | None, slot: CutPromotionSlot) -> dict[str, 
 # ── The decision, pure ────────────────────────────────────────────────────────
 
 
-def decision_earliest_on(slot: CutPromotionSlot = CUT_PROMOTION_SLOT) -> str:
+def first_decidable_week(
+    ledger_rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
+) -> str | None:
+    """``week_start`` of the earliest week in which EVERY promotable arm carries
+    a non-null decision column, or ``None`` when no such week exists yet.
+
+    The counting origin for :func:`decision_earliest_on`
+    (alpha-engine-config-I9284). A week in which a challenger's decision column
+    is null contributes nothing to that challenger's paired series, so it can
+    never count toward ``min_weeks_for_inference`` — and projecting the floor
+    from :data:`FIRST_COHORT_DATE` regardless is how the record came to publish
+    ``decision_earliest_on: 2026-09-25`` on evidence whose first week paired for
+    nobody.
+    """
+    if not ledger_rows:
+        return None
+    column = slot.ledger_return_column
+    by_week: dict[str, set[str]] = {}
+    for row in ledger_rows:
+        version = row.get("ledger_version")
+        if version is not None and int(version) != LEDGER_VERSION:
+            continue
+        arm = row.get("arm")
+        if arm not in slot.arms:
+            continue
+        if _clean(row.get(column)) is None:
+            continue
+        by_week.setdefault(str(row.get("week_start")), set()).add(str(arm))
+    complete = [w for w, arms in by_week.items() if arms >= set(slot.arms)]
+    return min(complete) if complete else None
+
+
+def decision_earliest_on(
+    slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
+    *,
+    ledger_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """The earliest date the weekly series could carry ``min_weeks_for_inference``
-    completed observations for every arm.
+    paired observations, and whether that date is PROVISIONAL.
 
     Derived from the WEEKLY series (alpha-engine-config-I8261 requirement 2),
     not from a forward horizon: ``min_weeks_for_inference`` weeks of
-    ~``SESSIONS_PER_WEEK`` trading sessions each, projected from
-    ``FIRST_COHORT_DATE`` onto the NYSE calendar so holidays are priced in. The
-    v1 basis put this at 2027-02-22 (126 sessions after the same start); the
-    weekly basis puts it five months earlier.
+    ~``SESSIONS_PER_WEEK`` trading sessions each, projected onto the NYSE
+    calendar so holidays are priced in. The v1 basis put this at 2027-02-22
+    (126 sessions after the same start); the weekly basis puts it five months
+    earlier.
 
-    A ceiling, not a promise: it says the evidence CANNOT exist before this
-    date, never that it will exist on it. A missed weekly run pushes the real
-    date out and the ledger's own ``n_weeks_paired`` is what says where it
-    actually stands.
+    **What alpha-engine-config-I9284 changed.** This used to count from
+    :data:`FIRST_COHORT_DATE` unconditionally, which published a floor the
+    ledger could not reach: the ledger's first week (2026-08-21 → 08-28) carries
+    a null decision column for every arm but the champion, so it contributes
+    zero paired observations and is permanently unusable — ledger rows are
+    immutable. The counting origin is now the first week in which every
+    promotable arm actually carries a number (:func:`first_decidable_week`), and
+    while no such week exists the answer is marked ``provisional: true`` with
+    the basis named. ``decision_earliest_on`` is the field a reader uses to tell
+    a working loop from a stuck one, so a date that silently slips is precisely
+    the failure it exists to prevent.
+
+    A ceiling, not a promise, in either mode: it says the evidence CANNOT exist
+    before this date, never that it will exist on it. A missed weekly run pushes
+    the real date out, and the ledger's own ``n_weeks_paired`` is what says
+    where it actually stands.
     """
-    return add_trading_days(
-        FIRST_COHORT_DATE, slot.min_weeks_for_inference * SESSIONS_PER_WEEK
+    observed = first_decidable_week(ledger_rows, slot=slot)
+    origin = date.fromisoformat(observed) if observed else FIRST_COHORT_DATE
+    projected = add_trading_days(
+        origin, slot.min_weeks_for_inference * SESSIONS_PER_WEEK
     ).isoformat()
+    return {
+        "date": projected,
+        "provisional": observed is None,
+        "counted_from": origin.isoformat(),
+        "basis": (
+            "first ledger week in which every promotable arm carries a non-null "
+            f"{slot.ledger_return_column}"
+            if observed
+            else (
+                "PROVISIONAL — no ledger week yet carries a non-null "
+                f"{slot.ledger_return_column} for every promotable arm, so this "
+                f"counts from FIRST_COHORT_DATE ({FIRST_COHORT_DATE.isoformat()}) "
+                "and will move OUT, never in, as the real first decidable week "
+                "lands later (alpha-engine-config-I9284)"
+            )
+        ),
+        "min_weeks_for_inference": slot.min_weeks_for_inference,
+    }
 
 
 def _leader(arms: dict[str, ArmEvidence]) -> str:
@@ -1032,6 +1205,7 @@ def decide_cut_champion(
     champion_before: str,
     decided_on: str,
     last_promoted_on: str | None = None,
+    cycle_ineligible_arms: Mapping[str, str] | None = None,
     slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
 ) -> CutPromotionDecision:
     """Decide, from an already-loaded weekly ledger. Pure: no S3, no clock.
@@ -1041,6 +1215,16 @@ def decide_cut_champion(
     report; its absence is not a hold, because an unmeasured veto is not a veto
     (§5.1).
 
+    ``cycle_ineligible_arms`` is arm → reason for arms this CYCLE cannot promote
+    to, as opposed to arms the REGISTER excludes permanently
+    (``slot.excluded_arms``). Today its only producer is
+    ``universe_membership.promotion_ineligibility_from_rank_tables``: an arm
+    whose basis has no full-universe rank table would resolve a rank ceiling in
+    a consumer, on the morning the promotion was made
+    (alpha-engine-config-I7843). Both kinds land on the record as
+    ``eligible_for_promotion: false`` with a reason — never as an absence
+    (alpha-engine-config-I9272).
+
     Every exit produces a record. There is no path that returns nothing, and no
     path that promotes without every arm clearing ``min_weeks_for_inference``
     paired weeks on the decision column.
@@ -1049,7 +1233,16 @@ def decide_cut_champion(
     # Computed once, up front: neither depends on which branch below fires, and
     # both must be on EVERY record — including the earliest holds, where a
     # reader most needs to know this is not a stuck loop.
-    earliest = decision_earliest_on(slot)
+    earliest = decision_earliest_on(slot, ledger_rows=ledger_rows)
+    cycle_ineligible = dict(cycle_ineligible_arms or {})
+    excluded_arms = {
+        arm: {"arm": arm, "reason": reason, "scored": True, "scope": "register"}
+        for arm, reason in slot.excluded_arms.items()
+    } | {
+        arm: {"arm": arm, "reason": reason, "scored": True, "scope": "this_cycle"}
+        for arm, reason in cycle_ineligible.items()
+        if arm not in slot.excluded_arms
+    }
     excluded = _excluded_horizons(board, slot)
 
     def _ledger_meta(rows, arms_seen=None, present=True) -> dict:
@@ -1085,14 +1278,21 @@ def decide_cut_champion(
                     cadence=slot.decision_cadence,
                     source=slot.decision_source,
                     is_champion=(a == champion_before),
+                    eligible_for_promotion=(
+                        a not in slot.excluded_arms and a not in cycle_ineligible
+                    ),
+                    ineligibility_reason=(
+                        slot.excluded_arms.get(a) or cycle_ineligible.get(a)
+                    ),
                 )
-                for a in slot.arms
+                for a in slot.scored_arms
             },
             last_promoted_on=last_promoted_on,
             corroborating=corroborating,
             defect=defect,
             excluded_horizons=excluded,
             decision_earliest_on=earliest,
+            excluded_arms=excluded_arms,
             ledger=ledger if ledger is not None else _ledger_meta(ledger_rows or []),
         )
 
@@ -1125,26 +1325,34 @@ def decide_cut_champion(
                 defect=f"duplicate arm rows: {', '.join(board_dupes)}",
             )
 
-    # ── The slot has no promotable challenger (alpha-engine-config-I8060) ───────
-    # Brian ruling 2026-08-21, reaffirmed 2026-08-24 on I8261: `tech_score_top_60`
-    # stays observe-only until it has a scored cohort. Arming an automatic
-    # pointer write before the evidence exists re-creates the condition that
-    # ruling was made about. With one promotable arm there is nothing to decide,
-    # and the engine must SAY so rather than fall through to a comparison path
-    # and report `champion_already_leads` — a claim about evidence, made where
-    # no comparison happened. Two states that mean different things must not
-    # render identically (§3).
+    # ── The slot has no promotable challenger ─────────────────────────────────
+    # Brian's ruling 2026-08-29 (alpha-engine-config-I9272) makes every scored
+    # arm of this slot promotion-eligible, so this branch is UNREACHABLE with
+    # today's register — five arms, no exclusions. It is kept, and kept loud,
+    # because the condition it names is a real one: if a future exclusion ever
+    # shrinks PROMOTABLE_CUTS back to a single arm, the engine must SAY there
+    # was nothing to decide rather than fall through to a comparison path and
+    # report `champion_already_leads`, which is a claim about evidence made
+    # where no comparison happened. Two states that mean different things must
+    # not render identically (champion-challenger-policy.md §3).
+    #
+    # And it now names the EXCLUSIONS WITH THEIR REASONS rather than a bare
+    # list of observe-only arms, because the register no longer expresses
+    # non-promotability as an absence.
     if len(slot.arms) < 2:
-        observe = ", ".join(slot.observe_only_arms) or "none"
+        excluded_note = (
+            "; ".join(f"{a}: {r}" for a, r in sorted(slot.excluded_arms.items()))
+            or "none — every scored arm is promotion-eligible, so this hold "
+            "means the slot itself has only one arm"
+        )
         return hold(
             REASON_NO_PROMOTABLE_CHALLENGER,
             f"the scanner-cut slot has one promotable arm ({champion_before!r}) "
             f"and no promotable challenger, so there is no decision to take on "
-            f"{decided_on} — on any metric, at any cadence. Observe-only arms, "
-            f"scored every cycle and ineligible to hold the feed: {observe}. "
-            "Restoring one of them to PROMOTABLE_CUTS is a one-line registry "
-            "edit and is the ONLY thing standing between this hold and a live "
-            "decision — the weekly evidence accumulates either way.",
+            f"{decided_on} — on any metric, at any cadence. Scored arms: "
+            f"{', '.join(slot.scored_arms)}. Excluded from promotion, with "
+            f"reasons: {excluded_note}. The weekly evidence accumulates either "
+            "way; what is missing is a second arm allowed to win.",
         )
 
     # ── The weekly ledger ──────────────────────────────────────────────────────
@@ -1164,33 +1372,66 @@ def decide_cut_champion(
 
     per_arm: dict[str, list[dict]] = {}
     stale_counts: dict[str, int] = {}
-    for arm in slot.arms:
+    for arm in slot.scored_arms:
         per_arm[arm], stale_counts[arm] = _rows_by_arm(ledger_rows, arm)
     ledger_meta = _ledger_meta(
-        ledger_rows, arms_seen=[a for a in slot.arms if per_arm[a]]
+        ledger_rows, arms_seen=[a for a in slot.scored_arms if per_arm[a]]
     )
 
     champion_rows = per_arm.get(champion_before) or []
-    missing = [a for a in slot.arms if not per_arm[a]]
-    if missing:
-        stale_note = ", ".join(
-            f"{a}: {stale_counts[a]} row(s) set aside at an older ledger_version"
-            for a in missing
-            if stale_counts[a]
+
+    # ── The CHAMPION's own rows are the only slot-wide precondition ───────────
+    # Every difference is taken against this leg, so without it there is no
+    # comparison to make for anybody. A CHALLENGER with no rows is a different
+    # thing entirely: it is that arm's own miss, recorded on that arm
+    # (champion-challenger-policy.md §3, "a cycle where an arm produces no
+    # output is recorded as a miss, not omitted"), and it must not stop the
+    # arms that DID produce output from being compared.
+    #
+    # This is the alpha-engine-config-I9272 correction generalised. Holding the
+    # whole slot on one arm's absence is the same defect as excluding an arm
+    # from the register: in both cases a slot with real evidence renders as a
+    # slot with nothing to say. With five arms rather than one, an all-or-
+    # nothing precondition would make `attractiveness_hard3_top_60` — which
+    # emitted zero names in the ledger's first week — able to freeze the
+    # decision indefinitely on its own.
+    if not champion_rows:
+        stale_note = (
+            f" {stale_counts[champion_before]} row(s) set aside at an older "
+            "ledger_version."
+            if stale_counts.get(champion_before)
+            else ""
         )
         return hold(
             REASON_LEDGER_ARM_MISSING,
-            f"{', '.join(missing)} has no weekly-ledger row at "
-            f"ledger_version={LEDGER_VERSION} on {decided_on} — an arm that is "
-            "not scored is not a challenger (champion-challenger-policy.md §3), "
-            "and a paired difference against an absent leg is not a difference. "
-            f"{champion_before!r} holds."
-            + (f" {stale_note}." if stale_note else ""),
+            f"the incumbent {champion_before!r} has no weekly-ledger row at "
+            f"ledger_version={LEDGER_VERSION} on {decided_on}. Every arm's "
+            "decision number is a difference against the champion's leg for the "
+            "SAME week, so an absent incumbent leg is not a thin comparison, it "
+            f"is no comparison at all. {champion_before!r} holds." + stale_note,
             ledger=ledger_meta,
         )
 
     arms: dict[str, ArmEvidence] = {}
-    for arm in slot.arms:
+    for arm in slot.scored_arms:
+        if not per_arm[arm]:
+            # Recorded as a MISS with its own reason, never omitted and never
+            # silently rendered as a zero.
+            arms[arm] = ArmEvidence(
+                present=False,
+                is_champion=(arm == champion_before),
+                weeks_dropped_stale_version=stale_counts[arm],
+                metric=slot.primary_metric,
+                cadence=slot.decision_cadence,
+                source=slot.decision_source,
+                eligible_for_promotion=(
+                    arm not in slot.excluded_arms and arm not in cycle_ineligible
+                ),
+                ineligibility_reason=(
+                    slot.excluded_arms.get(arm) or cycle_ineligible.get(arm)
+                ),
+            )
+            continue
         arms[arm] = _arm_evidence(
             arm=arm,
             arm_rows=per_arm[arm],
@@ -1199,32 +1440,99 @@ def decide_cut_champion(
             slot=slot,
             is_champion=(arm == champion_before),
         )
+        if arm in cycle_ineligible and arm not in slot.excluded_arms:
+            arms[arm].eligible_for_promotion = False
+            arms[arm].ineligibility_reason = cycle_ineligible[arm]
 
-    thin = [a for a in slot.arms if arms[a].n_weeks_paired < slot.min_weeks_for_inference]
-    if thin:
-        counts = ", ".join(f"{a}.n_weeks_paired={arms[a].n_weeks_paired}" for a in thin)
+    # ── Maturity is a PER-ARM property, not a slot-wide gate ──────────────────
+    # alpha-engine-config-I9284. The floor used to be applied to every arm at
+    # once: one arm short of `min_weeks_for_inference` held the entire slot, on
+    # any evidence, forever. With one promotable arm that was invisible. With
+    # five it is a live deadlock — `attractiveness_hard3_top_60` first emitted
+    # on 2026-08-28 and produced zero names in the ledger's first week, so an
+    # all-arms floor would have made `decision_earliest_on` unreachable by
+    # construction and every future hold would have blamed the calendar for a
+    # register problem.
+    #
+    # An immature arm is now recorded ineligible FOR THIS CYCLE, with its count
+    # and the floor it missed, and it keeps accruing. The slot decides as soon
+    # as the incumbent and at least one eligible challenger are both mature —
+    # which is the smallest set on which a promotion could honestly be taken.
+    champion_ev = arms[champion_before]
+    for name, ev in arms.items():
+        # Only the PROMOTABLE arms carry an eligibility verdict at all. A
+        # scored-but-excluded arm already carries its register reason and must
+        # not have it overwritten by a maturity one — the register exclusion is
+        # the binding fact and the thin series is downstream of it.
+        if name not in slot.arms:
+            ev.eligible_for_promotion = False
+            ev.ineligibility_reason = ev.ineligibility_reason or (
+                "not_promotable: absent from PROMOTABLE_CUTS"
+            )
+            continue
+        if not ev.eligible_for_promotion:
+            continue
+        if ev.n_weeks_paired < slot.min_weeks_for_inference:
+            ev.eligible_for_promotion = False
+            ev.ineligibility_reason = (
+                f"{REASON_INSUFFICIENT_WEEKS}: n_weeks_paired="
+                f"{ev.n_weeks_paired} < min_weeks_for_inference="
+                f"{slot.min_weeks_for_inference}"
+                + (
+                    f" ({ev.weeks_dropped_null_decision_column} week(s) paired "
+                    f"but carried no {slot.ledger_return_column})"
+                    if ev.weeks_dropped_null_decision_column
+                    else ""
+                )
+            )
+
+    contenders = {
+        name: arms[name]
+        for name in slot.arms
+        if name in arms and arms[name].eligible_for_promotion and name != champion_before
+    }
+    if not contenders or not champion_ev.eligible_for_promotion:
+        counts = ", ".join(
+            f"{a}.n_weeks_paired={arms[a].n_weeks_paired}"
+            for a in slot.arms
+            if a in arms
+        )
+        blocked = "; ".join(
+            f"{a}: {arms[a].ineligibility_reason}"
+            for a in slot.arms
+            if a in arms and arms[a].ineligibility_reason
+        )
         return hold(
             REASON_INSUFFICIENT_WEEKS,
-            f"the weekly series is immature for inference: {counts} < "
-            f"min_weeks_for_inference={slot.min_weeks_for_inference}. Below that "
-            "floor a mean of paired weekly differences is an anecdote, not an "
-            f"inference (alpha-engine-config-I7542). {champion_before!r} holds. "
-            f"The evidence cannot exist before {earliest} — first admissible "
-            f"cohort {FIRST_COHORT_DATE.isoformat()} "
-            "(alpha-engine-config-I8255) plus "
-            f"{slot.min_weeks_for_inference} weekly holding periods — so a run "
-            "of holds until then is the loop working, not stuck.",
+            f"no eligible challenger has {slot.min_weeks_for_inference} paired "
+            f"weeks against the incumbent {champion_before!r} on {decided_on} "
+            f"({counts}). Below that floor a mean of paired weekly differences "
+            "is an anecdote, not an inference (alpha-engine-config-I7542). "
+            f"{champion_before!r} holds. The evidence cannot exist before "
+            f"{earliest['date']}"
+            + (
+                " — PROVISIONAL: no ledger week yet carries a number for every "
+                "promotable arm, so that date counts from FIRST_COHORT_DATE and "
+                "will move out, not in (alpha-engine-config-I9284)"
+                if earliest["provisional"]
+                else f" (counting from the first fully-priced week "
+                f"{earliest['counted_from']})"
+            )
+            + ". A run of holds until then is the loop working, not stuck. "
+            "Per-arm: " + (blocked or "no arm carries an ineligibility reason."),
             arms=arms,
             ledger=ledger_meta,
         )
 
-    leader = _leader(arms)
+    leader = _leader({champion_before: champion_ev, **contenders})
     if leader == champion_before:
         champ_note = (
             ", ".join(
                 f"{a}={arms[a].mean_paired_log_return:+.6f}"
-                for a in slot.arms
-                if a != champion_before and arms[a].mean_paired_log_return is not None
+                for a in slot.scored_arms
+                if a != champion_before
+                and a in arms
+                and arms[a].mean_paired_log_return is not None
             )
             or "no challenger measured"
         )
@@ -1317,9 +1625,11 @@ def decide_cut_champion(
             f"{margin:+.6f} per week (chained {chained:+.6f} over "
             f"{arms[leader].n_weeks_paired} paired weeks, "
             f"{arms[leader].first_week}→{arms[leader].last_week}), at or above "
-            f"the margin {slot.promotion_margin}; every arm scored on "
-            f"≥{slot.min_weeks_for_inference} paired weeks; {veto_note}; cooldown "
-            "clear."
+            f"the margin {slot.promotion_margin}; both the incumbent and the "
+            f"winner cleared ≥{slot.min_weeks_for_inference} paired weeks "
+            "(arms short of the floor are recorded ineligible for this cycle "
+            "and keep accruing, alpha-engine-config-I9284); "
+            f"{veto_note}; cooldown clear."
         ),
         reason_code=REASON_PROMOTED,
         decided_on=decided_on,
@@ -1328,6 +1638,7 @@ def decide_cut_champion(
         corroborating=corroborating,
         excluded_horizons=excluded,
         decision_earliest_on=earliest,
+        excluded_arms=excluded_arms,
         ledger=ledger_meta,
     )
 
@@ -1373,7 +1684,7 @@ def reconcile_arms_with_ledger(
             # reflects the ledger, so there is nothing here to reconcile.
             continue
         arm_rows, _ = _rows_by_arm(ledger_rows, arm)
-        diffs, _weeks, _unpaired, _mismatched = _paired_series(
+        diffs, _weeks, _unpaired, _mismatched, _null_col = _paired_series(
             arm_rows, champion_rows, column=column
         )
         if ev.get("n_weeks_paired") != len(diffs):
@@ -1405,6 +1716,7 @@ def run_cut_promotion(
     s3_client: Any = None,
     leaderboard: dict | None = None,
     ledger_rows: Any = _UNSET,
+    membership: dict | None = None,
     slot: CutPromotionSlot = CUT_PROMOTION_SLOT,
 ) -> dict:
     """Decide and WRITE, unconditionally. Returns the written document.
@@ -1435,9 +1747,27 @@ def run_cut_promotion(
         else ledger_rows
     )
 
+    # An arm whose basis carries no full-universe rank table cannot be promoted
+    # to without breaking a consumer on the morning of the promotion
+    # (alpha-engine-config-I7843). The scanner handler passes the membership it
+    # just built; without one the engine cannot ESTABLISH servability and says
+    # so on the record rather than assuming it (§5.1 — you cannot gate on a
+    # statistic you did not measure, and an uncomputed gate reported as a PASS
+    # is the defect that rule prevents).
+    if membership is not None:
+        cycle_ineligible = promotion_ineligibility_from_rank_tables(membership)
+    else:
+        cycle_ineligible = {}
+        logger.info(
+            "[cut_promotion] no membership passed for %s — rank-table servability "
+            "is UNCHECKED this cycle and no arm is excluded on it",
+            decided_on,
+        )
+
     decision = decide_cut_champion(
         ledger_rows=rows,
         board=board,
+        cycle_ineligible_arms=cycle_ineligible,
         champion_before=champion_before,
         decided_on=decided_on,
         last_promoted_on=last_promoted_on,
@@ -1472,6 +1802,15 @@ def run_cut_promotion(
             if a in doc["arms"]
         ),
     )
+
+    # ── Delivery (alpha-engine-config-I9278) ──────────────────────────────────
+    # AFTER the three writes, so the email can never be the reason a record is
+    # missing; and BEFORE the defect raise, because a cycle that held on a
+    # DEFECTIVE board is precisely the cycle Brian most needs delivered, and a
+    # raise above this line would send nothing. `send_verdict_digest` escalates
+    # its OWN failure to an ops alert and returns False rather than raising, so
+    # a notification can never red a promotion run.
+    send_verdict_digest(doc, VERDICT_SLOT)
 
     if decision.defect:
         raise CutPromotionError(

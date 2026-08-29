@@ -621,6 +621,12 @@ def _run(event, context):
     # priced) raises an observe alert and lands in the summary, which is the
     # §7.2 invariant this ledger's whole arc is about.
     ledger_status: dict = {"status": "not_attempted"}
+    # Bound BEFORE the try: the cut-promotion block below reads it, and a raise
+    # inside this try would otherwise reach that block as a NameError — which
+    # its broad handler would render as "cut promotion FAILED", a true statement
+    # with a false cause. `None` there means "servability unchecked", which the
+    # engine records explicitly rather than assuming a pass.
+    _membership_doc: dict | None = None
     logger.info("[scanner_handler] attempting weekly cut ledger run_date=%s", run_date)
     try:
         from scoring.universe_membership import read_latest_membership
@@ -751,6 +757,14 @@ def _run(event, context):
             bucket=bucket,
             s3_client=s3_client,
             leaderboard=(cuts_leaderboard_status or {}).get("leaderboard"),
+            # The membership this run just wrote. The engine reads it for ONE
+            # thing: whether each promotable arm's basis carries a
+            # full-universe rank table, so it never promotes to an arm that
+            # would break a consumer's rank ceiling on the morning of the
+            # promotion (alpha-engine-config-I7843/I9272). Passing the
+            # in-memory artifact rather than re-fetching the key means the
+            # decision reads the exact document this run produced.
+            membership=_membership_doc,
         )
         logger.info(
             "[scanner_handler] cut promotion decision=%s champion=%s reason_code=%s",
