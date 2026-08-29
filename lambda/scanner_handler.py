@@ -273,6 +273,7 @@ def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
                 "completed for this run (alpha-engine-config-I9273).",
                 source="research:spec_promotion",
                 dedup_key=f"spec_promotion_error:{run_date}",
+                severity="ERROR",
             )
         except Exception:  # noqa: BLE001 — alerting is secondary; the ERROR log is the backstop
             logger.warning(
