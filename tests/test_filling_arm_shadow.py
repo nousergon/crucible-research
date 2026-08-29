@@ -13,7 +13,6 @@ import json
 
 import pytest
 
-from producers import filling_arms
 from producers.filling_arms import (
     CHAMPION_TOP_N_DEFAULT,
     FillingShadowError,

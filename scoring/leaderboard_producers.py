@@ -102,7 +102,6 @@ from observe_alerts import publish_observe_alert
 from producers.registry import SCORE_SOURCE_SIGNALS_LIVE, score_source_for
 from scoring.leaderboard_scoring import (
     CONFIDENCE_INSUFFICIENT,
-    MEASURABILITY_UNMEASURABLE,
     DEFAULT_HORIZON_DAYS,
     HORIZON_IMMATURE,
     HORIZON_OK,

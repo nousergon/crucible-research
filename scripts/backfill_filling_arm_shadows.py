@@ -60,6 +60,27 @@ class _Manager:
         self.s3 = boto3.client("s3")
 
 
+def _exists(s3, bucket: str, key: str) -> bool:
+    """Whether ``key`` is already present.
+
+    Narrow on purpose: only a genuine 404/NoSuchKey means "absent". Any other
+    ClientError — a permissions failure, a throttle — is a condition this script
+    must NOT interpret as "not there yet", because doing so would silently
+    rewrite an existing arm-date and make a recorded track record editable.
+    Those RAISE.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
+
+
 def cohort_dates(s3, bucket: str) -> list[str]:
     """Every date any arm has already written a shadow for.
 
@@ -99,14 +120,10 @@ def main() -> int:
     for arm in arms:
         for date in dates:
             key = SHADOW_KEY.format(arm=arm, date=date)
-            if not args.overwrite:
-                try:
-                    mgr.s3.head_object(Bucket=args.bucket, Key=key)
-                    logger.info("skip   %s %s (already present)", date, arm)
-                    skipped += 1
-                    continue
-                except Exception:
-                    pass
+            if not args.overwrite and _exists(mgr.s3, args.bucket, key):
+                logger.info("skip   %s %s (already present)", date, arm)
+                skipped += 1
+                continue
             try:
                 payload = build_filling_shadow(arm, date, mgr)
             except FillingShadowError as exc:

@@ -261,7 +261,6 @@ def load_research_free_pool(
     date is the miss/broken conflation §3 forbids.
     """
     import pandas as pd
-
     from botocore.exceptions import ClientError
 
     try:

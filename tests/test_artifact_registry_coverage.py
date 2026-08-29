@@ -43,6 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Captured 2026-05-27.
 EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "archive/manager.py": 5,
+    # alpha-engine-config-I9307 — one PUT, to the SAME
+    # signals_shadow/{arm}/{date}/signals.json prefix archive/manager.py
+    # already writes and the registry already declares
+    # (research_signals_shadow_*). This is a deliberate one-off backfill entry
+    # point, not a scheduled producer: the weekly pass writes these arms'
+    # shadows through producers/runner.py like every other challenger.
+    "scripts/backfill_filling_arm_shadows.py": 1,
     # research/{run_date}/self_test.json (the §2.3a numeric-correctness verdict)
     # + ops/checks/ae-research-self-test/latest.json (its console envelope).
     # BOTH REGISTERED in ARTIFACT_REGISTRY.yaml as research_self_test /

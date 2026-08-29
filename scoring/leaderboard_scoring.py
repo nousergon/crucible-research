@@ -348,7 +348,7 @@ def confidence_for(n_dates_scored: int | None, min_dates_for_inference: int) -> 
 
 
 def measurability_for(
-    spec: "SpecHistory",
+    spec: SpecHistory,
     dates_scored: Sequence[str],
     cohort_dates: Sequence[str],
 ) -> tuple[str, str | None]:
