@@ -9,14 +9,31 @@ research Lambdas.
 Modes:
 
 - ``"weekly"`` — ``lambda/handler.py``, the weekly research pipeline.
-  AWS_REGION + ANTHROPIC_API_KEY + S3 bucket reachable + ArcticDB ``universe``
+  AWS_REGION + the krepis router env contract + both weekly model classes
+  RESOLVING through the router + S3 bucket reachable + ArcticDB ``universe``
   library reachable with SPY's last row populated. Phase 7c (2026-04-17) made
   ArcticDB the only price source for the weekly path, so an ArcticDB outage
   is now a hard failure rather than a degraded-mode scenario.
 - ``"alerts"`` — ``lambda/alerts_handler.py``, the 30-minute intraday
-  price alert Lambda. AWS_REGION + S3 bucket only; alerts do not call
-  Anthropic and still read intraday bars from yfinance (ArcticDB is daily
+  price alert Lambda. AWS_REGION + S3 bucket only; alerts make no LLM call
+  at all and still read intraday bars from yfinance (ArcticDB is daily
   only — see ROADMAP "Intraday data store investigation").
+
+WHY THE WEEKLY CHECK IS NOT A CREDENTIAL CHECK (alpha-engine-config-I9302).
+It used to be ``check_env_vars("ANTHROPIC_API_KEY")``. Direct Anthropic is
+RETIRED (Brian's 2026-08-29 ruling: "we shouldn't be using the anthropic api
+at all"), and every model call on this path now resolves through
+``krepis.router.resolve_group_spec`` — which returns the model, the endpoint
+AND the credential NAME from the registry. So the presence of a retired
+vendor's key says nothing about whether this run can reach a model: it would
+pass on a box with no router at all, and fail on a correctly configured one.
+That is a preflight that is wrong in both directions.
+
+What is checked instead is the thing the run actually needs: krepis' own
+environment contract is declared, and BOTH model classes the weekly path uses
+resolve from the execution context this process DECLARES. A resolution failure
+here is the same failure the run would hit mid-invocation, surfaced before any
+S3 read or LLM spend.
 """
 
 from __future__ import annotations
@@ -141,13 +158,55 @@ class ResearchPreflight(BasePreflight):
             last_date,
         )
 
+    def _check_router_resolves_weekly_classes(self) -> None:
+        """Both weekly model classes must RESOLVE through the krepis router.
+
+        Resolution is what proves the run can reach a model: it exercises the
+        registry, the declared execution context, and the group's membership
+        in one call, and it returns the credential name the call will actually
+        use. Imports are local so this module stays importable without the LLM
+        dependencies, matching ``_check_deferred_imports``.
+
+        Raises rather than degrades: a weekly run that cannot resolve its model
+        classes has nothing to fall back to, and a preflight that shrugs at
+        that is worse than no preflight (`model-router-policy` §5 step 3).
+        """
+        from krepis.router import resolve_group_spec  # noqa: PLC0415
+
+        import config  # noqa: PLC0415
+        from agents.langchain_utils import _exec_context  # noqa: PLC0415
+
+        exec_context = _exec_context()
+        for model_class in (config.PER_STOCK_CLASS, config.STRATEGIC_CLASS):
+            try:
+                spec, _route = resolve_group_spec(
+                    model_class, exec_context=exec_context, wire="openai"
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"preflight: model class {model_class!r} does not resolve "
+                    f"through the krepis router from exec_context="
+                    f"{exec_context or '(undeclared)'!r} — the weekly run "
+                    f"cannot reach a model. This is the same failure the run "
+                    f"would hit mid-invocation, surfaced before any spend."
+                ) from exc
+            log.info(
+                "preflight: %s -> %s (credential %s)",
+                model_class,
+                spec.model,
+                spec.api_key_env,
+            )
+
     def run(self) -> None:
         self.check_env_vars("AWS_REGION")
         if self.mode == "weekly":
-            # Without the Anthropic key the graph fails mid-invocation
-            # with a less-actionable error; checking here surfaces the
-            # misconfiguration before any S3 read or LLM call.
-            self.check_env_vars("ANTHROPIC_API_KEY")
+            # Without a reachable router the graph fails mid-invocation with a
+            # less-actionable error; checking here surfaces the
+            # misconfiguration before any S3 read or LLM spend.
+            self.check_env_vars(
+                "KREPIS_LITELLM_PROXY_URL", "KREPIS_ROUTER_CREDENTIAL_SECRET"
+            )
+            self._check_router_resolves_weekly_classes()
         self.check_s3_bucket()
         if self.mode == "weekly":
             self._check_deferred_imports()
