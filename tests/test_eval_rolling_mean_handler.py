@@ -255,3 +255,61 @@ class TestHandler:
         assert result["status"] == "OK"
         assert result["producer_leaderboard"]["status"] == "ERROR"
         assert "closes read failed" in result["producer_leaderboard"]["error"]
+
+
+# ── alpha-engine-config-I9321 ────────────────────────────────────────────
+
+
+class TestFloorUnmeasurablePropagates:
+    """The handler must not convert an unmeasurable floor into a green stage.
+
+    `{"status": "ERROR"}` is a SUCCESSFUL Lambda return, and `EvalRollingMean`
+    has no Choice state reading `status` — its only success exit goes straight
+    to `CheckSkipRationaleClustering`. So the handler's blanket
+    `except Exception -> return {"status": "ERROR"}` made every computation
+    failure indistinguishable from a clean run at the Step Function level.
+
+    Brian, 2026-08-29: *"if an agent is downgraded from a poor answer, how am i
+    notified?"* With the floor unpublished the alarm has nothing to evaluate,
+    and per `champion-challenger-policy.md` §8 the judge's scores may never
+    demote anything — so notification is not one response among several, it is
+    the only one. A silent stage removes it entirely.
+    """
+
+    def test_floor_unmeasurable_raises_out_of_the_handler(self, handler_mod):
+        from evals.rolling_mean import EvalFloorUnmeasurable
+
+        boom = EvalFloorUnmeasurable(
+            reason="no metric streams exist under the source metric",
+            namespace="AlphaEngine/Eval",
+            source_metric="agent_quality_score",
+            combos_discovered=0,
+            combos_skipped_no_data=0,
+        )
+        with patch(
+            "evals.rolling_mean.compute_and_emit_4w_mean", side_effect=boom,
+        ):
+            with pytest.raises(EvalFloorUnmeasurable):
+                handler_mod.handler(
+                    {"end_time_iso": "2026-08-29T05:11:40Z"}, None,
+                )
+
+    def test_other_computation_failures_still_return_status_error(
+        self, handler_mod,
+    ):
+        """The blanket catch is NARROWED, not removed.
+
+        Only the coverage-blinding case escalates to a stage failure. A
+        transient GetMetricData fault keeps the pre-existing fail-soft posture
+        (eval is observability; it must not halt the Saturday pipeline), so
+        this change cannot be read as making the whole stage brittle.
+        """
+        with patch(
+            "evals.rolling_mean.compute_and_emit_4w_mean",
+            side_effect=RuntimeError("throttled"),
+        ):
+            result = handler_mod.handler(
+                {"end_time_iso": "2026-08-29T05:11:40Z"}, None,
+            )
+        assert result["status"] == "ERROR"
+        assert "throttled" in result["error"]

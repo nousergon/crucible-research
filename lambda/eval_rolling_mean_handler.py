@@ -200,7 +200,7 @@ def _run(event, context):
 
     # Imports deferred until after _ensure_init in case the rolling-mean
     # module ever pulls config that depends on SSM-loaded secrets.
-    from evals.rolling_mean import compute_and_emit_4w_mean
+    from evals.rolling_mean import EvalFloorUnmeasurable, compute_and_emit_4w_mean
 
     end_time_iso = event.get("end_time_iso")
     end_time = (
@@ -227,6 +227,31 @@ def _run(event, context):
 
     try:
         summary = compute_and_emit_4w_mean(end_time=end_time)
+    except EvalFloorUnmeasurable:
+        # alpha-engine-config-I9321 — this one PROPAGATES, and the ordering of
+        # these two handlers is the whole fix.
+        #
+        # `{"status": "ERROR"}` is a SUCCESSFUL Lambda return. `EvalRollingMean`
+        # has no Choice state reading `status`; its only exit on success goes
+        # straight to `CheckSkipRationaleClustering`. So the generic handler
+        # below converts every computation failure into a green stage carrying
+        # a field nobody reads — which is how the quality floor stopped
+        # publishing on ~2026-08-20 and the weekly pipeline never once said so.
+        #
+        # An unpublished floor blinds the alarm that is the ENTIRE notification
+        # path for a quality regression (champion-challenger-policy.md §8: the
+        # judge's scores are observability only and may never demote anything,
+        # so telling Brian is not one response among several — it is the only
+        # one). Raising surfaces it as States.TaskFailed; the SF's existing
+        # Catch still routes to `MarkEvalRollingMeanDegraded`, so the weekly
+        # pipeline continues as eval-as-observability requires, but it
+        # continues with `research_degraded_local=true` and a failed stage
+        # instead of a clean one.
+        logger.exception(
+            "[eval_rolling_mean_handler] quality floor UNMEASURABLE — failing "
+            "the stage rather than returning a green one (I9321)"
+        )
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_rolling_mean_handler] computation failed hard")
         return {"status": "ERROR", "error": str(exc)}
