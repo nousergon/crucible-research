@@ -38,7 +38,36 @@ echo "[setup_eval_alarms] SNS=${SNS_TOPIC_ARN} namespace=${NAMESPACE}"
 # below 3.0 — an absolute-quality floor. Mirrors the live alarm exactly so
 # this re-put is a no-op against existing state.
 echo "[setup_eval_alarms] put alpha-engine-eval-quality-regression (${FLOOR_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regression" --alarm-description "Eval quality floor: min 4-week-mean agent_quality_score < 3.0 (rolling_mean.py)." --namespace "${NAMESPACE}" --metric-name "${FLOOR_METRIC}" --statistic Minimum --period 86400 --evaluation-periods 1 --threshold 3.0 --comparison-operator LessThanThreshold --treat-missing-data ignore --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
+# alpha-engine-config-I9321 — two corrections, both measured 2026-08-29.
+#
+# 1. `--period 86400` on a metric emitted ONCE A WEEK. Six of every seven
+#    evaluation windows were empty by construction, which is why the period
+#    and the missing-data policy have to change together: `breaching` on a
+#    daily period would flap the alarm every week on a metric behaving
+#    perfectly. 604800 matches what `EvalRollingMean` actually publishes.
+#
+# 2. `--treat-missing-data ignore` retains the LAST state when data stops.
+#    The floor last published 2026-08-20; `AlphaEngine/Eval/agent_quality_score`
+#    has zero live streams, so the floor is not being computed at all — and
+#    `ignore` made a blind alarm indistinguishable from a breaching one on
+#    every surface. `breaching` renders "we did not measure quality this week"
+#    as a problem, which is what it is (`principles.md` §2.7: no data is never
+#    rendered as green). The producer-side half of the same fix makes
+#    `EvalRollingMean` FAIL rather than publish nothing quietly.
+#
+# Note on why Brian was never notified, which is a THIRD thing and not fixed
+# by either line above: the floor has been below 3.0 in every datapoint since
+# 2026-04-30 (measured: 1.0 -> 2.0 -> 2.006, never once >= 3.0). CloudWatch
+# notifies on a TRANSITION, so this alarm paged once, on 2026-05-07, and
+# structurally could not page again. A threshold alarm on a permanently
+# breached level is a red light, not a pager. The change-detector that DOES
+# transition is `alpha-engine-eval-control-breach` below, which moved 0->2 on
+# 2026-08-27 and is the live channel for "this agent got worse".
+#
+# Re-putting with changed configuration RESETS alarm state to
+# INSUFFICIENT_DATA, so this deploy also un-latches the 114-day-old ALARM and
+# lets the next evaluation produce a real transition.
+aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regression" --alarm-description "Eval quality floor: min 4-week-mean agent_quality_score < 3.0 (rolling_mean.py). Missing data is BREACHING (alpha-engine-config-I9321): an unpublished floor means quality went unmeasured, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${FLOOR_METRIC}" --statistic Minimum --period 604800 --evaluation-periods 1 --threshold 3.0 --comparison-operator LessThanThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
 
 # ── Control-band breach alarm (L4578e) ────────────────────────────────────
 # Fires when >= 1 combo is OUT_OF_CONTROL (a downward Shewhart or CUSUM

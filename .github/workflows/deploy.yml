@@ -175,6 +175,29 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_rolling_mean
 
+      # Eval-quality ALARM reconcile (alpha-engine-config-I9321).
+      #
+      # `setup_eval_alarms.sh` has been infra-as-code since the L4578e arc and
+      # nothing has ever invoked it. Grepped 2026-08-29: zero callers in any
+      # repo. So the two alarms it declares have been live AWS state that
+      # happened to match a script, with no mechanism keeping them matched —
+      # the same merged-but-not-deployed class the rolling-mean step below was
+      # added to close, one layer up.
+      #
+      # It runs AFTER the rolling-mean deploy on purpose: the alarms watch
+      # metrics that Lambda emits, so reconciling them against a function that
+      # has not shipped yet would arm a detector for a producer that does not
+      # exist. put-metric-alarm is an upsert, so this is idempotent and a
+      # no-op on every deploy that does not change the declaration.
+      #
+      # This step is also what makes the I9321 alarm change deployable by the
+      # merge button alone (`pull-request-policy.md` §4.2 form 1: automated ON
+      # merge, from code committed in the repo) rather than an operator
+      # instruction in a PR body.
+      - name: Reconcile eval-quality CloudWatch alarms
+        working-directory: alpha-engine-research
+        run: bash infrastructure/setup_eval_alarms.sh
+
       # Cross-week rationale clustering Lambda — same image-share as
       # eval-judge, different CMD entrypoint. Created lazily on first
       # deploy; idempotent thereafter. Auto-deployed on every push to

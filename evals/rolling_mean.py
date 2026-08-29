@@ -96,6 +96,50 @@ ROLLING_WINDOW_DAYS = 28
 """4-week (28-day) window — matches ROADMAP §1634 wording."""
 
 
+class EvalFloorUnmeasurable(RuntimeError):
+    """The quality floor could not be computed, so nothing was published.
+
+    **alpha-engine-config-I9321.** Brian asked 2026-08-29: *"if an agent is
+    downgraded from a poor answer, how am i notified?"*
+
+    Measured that day, the answer was: he is not. `AlphaEngine/Eval/
+    agent_quality_score` had **zero** metric streams (`list_metrics` surfaces
+    anything with data in the trailing ~2 weeks), so `_list_metric_combos`
+    returned `[]`, this module took its "first-run state, nothing to roll up
+    yet" early return, and `EvalRollingMean` reported success having published
+    no floor datapoint. The last floor datapoint is 2026-08-20; the alarm
+    `alpha-engine-eval-quality-regression` therefore had nothing to evaluate,
+    and — with `--treat-missing-data ignore` — simply held its existing state.
+
+    The chain upstream is one causal line, not three coincidences: the judge
+    graded a fraction of its corpus (alpha-engine-config-I9309), so the
+    per-eval `agent_quality_score` stream thinned to nothing, so the floor had
+    no combos, so the alarm went blind — and **every layer reported OK.**
+
+    Raising is the point. `principles.md` §2.7: a component emitting nothing is
+    not healthy, it is unobserved, and *no data* is never rendered as green.
+    An unmeasurable floor is a finding, not an empty success.
+    """
+
+    def __init__(self, *, reason: str, namespace: str, source_metric: str,
+                 combos_discovered: int, combos_skipped_no_data: int) -> None:
+        self.reason = reason
+        self.namespace = namespace
+        self.source_metric = source_metric
+        self.combos_discovered = combos_discovered
+        self.combos_skipped_no_data = combos_skipped_no_data
+        super().__init__(
+            f"eval quality floor UNMEASURABLE — no datapoint published for "
+            f"{namespace}/{DERIVED_FLOOR_METRIC_NAME}: {reason} "
+            f"(source={namespace}/{source_metric}, "
+            f"combos_discovered={combos_discovered}, "
+            f"combos_with_no_data={combos_skipped_no_data}). "
+            f"The alarm watching this metric has nothing to evaluate, so a "
+            f"quality regression cannot be detected while this persists "
+            f"(alpha-engine-config-I9321)."
+        )
+
+
 def _list_metric_combos(
     cw: Any,
     *,
@@ -241,21 +285,24 @@ def compute_and_emit_4w_mean(
         cw, namespace=namespace, metric_name=source_metric,
     )
     if not combos:
-        logger.warning(
-            "[rolling_mean] no metric streams found under %s/%s — "
-            "first-run state, nothing to roll up yet",
-            namespace, source_metric,
+        # Was an early SUCCESS return whose log line read "first-run state,
+        # nothing to roll up yet". That sentence was true exactly once, in
+        # 2026-05; every time since it has described a source metric that
+        # STOPPED, in the reassuring words of one that had not started.
+        # Measured 2026-08-29: zero streams under this metric, floor last
+        # published 2026-08-20, stage green throughout (I9321).
+        raise EvalFloorUnmeasurable(
+            reason=(
+                "no metric streams exist under the source metric — the "
+                "per-eval judge metric has published nothing in the window "
+                "CloudWatch ListMetrics covers (~14 days), so there are no "
+                "combos to roll up. Upstream: is the judge grading anything?"
+            ),
+            namespace=namespace,
+            source_metric=source_metric,
+            combos_discovered=0,
+            combos_skipped_no_data=0,
         )
-        return {
-            "combos_discovered": 0,
-            "datapoints_emitted": 0,
-            "combos_skipped_no_data": 0,
-            "failed": [],
-            "window_start": start.isoformat(),
-            "window_end": end.isoformat(),
-            "floor_value": None,
-            "floor_metric_emitted": False,
-        }
 
     queries = _build_metric_data_queries(
         combos,
@@ -387,7 +434,32 @@ def compute_and_emit_4w_mean(
             "back to the ungated min (combo n=%d)",
             min_n, floor_combo["n"],
         )
-    floor_value = floor_combo["value"] if floor_combo else None
+    if floor_combo is None:
+        # combos were DISCOVERED but not one carried a value in the window.
+        # Structurally identical to the empty-combos case above and it used to
+        # be just as quiet: `floor_value` stayed None, the `if floor_value is
+        # not None` guard below skipped the put_metric_data, and the function
+        # returned a summary a reader would call healthy.
+        #
+        # Deliberately NOT downgraded to a warning even though `derived_data`
+        # (the per-combo dashboard metric) may have been emitted just above:
+        # the per-combo streams are a dashboard someone must go and look at,
+        # while the floor is the only stream an ALARM watches. Publishing the
+        # first and not the second leaves the pager dark behind a dashboard
+        # that looks populated — the exact shape of I9321.
+        raise EvalFloorUnmeasurable(
+            reason=(
+                f"{len(combos)} combo(s) discovered but none returned a value "
+                f"in the {ROLLING_WINDOW_DAYS}-day window, so there is no "
+                f"minimum to take"
+            ),
+            namespace=namespace,
+            source_metric=source_metric,
+            combos_discovered=len(combos),
+            combos_skipped_no_data=skipped_no_data,
+        )
+
+    floor_value = floor_combo["value"]
     if floor_combo is not None:
         dims_flat = {d["Name"]: d["Value"] for d in floor_combo["dims"]}
         logger.info(
