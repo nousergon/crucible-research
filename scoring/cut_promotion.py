@@ -875,13 +875,20 @@ def _evidence_and_meta(
     """
     if ledger_rows is None:
         return None, None
+    # SCORED arms, not promotable ones. Measurement is unconditional
+    # (champion-challenger-policy.md §3) and the record's `arms` block widened
+    # to every scored arm in schema v3 (alpha-engine-config-I9272) — an arm that
+    # is excluded from promotion still has ledger rows, and dropping it here
+    # would put its numbers on the ledger and nowhere a reader looks. Iterating
+    # `slot.arms` silently omitted every excluded arm when this extraction met
+    # the v3 record on rebase.
     per_arm: dict[str, list[dict]] = {}
     stale_counts: dict[str, int] = {}
-    for arm in slot.arms:
+    for arm in slot.scored_arms:
         per_arm[arm], stale_counts[arm] = _rows_by_arm(ledger_rows, arm)
     champion_rows = per_arm.get(champion_before) or []
     arms: dict[str, ArmEvidence] = {}
-    for arm in slot.arms:
+    for arm in slot.scored_arms:
         if per_arm[arm]:
             arms[arm] = _arm_evidence(
                 arm=arm,
@@ -901,6 +908,8 @@ def _evidence_and_meta(
                 metric=slot.primary_metric,
                 cadence=slot.decision_cadence,
                 source=slot.decision_source,
+                eligible_for_promotion=(arm not in slot.excluded_arms),
+                ineligibility_reason=slot.excluded_arms.get(arm),
             )
     meta = ledger_meta_fn(
         ledger_rows, arms_seen=[a for a in slot.arms if per_arm[a]]

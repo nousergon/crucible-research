@@ -1601,14 +1601,25 @@ def test_the_registry_state_hold_reports_the_ledger_rows_it_was_given():
     PRE-FIX: RED — `present` is False, `n_weeks_scored` is 0 and
     `arms_present` is empty even though two ledger rows were handed in.
     """
+    # An EXPLICIT one-arm slot. This test used to inherit the live register,
+    # which had exactly one promotable arm when it was written; Brian's ruling
+    # 2026-08-29 (alpha-engine-config-I9272) made all five promotable, so the
+    # inherited slot now reaches a real decision and never takes this branch.
+    # The property under test is what the branch REPORTS, so it states the slot
+    # it needs rather than depending on a register that moved under it.
+    one_arm = replace(
+        CUT_PROMOTION_SLOT,
+        arms=(CHAMP,),
+        scored_arms=(CHAMP, CHALLENGER),
+        observe_only_arms=(CHALLENGER,),
+        excluded_arms={CHALLENGER: "explicitly excluded for this test"},
+    )
     rows = _ledger(champ_net=0.010, chal_net=0.100)
     d = decide_cut_champion(
-        ledger_rows=rows, board=None, champion_before=CHAMP, decided_on=DATE
+        ledger_rows=rows, board=None, champion_before=CHAMP, decided_on=DATE,
+        slot=one_arm,
     )
-    assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER, (
-        "the live registry has one promotable arm; this test is about what the "
-        "hold REPORTS, not about which branch it takes"
-    )
+    assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER
     champ = d.arms[CHAMP]
     assert champ.present is True, (
         "the champion has ledger rows — reporting present=false is the record "
@@ -1619,13 +1630,27 @@ def test_the_registry_state_hold_reports_the_ledger_rows_it_was_given():
     assert champ.source == LEDGER_KEY
     assert d.ledger["rows_read"] == len(rows)
     assert CHAMP in d.ledger["arms_present"]
+    # And the EXCLUDED arm is on the record too, with its own ledger evidence —
+    # measurement is unconditional (§3) and the v3 `arms` block covers every
+    # SCORED arm, not just the promotable ones (alpha-engine-config-I9272).
+    assert d.arms[CHALLENGER].present is True
+    assert d.arms[CHALLENGER].eligible_for_promotion is False
+    assert d.arms[CHALLENGER].ineligibility_reason
 
 
 def test_the_registry_state_hold_with_no_ledger_still_reports_absence_honestly():
     """The other half of the same claim: with no ledger there is nothing to
     report, and the record must say so rather than inventing a read."""
+    one_arm = replace(
+        CUT_PROMOTION_SLOT,
+        arms=(CHAMP,),
+        scored_arms=(CHAMP, CHALLENGER),
+        observe_only_arms=(CHALLENGER,),
+        excluded_arms={CHALLENGER: "explicitly excluded for this test"},
+    )
     d = decide_cut_champion(
-        ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE
+        ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE,
+        slot=one_arm,
     )
     assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER
     assert d.arms[CHAMP].present is False
