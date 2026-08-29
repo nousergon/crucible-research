@@ -106,7 +106,7 @@ def test_sync_judge_addresses_the_low_group_from_lambda(monkeypatch, live_router
     _patch_router(monkeypatch, captured=captured)
 
     with _patch_llm_client(fake_client) as mock_llm_cls:
-        artifact = _make_artifact("sector_quant:technology")
+        artifact = _make_artifact("thinktank_thesis")
         judge_mod.evaluate_artifact(artifact, api_key="sk-test")
 
     assert len(captured) == 1
@@ -140,7 +140,7 @@ def test_shadow_judge_addresses_the_same_low_group_from_lambda(monkeypatch, live
     _patch_router(monkeypatch, captured=captured)
 
     with _patch_llm_client(fake_client):
-        artifact = _make_artifact("sector_quant:technology")
+        artifact = _make_artifact("thinktank_thesis")
         judge_mod.evaluate_artifact_openrouter(artifact, api_key="sk-test")
 
     assert len(captured) == 1
@@ -162,11 +162,11 @@ def test_sync_and_shadow_use_distinct_callsite_ids(monkeypatch, live_router_reso
     _patch_router(monkeypatch)
 
     with _patch_llm_client(fake_client) as mock_llm_cls:
-        judge_mod.evaluate_artifact(_make_artifact("sector_quant:technology"), api_key="sk-test")
+        judge_mod.evaluate_artifact(_make_artifact("thinktank_thesis"), api_key="sk-test")
     assert mock_llm_cls.call_args.kwargs["callsite_id"] == "evaljudge-sync"
 
     with _patch_llm_client(fake_client) as mock_llm_cls:
-        judge_mod.evaluate_artifact_openrouter(_make_artifact("sector_quant:technology"), api_key="sk-test")
+        judge_mod.evaluate_artifact_openrouter(_make_artifact("thinktank_thesis"), api_key="sk-test")
     assert mock_llm_cls.call_args.kwargs["callsite_id"] == "evaljudge-shadow"
 
 

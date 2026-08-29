@@ -131,6 +131,11 @@ def test_list_capture_keys_agent_prefix_filter():
         s3.create_bucket(Bucket=BUCKET)
         k1 = _put_capture(s3, date="2026-07-02", agent_id=THESIS_AGENT_ID, run_id="a")
         k2 = _put_capture(s3, date="2026-07-02", agent_id=THEME_AGENT_ID, run_id="b")
+        # Deliberately NOT thinktank_-prefixed — this test's whole point is
+        # the family filter excluding a non-thinktank agent_id.
+        # ``list_capture_keys`` never resolves a rubric, so any arbitrary
+        # non-thinktank label works here regardless of what
+        # ``resolve_rubric_for_agent`` maps.
         k3 = _put_capture(s3, date="2026-07-02", agent_id="ic_cio", run_id="c")
 
         allk = list_capture_keys(s3, date="2026-07-02", bucket=BUCKET)
@@ -148,7 +153,8 @@ def test_build_batch_plan_extra_dates_and_family_filter(monkeypatch, tmp_path):
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
         # thinktank artifacts across two weekday partitions + one graph
-        # artifact on the same dates that must be filtered OUT
+        # artifact on the same dates that must be filtered OUT by
+        # agent_id_prefixes before rubric resolution is ever consulted.
         _put_capture(s3, date="2026-06-29", agent_id=THESIS_AGENT_ID, run_id="r1")
         _put_capture(s3, date="2026-06-30", agent_id=THEME_AGENT_ID, run_id="r2")
         _put_capture(s3, date="2026-06-30", agent_id="ic_cio", run_id="r3")
@@ -171,8 +177,8 @@ def test_build_batch_plan_default_shape_unchanged():
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        _put_capture(s3, date="2026-07-02", agent_id="ic_cio", run_id="r1")
-        _put_capture(s3, date="2026-07-01", agent_id="ic_cio", run_id="r0")
+        _put_capture(s3, date="2026-07-02", agent_id=THESIS_AGENT_ID, run_id="r1")
+        _put_capture(s3, date="2026-07-01", agent_id=THESIS_AGENT_ID, run_id="r0")
         plan = build_batch_plan(date="2026-07-02", bucket=BUCKET, s3_client=s3)
         assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
 
@@ -298,7 +304,7 @@ def test_single_date_plan_skips_dedup_lookup():
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        k1 = _put_capture(s3, date="2026-07-04", agent_id="ic_cio", run_id="r1")
+        k1 = _put_capture(s3, date="2026-07-04", agent_id=THESIS_AGENT_ID, run_id="r1")
         # a (bogus) manifest claiming r1 was judged must be IGNORED on
         # the single-date path
         s3.put_object(
