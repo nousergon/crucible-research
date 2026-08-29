@@ -272,7 +272,7 @@ class TestSubmitBatch:
         fake_client.messages.batches.create.return_value = fake_batch
 
         result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         assert result["batch_id"] == "msgbatch_test_001"
         assert result["processing_status"] == "in_progress"
@@ -313,7 +313,7 @@ class TestSubmitBatch:
         }
         fake_client = MagicMock()
         result = submit_batch(
-            empty_plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            empty_plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         assert result["processing_status"] == "ended_empty"
         assert result["batch_id"].startswith("empty-")
@@ -331,7 +331,7 @@ class TestPollBatch:
 
         # No client needed — empty path short-circuits.
         result = poll_batch(
-            batch_id="empty-2026-05-09", anthropic_client=MagicMock(),
+            batch_id="empty-2026-05-09", batch_client=MagicMock(),
         )
         assert result["processing_status"] == "ended"
 
@@ -344,7 +344,7 @@ class TestPollBatch:
         fake_batch.request_counts = {"processing": 5, "succeeded": 2}
         fake_client.messages.batches.retrieve.return_value = fake_batch
         result = poll_batch(
-            batch_id="msgbatch_xyz", anthropic_client=fake_client,
+            batch_id="msgbatch_xyz", batch_client=fake_client,
         )
         assert result["processing_status"] == "in_progress"
         assert result["request_counts"]["processing"] == 5
@@ -388,7 +388,7 @@ class TestPollBatch:
         fake_client.messages.batches.retrieve.return_value = fake_batch
 
         result = poll_batch(
-            batch_id="msgbatch_xyz", anthropic_client=fake_client,
+            batch_id="msgbatch_xyz", batch_client=fake_client,
         )
 
         # Result must be JSON-serializable — Lambda's runtime marshaller
@@ -423,7 +423,7 @@ class TestProcessBatchResults:
         fake_client.messages.batches.create.return_value = fake_batch
 
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
 
         # Synthesize the batch results — one succeeded entry per
@@ -445,7 +445,7 @@ class TestProcessBatchResults:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=mocked_s3,
             emit_metrics=False,
         )
@@ -480,7 +480,7 @@ class TestProcessBatchResults:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         plan_entries = json.loads(
             mocked_s3.get_object(
@@ -526,7 +526,7 @@ class TestProcessBatchResults:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=mocked_s3,
                 emit_metrics=False,
             )
@@ -555,7 +555,7 @@ class TestProcessBatchResults:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         plan_entries = json.loads(
             mocked_s3.get_object(
@@ -577,7 +577,7 @@ class TestProcessBatchResults:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=mocked_s3,
                 emit_metrics=False,
             )
@@ -602,7 +602,7 @@ class TestProcessBatchResults:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         plan_entries = json.loads(
             mocked_s3.get_object(
@@ -625,7 +625,7 @@ class TestProcessBatchResults:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=mocked_s3,
             emit_metrics=False,
         )
@@ -660,7 +660,7 @@ class TestProcessBatchResults:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         plan_entries = json.loads(
             mocked_s3.get_object(
@@ -701,7 +701,7 @@ class TestProcessBatchResults:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=mocked_s3,
                 emit_metrics=False,
             )
@@ -734,7 +734,7 @@ class TestProcessBatchResults:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
         plan_entries = json.loads(
             mocked_s3.get_object(
@@ -758,7 +758,7 @@ class TestProcessBatchResults:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=mocked_s3,
                 emit_metrics=False,
             )
@@ -834,7 +834,7 @@ class TestBatchChainIntegration:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=mocked_s3,
+            plan, batch_client=fake_client, s3_client=mocked_s3,
         )
 
         # Simulate one poll cycle returning ``ended``.
@@ -846,7 +846,7 @@ class TestBatchChainIntegration:
         fake_done_batch.ended_at = "2026-05-09T22:35:00Z"
         fake_client.messages.batches.retrieve.return_value = fake_done_batch
         poll_result = poll_batch(
-            batch_id=submit_result["batch_id"], anthropic_client=fake_client,
+            batch_id=submit_result["batch_id"], batch_client=fake_client,
         )
         assert poll_result["processing_status"] == "ended"
 
@@ -865,7 +865,7 @@ class TestBatchChainIntegration:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=mocked_s3,
             emit_metrics=False,
         )

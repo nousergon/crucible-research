@@ -135,9 +135,6 @@ def _run(event, context):
     _started = datetime.datetime.now(datetime.UTC)
     _ensure_init()
 
-    import anthropic
-
-    from config import ANTHROPIC_API_KEY
     from evals.lambda_dry import dry_submit_result, is_dry
     from evals.orchestrator import (
         DEFAULT_HAIKU_MODEL,
@@ -222,9 +219,15 @@ def _run(event, context):
         plan, s3=s3, bucket=bucket,
     )
 
+    # alpha-engine-config-I9263 (Brian ruling 2026-08-29: "I will not fund the
+    # anthropic account, at this point we shouldn't be using the anthropic api
+    # at all"). No provider SDK client is built here any more. `submit_batch`
+    # asks the router whether the judge's model group can serve the `batches`
+    # CAPABILITY from this Lambda and, when it cannot, takes the synchronous
+    # rung and records the degradation durably — see
+    # `evals/judge_batch_transport.py` for the ladder.
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        submit_result = submit_batch(plan, anthropic_client=client, s3_client=s3)
+        submit_result = submit_batch(plan, s3_client=s3)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_submit_handler] batch submission failed")
         return {"status": "ERROR", "stage": "submit", "error": str(exc)}

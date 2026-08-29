@@ -118,9 +118,6 @@ def _run(event, context):
     _started = datetime.datetime.now(datetime.UTC)
     _ensure_init()
 
-    import anthropic
-
-    from config import ANTHROPIC_API_KEY
     from evals.lambda_dry import dry_poll_result, is_dry
     from evals.orchestrator import poll_batch
 
@@ -164,8 +161,12 @@ def _run(event, context):
             )
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        poll_result = poll_batch(batch_id=batch_id, anthropic_client=client)
+        # alpha-engine-config-I9263: no provider SDK client at the call site.
+        # A `sync-` or `empty-` batch id is terminal by construction and needs
+        # no client at all; a real provider batch id would need a router-
+        # resolved batch client, which `submit_batch` is the only thing that
+        # can produce today.
+        poll_result = poll_batch(batch_id=batch_id)
     except Exception:  # noqa: BLE001
         logger.exception(
             "[eval_judge_poll_handler] poll API failed for batch_id=%s",

@@ -149,9 +149,6 @@ def _run(event, context):
     _started = _utcnow_cls.now(UTC)
     _ensure_init()
 
-    import anthropic
-
-    from config import ANTHROPIC_API_KEY
     from evals.lambda_dry import dry_process_result, is_dry
     from evals.orchestrator import process_batch_results
 
@@ -186,12 +183,15 @@ def _run(event, context):
 
     _process_error: str | None = None
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         summary = process_batch_results(
             batch_id=batch_id,
             plan_s3_key=plan_s3_key,
             bucket=bucket,
-            anthropic_client=client,
+            # alpha-engine-config-I9263: no provider SDK client at the call
+            # site. On the `sync-` rung `process_batch_results` judges every
+            # plan entry through the router-addressed `evaluate_artifact` and
+            # never touches a batch stream.
+            batch_client=None,
             remaining_s=_remaining_seconds(context),
         )
     except Exception as exc:  # noqa: BLE001

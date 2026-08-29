@@ -153,7 +153,7 @@ def _plan_and_results(budget_s3, *, scores):
     fake_client = MagicMock()
     fake_client.messages.batches.create.return_value = fake_batch
     submit_result = submit_batch(
-        plan, anthropic_client=fake_client, s3_client=budget_s3,
+        plan, batch_client=fake_client, s3_client=budget_s3,
     )
     plan_entries = json.loads(
         budget_s3.get_object(
@@ -184,7 +184,7 @@ class TestStreamPhaseBudget:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=budget_s3,
             emit_metrics=False,
             remaining_s=lambda: 0.0,
@@ -207,7 +207,7 @@ class TestStreamPhaseBudget:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=budget_s3,
             emit_metrics=False,
             remaining_s=lambda: 10_000.0,
@@ -229,7 +229,7 @@ class TestStreamPhaseBudget:
             batch_id=submit_result["batch_id"],
             plan_s3_key=submit_result["plan_s3_key"],
             bucket="alpha-engine-research",
-            anthropic_client=fake_client,
+            batch_client=fake_client,
             s3_client=budget_s3,
             emit_metrics=False,
         )
@@ -264,7 +264,7 @@ class TestParseRetryPhaseBudget:
         fake_client = MagicMock()
         fake_client.messages.batches.create.return_value = fake_batch
         submit_result = submit_batch(
-            plan, anthropic_client=fake_client, s3_client=budget_s3,
+            plan, batch_client=fake_client, s3_client=budget_s3,
         )
         plan_entries = json.loads(
             budget_s3.get_object(
@@ -284,7 +284,7 @@ class TestParseRetryPhaseBudget:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=budget_s3,
                 emit_metrics=False,
                 remaining_s=lambda: next(budget),
@@ -333,7 +333,7 @@ class TestEscalationPhaseBudget:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=budget_s3,
                 emit_metrics=False,
                 remaining_s=lambda: next(budget),
@@ -383,7 +383,7 @@ class TestEscalationPhaseBudget:
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
                 bucket="alpha-engine-research",
-                anthropic_client=fake_client,
+                batch_client=fake_client,
                 s3_client=budget_s3,
                 emit_metrics=False,
                 remaining_s=lambda: 10_000.0,
