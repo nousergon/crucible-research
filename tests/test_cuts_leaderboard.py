@@ -671,6 +671,7 @@ from scoring.cut_promotion import (  # noqa: E402
 from scoring.universe_membership import (  # noqa: E402
     ATTRACTIVENESS_FEED_TOP_N,
     CHALLENGER_CUT_PREFIX,
+    HARD3_CUT_PREFIX,
     MOMZERO_CUT_PREFIX,
     PROMOTABLE_CUTS,
     TECH_SCORE_CUT_PREFIX,
@@ -680,16 +681,22 @@ from scoring.universe_membership import (  # noqa: E402
 TECH_CUT = f"{TECH_SCORE_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
 MOMZERO_CUT = f"{MOMZERO_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
 MOM121_CUT = f"{CHALLENGER_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
+# The fifth arm. Absent from this fixture until alpha-engine-config-I9272,
+# which is itself the finding: it has been a registered arm of the slot since
+# 2026-08-28 and no test in this file seeded it, so every "every arm reaches
+# every horizon" assertion below was passing over four arms out of five.
+HARD3_CUT = f"{HARD3_CUT_PREFIX}{ATTRACTIVENESS_FEED_TOP_N}"
 
 # Each slot arm picks a different 60 — a real comparison, not four clones.
 TECH = [f"H{i:03d}" for i in range(60)]
 MOMZERO = FEED[:30] + [f"Z{i:03d}" for i in range(30)]
 MOM121 = FEED[:10] + [f"M{i:03d}" for i in range(50)]
-SLOT_UNIVERSE = sorted(set(FEED + GATE + TECH + MOMZERO + MOM121))
+HARD3 = FEED[:20] + [f"D{i:03d}" for i in range(40)]
+SLOT_UNIVERSE = sorted(set(FEED + GATE + TECH + MOMZERO + MOM121 + HARD3))
 
 
 class _SlotS3(_S3):
-    """Membership carrying the funnel's stages AND the slot's four arms."""
+    """Membership carrying the funnel's stages AND all five of the slot's arms."""
 
     def get_object(self, Bucket, Key):  # noqa: N803
         if Key.startswith("universe_membership/") and Key.endswith("membership.json"):
@@ -701,6 +708,7 @@ class _SlotS3(_S3):
                     TECH_CUT: {"tickers": TECH},
                     MOMZERO_CUT: {"tickers": MOMZERO},
                     MOM121_CUT: {"tickers": MOM121},
+                    HARD3_CUT: {"tickers": HARD3},
                 },
                 # Only the tech_score arm publishes a rank table; the two
                 # momentum arms deliberately do not (see the loader's comment).
@@ -739,9 +747,9 @@ def slot_built():
 def test_loader_reads_the_slot_arms_too():
     arms, widths = _load_cut_specs(_SlotS3(), "b", DATES)
     names = {a.name for a in arms}
-    assert {TECH_CUT, MOMZERO_CUT, MOM121_CUT} <= names
+    assert {TECH_CUT, MOMZERO_CUT, MOM121_CUT, HARD3_CUT} <= names
     # §4: the slot is count-matched by construction — every arm at 60.
-    for arm in (FEED_CUT_NAME, TECH_CUT, MOMZERO_CUT, MOM121_CUT):
+    for arm in (FEED_CUT_NAME, TECH_CUT, MOMZERO_CUT, MOM121_CUT, HARD3_CUT):
         assert widths[arm] == ATTRACTIVENESS_FEED_TOP_N, arm
 
 

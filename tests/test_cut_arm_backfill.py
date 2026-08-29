@@ -36,8 +36,8 @@ from scoring.universe_membership import (  # noqa: E402
     HARD3_PILLAR_WEIGHTS,
     MOMZERO_CUT_PREFIX,
     MOMZERO_PILLAR_WEIGHTS,
-    OBSERVE_ONLY_CUTS,
     PILLAR_ORDER_FOR_WEIGHTS,
+    SLOT_ARMS,
     VENDOR_FUNDAMENTAL_PILLARS,
     VENDOR_FUNDAMENTALS_REPAIR_DATE,
     UniverseMembershipError,
@@ -447,8 +447,15 @@ def test_every_backfillable_arm_is_already_on_the_measurement_surface():
     """Writing shadow output for an arm the board does not score is the
     registered-but-unscored rumour §3 warns about. The backfill adds history to
     arms that are ALREADY scored; it must never introduce a new arm name."""
+    # Asserted against SLOT_ARMS — the SCORED register — not against
+    # OBSERVE_ONLY_CUTS. The property is "this arm is already on the measurement
+    # surface", and measurement is unconditional (champion-challenger-policy.md
+    # §3); who may WIN is a separate axis. Under Brian's ruling 2026-08-29
+    # (alpha-engine-config-I9272) OBSERVE_ONLY_CUTS is empty, and reading a
+    # measurement fact off a promotability tuple would have made this guard
+    # vacuous the moment the register changed.
     for prefix in BACKFILLABLE_ARM_PREFIXES:
-        assert f"{prefix}{ATTRACTIVENESS_FEED_TOP_N}" in OBSERVE_ONLY_CUTS, prefix
+        assert f"{prefix}{ATTRACTIVENESS_FEED_TOP_N}" in SLOT_ARMS, prefix
 
 
 # ══ The script's default is a dry run ══════════════════════════════════════

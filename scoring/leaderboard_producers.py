@@ -1579,8 +1579,8 @@ def _load_cut_specs(
         GATE_LEGACY_CUT,
         HARD3_CUT_PREFIX,
         MOMZERO_CUT_PREFIX,
-        OBSERVE_ONLY_CUTS,
         PREDICTOR_UNIVERSE_CUT,
+        SLOT_ARMS,
         TECH_SCORE_CUT_PREFIX,
         TECH_SCORE_RANKS_FIELD,
         live_cut_champion,
@@ -1595,14 +1595,25 @@ def _load_cut_specs(
     # unscored rumour champion-challenger-policy.md §3 warns about, and
     # non-promotability must never quietly become non-measurement
     # (alpha-engine-config-I8060).
-    if set(OBSERVE_ONLY_CUTS) != {tech_score_cut, momzero_cut, mom121_cut, hard3_cut}:
+    #
+    # Checked against SLOT_ARMS — every arm of the slot — rather than against
+    # OBSERVE_ONLY_CUTS (alpha-engine-config-I9272). The old form asserted that
+    # the four non-champion arms were exactly the OBSERVE-ONLY ones, which made
+    # the board's measurement surface a function of PROMOTABILITY: under Brian's
+    # ruling 2026-08-29 every scored arm became promotion-eligible,
+    # OBSERVE_ONLY_CUTS emptied, and this guard would have redded the Scanner
+    # run for a register change that added no arm and removed none. Measurement
+    # is unconditional (§3); who may WIN is a separate axis and must not be able
+    # to change what is MEASURED.
+    _board_slot_arms = {FEED_CUT_NAME, tech_score_cut, momzero_cut, mom121_cut, hard3_cut}
+    if _board_slot_arms != set(SLOT_ARMS):
         raise RuntimeError(
-            f"the cuts board scores {sorted((tech_score_cut, momzero_cut, mom121_cut, hard3_cut))} "
-            f"but the registry declares OBSERVE_ONLY_CUTS={sorted(OBSERVE_ONLY_CUTS)} — "
-            "an arm in one and not the other is either unscored or unregistered. "
-            "Raised rather than asserted: `python -O` strips an assert, and this "
-            "is the check that keeps a registry edit from silently dropping an "
-            "arm off the measurement surface (alpha-engine-config-I8060)."
+            f"the cuts board scores {sorted(_board_slot_arms)} but the registry "
+            f"declares SLOT_ARMS={sorted(SLOT_ARMS)} — an arm in one and not the "
+            "other is either unscored or unregistered. Raised rather than "
+            "asserted: `python -O` strips an assert, and this is the check that "
+            "keeps a registry edit from silently dropping an arm off the "
+            "measurement surface (alpha-engine-config-I8060/I9272)."
         )
 
     # Each arm, and the membership keys it may appear under, newest name first.

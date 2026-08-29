@@ -43,21 +43,81 @@ standing champion. A pointer naming anything outside `PROMOTABLE_CUTS` **raises*
 — a promotion engine that believes one arm is live while the funnel serves
 another is the exact drift this contract exists to prevent.
 
-**`tech_score_top_60` is OBSERVE-ONLY as of 2026-08-21** (Brian ruling,
-`alpha-engine-config-I8060`). `PROMOTABLE_CUTS` is `("attractiveness_top_60",)`
-and `OBSERVE_ONLY_CUTS` carries `tech_score_top_60` plus the two attractiveness
-challengers. All four are scored every cycle — on the weekly ledger and at
-21 / 126 / 252 on the leaderboard; non-promotable is not non-measured — but only
-the promotable set may hold the pointer, and `live_cut_champion` refuses the
-rest regardless of what the promotion engine believes. With one promotable arm
-there is nothing to decide, so the engine writes
-`reason_code: "no_promotable_challenger"` every cycle rather than falling
-through to a comparison it did not make. The arm was made promotable on
-2026-08-20 and first emitted the same day, so it has never had a scored cohort;
-Brian declined to restore it in the I8261 cutover for that reason — arming an
-automatic pointer write before evidence exists re-creates the I8060 condition.
-It returns to `PROMOTABLE_CUTS` on a ruling once it has weeks of measured
-performance, which is a one-line registry edit.
+**Every SCORED arm is PROMOTION-ELIGIBLE as of 2026-08-29** (Brian ruling,
+`alpha-engine-config-I9272`). Verbatim: *"for the research arm, we should make
+all arms promote eligible, including think tank"* — the principle, stated twice
+that day, being that **an arm which is scored must be able to win**.
+
+`PROMOTABLE_CUTS` is no longer a hand-maintained literal. The register is built
+in one direction: `SLOT_ARMS` is derived from `CUT_SLOT_ARM_PREFIXES` — the
+prefixes the cut builder actually emits at the feed width — and `PROMOTABLE_CUTS`
+is that set **minus `CUT_ARM_PROMOTION_EXCLUSIONS`**, an arm→reason map that is
+EMPTY today. So the five arms `attractiveness_top_60`, `tech_score_top_60`,
+`attractiveness_momzero_top_60`, `attractiveness_mom121_top_60` and
+`attractiveness_hard3_top_60` are all scored and all eligible.
+
+Two properties follow, and both are enforced rather than documented:
+
+* **A scored-but-unregistered arm cannot recur.**
+  `assert_slot_register_covers_emitted_arms` raises when a cut is emitted
+  count-matched at 60 and is absent from `SLOT_ARMS` — such an arm is scored by
+  nothing and promotable by nothing while the artifact shows it competing.
+  Funnel STAGES at the same width (`FUNNEL_STAGE_CUTS`) are excluded: a stage
+  answers "which names reached this point", an arm answers "how were they
+  ranked", and they are separate axes (champion-challenger-policy.md §2).
+* **A genuine exclusion is a stated property, never an absence.** Adding an arm
+  to `CUT_ARM_PROMOTION_EXCLUSIONS` puts it on every decision record as
+  `excluded_arms.<arm>.reason` with `scope: "register"`, and on that arm's
+  evidence block as `eligible_for_promotion: false`. A per-CYCLE refusal (today
+  only: the arm's basis carries no full-universe rank table) lands the same way
+  with `scope: "this_cycle"`.
+
+**What replaced the old registry gate.** Between 2026-08-21 and 2026-08-29 the
+promotable set was the single literal `("attractiveness_top_60",)`, per Brian's
+I8060 ruling that `tech_score_top_60` stay observe-only "until it has weeks of
+measured performance" — the concern being an automatic pointer write armed
+before any evidence existed. Every cycle therefore wrote
+`reason_code: "no_promotable_challenger"`: **two evaluations, zero comparisons.**
+That concern is now held by MECHANISM, and by three independent ones —
+`min_weeks_for_inference = 5`, the `0.0002`/week hysteresis margin, and the
+28-day cooldown. None can be cleared before roughly 2026-10-02, so restoring the
+arms buys a real comparison at no added promotion risk. Registry membership was
+the wrong instrument: it suppressed the COMPARISON, which is free, in order to
+suppress the PROMOTION, which was already gated three times over.
+
+The `no_promotable_challenger` branch is kept and is unreachable on today's
+register. If a future exclusion ever shrinks the set to one arm the engine must
+still SAY there was nothing to decide, rather than fall through and report
+`champion_already_leads` — a claim about evidence, made where no comparison
+happened.
+
+**Maturity is a PER-ARM property** (`alpha-engine-config-I9284`). An arm short of
+`min_weeks_for_inference` paired weeks is recorded ineligible for that cycle
+with its count and the floor it missed, and keeps accruing. The slot decides as
+soon as the incumbent and at least one eligible challenger are both mature. The
+floor used to apply to every arm at once, which with five arms is a live
+deadlock: `attractiveness_hard3_top_60` produced ZERO names in the ledger's
+first week, so an all-arms floor would have made `decision_earliest_on`
+unreachable by construction.
+
+**`decision_earliest_on` is an object, and it can be PROVISIONAL.** It counts
+from the first ledger week in which every promotable arm carries a non-null
+decision column, not from `FIRST_COHORT_DATE` unconditionally. The v2 record
+published `2026-09-25` on a ledger whose first week (2026-08-21 → 08-28) carries
+a null `net_log_return` for every arm but the champion and is permanently
+unusable — ledger rows are immutable. While no such week exists the record
+carries `provisional: true`, `counted_from`, and a `basis` string saying the
+date can only move OUT. Record `schema_version` is **3** for this change; a v2
+reader would find an object where it expects a string.
+
+**The verdict is DELIVERED, every cycle** (`alpha-engine-config-I9278`).
+`scoring/verdict_digest.py` builds a subject and a markdown body from the audit
+record and sends it through `krepis.email_sender.send_email`, on **promote and
+hold alike** — a digest that fires only on a promotion would leave 52 holds a
+year indistinguishable from a dead loop, which is the condition it exists to
+retire. An undelivered digest escalates as an ops alert rather than becoming a
+second silence. The module is slot-parameterised (`VerdictSlot`) and is shared
+with the SPEC slot's engine.
 
 **Fixed consumers, not subject to promotion:** `attractiveness_top_20` is the
 predictor's daily universe (`PREDICTOR_UNIVERSE_CUT`, explicitly ruled unchanged
