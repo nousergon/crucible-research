@@ -28,6 +28,8 @@ import pytest
 from evals.lambda_dry import (
     DRY_FLAG,
     DRY_SENTINEL_BATCH_ID,
+    DRY_SENTINEL_PLAN_S3_KEY,
+    dry_submit_result,
     is_dry,
 )
 
@@ -128,10 +130,39 @@ class TestSubmitDry:
         # Sentinel threads to Process (status EMPTY skips the poll loop).
         assert result["status"] == "EMPTY"
         assert result["batch_id"] == DRY_SENTINEL_BATCH_ID
-        assert result["plan_s3_key"] is None
+        assert result["plan_s3_key"] == DRY_SENTINEL_PLAN_S3_KEY
         assert result["request_count"] == 0
         assert result["processing_status"] == "ended_empty"
         assert result["dry_run"] is True
+
+    def test_no_null_anywhere_in_the_dry_submit_return(self):
+        """DERIVED, not enumerated (alpha-engine-config-I9329).
+
+        Every value the Submit dry return carries is reachable by a Step
+        Functions intrinsic on the Friday shell run, and ``States.Format``
+        raises ``States.Runtime`` on a null argument — a definition that works
+        on Saturday and dies on Friday. ``plan_s3_key`` is the value the new
+        ``ssm:sendCommand`` stage formats into its judge command, and it was
+        the null. Walking the whole structure rather than restating the keys
+        is what makes this cover the NEXT key someone adds as ``None``.
+        """
+        def _nulls(value, path="dry_submit_result"):
+            if value is None:
+                return [path]
+            if isinstance(value, dict):
+                return [p for k, v in value.items()
+                        for p in _nulls(v, f"{path}.{k}")]
+            if isinstance(value, (list, tuple)):
+                return [p for i, v in enumerate(value)
+                        for p in _nulls(v, f"{path}[{i}]")]
+            return []
+
+        offenders = _nulls(dry_submit_result("2026-05-16"))
+        assert offenders == [], (
+            f"null value(s) in the Submit dry return: {offenders} — a null "
+            "reaching a States.Format argument raises States.Runtime on the "
+            "Friday shell run only. Use a non-null sentinel."
+        )
 
     def test_non_dry_still_takes_real_path(self, submit_mod):
         """Production Saturday SF passes no dry_run_llm — must NOT
