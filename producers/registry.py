@@ -28,6 +28,10 @@ from dataclasses import dataclass
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 
+from producers.filling_arms import (
+    run_scanner_predictor_direct_producer,
+    run_scanner_top20_predictor_producer,
+)
 from producers.no_agent import run_no_agent_producer
 from producers.single_agent import run_single_agent_producer
 
@@ -83,6 +87,22 @@ class ProducerSpec:
     # absent from the tree AND unreachable from any Lambda handler's import
     # graph. Empty for a live arm.
     retired_modules: tuple[str, ...] = ()
+    # WHERE this arm's score is read from (alpha-engine-config-I9307). Exactly
+    # two values are legal:
+    #
+    #   "shadow"       — signals_shadow/{name}/{date}/signals.json, the artifact
+    #                    this arm writes itself. Every arm should be here.
+    #   "signals_live" — signals/{date}/signals.json, the LIVE artifact.
+    #
+    # It is a declared field rather than an inference because the second value
+    # is a live hazard, and an inference cannot be refused. The champion arm was
+    # scored from "signals_live" for seven weeks after the live signals producer
+    # became ``signals_envelope`` — which is empty-by-contract and emits no
+    # ENTER picks at all — so the arm contributed zero cohort dates while
+    # rendering as merely *thin*. ``_assert_score_source_can_carry_output``
+    # below now REFUSES that combination at import, so the defect cannot recur
+    # silently: it becomes an ImportError with the reason in it.
+    score_source: str = "shadow"
 
 
 RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
@@ -157,13 +177,22 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         "here 2026-08-29 (alpha-engine-config-I9277): it had been a promotion "
         "arm for six weeks while existing in NO producer register — only in "
         "crucible-backtester's VALID_CHAMPIONS literal.",
-        # build=None: when this arm is the live champion its picks ARE
-        # signals/{date}/signals.json, which the leaderboard scores as the
-        # champion row. It writes no signals_shadow/ of its own, so if the
-        # pointer ever moves OFF it, it becomes unscoreable until a shadow
-        # writer exists — recorded on the board as an explicit absence
-        # (scored=false + absence_reason), never as a silent missing row.
-        build=None,
+        # alpha-engine-config-I9307: this arm now BUILDS its own shadow, on
+        # every weekly pass, regardless of whether it is currently serving.
+        #
+        # It used to be scored from signals/{date}/signals.json on the theory
+        # that "when this arm is champion its picks ARE signals.json". That
+        # stopped being true when SignalsEnvelope became the live producer
+        # (epic config-I2515 Phase B): the envelope is empty-by-contract and
+        # emits ZERO ENTER picks, so the arm contributed nothing to the cohort
+        # from 2026-07-18 onward while its row still rendered as `thin`.
+        #
+        # Building it here — not capturing it in the executor where the picks
+        # are actually synthesized — is what satisfies §3: the executor only
+        # synthesizes for the arm that is CURRENTLY champion, so an
+        # executor-side capture would go dark on the incumbent the moment the
+        # pointer moved. See producers/filling_arms.py for the full rationale.
+        build=run_scanner_predictor_direct_producer,
     ),
     "scanner_top20_predictor": ProducerSpec(
         name="scanner_top20_predictor",
@@ -173,12 +202,12 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         "predictor — the arm Brian's 2026-08-27 ruling names. Registered here "
         "2026-08-29 (alpha-engine-config-I9277); previously only in "
         "crucible-backtester's VALID_CHAMPIONS literal.",
-        # build=None and NO signals_shadow/ writer exists: this arm is scored
-        # today only as a crucible-backtester end-to-end counterfactual, which
-        # is a DIFFERENT source and cohort from every other arm on this board
-        # (alpha-engine-config-I9279). Until a shadow writer exists it appears
-        # on the board as an explicit unscored arm with an absence reason.
-        build=None,
+        # alpha-engine-config-I9307: was scored ONLY as a crucible-backtester
+        # end-to-end counterfactual — a different source and a different cohort
+        # from every other arm on this board (-I9279), i.e. the asymmetry that
+        # hid the champion's silence. It now builds its own shadow through the
+        # same one writer, so it is on the shared basis like everything else.
+        build=run_scanner_top20_predictor_producer,
     ),
     "thinktank_coverage": ProducerSpec(
         name="thinktank_coverage",
@@ -377,3 +406,79 @@ FILLING_CHAMPION_ARMS = tuple(
     sorted(p.name for p in RESEARCH_PRODUCERS.values() if p.promotion_eligible)
 )
 NOOP_CHAMPION_ARMS = ("agentic",)
+
+# The producer that actually writes ``signals/{date}/signals.json`` today.
+# Declared here so the guard below can be evaluated at import instead of being
+# a fact somebody has to remember (epic config-I2515 Phase B moved this from
+# the agentic graph to the envelope, and nothing downstream noticed).
+LIVE_SIGNALS_PRODUCER = "signals_envelope"
+
+SCORE_SOURCE_SHADOW = "shadow"
+SCORE_SOURCE_SIGNALS_LIVE = "signals_live"
+VALID_SCORE_SOURCES = (SCORE_SOURCE_SHADOW, SCORE_SOURCE_SIGNALS_LIVE)
+
+
+def _assert_score_source_can_carry_output() -> None:
+    """Refuse, at import, any arm scored from a source that cannot carry its
+    output (alpha-engine-config-I9307).
+
+    THE DEFECT THIS CLOSES, in one sentence: the champion arm was scored by
+    reading ENTER picks out of ``signals/{date}/signals.json`` while the live
+    producer of that artifact was ``signals_envelope``, which is
+    empty-by-contract and emits no ENTER picks at all — so the arm was
+    structurally incapable of scoring, contributed 2 cohort dates in 7 weeks,
+    and rendered as a merely *thin* row the whole time.
+
+    Nothing in the fleet could see that, because it is a relationship between
+    two facts held in different modules: which artifact an arm is scored FROM,
+    and whether that artifact's producer ever emits picks. Both facts are now
+    declared in this file, so the relationship is checkable — and it is checked
+    HERE, at import, rather than alerted on per cycle, because a structural
+    impossibility is not a measurement outcome (champion-challenger-policy.md
+    §7.2). A registry that cannot produce a comparable measurement must not
+    load at all.
+
+    Raises ``ValueError`` (surfacing as an ImportError at the call site) rather
+    than warning: §7.2's dominant bug class is a record asserting an action
+    that never happened, and a warning here would produce exactly that.
+    """
+    for spec in RESEARCH_PRODUCERS.values():
+        if spec.score_source not in VALID_SCORE_SOURCES:
+            raise ValueError(
+                f"producer {spec.name!r} declares score_source="
+                f"{spec.score_source!r}, which is not one of {VALID_SCORE_SOURCES}"
+            )
+        if spec.kind == "retired":
+            continue
+        if (
+            spec.score_source == SCORE_SOURCE_SIGNALS_LIVE
+            and LIVE_SIGNALS_PRODUCER in EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS
+        ):
+            raise ValueError(
+                f"producer {spec.name!r} declares score_source="
+                f"{SCORE_SOURCE_SIGNALS_LIVE!r}, but the live producer of "
+                f"signals/{{date}}/signals.json is {LIVE_SIGNALS_PRODUCER!r}, "
+                "which is EMPTY-BY-CONTRACT (see "
+                "EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS): it never emits an "
+                "ENTER pick, so this arm can never score and would render as a "
+                "thin row forever. Give the arm its own signals_shadow/ writer "
+                "(producers/filling_arms.py) and score_source='shadow'. "
+                "alpha-engine-config-I9307."
+            )
+        if spec.score_source == SCORE_SOURCE_SHADOW and spec.build is None:
+            # Legitimate: the arm's own pipeline writes the shadow on its own
+            # cadence (thinktank_coverage). Not an error — but it IS the
+            # registration/writer split that must stay visible, so it is stated
+            # rather than inferred.
+            continue
+
+
+_assert_score_source_can_carry_output()
+
+
+def score_source_for(name: str) -> str:
+    """Where ``name``'s score is read from. Unregistered arms default to the
+    shadow prefix — the only source on which an unregistered arm could ever be
+    compared like the rest."""
+    spec = RESEARCH_PRODUCERS.get(name)
+    return spec.score_source if spec else SCORE_SOURCE_SHADOW

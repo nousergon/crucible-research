@@ -99,6 +99,7 @@ import arcticdb as _arcticdb  # noqa: F401
 from nousergon_lib.trading_calendar import count_trading_days
 
 from observe_alerts import publish_observe_alert
+from producers.registry import SCORE_SOURCE_SIGNALS_LIVE, score_source_for
 from scoring.leaderboard_scoring import (
     CONFIDENCE_INSUFFICIENT,
     DEFAULT_HORIZON_DAYS,
@@ -1047,6 +1048,46 @@ def _resolve_champion_name(s3: Any, bucket: str) -> str | None:
     return None
 
 
+def _picks_by_date(
+    s3: Any,
+    bucket: str,
+    arm: str,
+    dates: Sequence[str],
+    score_source: str,
+) -> dict[str, SpecDay]:
+    """``{date: SpecDay}`` for ONE arm, read from the source its register row
+    declares (alpha-engine-config-I9307).
+
+    ONE reader for champion, challengers and retired arms. Before this, the
+    champion had its own read against a different S3 key inside the same
+    function — which is precisely how the two sides of the comparison came to
+    be scored from different artifacts without anything noticing
+    (champion-challenger-policy.md §4, alpha-engine-config-I9279).
+
+    A date whose document is absent, or whose document carries no ENTER pick,
+    contributes nothing — that is the arm's miss and stays visible as a gap in
+    ``dates_scored``. Whether an all-empty window is a run of misses or a
+    structural absence is decided by ``measurability_for``, not here.
+    """
+    key_tmpl = (
+        _SIGNALS_LIVE if score_source == SCORE_SOURCE_SIGNALS_LIVE
+        else _SIGNALS_SHADOW
+    )
+    out: dict[str, SpecDay] = {}
+    for d in dates:
+        key = (
+            key_tmpl.format(date=d) if score_source == SCORE_SOURCE_SIGNALS_LIVE
+            else key_tmpl.format(producer=arm, date=d)
+        )
+        doc = _get_json(s3, bucket, key)
+        if not doc:
+            continue
+        day = _enter_ranked_and_scores(doc)
+        if day.ranked:
+            out[d] = day
+    return out
+
+
 def _load_producer_specs(
     s3: Any,
     bucket: str,
@@ -1084,6 +1125,17 @@ def _load_producer_specs(
     champion: SpecHistory | None = None
     if champ_name is not None:
         champ_spec = RESEARCH_PRODUCERS.get(champ_name)
+        # Picks FIRST: SpecHistory is frozen, and the unmeasurable reason is a
+        # property of what the read found, so it cannot be back-filled onto an
+        # already-constructed row.
+        champ_source = score_source_for(champ_name)
+        champ_picks = _picks_by_date(s3, bucket, champ_name, dates, champ_source)
+        champ_unmeasurable = None if champ_picks else (
+            f"no ENTER picks on any of the {len(dates)} cohort date(s) at "
+            f"score_source={champ_source!r} — the champion arm produced no "
+            "comparable output at all, so the slot has no measured incumbent to "
+            "compare a challenger against (alpha-engine-config-I9307)"
+        )
         champion = SpecHistory(
             name=champ_name,
             kind="champion",
@@ -1094,13 +1146,24 @@ def _load_producer_specs(
             # silently reclassifying the live arm.
             promotion_eligible=(champ_spec.promotion_eligible if champ_spec else True),
             ineligible_reason=(champ_spec.ineligible_reason if champ_spec else None),
+            unmeasurable_reason=champ_unmeasurable,
         )
-        for d in dates:
-            doc = _get_json(s3, bucket, _SIGNALS_LIVE.format(date=d))
-            if doc:
-                day = _enter_ranked_and_scores(doc)
-                if day.ranked:
-                    champion.by_date[d] = day
+        # alpha-engine-config-I9307. The champion is read from the SAME source
+        # as every challenger, because the register says so — not from
+        # signals/{date}/signals.json on the assumption that the champion's
+        # picks are whatever the live artifact holds.
+        #
+        # That assumption was true once and stopped being true silently: when
+        # SignalsEnvelope became the live producer (config-I2515 Phase B) the
+        # live artifact became empty-by-contract, so the champion read returned
+        # 903 HOLDs and zero ENTER on every date from 2026-07-18 on. The arm
+        # contributed 2 cohort dates in 7 weeks and rendered `thin`.
+        #
+        # champion-challenger-policy.md §4: both sides of a comparison are
+        # scored on the same basis, over the same cohort, FROM THE SAME SOURCE.
+        # Reading the source off the register is what makes that true by
+        # construction rather than by a comment.
+        champion.by_date.update(champ_picks)
 
     challengers: list[SpecHistory] = []
     for spec in challenger_producers():
@@ -1117,12 +1180,9 @@ def _load_producer_specs(
             promotion_eligible=spec.promotion_eligible,
             ineligible_reason=spec.ineligible_reason,
         )
-        for d in dates:
-            doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
-            if doc:
-                day = _enter_ranked_and_scores(doc)
-                if day.ranked:
-                    hist.by_date[d] = day
+        hist.by_date.update(
+            _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
+        )
         challengers.append(hist)
 
     for spec in retired_producers(as_of=as_of):
@@ -1132,12 +1192,9 @@ def _load_producer_specs(
             promotion_eligible=spec.promotion_eligible,
             ineligible_reason=spec.ineligible_reason,
         )
-        for d in dates:
-            doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
-            if doc:
-                day = _enter_ranked_and_scores(doc)
-                if day.ranked:
-                    hist.by_date[d] = day
+        hist.by_date.update(
+            _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
+        )
         challengers.append(hist)
 
     return champion, challengers
@@ -1413,6 +1470,98 @@ def _vacuous_membership_collisions(
     return collisions
 
 
+def _alert_unmeasurable_arms(leaderboard_id: str, date_str: str, board: dict) -> None:
+    """Route every arm that CANNOT be measured (alpha-engine-config-I9307),
+    on the tier its condition actually deserves.
+
+    Why this is separate from the leaderboard-level ``unmeasurable`` status:
+    that fires when the WHOLE board could not be computed. This fires when the
+    board computed perfectly and one ARM inside it is structurally incapable of
+    contributing — strictly harder to see, because every machine-health signal
+    is green and the only symptom is a small number in a column that also
+    legitimately holds small numbers. That is how the champion arm stayed dead
+    for seven weeks: board healthy, row present, ``confidence: "thin"``, and
+    ``thin`` is a state that resolves by waiting.
+
+    THREE TIERS, and the split is the point (observability-policy.md §7.2a,
+    the routing `_route_no_cohort_arms` established in alpha-engine-config
+    -I9276 — mirrored here rather than re-decided):
+
+    * **Champion unmeasurable → PAGE.** Actionable now: with no measured
+      incumbent the slot cannot promote ANYTHING, so every challenger's
+      evidence is being accrued against nothing. This is the one rung of this
+      class that belongs on the operator's phone.
+    * **A challenger that has stopped producing → DIGEST.** It scored before
+      and no longer does. A standing structural fact whose remedy is a tracked
+      item, not a 3am decision.
+    * **A challenger that never produced at all → NOTHING here.**
+      ``_annotate_arm_measurement_gaps`` already routes that exact condition to
+      the digest. Reporting it twice would trade one silence for two duplicate
+      notifications, which is the noise-for-signal swap this whole class of fix
+      keeps re-introducing.
+
+    A RETIRED arm is excluded from both tiers, though never from the artifact:
+    §6 DELETES a retired arm's code, so producing nothing is its expected state
+    for the whole trailing window. Paging or digesting it would fire every
+    cycle for eight cycles after every retirement, and an alert that fires when
+    nothing is wrong is how the previous detector died.
+
+    NEVER raises — this is the observe path, and a scoring failure must not red
+    the live pipeline (§7.2). It is never silent either: ``unmeasurable_arms``
+    is on the artifact whether or not anyone is notified.
+    """
+    from ops_alerts import publish_ops_digest
+
+    rows = [
+        a for a in (board.get("unmeasurable_arms") or []) if a.get("kind") != "retired"
+    ]
+    if not rows:
+        return
+    champion_name = board.get("champion")
+
+    champion_hit = [a for a in rows if a.get("name") == champion_name]
+    if champion_hit:
+        reason = champion_hit[0].get("reason")
+        publish_observe_alert(
+            message=(
+                f"[{leaderboard_id}-leaderboard] the CHAMPION arm "
+                f"{champion_name!r} is UNMEASURABLE on {date_str}, so this slot "
+                f"cannot promote: there is no measured incumbent for a "
+                f"challenger to beat, and every challenger's evidence is "
+                f"accruing against nothing. {reason}. An unmeasurable arm is "
+                "NOT a thin arm — thin resolves by waiting, unmeasurable does "
+                "not. Fix the arm's producer or its declared score source "
+                "(champion-challenger-policy.md §7.2, "
+                "alpha-engine-config-I9307)."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=f"unmeasurable_champion:{leaderboard_id}:{date_str}",
+        )
+
+    # Challengers that STOPPED producing. Excludes the never-produced case,
+    # which `_annotate_arm_measurement_gaps` already digests.
+    stalled = [
+        a for a in rows
+        if a.get("name") != champion_name and "last scored" in (a.get("reason") or "")
+    ]
+    if stalled:
+        publish_ops_digest(
+            [f"{a['name']!r} ({a.get('kind')}): {a.get('reason')}" for a in stalled],
+            header=(
+                f"[{leaderboard_id}-leaderboard] {len(stalled)} arm(s) STOPPED "
+                f"producing comparable output as of {date_str}. Each scored "
+                "before and no longer does, so its remaining dates are residue "
+                "rather than a thin-but-live record. Not a page: the remedy is "
+                "a tracked item, not a decision tonight."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=(
+                f"unmeasurable_stalled:{leaderboard_id}:{date_str}:"
+                + ",".join(sorted(str(a.get("name")) for a in stalled))
+            ),
+        )
+
+
 def _alert_vacuous_collisions(
     leaderboard_id: str,
     champion_name: str | None,
@@ -1590,6 +1739,10 @@ def build_scanner_leaderboard(
         leaderboard["leaderboard_id"] = "scanner"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
+        # Same detector on every board, not only the one where the defect was
+        # found (engagement-protocol §5: a fix survives the class, not the
+        # instance). alpha-engine-config-I9307.
+        _alert_unmeasurable_arms("scanner", date_str, leaderboard)
         # config-I5195: zero scored cohorts is EXPECTED while cohorts are
         # immature and a DEFECT once they should have matured. The two render
         # identically as n_dates=0, which is how the original defect survived
@@ -2138,6 +2291,7 @@ def build_cuts_leaderboard(
             merged["horizons"], arms, realized_by_horizon,
         )
         merged["leaderboard_id"] = "cuts"
+        _alert_unmeasurable_arms("cuts", date_str, merged)
         merged["date"] = date_str
         # `merged` is seeded from whichever arm happened to be scored first, so
         # its top-level `champion` is that pass's value. Name the champion from
@@ -2362,6 +2516,13 @@ def build_producer_leaderboard(
         # alpha-engine-config-I9277 — the register, projected. Read by
         # crucible-backtester's promotion engine as THE arm set.
         leaderboard["arms"] = _arms_block(champion, challengers, leaderboard)
+        # alpha-engine-config-I9307 — an arm that CANNOT produce a comparable
+        # output alarms; it does not quietly render as a low-confidence row.
+        # champion-challenger-policy.md §7.2: an unmeasurable result must fail
+        # LOUD, never render as an empty success. Fail-soft toward the live
+        # path is correct and preserved (this alert never raises), but fail-soft
+        # must never extend to silence.
+        _alert_unmeasurable_arms("producer", date_str, leaderboard)
         # config-I5195: zero scored cohorts is EXPECTED while cohorts are
         # immature and a DEFECT once they should have matured. The two render
         # identically as n_dates=0, which is how the original defect survived
