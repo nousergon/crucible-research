@@ -63,7 +63,7 @@ class _Panel:
     def __init__(self) -> None:
         self.panel: dict[str, dict[str, float]] = {}
 
-    def put(self, date_str: str, closes: dict) -> "_Panel":
+    def put(self, date_str: str, closes: dict) -> _Panel:
         self.panel.setdefault(date_str, {}).update({t: float(c) for t, c in closes.items()})
         return self
 
