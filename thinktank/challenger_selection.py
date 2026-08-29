@@ -54,6 +54,8 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from observe_alerts import publish_observe_alert
+
 from thinktank import (
     CHALLENGER_SELECTION_KEY_TMPL,
     CHALLENGER_SELECTION_LATEST_KEY,
@@ -240,11 +242,42 @@ def _write_shadow_signals(store: ThinktankStore, selection: ChallengerSelection)
     for the shared leaderboard scorer — ONLY when ``coverage_complete``
     (see module docstring). Returns the S3 key written, or None when skipped."""
     if not selection.coverage_complete:
-        logger.info(
-            "challenger shadow signals skipped for %s — coverage incomplete "
-            "(uncovered=%d), not valid leaderboard evidence",
+        # ── An arm that cannot produce a cohort must SAY so ────────────────
+        # alpha-engine-config-I9282. This skip is correct (an incomplete
+        # -coverage selection is not valid leaderboard evidence, Brian's
+        # config#1580 ruling) but it was reported at INFO and escalated
+        # NOWHERE, so the arm silently stopped contributing cohort dates on
+        # 2026-08-14 and nothing noticed for two weeks. Meanwhile
+        # `thinktank_coverage` kept appearing on the producer leaderboard with
+        # a frozen 4-date history, which reads as a thin arm rather than a
+        # dead one — champion-challenger-policy.md §3: "A cycle where an arm
+        # produces no output is recorded as a MISS, not omitted. Silent
+        # absence and a genuine zero must never render identically."
+        #
+        # Now: WARNING plus an active observe alert, so a run that produces no
+        # challenger evidence is a reported event on the cycle it happens.
+        logger.warning(
+            "challenger shadow signals SKIPPED for %s — coverage incomplete "
+            "(uncovered=%d of the declared top-%d window). This arm "
+            "contributes NO cohort date for %s; its leaderboard row will not "
+            "advance (alpha-engine-config-I9282).",
             selection.trading_day,
             selection.uncovered_count,
+            CHALLENGER_TOP_N,
+            selection.trading_day,
+        )
+        publish_observe_alert(
+            message=(
+                f"[thinktank] challenger arm produced NO leaderboard evidence "
+                f"for {selection.trading_day}: coverage incomplete "
+                f"(uncovered={selection.uncovered_count}). "
+                f"signals_shadow/thinktank_coverage/{selection.trading_day}/"
+                f"signals.json NOT written — the arm is scored on a cohort "
+                f"that stopped advancing. champion-challenger-policy.md §3 "
+                f"(a no-output cycle is a MISS, not an omission)."
+            ),
+            source="thinktank:challenger_selection",
+            dedup_key=f"thinktank_coverage_incomplete:{selection.trading_day}",
         )
         return None
 

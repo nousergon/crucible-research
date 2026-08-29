@@ -244,6 +244,35 @@ def record_thesis_write(
         entry.thesis_updated_on = trading_day
         if sector and not entry.sector:
             entry.sector = sector
+        # ── RE-COVER (alpha-engine-config-I9282) ────────────────────────────
+        # Writing a thesis IS coverage. Until 2026-08-29 this branch advanced
+        # the thesis fields and left `covered` alone — which was harmless
+        # while `covered` could only ever be True, and became a permanent
+        # deadlock the moment the hysteresis EXIT half shipped on 2026-08-10
+        # (config-I6648) without this, its RE-ENTRY half:
+        #
+        #   name de-covered past exit_rank -> rank recovers, re-enters the
+        #   top-60 window -> select_intake sees an UNCOVERED name and spends a
+        #   full daily_new_names slot writing its thesis -> covered stays
+        #   False -> the name is "uncovered" again tomorrow, forever.
+        #
+        # Measured on the live ledger 2026-08-29: HALO dropped 2026-08-10 and
+        # carried thesis v11 written 2026-08-28 while still covered=False;
+        # FTNT/WEX (dropped 08-17) carried v13 written 08-27. Those names were
+        # re-underwritten daily to no effect, consuming most of the fixed
+        # 5-slot intake budget, so `uncovered_count` could never reach 0 —
+        # which is why `coverage_complete` has been False since 2026-08-14 and
+        # the arm has written no shadow signal since, i.e. why
+        # `thinktank_coverage` scores on a frozen 4-date cohort.
+        #
+        # The drop record is CLEARED, not kept: `dropped_on` is the audit
+        # trail for a name that IS dropped, and leaving it set on a re-covered
+        # name makes the ledger assert two contradictory things at once. The
+        # immutable per-version thesis history under `thinktank/theses/` is
+        # the durable record of the drop-and-return; this field is state.
+        entry.covered = True
+        entry.dropped_on = None
+        entry.attractiveness_rank_at_drop = None
 
 
 def record_sweep(ledger: CoverageLedger, tickers: list[str], trading_day: str) -> None:
