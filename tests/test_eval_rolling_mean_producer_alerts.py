@@ -117,10 +117,26 @@ def test_every_swallow_path_alerts() -> None:
     source = _HANDLER_PATH.read_text()
     error_blocks = source.count('= {"status": "ERROR", "error": str(exc)}')
     emitter_calls = source.count("_emit_producer_failure_alert(")
-    # one definition + one call per block
-    assert emitter_calls == error_blocks + 1, (
-        f"{error_blocks} best-effort failure paths but {emitter_calls - 1} alert "
+    # One definition, one call per hard-failure block, and one inside
+    # _shortfall — the single path every BUDGET shortfall routes through
+    # (alpha-engine-config-I9102). A block that could not finish inside the
+    # invocation is exactly as invisible as one that raised, so it alerts too.
+    assert emitter_calls == error_blocks + 2, (
+        f"{error_blocks} best-effort failure paths but {emitter_calls - 2} alert "
         "calls — a swallow path is silent"
+    )
+    # And every budget-shortfall branch goes through the alerting helper rather
+    # than recording a status of its own: a fifth aggregation that catches
+    # BlockTimeout/NoBudget and quietly writes a dict fails here.
+    shortfall_branches = source.count("except (BlockTimeout, NoBudget) as exc:")
+    assert shortfall_branches == error_blocks, (
+        f"{error_blocks} secondary blocks but {shortfall_branches} of them bound "
+        "by the invocation budget — an unbounded block can still spend the "
+        "stage's whole invocation (alpha-engine-config-I9102)"
+    )
+    assert source.count("= _shortfall(") == shortfall_branches, (
+        "a budget-shortfall branch records its own status instead of routing "
+        "through _shortfall, so it never reaches the alert bus"
     )
     for producer in EXPECTED_PRODUCERS:
         assert f'producer="{producer}"' in source, (

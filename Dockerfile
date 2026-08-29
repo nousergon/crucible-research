@@ -138,6 +138,9 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 COPY freshness.py ${LAMBDA_TASK_ROOT}/
 COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
 COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
+# invocation_budget.py — repo-ROOT single-file module bounding the SECONDARY
+# aggregations hung off a stage's primary deliverable (alpha-engine-config-I9102).
+COPY invocation_budget.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
