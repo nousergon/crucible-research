@@ -4,16 +4,25 @@ rationale-clustering Lambdas.
 The Saturday Step Function (alpha-engine-data step_function.json) has a
 Friday-PM "shell run" keystone that boots + dry-executes every workload
 state to catch import / bootstrap / lib-pin / transport breakage WITHOUT
-paying for Anthropic tokens or polluting prod S3 / CloudWatch.
+spending LLM budget or polluting prod S3 / CloudWatch.
 
 Research's main handler already routes dry via the ``dry_run_llm`` event
-flag (``dry_run_llm.$: $.research_dry``). The eval-judge chain
-(Submit → Poll → Process) and the rationale-clustering Lambda had NO
-clean no-write dry path, so the keystone had to hard-SKIP them
-(``skip_eval_judge`` / ``skip_rationale_clustering``) — meaning their
-import/bootstrap paths were NOT exercised on the Friday smoke.
+flag (``dry_run_llm.$: $.research_dry``). The eval-judge chain and the
+rationale-clustering Lambda had NO clean no-write dry path, so the
+keystone had to hard-SKIP them (``skip_eval_judge`` /
+``skip_rationale_clustering``) — meaning their import/bootstrap paths were
+NOT exercised on the Friday smoke.
 
-This module is the single canonical dry substrate for those four
+**What changed (alpha-engine-config-I9329).** The chain was Submit → Poll
+→ Process. Poll and Process are retired as Lambdas: Poll was residue of
+the retired async batch API, and Process moved substrate to a spot box
+(``evals/judge_spot_run.py``), whose dry path is
+``python -m evals.judge_spot_run --preflight-only`` — an on-box flag, not
+an event key, so it needs nothing from this module. ``dry_poll_result``
+and ``dry_process_result`` are therefore GONE. The module stays: ``is_dry``
+and ``DRY_FLAG`` are imported by handlers that are very much alive.
+
+This module is the canonical dry substrate for the remaining
 handlers (no per-handler bespoke logic, no copy-paste). It deliberately
 does NOT pull in ``dry_run.py`` (that module installs LangGraph agent
 stubs — irrelevant here; these handlers never build the research graph).
@@ -26,18 +35,16 @@ Contract:
 - The submit handler returns ``dry_submit_result(date)`` — a sentinel
   whose ``batch_id`` is ``DRY_SENTINEL_BATCH_ID`` and whose
   ``status`` is ``"EMPTY"`` + ``processing_status`` ``"ended_empty"``.
-  The existing ``EvalJudgePollChoice`` SF Choice already routes
-  ``status == "EMPTY"`` straight to ``EvalJudgeProcess`` (skipping the
-  poll loop entirely), so the sentinel threads submit → process with no
-  Anthropic poll in between.
-- Poll + Process detect the sentinel (or the raw event flag) and
-  short-circuit to a benign success WITHOUT any Anthropic call or S3
-  read/write.
+  The SF routes ``status == "EMPTY"`` straight past the judge run, so the
+  sentinel threads the Friday shell run through Submit without any LLM
+  call downstream of it.
 - Rationale clustering boots + imports, then returns
   ``dry_clustering_result()`` BEFORE any read/cluster/persist.
 
-Hard invariant for every helper here: zero Anthropic/LLM calls, zero
-S3/CloudWatch writes, returns a status the SF treats as OK.
+Hard invariant for every helper here: zero LLM calls, zero S3/CloudWatch
+writes, returns a status the SF treats as OK — and no value in any return
+is ``None`` (a null reaching a ``States.Format`` argument raises
+``States.Runtime`` on the Friday path only; see ``dry_submit_result``).
 """
 
 from __future__ import annotations
@@ -83,9 +90,8 @@ def is_dry(event: Any) -> bool:
 
 def dry_submit_result(date: str) -> dict[str, Any]:
     """eval_judge_submit dry return — NO Anthropic batch, NO S3 plan
-    persist. Shaped so the existing SF Choice (`EvalJudgePollChoice`,
-    ``status == "EMPTY"`` → `EvalJudgeProcess`) skips the poll loop and
-    Process sees the sentinel batch_id.
+    persist. Shaped so the SF's ``status == "EMPTY"`` choice branch skips the
+    judge run entirely and the spot stage sees the sentinel batch_id.
 
     **Nothing here may be ``None`` (alpha-engine-config-I9329).**
     ``plan_s3_key`` used to be null. Once ``EvalJudgeProcess`` runs on a spot
@@ -93,10 +99,10 @@ def dry_submit_result(date: str) -> dict[str, Any]:
     ``States.Format`` intrinsic on the new ``ssm:sendCommand`` stage, and
     ``States.Format`` raises ``States.Runtime`` on a null argument. That is a
     definition which works on Saturday and dies on Friday — the exact class
-    ``dry_process_result``'s existing comment already names for its own hoisted
-    keys. ``DRY_SENTINEL_PLAN_S3_KEY`` is a non-null string that is obviously
-    not a real key, so the intrinsic resolves and a reader of the rendered
-    command sees immediately that it was the dry path.
+    the retired ``dry_process_result``'s own comment named for its hoisted
+    coverage keys. ``DRY_SENTINEL_PLAN_S3_KEY`` is a non-null string that is
+    obviously not a real key, so the intrinsic resolves and a reader of the
+    rendered command sees immediately that it was the dry path.
     """
     return {
         "status": "EMPTY",
@@ -114,53 +120,6 @@ def dry_submit_result(date: str) -> dict[str, Any]:
             "skip_failed": [],
             "force_sonnet_pass": False,
             "judge_only": False,
-            "dry_run": True,
-        },
-    }
-
-
-def dry_poll_result(batch_id: str | None = None) -> dict[str, Any]:
-    """eval_judge_poll dry return — NO Anthropic retrieve. Terminal
-    ``ended`` so the SF Poll Choice routes forward to Process.
-    """
-    return {
-        "batch_id": batch_id or DRY_SENTINEL_BATCH_ID,
-        "processing_status": "ended",
-        "request_counts": {
-            "processing": 0, "succeeded": 0, "errored": 0,
-            "canceled": 0, "expired": 0,
-        },
-        "ended_at": None,
-        "elapsed_seconds": 0,
-        "exceeded_max_wait": False,
-        "dry_run": True,
-    }
-
-
-def dry_process_result(batch_id: str | None = None) -> dict[str, Any]:
-    """eval_judge_process dry return — NO Anthropic results stream, NO
-    S3 plan read, NO per-artifact persist, NO CW emit. ``status: OK``
-    mirrors the legacy single-Lambda contract the SF treats as success.
-    """
-    return {
-        "status": "OK",
-        "dry_run": True,
-        # I6920: the real path hoists these to the top level so a Step
-        # Functions Choice can branch on coverage. The dry path must carry
-        # the same keys or that Choice's JSONPath is unresolvable on the
-        # Friday preflight run — a definition that works on Saturday and
-        # breaks on Friday. `dry_run: True` alongside is what tells a
-        # reader this completeness is the keystone's, not a corpus's.
-        "complete": True,
-        "budget_stopped": False,
-        "summary": {
-            "batch_id": batch_id or DRY_SENTINEL_BATCH_ID,
-            "haiku_evaluated": 0,
-            "sonnet_evaluated": 0,
-            "skipped_unmapped": 0,
-            "skipped_empty_input": 0,
-            "failed": [],
-            "persisted_keys": [],
             "dry_run": True,
         },
     }

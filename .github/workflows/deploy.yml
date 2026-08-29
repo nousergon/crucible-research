@@ -144,20 +144,19 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_judge
 
-      # Eval-judge Anthropic Message Batches API chain — three Lambdas
-      # (-submit / -poll / -process) that share the main runner's ECR
-      # image with per-Lambda CMD overrides. Same image-share rationale
-      # as eval_judge above. Without this step the Saturday SF batch
-      # chain (PR #136 + alpha-engine-data#189, ROADMAP §1642) would
-      # invoke stale or missing function versions on every code push —
-      # PR #136's initial deploy required a manual `bash deploy.sh
-      # eval_judge_batch` to publish the three functions because this
-      # step was missing.
-      - name: Deploy eval-judge batch chain (submit/poll/process)
+      # Eval-judge Submit Lambda — shares the main runner's ECR image with
+      # a CMD override, same image-share rationale as eval_judge above.
+      # Formerly the three-Lambda batch chain (submit/poll/process); Poll and
+      # Process are retired by alpha-engine-config-I9329 — Poll was residue of
+      # the async batch API, and Process now runs to completion on a spot box
+      # over SSM. Without this step Submit would serve stale code on every
+      # push, which is the merged-but-not-deployed class this workflow's own
+      # comments record (the original eval_judge_batch case).
+      - name: Deploy eval-judge submit Lambda
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
-        run: bash infrastructure/deploy.sh eval_judge_batch
+        run: bash infrastructure/deploy.sh eval_judge_submit
 
       # Eval rolling-mean Lambda — the EvalRollingMean Saturday SF state.
       # Same image-share pattern, CMD override sets the entry to
