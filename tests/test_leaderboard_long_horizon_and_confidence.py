@@ -120,6 +120,17 @@ def _matured_to_126_panel() -> tuple[_Panel, list[str]]:
     return panel, entries
 
 
+# EVERY registered challenger arm, not just one (alpha-engine-config-I9281).
+# The fixture used to seed `signals_shadow/thinktank_coverage/` alone while
+# `RESEARCH_PRODUCERS` also registers `no_agent_quant` and
+# `single_agent_quant` — so the "an immature long horizon does not alert" lock
+# below was standing over a fixture that genuinely exhibited a DIFFERENT
+# condition (two registered arms with no cohort artifact at all). The lock is
+# about an immature HORIZON; it must be seeded with a cohort that is immature
+# rather than one that is missing, or it locks the wrong thing in place.
+_SEEDED_PRODUCER_ARMS = ("thinktank_coverage", "no_agent_quant", "single_agent_quant")
+
+
 def _seed_producer_cohort(client, entries: list[str]) -> None:
     for d in entries:
         _put_json(
@@ -127,11 +138,12 @@ def _seed_producer_cohort(client, entries: list[str]) -> None:
             f"signals/{d}/signals.json",
             {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("A", 0.9), ("B", 0.5), ("C", 0.1)]}},
         )
-        _put_json(
-            client,
-            f"signals_shadow/thinktank_coverage/{d}/signals.json",
-            {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
-        )
+        for arm in _SEEDED_PRODUCER_ARMS:
+            _put_json(
+                client,
+                f"signals_shadow/{arm}/{d}/signals.json",
+                {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
+            )
 
 
 # ── I7540: every horizon is scored, each with its own n_dates ─────────────────
@@ -243,6 +255,14 @@ class TestLongHorizonImmaturityIsHonest:
         findings — the same reasoning that keeps the primary horizon's
         immature case silent.
 
+        The fixture seeds EVERY registered challenger arm (alpha-engine-config
+        -I9281): a fixture where two of the three registered arms wrote no
+        shadow at all exhibits the registered-arm-never-wrote condition, not an
+        immature horizon, so "no alert" over it locked a claim this test does
+        not make. Both channels are asserted silent — the page AND the
+        surveillance digest — because the honest-immaturity rule is about the
+        condition, not about which channel it would have reached.
+
         PRE-FIX: GREEN — no long horizon exists to alert about. A lock against
         the wrong fix (alerting on honest immaturity), stated as such rather
         than counted among the red guards."""
@@ -250,11 +270,16 @@ class TestLongHorizonImmaturityIsHonest:
 
         panel, entries = _matured_to_126_panel()
         _seed_producer_cohort(s3, entries)
-        with patch("scoring.leaderboard_producers.publish_observe_alert") as alert:
+        with patch("scoring.leaderboard_producers.publish_observe_alert") as alert, \
+                patch("ops_alerts.publish_ops_digest") as digest:
             build_producer_leaderboard(
                 s3, _BUCKET, "2026-08-17", top_n=2, closes_panel_loader=panel.loader()
             )
         assert alert.call_count == 0
+        assert digest.call_count == 0, (
+            "every registered arm wrote a shadow here; the only zero-cohort "
+            "arm is the RETIRED one, which is permanently zero by construction"
+        )
 
     def test_a_long_horizon_the_source_cannot_serve_never_sinks_the_21d_series(self, s3):
         """§3 continuity: failing the whole leaderboard because the panel cannot
@@ -355,12 +380,15 @@ def _continuity_fixture():
 #                              a row's number was computed over, the same metric
 #                              restricted to the cohort every eligible arm
 #                              shares, and whether the arm may be promoted.
-#                              Every protected mean/se/t_stat above is
-#                              arithmetically untouched: the intersection metric
-#                              is a SEPARATE field, and on this fixture (all
-#                              arms sharing one cohort) it happens to equal the
-#                              own-cohort figure — which is the correct value,
-#                              not a coincidence being papered over.
+#   comparison_status          alpha-engine-config-I9274 — WHY this row holds
+#                              the paired figure it holds.
+#
+# Every protected mean/se/t_stat above is arithmetically untouched by BOTH
+# changes. On this pinned fixture all arms score all six dates, so the cohort
+# intersection IS the union and `topn_alpha_vs_champion` is unchanged (the
+# pinned {-0.02, se 0.0, n 6} still stands) — which is the correct value, not a
+# coincidence being papered over. What the new fields add is a STATED basis
+# where the basis was previously unstated.
 _ADDITIVE_SINCE_CAPTURE = (
     "confidence",
     "topn_alpha_vs_population",
@@ -369,10 +397,28 @@ _ADDITIVE_SINCE_CAPTURE = (
     "n_dates_in_intersection",
     "promotion_eligible",
     "ineligible_reason",
+    "comparison_status",
 )
 
-# Additive keys at the TOP level of the leaderboard dict, same rule.
-_ADDITIVE_TOP_LEVEL_SINCE_CAPTURE = ("cohort_intersection", "n_dates_intersection")
+# Additive keys at the TOP level of the leaderboard dict, same rule. This is the
+# UNION of what both merged changes emit, and it is exhaustive on purpose: the
+# lock's whole value is that an unlisted new key FAILS. `n_dates` — the field
+# crucible-dashboard's s3_loader and the live gate:data predicates poll — is
+# absent from this list because it is untouched, and that is what this lock
+# proves (alpha-engine-config-I9274).
+#
+# Two intersection vocabularies coexist here deliberately; see the
+# "TWO windows" note in scoring/leaderboard_scoring.py. `cohort_intersection` /
+# `n_dates_intersection` carry the RELAXED promotion window; the
+# `cohort_intersection_*` trio carries the STRICT reported one.
+_ADDITIVE_TOP_LEVEL_SINCE_CAPTURE = (
+    "cohort_intersection",
+    "n_dates_intersection",
+    "cohort_union_dates",
+    "cohort_intersection_dates",
+    "cohort_intersection_first",
+    "cohort_intersection_last",
+)
 
 # Additive fields added INSIDE a metric block, rather than alongside it. Same
 # rule as above and the same test: each must carry new information about the
