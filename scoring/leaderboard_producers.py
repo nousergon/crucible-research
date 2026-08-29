@@ -1471,62 +1471,95 @@ def _vacuous_membership_collisions(
 
 
 def _alert_unmeasurable_arms(leaderboard_id: str, date_str: str, board: dict) -> None:
-    """Raise a LOUD, deduped observe alert for every arm that cannot be
-    measured (alpha-engine-config-I9307).
+    """Route every arm that CANNOT be measured (alpha-engine-config-I9307),
+    on the tier its condition actually deserves.
 
     Why this is separate from the leaderboard-level ``unmeasurable`` status:
-    that one fires when the WHOLE board could not be computed. This one fires
-    when the board computed perfectly and one ARM inside it is structurally
-    incapable of contributing — which is strictly harder to see, because every
-    machine-health signal is green and the only symptom is a small number in a
-    column that also legitimately holds small numbers.
+    that fires when the WHOLE board could not be computed. This fires when the
+    board computed perfectly and one ARM inside it is structurally incapable of
+    contributing — strictly harder to see, because every machine-health signal
+    is green and the only symptom is a small number in a column that also
+    legitimately holds small numbers. That is how the champion arm stayed dead
+    for seven weeks: board healthy, row present, ``confidence: "thin"``, and
+    ``thin`` is a state that resolves by waiting.
 
-    That is exactly how the champion arm stayed dead for seven weeks: the board
-    was healthy, the row existed, the confidence said ``thin``, and ``thin`` is
-    a state that resolves by waiting.
+    THREE TIERS, and the split is the point (observability-policy.md §7.2a,
+    the routing `_route_no_cohort_arms` established in alpha-engine-config
+    -I9276 — mirrored here rather than re-decided):
+
+    * **Champion unmeasurable → PAGE.** Actionable now: with no measured
+      incumbent the slot cannot promote ANYTHING, so every challenger's
+      evidence is being accrued against nothing. This is the one rung of this
+      class that belongs on the operator's phone.
+    * **A challenger that has stopped producing → DIGEST.** It scored before
+      and no longer does. A standing structural fact whose remedy is a tracked
+      item, not a 3am decision.
+    * **A challenger that never produced at all → NOTHING here.**
+      ``_annotate_arm_measurement_gaps`` already routes that exact condition to
+      the digest. Reporting it twice would trade one silence for two duplicate
+      notifications, which is the noise-for-signal swap this whole class of fix
+      keeps re-introducing.
+
+    A RETIRED arm is excluded from both tiers, though never from the artifact:
+    §6 DELETES a retired arm's code, so producing nothing is its expected state
+    for the whole trailing window. Paging or digesting it would fire every
+    cycle for eight cycles after every retirement, and an alert that fires when
+    nothing is wrong is how the previous detector died.
 
     NEVER raises — this is the observe path, and a scoring failure must not red
-    the live pipeline (§7.2). But it is never silent either: the alert fires
-    and ``unmeasurable_arms`` is on the artifact whether or not anyone reads it.
+    the live pipeline (§7.2). It is never silent either: ``unmeasurable_arms``
+    is on the artifact whether or not anyone is notified.
     """
-    # A RETIRED arm is deliberately excluded from the page, though not from the
-    # artifact. §6 DELETES a retired arm's code, so producing no new output is
-    # its expected state for the whole trailing window — it is carried as
-    # historical evidence, not as a live competitor. Paging on that would fire
-    # every cycle for eight cycles after every retirement, and an alert that
-    # fires when nothing is wrong is how the previous one died. The row still
-    # says `unmeasurable` on the board, which is true and is what a reader
-    # needs; it just does not wake anyone.
-    unmeasurable = [
+    from ops_alerts import publish_ops_digest
+
+    rows = [
         a for a in (board.get("unmeasurable_arms") or []) if a.get("kind") != "retired"
     ]
-    if not unmeasurable:
+    if not rows:
         return
     champion_name = board.get("champion")
-    champion_hit = any(a.get("name") == champion_name for a in unmeasurable)
-    detail = "; ".join(
-        f"{a.get('name')} ({a.get('kind')}): {a.get('reason')}" for a in unmeasurable
-    )
-    publish_observe_alert(
-        message=(
-            f"[{leaderboard_id}-leaderboard] {len(unmeasurable)} arm(s) are "
-            f"UNMEASURABLE on {date_str}"
-            + (
-                " — INCLUDING THE CHAMPION, so this slot cannot promote: there "
-                "is no measured incumbent for a challenger to beat"
-                if champion_hit else ""
-            )
-            + f". {detail}. An unmeasurable arm is NOT a thin arm: thin resolves "
-            "by waiting, unmeasurable does not. Fix the arm's producer or its "
-            "declared score source (champion-challenger-policy.md §7.2, "
-            "alpha-engine-config-I9307)."
-        ),
-        source=f"research:{leaderboard_id}_leaderboard",
-        dedup_key=(
-            f"unmeasurable_arms:{leaderboard_id}:{date_str}:"
-            + ",".join(sorted(str(a.get("name")) for a in unmeasurable))
-        ),
-    )
+
+    champion_hit = [a for a in rows if a.get("name") == champion_name]
+    if champion_hit:
+        reason = champion_hit[0].get("reason")
+        publish_observe_alert(
+            message=(
+                f"[{leaderboard_id}-leaderboard] the CHAMPION arm "
+                f"{champion_name!r} is UNMEASURABLE on {date_str}, so this slot "
+                f"cannot promote: there is no measured incumbent for a "
+                f"challenger to beat, and every challenger's evidence is "
+                f"accruing against nothing. {reason}. An unmeasurable arm is "
+                "NOT a thin arm — thin resolves by waiting, unmeasurable does "
+                "not. Fix the arm's producer or its declared score source "
+                "(champion-challenger-policy.md §7.2, "
+                "alpha-engine-config-I9307)."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=f"unmeasurable_champion:{leaderboard_id}:{date_str}",
+        )
+
+    # Challengers that STOPPED producing. Excludes the never-produced case,
+    # which `_annotate_arm_measurement_gaps` already digests.
+    stalled = [
+        a for a in rows
+        if a.get("name") != champion_name and "last scored" in (a.get("reason") or "")
+    ]
+    if stalled:
+        publish_ops_digest(
+            [f"{a['name']!r} ({a.get('kind')}): {a.get('reason')}" for a in stalled],
+            header=(
+                f"[{leaderboard_id}-leaderboard] {len(stalled)} arm(s) STOPPED "
+                f"producing comparable output as of {date_str}. Each scored "
+                "before and no longer does, so its remaining dates are residue "
+                "rather than a thin-but-live record. Not a page: the remedy is "
+                "a tracked item, not a decision tonight."
+            ),
+            source=f"research:{leaderboard_id}_leaderboard",
+            dedup_key=(
+                f"unmeasurable_stalled:{leaderboard_id}:{date_str}:"
+                + ",".join(sorted(str(a.get("name")) for a in stalled))
+            ),
+        )
 
 
 def _alert_vacuous_collisions(

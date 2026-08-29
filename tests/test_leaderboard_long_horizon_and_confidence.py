@@ -182,7 +182,6 @@ def _seed_producer_cohort(client, entries: list[str]) -> None:
                 {"signals": {t: {"signal": "ENTER", "score": 0.9 - 0.4 * j}
                              for j, t in enumerate(picks)}},
             )
-            )
 
 
 # ── I7540: every horizon is scored, each with its own n_dates ─────────────────

@@ -336,18 +336,46 @@ def _board(arms):
     return {"champion": "c", "unmeasurable_arms": arms}
 
 
-def test_an_unmeasurable_live_arm_pages():
+def test_a_stalled_challenger_reaches_the_DIGEST_and_never_the_page():
+    """observability-policy.md §7.2a. A challenger that stopped producing is a
+    standing structural fact whose remedy is a tracked item — surveillance
+    tier, never the operator's phone. Getting this wrong is how a fix for
+    silence ships as noise."""
     from unittest.mock import patch
 
     from scoring.leaderboard_producers import _alert_unmeasurable_arms
 
-    with patch("scoring.leaderboard_producers.publish_observe_alert") as alert:
+    with patch("ops_alerts.publish_ops_digest") as digest, \
+            patch("scoring.leaderboard_producers.publish_observe_alert") as page:
         _alert_unmeasurable_arms(
             "producer", "2026-08-28",
-            _board([{"name": "scanner_top20_predictor", "kind": "challenger", "reason": "r"}]),
+            _board([{
+                "name": "scanner_top20_predictor", "kind": "challenger",
+                "reason": "last scored 2026-07-30, but scored none of the 3 most recent",
+            }]),
         )
-    assert alert.call_count == 1
-    assert "UNMEASURABLE" in alert.call_args.kwargs["message"]
+    assert digest.call_count == 1
+    assert page.call_count == 0, "a stalled challenger must not page"
+
+
+def test_an_arm_that_never_produced_is_not_reported_twice():
+    """`_annotate_arm_measurement_gaps` (alpha-engine-config-I9276) already
+    digests the never-wrote-anything case. Reporting it here as well would
+    trade one silence for two duplicate notifications."""
+    from unittest.mock import patch
+
+    from scoring.leaderboard_producers import _alert_unmeasurable_arms
+
+    with patch("ops_alerts.publish_ops_digest") as digest, \
+            patch("scoring.leaderboard_producers.publish_observe_alert") as page:
+        _alert_unmeasurable_arms(
+            "producer", "2026-08-28",
+            _board([{
+                "name": "scanner_top20_predictor", "kind": "challenger",
+                "reason": "scored 0 of 6 cohort date(s) — the arm produced no comparable output",
+            }]),
+        )
+    assert digest.call_count == 0 and page.call_count == 0
 
 
 def test_an_unmeasurable_champion_says_the_slot_cannot_promote():
@@ -362,6 +390,10 @@ def test_an_unmeasurable_champion_says_the_slot_cannot_promote():
             "producer", "2026-08-28",
             {"champion": "c", "unmeasurable_arms": [{"name": "c", "kind": "champion", "reason": "r"}]},
         )
+    assert alert.call_count == 1, (
+        "the champion being unmeasurable IS actionable now — it is the one rung "
+        "of this class that belongs on the phone"
+    )
     assert "cannot promote" in alert.call_args.kwargs["message"]
 
 
@@ -374,12 +406,16 @@ def test_a_retired_arm_does_not_page():
 
     from scoring.leaderboard_producers import _alert_unmeasurable_arms
 
-    with patch("scoring.leaderboard_producers.publish_observe_alert") as alert:
+    with patch("ops_alerts.publish_ops_digest") as digest, \
+            patch("scoring.leaderboard_producers.publish_observe_alert") as page:
         _alert_unmeasurable_arms(
             "producer", "2026-08-28",
-            _board([{"name": "agentic_sector_teams", "kind": "retired", "reason": "r"}]),
+            _board([{
+                "name": "agentic_sector_teams", "kind": "retired",
+                "reason": "last scored 2026-07-11, but scored none of the 3 most recent",
+            }]),
         )
-    assert alert.call_count == 0
+    assert page.call_count == 0 and digest.call_count == 0
 
 
 def test_a_retired_arm_still_appears_on_the_artifact():
