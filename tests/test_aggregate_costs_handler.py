@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import importlib.util
 import sys
 from datetime import date as date_type
 from pathlib import Path
-import datetime as _dt
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -228,7 +228,7 @@ _COVERAGE_DECL = {
 #: alpha-engine-config-I9261 — the coverage read is anchored on the
 #: execution's own start time, not on a calendar date, so these stubs
 #: supply one.
-_STARTED_AT = _dt.datetime(2026, 5, 25, 9, 0, tzinfo=_dt.timezone.utc)
+_STARTED_AT = _dt.datetime(2026, 5, 25, 9, 0, tzinfo=_dt.UTC)
 
 
 class TestFanInCoverage:
@@ -457,7 +457,7 @@ class TestFanInCoverageReadsTheExecutionNotTheRunDate:
     """
 
     _RUN_DATE = "2026-08-28"
-    _STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.timezone.utc)
+    _STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.UTC)
 
     class _ProdS3:
         """`_cost_raw/` as measured on 2026-08-29."""
@@ -465,14 +465,14 @@ class TestFanInCoverageReadsTheExecutionNotTheRunDate:
         _OBJECTS = {
             # Friday's DAILY pipelines, in the run_date partition.
             "decision_artifacts/_cost_raw/2026-08-28/8e9fff668cc8/thinktank-sweep.0.jsonl":
-                _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.timezone.utc),
+                _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.UTC),
             "decision_artifacts/_cost_raw/2026-08-28/krepis-7faeb93de042/single-agent-quant.0.jsonl":
-                _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.timezone.utc),
+                _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.UTC),
             # THIS execution, in the UTC partition it actually ran on.
             "decision_artifacts/_cost_raw/2026-08-29/krepis-31e1cf2e27b5/single-agent-quant.0.jsonl":
-                _dt.datetime(2026, 8, 29, 11, 14, 32, tzinfo=_dt.timezone.utc),
+                _dt.datetime(2026, 8, 29, 11, 14, 32, tzinfo=_dt.UTC),
             "decision_artifacts/_cost_raw/2026-08-29/krepis-b1444bfa3454/replay-concordance.0.jsonl":
-                _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.timezone.utc),
+                _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.UTC),
         }
 
         def get_paginator(self, name):
@@ -532,7 +532,7 @@ class TestFanInCoverageReadsTheExecutionNotTheRunDate:
             patch("boto3.client", side_effect=self._client),
         ):
             fake_dt.now.return_value = _dt.datetime(
-                2026, 8, 29, 14, 2, 40, tzinfo=_dt.timezone.utc
+                2026, 8, 29, 14, 2, 40, tzinfo=_dt.UTC
             )
             result = handler_mod.handler(
                 {"date": self._RUN_DATE, "coverage": decl}, context=None

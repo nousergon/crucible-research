@@ -9,6 +9,8 @@ correct; the number was about something else.
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import pytest
 
 from scripts.cost_coverage import (
@@ -254,8 +256,6 @@ class TestStagesEntered:
 # came from Friday's DAILY pipelines; this execution's `stages_entered`
 # was ['ChallengerShadow', 'ReplayConcordance'].
 
-import datetime as _dt
-
 
 class _WindowS3:
     """S3 fake keyed by prefix, carrying LastModified like the real API."""
@@ -281,8 +281,8 @@ class _WindowS3:
 
 
 _ROOT = "decision_artifacts/_cost_raw"
-_STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.timezone.utc)
-_NOW = _dt.datetime(2026, 8, 29, 14, 2, 40, tzinfo=_dt.timezone.utc)
+_STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.UTC)
+_NOW = _dt.datetime(2026, 8, 29, 14, 2, 40, tzinfo=_dt.UTC)
 
 
 def _observed(**kw):
@@ -303,7 +303,7 @@ def test_a_producer_in_tomorrows_partition_is_this_executions_producer():
     """
     s3 = _WindowS3({
         f"{_ROOT}/2026-08-29/krepis-b1444bfa3454/replay-concordance.0.jsonl":
-            _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.timezone.utc),
+            _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.UTC),
     })
     assert _observed(s3=s3) == {"replay-concordance"}
 
@@ -319,9 +319,9 @@ def test_another_runs_object_in_the_run_date_partition_is_not_coverage():
     s3 = _WindowS3({
         # Friday's daily pipelines, hours before the weekly run started.
         f"{_ROOT}/2026-08-28/8e9fff668cc8/thinktank-sweep.0.jsonl":
-            _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.timezone.utc),
+            _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.UTC),
         f"{_ROOT}/2026-08-28/krepis-7faeb93de042/single-agent-quant.0.jsonl":
-            _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.timezone.utc),
+            _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.UTC),
     })
     assert _observed(s3=s3) == set()
 
@@ -330,16 +330,16 @@ def test_the_execution_window_spans_the_dates_it_ran_across():
     """A run that crosses UTC midnight writes to both partitions."""
     s3 = _WindowS3({
         f"{_ROOT}/2026-08-29/r1/replay-concordance.0.jsonl":
-            _dt.datetime(2026, 8, 29, 12, 0, tzinfo=_dt.timezone.utc),
+            _dt.datetime(2026, 8, 29, 12, 0, tzinfo=_dt.UTC),
         f"{_ROOT}/2026-08-30/r2/single-agent-quant.0.jsonl":
-            _dt.datetime(2026, 8, 30, 1, 0, tzinfo=_dt.timezone.utc),
+            _dt.datetime(2026, 8, 30, 1, 0, tzinfo=_dt.UTC),
     })
     from scripts.cost_coverage import observed_producers_for_execution
 
     observed = observed_producers_for_execution(
         s3, "alpha-engine-research", _ROOT,
         started_at=_STARTED,
-        now=_dt.datetime(2026, 8, 30, 2, 0, tzinfo=_dt.timezone.utc),
+        now=_dt.datetime(2026, 8, 30, 2, 0, tzinfo=_dt.UTC),
     )
     assert observed == {"replay-concordance", "single-agent-quant"}
 

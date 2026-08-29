@@ -63,7 +63,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -200,8 +200,8 @@ def execution_started_at(execution_arn: str, *, sfn_client: Any = None):
             f"which cannot be true of a running execution."
         )
     if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
-    return started.astimezone(timezone.utc)
+        started = started.replace(tzinfo=UTC)
+    return started.astimezone(UTC)
 
 
 def observed_producers_for_execution(
@@ -249,7 +249,7 @@ def observed_producers_for_execution(
     reported as the alarming finding this check exists to make.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     if started_at is None:
         raise CostCoverageUnmeasured(
             "no execution start time was supplied, so which cost objects "
@@ -284,7 +284,7 @@ def observed_producers_for_execution(
                             f"an execution."
                         )
                     if modified.tzinfo is None:
-                        modified = modified.replace(tzinfo=timezone.utc)
+                        modified = modified.replace(tzinfo=UTC)
                     if modified >= started_at:
                         keys.append(key)
         except CostCoverageUnmeasured:
