@@ -256,24 +256,87 @@ class TestGetMetricDataAll:
 
 
 class TestComputeAndEmit4wMean:
-    def test_empty_corpus_first_run(self):
-        from evals.rolling_mean import compute_and_emit_4w_mean
+    def test_empty_corpus_raises_rather_than_returning_a_clean_summary(self):
+        """alpha-engine-config-I9321.
+
+        This test previously asserted the OPPOSITE — a successful return with
+        ``floor_metric_emitted is False`` — under the comment "the alarm
+        correctly stays in INSUFFICIENT_DATA rather than firing on a None".
+
+        Both halves of that were wrong, and measuring beats reasoning here:
+        `alpha-engine-eval-quality-regression` was created with
+        ``--treat-missing-data ignore``, which RETAINS the last state and never
+        yields INSUFFICIENT_DATA, so an absent floor left the alarm exactly as
+        it was — latched in ALARM since 2026-05-07. The empty return was not a
+        safe no-op; it was the mechanism by which a blind alarm looked healthy.
+
+        Measured 2026-08-29: ``AlphaEngine/Eval/agent_quality_score`` had zero
+        live metric streams, so this branch was the one production took, and
+        ``EvalRollingMean`` reported success while publishing no floor.
+        """
+        from evals.rolling_mean import (
+            EvalFloorUnmeasurable,
+            compute_and_emit_4w_mean,
+        )
 
         cw = MagicMock()
         paginator = MagicMock()
         paginator.paginate.return_value = [{"Metrics": []}]
         cw.get_paginator.return_value = paginator
 
-        result = compute_and_emit_4w_mean(cloudwatch_client=cw)
+        with pytest.raises(EvalFloorUnmeasurable) as exc_info:
+            compute_and_emit_4w_mean(cloudwatch_client=cw)
 
-        assert result["combos_discovered"] == 0
-        assert result["datapoints_emitted"] == 0
+        assert exc_info.value.combos_discovered == 0
+        # The message must name the metric an operator has to go and look at,
+        # not merely say "unmeasurable" — this string is what lands in the SF
+        # `cause` field and in the CloudWatch Logs error line.
+        assert "agent_quality_score" in str(exc_info.value)
+        assert "alpha-engine-config-I9321" in str(exc_info.value)
         cw.get_metric_data.assert_not_called()
         cw.put_metric_data.assert_not_called()
-        # No combos → no floor emission. The alarm correctly stays in
-        # INSUFFICIENT_DATA rather than firing on a None.
-        assert result["floor_value"] is None
-        assert result["floor_metric_emitted"] is False
+
+    def test_combos_discovered_but_none_carry_data_also_raises(self):
+        """The second silent path (alpha-engine-config-I9321).
+
+        Structurally distinct from the empty-combos case: streams exist, so
+        `_list_metric_combos` returns rows, but every GetMetricData result is
+        empty. `combo_stats` stays empty, `floor_combo` stays None, and the
+        old `if floor_value is not None` guard skipped the emission without a
+        word. The per-combo dashboard metric may still have been published,
+        which makes this the more dangerous of the two: a populated dashboard
+        above a dark alarm.
+        """
+        from evals.rolling_mean import (
+            EvalFloorUnmeasurable,
+            compute_and_emit_4w_mean,
+        )
+
+        combos = [_dims("thinktank_thesis", "evidence_quality")]
+        cw = _make_cw_with_combos(combos, values_by_idx={})
+
+        with pytest.raises(EvalFloorUnmeasurable) as exc_info:
+            compute_and_emit_4w_mean(cloudwatch_client=cw)
+
+        assert exc_info.value.combos_discovered == 1
+        assert exc_info.value.combos_skipped_no_data == 1
+
+    def test_a_measurable_floor_still_returns_normally(self):
+        """The guard must not fire on a healthy run.
+
+        A fail-loud change that also fails on the happy path converts a silent
+        outage into a weekly false alarm, which is how a real detector gets
+        turned off. Pins the boundary: ONE combo with ONE value is enough.
+        """
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("thinktank_thesis", "evidence_quality")]
+        cw = _make_cw_with_combos(combos, values_by_idx={0: [2.0]})
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw)
+
+        assert result["floor_metric_emitted"] is True
+        assert result["floor_value"] == 2.0
 
     def test_happy_path_emits_one_per_combo(self):
         from evals.rolling_mean import compute_and_emit_4w_mean
@@ -408,11 +471,27 @@ class TestComputeAndEmit4wMean:
         # MIN across the two combo means.
         assert floor_metric["Value"] == 3.2
 
-    def test_floor_emitted_only_when_at_least_one_combo_had_data(self):
-        """All combos return empty Values → no floor emission even
-        though combos were discovered. Alarm stays in
-        INSUFFICIENT_DATA rather than getting a None datapoint."""
-        from evals.rolling_mean import compute_and_emit_4w_mean
+    def test_no_combo_with_data_raises_and_publishes_nothing(self):
+        """Supersedes ``test_floor_emitted_only_when_at_least_one_combo_had_data``
+        (alpha-engine-config-I9321).
+
+        The old test asserted a clean summary here and justified it with
+        "alarm stays in INSUFFICIENT_DATA rather than getting a None
+        datapoint". The first clause was false in production — the alarm is
+        configured ``--treat-missing-data ignore``, so it retains its last
+        state and never reaches INSUFFICIENT_DATA — and the second was a straw
+        man: the alternative to a None datapoint is a FAILED STAGE, not a
+        quiet return.
+
+        What is retained from the old test, deliberately, is the assertion
+        that nothing is published. Failing loud must not also mean publishing
+        a fabricated floor: an invented number would be worse than silence
+        because the alarm would then evaluate it.
+        """
+        from evals.rolling_mean import (
+            EvalFloorUnmeasurable,
+            compute_and_emit_4w_mean,
+        )
 
         combos = [_dims("a", "c1"), _dims("a", "c2")]
         cw = _make_cw_with_combos(combos, values_by_idx={
@@ -420,15 +499,11 @@ class TestComputeAndEmit4wMean:
             1: [],
         })
 
-        result = compute_and_emit_4w_mean(cloudwatch_client=cw)
+        with pytest.raises(EvalFloorUnmeasurable) as exc_info:
+            compute_and_emit_4w_mean(cloudwatch_client=cw)
 
-        assert result["combos_discovered"] == 2
-        assert result["datapoints_emitted"] == 0
-        assert result["combos_skipped_no_data"] == 2
-        assert result["floor_value"] is None
-        assert result["floor_metric_emitted"] is False
-        # Only the combo discovery happened — no put calls at all
-        # because no per-combo data AND no floor to emit.
+        assert exc_info.value.combos_discovered == 2
+        assert exc_info.value.combos_skipped_no_data == 2
         cw.put_metric_data.assert_not_called()
 
     def test_missing_query_result_recorded_as_failure(self):
