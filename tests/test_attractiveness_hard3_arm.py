@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scoring.universe_membership import (  # noqa: E402
     ATTRACTIVENESS_FEED_TOP_N,
     CHALLENGER_CUT_PREFIX,
+    CUT_ARM_PROMOTION_EXCLUSIONS,
     HARD3_CUT_PREFIX,
     HARD3_PILLAR_WEIGHTS,
     MOMZERO_CUT_PREFIX,
@@ -101,12 +102,22 @@ def test_hard3_and_momzero_are_not_the_same_arm_by_arithmetic():
 # ── Registration ─────────────────────────────────────────────────────────────
 
 
-def test_hard3_is_observe_only_and_cannot_hold_the_feed():
-    """Registration is the gate (champion-challenger-policy.md §3): an arm in
-    OBSERVE_ONLY_CUTS is scored by construction and can never serve."""
-    assert HARD3_CUT in OBSERVE_ONLY_CUTS
-    assert HARD3_CUT not in PROMOTABLE_CUTS
+def test_hard3_is_scored_and_promotion_eligible():
+    """Registration is the gate (champion-challenger-policy.md §3), and under
+    Brian's ruling 2026-08-29 (alpha-engine-config-I9272) an arm that is SCORED
+    must be able to WIN.
+
+    Replaces ``test_hard3_is_observe_only_and_cannot_hold_the_feed``, which
+    locked the superseded 2026-08-21 state. The property that matters is
+    unchanged and still asserted: the arm is in SLOT_ARMS, so it is scored by
+    construction. What changed is that non-promotability is no longer an
+    ABSENCE from a tuple — an excluded arm now carries a REASON, and there is
+    none for this one.
+    """
     assert HARD3_CUT in SLOT_ARMS
+    assert HARD3_CUT in PROMOTABLE_CUTS
+    assert HARD3_CUT not in OBSERVE_ONLY_CUTS
+    assert HARD3_CUT not in CUT_ARM_PROMOTION_EXCLUSIONS
 
 
 def test_hard3_is_emitted_at_the_champion_width_only():

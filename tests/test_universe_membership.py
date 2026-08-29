@@ -40,6 +40,7 @@ from scoring.universe_membership import (  # noqa: E402
     PREDICTOR_UNIVERSE_CUT,
     PROMOTABLE_CUTS,
     SCHEMA_VERSION,
+    SLOT_ARMS,
     TECH_SCORE_RANKS_FIELD,
     UniverseMembershipError,
     assert_population_parity,
@@ -48,6 +49,7 @@ from scoring.universe_membership import (  # noqa: E402
     build_universe_membership,
     compute_turnover,
     declared_cut_for,
+    promotion_ineligibility_from_rank_tables,
     rank_table_for_cut,
     run_stamp,
     scanned_universe_from_eval_log,
@@ -819,8 +821,14 @@ def test_a_tech_basis_cut_has_no_rank_table_and_says_so():
 def test_every_promotable_cut_that_can_hold_the_feed_is_a_named_cut():
     """A pointer may only name an arm the artifact can actually serve."""
     m = _membership()
+    # Every promotable arm is a REGISTERED arm of the slot, count-matched at the
+    # feed width. Asserted against SLOT_ARMS rather than against a prefix
+    # allow-list: the allow-list had to be edited every time an arm was added,
+    # which is the hand-maintained-literal shape alpha-engine-config-I9272
+    # retired.
     for name in PROMOTABLE_CUTS:
-        assert name.startswith(("attractiveness_top_", "tech_score_top_")), name
+        assert name in SLOT_ARMS, name
+        assert name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}"), name
     assert FEED_CUT_NAME in PROMOTABLE_CUTS, (
         "the cut the funnel declares for the feed consumers is not in the "
         "promotable set — the champion pointer could then never serve it"
@@ -884,12 +892,17 @@ def test_a_promotable_arm_without_its_rank_table_is_a_red_run():
         assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)
 
 
-def test_an_observe_only_arm_without_its_rank_table_is_recorded_not_raised(caplog):
-    """Non-promotable must not decay into unmeasured without anyone deciding it.
-
-    Losing the table costs the arm its rank-IC and nothing live, so redding a
+def test_a_non_serving_arm_without_its_rank_table_is_recorded_not_raised(caplog):
+    """Losing the table costs the arm its rank-IC and nothing live, so redding a
     Scanner run over it is the wrong trade — but the loss has to be VISIBLE
     (champion-challenger-policy.md §3).
+
+    Widened from OBSERVE-ONLY to NON-SERVING by alpha-engine-config-I9272. With
+    every arm promotable, the old scoping would have redded every Scanner run
+    over the two arms that publish no rank table BY DESIGN. The property the
+    raise held — a promotion must not fail in a consumer on the morning it is
+    made (I7843) — moved to `promotion_ineligibility_from_rank_tables`, which
+    refuses the PROMOTION rather than the run.
     """
     import logging
 
@@ -900,7 +913,12 @@ def test_an_observe_only_arm_without_its_rank_table_is_recorded_not_raised(caplo
     }
     with caplog.at_level(logging.WARNING):
         assert_rank_tables_cover_promotable_cuts(m, _RUN_DATE)  # no raise
-    assert any("observe-only arm" in r.getMessage() for r in caplog.records), caplog.text
+    assert any(
+        "no full-universe rank table" in r.getMessage() for r in caplog.records
+    ), caplog.text
+    # And the arm is refused at the DECISION with a reason, not silently servable.
+    ineligible = promotion_ineligibility_from_rank_tables(m)
+    assert any("rank_table_missing" in reason for reason in ineligible.values()), ineligible
 
 
 def test_the_tech_table_covers_the_universe_not_the_cut():
