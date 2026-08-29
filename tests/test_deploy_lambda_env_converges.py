@@ -43,7 +43,7 @@ _DEFERRED_TARGETS = (
     "FUNCTION_EVAL_JUDGE",
     "FUNCTION_EVAL_ROLLING_MEAN",
     "FUNCTION_RATIONALE_CLUSTERING",
-    # eval-judge-submit / -poll / -process, aggregate-costs, scanner,
+    # eval-judge-submit, aggregate-costs, scanner,
     # signals-envelope, openrouter-shadow, perturbation-battery all share
     # this generic function, parameterized on $fn_name.
     "fn_name",

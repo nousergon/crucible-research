@@ -19,10 +19,10 @@ set -euo pipefail
 FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
 FUNCTION_EVAL_JUDGE="alpha-engine-research-eval-judge"
-# Batch-API chain Lambdas (ROADMAP §1642 closure 2026-05-07).
+# Eval-judge Submit Lambda. Poll and Process are retired
+# (alpha-engine-config-I9329): Poll was async-batch-API residue, and Process
+# now runs on a spot box over SSM, not as a Lambda.
 FUNCTION_EVAL_JUDGE_SUBMIT="alpha-engine-research-eval-judge-submit"
-FUNCTION_EVAL_JUDGE_POLL="alpha-engine-research-eval-judge-poll"
-FUNCTION_EVAL_JUDGE_PROCESS="alpha-engine-research-eval-judge-process"
 FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
@@ -1182,10 +1182,12 @@ _deploy_image_shared_lambda() {
   _verify_live_alias "$fn_name" "$VERSION"
 }
 
-deploy_eval_judge_batch() {
+# Renamed from `deploy_eval_judge_batch` (alpha-engine-config-I9329). The
+# target once published a three-Lambda batch chain; Poll and Process are
+# retired, so the old name named a chain that no longer exists. Grepped
+# fleet-wide before renaming: the only invoker is deploy.yml, in this repo.
+deploy_eval_judge_submit() {
   _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_SUBMIT"  "eval_judge_submit_handler"  300 512
-  _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_POLL"    "eval_judge_poll_handler"     60 256
-  _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_PROCESS" "eval_judge_process_handler" 900 1024
 }
 
 # Daily cost aggregation Lambda — ROADMAP L1146. Shared image with the
@@ -1304,7 +1306,7 @@ case "$TARGET" in
   main)                  build_and_deploy_main ;;
   alerts)                build_and_deploy_alerts ;;
   eval_judge)            deploy_eval_judge ;;
-  eval_judge_batch)      deploy_eval_judge_batch ;;
+  eval_judge_submit)     deploy_eval_judge_submit ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
@@ -1313,8 +1315,8 @@ case "$TARGET" in
   openrouter_shadow)     deploy_openrouter_shadow ;;
   perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_submit; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_submit|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
 esac
 
 echo ""

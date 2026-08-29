@@ -203,13 +203,11 @@ REGISTRY: dict[str, FunctionSpec] = {
         "judge mis-grades a run; it does not mis-trade one.",
     ),
     "alpha-engine-research-eval-judge-submit": FunctionSpec(
-        OBSERVE, "Batches-API judge chain, submit leg. Evaluation only.",
-    ),
-    "alpha-engine-research-eval-judge-poll": FunctionSpec(
-        OBSERVE, "Batches-API judge chain, poll leg. Evaluation only.",
-    ),
-    "alpha-engine-research-eval-judge-process": FunctionSpec(
-        OBSERVE, "Batches-API judge chain, process leg. Evaluation only.",
+        OBSERVE,
+        "Eval-judge plan/submit leg — the only Lambda left of what was the "
+        "batch chain. Poll and Process retired by "
+        "alpha-engine-config-I9329; Process runs on a spot box now, so it "
+        "has no Lambda to drift.",
     ),
     "alpha-engine-research-eval-rolling-mean": FunctionSpec(
         OBSERVE,
