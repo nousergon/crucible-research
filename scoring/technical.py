@@ -28,18 +28,21 @@ def _resolve_team_id(team_id: str | None, sector: str | None) -> str | None:
     Caller may pass team_id directly (canonical: technology / healthcare /
     financials / industrials / consumer / defensives) or pass `sector` (GICS
     name) and rely on the team_config.SECTOR_TEAM_MAP for translation.
-    Deferred import avoids a scoring → agents layering dependency at import
-    time; the mapping is only loaded when an override-eligible lookup
-    happens.
+
+    ``agents.sector_teams.team_config`` is first-party, in-repo, and always
+    bundled with this Lambda image (AGENTS.md's deploy-path list includes
+    ``agents/``) — the import CANNOT legitimately fail short of the module
+    being renamed or deleted, and a rename must be loud, not a silent
+    fallback to global weights (alpha-engine-config-I9339). Deferred (not
+    module-scope) purely to avoid a scoring → agents layering dependency at
+    import time; the mapping is loaded on first override-eligible lookup
+    and cached by Python's own module cache thereafter.
     """
     if team_id:
         return team_id
     if not sector:
         return None
-    try:
-        from agents.sector_teams.team_config import SECTOR_TEAM_MAP
-    except ImportError:
-        return None
+    from agents.sector_teams.team_config import SECTOR_TEAM_MAP
     return SECTOR_TEAM_MAP.get(sector)
 
 
