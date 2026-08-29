@@ -59,6 +59,10 @@ DRY_FLAG = "dry_run_llm"
 # in logs / dashboards.
 DRY_SENTINEL_BATCH_ID = "dry-run-no-batch"
 
+# Sentinel plan key. NOT ``None`` — see ``dry_submit_result``. A null here is
+# a States.Runtime waiting for the Friday shell run.
+DRY_SENTINEL_PLAN_S3_KEY = "dry-run-no-plan"
+
 
 def is_dry(event: Any) -> bool:
     """True iff the SF keystone requested a shell-run dry pass.
@@ -82,11 +86,22 @@ def dry_submit_result(date: str) -> dict[str, Any]:
     persist. Shaped so the existing SF Choice (`EvalJudgePollChoice`,
     ``status == "EMPTY"`` → `EvalJudgeProcess`) skips the poll loop and
     Process sees the sentinel batch_id.
+
+    **Nothing here may be ``None`` (alpha-engine-config-I9329).**
+    ``plan_s3_key`` used to be null. Once ``EvalJudgeProcess`` runs on a spot
+    box, the Friday shell-run path threads ``plan_s3_key`` into a
+    ``States.Format`` intrinsic on the new ``ssm:sendCommand`` stage, and
+    ``States.Format`` raises ``States.Runtime`` on a null argument. That is a
+    definition which works on Saturday and dies on Friday — the exact class
+    ``dry_process_result``'s existing comment already names for its own hoisted
+    keys. ``DRY_SENTINEL_PLAN_S3_KEY`` is a non-null string that is obviously
+    not a real key, so the intrinsic resolves and a reader of the rendered
+    command sees immediately that it was the dry path.
     """
     return {
         "status": "EMPTY",
         "batch_id": DRY_SENTINEL_BATCH_ID,
-        "plan_s3_key": None,
+        "plan_s3_key": DRY_SENTINEL_PLAN_S3_KEY,
         "request_count": 0,
         "processing_status": "ended_empty",
         "dry_run": True,
