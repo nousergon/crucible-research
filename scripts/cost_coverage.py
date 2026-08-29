@@ -33,6 +33,24 @@ wolf is a detector that gets turned off. The set of stages that actually
 entered comes from the execution's own history, which is the only source
 that knows.
 
+**Why the read is scoped to the EXECUTION, not to a calendar date.**
+``entered`` is a fact about one execution. ``observed`` has to be a fact
+about the same execution or the set comparison is between two different
+things. It was not, until 2026-08-29: the check listed exactly one
+prefix, ``_cost_raw/{run_date}/``, while ``krepis.cost_sink.S3JsonlCostSink``
+partitions by the record's own UTC ``ts``. The weekly pipeline starts
+09:00 UTC on the day AFTER its ``run_date``, so 100% of its cost records
+land one partition ahead of where the check looked, and the verdict it
+published — ``covered``, ``observed``, ``undeclared`` — described the
+previous day's DAILY pipelines. Measured on execution
+``965d925b-f9d6-ce5e-e059-9405433a0724_c0271e3b-a27f-a834-b303-3e3803fffd16``:
+``replay-concordance`` was reported as "ran and emitted no cost record"
+while its 24 priced rows sat in
+``_cost_raw/2026-08-29/krepis-b1444bfa3454/replay-concordance.0.jsonl``,
+flushed one second after the stage exited; and the five ``thinktank-*``
+producers scored as ``observed`` belonged to a run this execution never
+made. See :func:`observed_producers_for_execution`.
+
 **Being unable to measure is not passing.** If the execution history cannot
 be read, this raises :exc:`CostCoverageUnmeasured` — a *different*
 exception from the coverage breach, so the two are never confused on the
@@ -45,15 +63,23 @@ from __future__ import annotations
 import fnmatch
 import logging
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: An execution spans at most a couple of UTC dates. A run_date further
+#: back than this means the caller is not describing a live run, and
+#: enumerating the span would be a guess rather than a measurement.
+_MAX_PARTITION_SPAN_DAYS = 3
 
 __all__ = [
     "CostCoverageError",
     "CostCoverageUnmeasured",
     "evaluate_coverage",
+    "execution_started_at",
     "observed_producers",
+    "observed_producers_for_execution",
     "stages_entered",
 ]
 
@@ -137,6 +163,145 @@ def stages_entered(execution_arn: str, *, sfn_client: Any = None) -> set:
             f"unmeasured rather than as universal absence."
         )
     return names
+
+
+def execution_started_at(execution_arn: str, *, sfn_client: Any = None):
+    """UTC start time of the execution, as a timezone-aware datetime.
+
+    Raises :exc:`CostCoverageUnmeasured` on any failure rather than
+    substituting a default. A fabricated start time would silently widen or
+    narrow the window the observed set is drawn from, and the check would
+    then be wrong in a direction nobody could see — the same shape of
+    defect this module exists to catch.
+    """
+    if not execution_arn:
+        raise CostCoverageUnmeasured(
+            "no execution ARN was supplied, so the execution's start time — "
+            "and therefore which cost objects belong to it — is unknown. "
+            "The Step Function threads it as coverage.execution_arn "
+            "($$.Execution.Id)."
+        )
+    if sfn_client is None:
+        import boto3
+
+        sfn_client = boto3.client("stepfunctions")
+    try:
+        started = sfn_client.describe_execution(executionArn=execution_arn)[
+            "startDate"
+        ]
+    except Exception as exc:  # noqa: BLE001 — duck-typed boto errors
+        raise CostCoverageUnmeasured(
+            f"could not read the start time of {execution_arn}: {exc}. "
+            f"This is a fault in the coverage check, NOT a coverage finding."
+        ) from exc
+    if started is None:
+        raise CostCoverageUnmeasured(
+            f"describe_execution({execution_arn}) returned no startDate, "
+            f"which cannot be true of a running execution."
+        )
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return started.astimezone(timezone.utc)
+
+
+def observed_producers_for_execution(
+    s3_client: Any,
+    bucket: str,
+    prefix_root: str,
+    *,
+    started_at,
+    now: Any = None,
+) -> set:
+    """Producers that wrote a cost object DURING this execution.
+
+    ``prefix_root`` is the ``_cost_raw`` root with no date segment.
+
+    Two things are wrong with reading a single ``{prefix_root}/{run_date}/``
+    prefix, and this replaces both:
+
+    1. **The partition is not the run_date.** ``S3JsonlCostSink`` keys by
+       the record's own UTC ``ts``, so the partitions an execution can have
+       written to are the UTC dates the EXECUTION spans — ``started_at``
+       through now — which for the weekly pipeline is ``run_date + 1``.
+       ``run_date`` is not consulted at all: it names the trading day the
+       run is ABOUT, never the wall-clock day it ran on, and a rerun of an
+       old ``run_date`` writes its records today like any other run.
+    2. **A partition holds other runs' objects.** The daily pipelines write
+       to the same prefix. Filtering on ``LastModified >= started_at`` keeps
+       only objects flushed while this execution was running, so a producer
+       from another run can no longer supply coverage for a stage THIS
+       execution ran — which is what masked the defect on 2026-08-29, where
+       ``single-agent-quant`` scored ``covered`` off an object written 14
+       hours before the execution began, and five ``thinktank-*`` producers
+       were reported as ``observed`` by a run that never entered a thinktank
+       stage.
+
+    ``LastModified`` is the flush time, at or after the ``ts`` of every
+    record in the object. The sink is per-process and flushes on handler
+    exit (the ``finally: flush_default_sink()`` of
+    ``alpha-engine-config-I7423``), so an object straddling the execution
+    boundary would have to come from a process that started before it and
+    flushed during it. That widens ``observed`` only, never narrows it, and
+    the ``undeclared`` direction still refuses anything nothing declared.
+
+    Raises :exc:`CostCoverageUnmeasured` if the listing fails: an empty
+    observed set is indistinguishable from universal silence, and would be
+    reported as the alarming finding this check exists to make.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if started_at is None:
+        raise CostCoverageUnmeasured(
+            "no execution start time was supplied, so which cost objects "
+            "belong to this execution is unknown."
+        )
+    first = started_at.date()
+    last = max(first, now.date())
+    if (last - first).days > _MAX_PARTITION_SPAN_DAYS:
+        raise CostCoverageUnmeasured(
+            f"the execution started {(last - first).days} day(s) ago "
+            f"({first} .. {last}); refusing to enumerate that many "
+            f"partitions rather than guessing which one the run wrote to."
+        )
+
+    root = prefix_root.rstrip("/")
+    keys: list[str] = []
+    day = first
+    while day <= last:
+        prefix = f"{root}/{day.isoformat()}/"
+        try:
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []) or []:
+                    key = obj.get("Key", "")
+                    if not key.endswith(".jsonl"):
+                        continue
+                    modified = obj.get("LastModified")
+                    if modified is None:
+                        raise CostCoverageUnmeasured(
+                            f"s3://{bucket}/{key} was listed without a "
+                            f"LastModified, so it cannot be attributed to "
+                            f"an execution."
+                        )
+                    if modified.tzinfo is None:
+                        modified = modified.replace(tzinfo=timezone.utc)
+                    if modified >= started_at:
+                        keys.append(key)
+        except CostCoverageUnmeasured:
+            raise
+        except Exception as exc:  # noqa: BLE001 — duck-typed boto errors
+            raise CostCoverageUnmeasured(
+                f"could not list s3://{bucket}/{prefix}: {exc}. This is a "
+                f"fault in the coverage check, NOT a coverage finding — do "
+                f"not read it as a silent stage."
+            ) from exc
+        day += timedelta(days=1)
+
+    logger.info(
+        "[cost_coverage] observed window %s..%s since %s: %d object(s)",
+        first.isoformat(), last.isoformat(), started_at.isoformat(), len(keys),
+    )
+    return observed_producers(keys)
 
 
 def evaluate_coverage(

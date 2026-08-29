@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from datetime import date as date_type
 from pathlib import Path
+import datetime as _dt
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -224,6 +225,12 @@ _COVERAGE_DECL = {
 }
 
 
+#: alpha-engine-config-I9261 — the coverage read is anchored on the
+#: execution's own start time, not on a calendar date, so these stubs
+#: supply one.
+_STARTED_AT = _dt.datetime(2026, 5, 25, 9, 0, tzinfo=_dt.timezone.utc)
+
+
 class TestFanInCoverage:
     """alpha-engine-config-I7179 — the check must reach the Step Function's
     Catch, which fires on a RAISED error. Nothing downstream reads this
@@ -238,7 +245,11 @@ class TestFanInCoverage:
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
-            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=["p/d/r/thinktank-sweep.0.jsonl"]),
+            patch("scripts.cost_coverage.execution_started_at", return_value=_STARTED_AT),
+            patch(
+                "scripts.cost_coverage.observed_producers_for_execution",
+                return_value={"thinktank-sweep"},
+            ),
             patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
             patch("boto3.client", return_value=MagicMock()),
         ):
@@ -259,7 +270,11 @@ class TestFanInCoverage:
             patch(
                 "scripts.aggregate_costs.aggregate_window", return_value={"aggregated": [], "skipped": ["2026-05-25"]}
             ),
-            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("scripts.cost_coverage.execution_started_at", return_value=_STARTED_AT),
+            patch(
+                "scripts.cost_coverage.observed_producers_for_execution",
+                return_value=set(),
+            ),
             patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
             patch("boto3.client", return_value=MagicMock()),
         ):
@@ -278,7 +293,11 @@ class TestFanInCoverage:
             patch(
                 "scripts.aggregate_costs.aggregate_window", return_value={"aggregated": [], "skipped": ["2026-05-25"]}
             ),
-            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("scripts.cost_coverage.execution_started_at", return_value=_STARTED_AT),
+            patch(
+                "scripts.cost_coverage.observed_producers_for_execution",
+                return_value=set(),
+            ),
             patch("scripts.cost_coverage.stages_entered", return_value={"CheckSkipReplayConcordance"}),
             patch("boto3.client", return_value=MagicMock()),
         ):
@@ -294,9 +313,10 @@ class TestFanInCoverage:
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("scripts.cost_coverage.execution_started_at", return_value=_STARTED_AT),
             patch(
-                "scripts.aggregate_costs._list_jsonl_keys",
-                return_value=["p/d/r/replay-concordance.0.jsonl", "p/d/r/thinktank-sweep.0.jsonl"],
+                "scripts.cost_coverage.observed_producers_for_execution",
+                return_value={"replay-concordance", "thinktank-sweep"},
             ),
             patch("scripts.cost_coverage.stages_entered", return_value={"ReplayConcordance"}),
             patch("boto3.client", return_value=MagicMock()),
@@ -318,7 +338,11 @@ class TestFanInCoverage:
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
-            patch("scripts.aggregate_costs._list_jsonl_keys", return_value=[]),
+            patch("scripts.cost_coverage.execution_started_at", return_value=_STARTED_AT),
+            patch(
+                "scripts.cost_coverage.observed_producers_for_execution",
+                return_value=set(),
+            ),
             patch("boto3.client", return_value=MagicMock()),
         ):
             with pytest.raises(CostCoverageUnmeasured):
@@ -422,3 +446,105 @@ class TestCaptureStreamFreshness:
                 {"date": "2026-05-25", "dry_run_llm": True}, context=None
             )
         assert result == {"status": "OK", "dry_run": True}
+
+
+class TestFanInCoverageReadsTheExecutionNotTheRunDate:
+    """alpha-engine-config-I9261 — end to end, through the real listing.
+
+    Reproduces the 2026-08-29 weekly run against a fake S3 holding exactly
+    what production held. FAILS on main with the live CostCoverageError:
+    `1 stage(s) ran and emitted no cost record: replay-concordance`.
+    """
+
+    _RUN_DATE = "2026-08-28"
+    _STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.timezone.utc)
+
+    class _ProdS3:
+        """`_cost_raw/` as measured on 2026-08-29."""
+
+        _OBJECTS = {
+            # Friday's DAILY pipelines, in the run_date partition.
+            "decision_artifacts/_cost_raw/2026-08-28/8e9fff668cc8/thinktank-sweep.0.jsonl":
+                _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.timezone.utc),
+            "decision_artifacts/_cost_raw/2026-08-28/krepis-7faeb93de042/single-agent-quant.0.jsonl":
+                _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.timezone.utc),
+            # THIS execution, in the UTC partition it actually ran on.
+            "decision_artifacts/_cost_raw/2026-08-29/krepis-31e1cf2e27b5/single-agent-quant.0.jsonl":
+                _dt.datetime(2026, 8, 29, 11, 14, 32, tzinfo=_dt.timezone.utc),
+            "decision_artifacts/_cost_raw/2026-08-29/krepis-b1444bfa3454/replay-concordance.0.jsonl":
+                _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.timezone.utc),
+        }
+
+        def get_paginator(self, name):
+            objects = self._OBJECTS
+
+            class _P:
+                def paginate(self, **kwargs):
+                    prefix = kwargs["Prefix"]
+                    contents = [
+                        {"Key": k, "LastModified": ts}
+                        for k, ts in sorted(objects.items())
+                        if k.startswith(prefix)
+                    ]
+                    return [{"Contents": contents} if contents else {}]
+
+            return _P()
+
+        def list_objects_v2(self, **kwargs):
+            prefix = kwargs["Prefix"]
+            contents = [
+                {"Key": k, "LastModified": ts}
+                for k, ts in sorted(self._OBJECTS.items())
+                if k.startswith(prefix)
+            ]
+            return {"Contents": contents} if contents else {}
+
+    def _client(self, service, *a, **k):
+        if service == "s3":
+            return self._ProdS3()
+        return MagicMock()
+
+    def test_the_weekly_runs_own_producers_are_covered(self, handler_mod):
+        decl = {
+            "execution_arn": "arn:aws:states:us-east-1:1:execution:ne-weekly-freshness-pipeline:e1",
+            "required_producers": {
+                "ChallengerShadow": ["single-agent-quant"],
+                "ReplayConcordance": ["replay-concordance"],
+            },
+            "conditional_producers": {},
+            "allowed_producers": ["thinktank-*"],
+        }
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("scripts.aggregate_costs.aggregate_day", return_value=_ok_summary()),
+            patch("scripts.aggregate_costs.aggregate_window", return_value={
+                "aggregated": [self._RUN_DATE], "skipped": [], "summaries": {}
+            }),
+            patch("scripts.cost_coverage.execution_started_at", return_value=self._STARTED),
+            patch(
+                "scripts.cost_coverage.stages_entered",
+                return_value={"ChallengerShadow", "ReplayConcordance"},
+            ),
+            patch(
+                "scripts.cost_coverage.datetime",
+                wraps=_dt.datetime,
+            ) as fake_dt,
+            patch("boto3.client", side_effect=self._client),
+        ):
+            fake_dt.now.return_value = _dt.datetime(
+                2026, 8, 29, 14, 2, 40, tzinfo=_dt.timezone.utc
+            )
+            result = handler_mod.handler(
+                {"date": self._RUN_DATE, "coverage": decl}, context=None
+            )
+
+        verdict = result["summary"]["coverage"]
+        assert verdict["missing"] == []
+        assert verdict["undeclared"] == []
+        assert sorted(verdict["covered"]) == [
+            "replay-concordance",
+            "single-agent-quant",
+        ]
+        # Friday's thinktank objects belong to a run this execution never
+        # made — they must not appear as this execution's producers.
+        assert "thinktank-sweep" not in verdict["observed"]
