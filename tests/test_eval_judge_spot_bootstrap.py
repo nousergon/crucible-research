@@ -94,7 +94,7 @@ def test_bootstrap_installs_gitleaks():
 
 def test_bootstrap_builds_the_venv_where_the_sf_command_looks_for_it():
     code = "\n".join(_code_lines())
-    assert f'VENV_DIR:-${{REPO_DIR}}/.venv' in code or BOX_VENV_DIR in code, (
+    assert 'VENV_DIR:-${REPO_DIR}/.venv' in code or BOX_VENV_DIR in code, (
         f"the venv must resolve to {BOX_VENV_DIR}"
     )
     assert f'REPO_DIR:-{BOX_REPO_DIR}' in code, (
