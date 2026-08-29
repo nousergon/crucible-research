@@ -528,9 +528,16 @@ class SpecHistory:
     """
 
     name: str
-    kind: str  # "champion" | "challenger"
+    kind: str  # "champion" | "challenger" | "retired"
     by_date: dict[str, SpecDay] = field(default_factory=dict)
     held_dates: dict[str, list[str]] = field(default_factory=dict)
+    # Promotion eligibility, carried from the producer register
+    # (``producers/registry.py``) so it lands on the artifact rather than
+    # being re-derived by each consumer (alpha-engine-config-I9277). The
+    # loader sets these; scoring only passes them through. Defaults keep every
+    # non-producer board (scanner, cuts) unchanged.
+    promotion_eligible: bool = True
+    ineligible_reason: str | None = None
 
 
 def _signal_for_ic(day: SpecDay) -> dict[str, float]:
@@ -757,6 +764,74 @@ def paired_alpha_vs_champion(
     )
 
 
+#: How many of the cohort's most recent observations an arm must have reached
+#: to constrain the shared comparison window. An arm quieter than this is stale
+#: rather than merely sparse: it is not contributing to the CURRENT question.
+STALE_ARM_EXCLUSION_DATES = 5
+
+
+def cohort_intersection(
+    champion: SpecHistory | None,
+    challengers: Sequence[SpecHistory],
+    realized: Mapping[str, Mapping[str, float]],
+) -> list[str]:
+    """The dates on which EVERY promotion-eligible arm produced output AND a
+    realized return exists — the only cohort on which a promotion comparison
+    is fair (champion-challenger-policy.md §4: "Arms are scored over the
+    intersection of dates where all arms produced output, and the intersection
+    is reported alongside the metric").
+
+    The defect this closes (alpha-engine-config-I9279): on the live
+    2026-08-28 board the four scored arms carried n_dates_scored of 2, 6, 6
+    and 4 over a NINE-date cohort — every arm scored on its OWN available
+    dates, so the numbers being ranked against each other described four
+    different windows of the market. "Comparing an arm's good month to
+    another's bad quarter is not a comparison."
+
+    Only promotion-ELIGIBLE arms constrain the intersection. A retired arm is
+    historical evidence that can never win (§3/§6), so letting its sparse
+    history shrink the window every live arm is judged on would be the
+    measurement paying rent for a row that cannot use it. An arm that produced
+    NOTHING at all is likewise excluded from the constraint and reported
+    separately as an absence — otherwise one dead arm empties the intersection
+    and silently converts every comparison into a no-contest, which is the
+    dead-arm failure mode wearing a statistical costume.
+    """
+    arms = [a for a in ([champion] if champion is not None else []) + list(challengers)
+            if a.promotion_eligible]
+    contributing = {
+        a.name: {d for d in a.by_date if realized.get(d)} for a in arms
+    }
+    live = {n: c for n, c in contributing.items() if c}
+    if not live:
+        return []
+
+    # An arm that STOPPED producing must not freeze the comparison window for
+    # the arms that did not. Measured 2026-08-29: `thinktank_coverage` last
+    # wrote a shadow on 2026-08-14 (it had deadlocked — see
+    # alpha-engine-config-I9282), and its 4 remaining dates cut the shared
+    # cohort from 18 dates to 4 for every other arm. Enforcing §4's
+    # intersection naively would let one dead arm collapse every comparison to
+    # a no-contest — the dead-arm failure mode wearing a statistical costume,
+    # and precisely the "over-strict gate that never promotes" §5 rejects.
+    #
+    # So: an arm whose most recent contribution predates the cohort's most
+    # recent date by more than STALE_ARM_EXCLUSION_DATES observations is
+    # excluded from CONSTRAINING the intersection. It is still scored, still
+    # on the artifact, and its staleness is recorded — §3's "a cycle where an
+    # arm produces no output is recorded as a MISS, not omitted". What it
+    # loses is only the power to shrink everyone else's window.
+    ordered = sorted({d for c in live.values() for d in c})
+    if len(ordered) > STALE_ARM_EXCLUSION_DATES:
+        recent_floor = ordered[-STALE_ARM_EXCLUSION_DATES]
+        current = {n: c for n, c in live.items() if max(c) >= recent_floor}
+    else:
+        current = live
+    if not current:
+        return []
+    return sorted(set.intersection(*current.values()))
+
+
 def score_leaderboard(
     champion: SpecHistory | None,
     challengers: Sequence[SpecHistory],
@@ -813,6 +888,11 @@ def score_leaderboard(
         and realized.get(d)
     )
 
+    # champion-challenger-policy.md §4 — the ONE cohort every promotion
+    # comparison is made on, computed once and reported on the artifact.
+    intersection = cohort_intersection(champion, challengers, realized)
+    realized_intersection = {d: realized[d] for d in intersection if d in realized}
+
     spec_rows: list[dict] = []
 
     def _row(spec: SpecHistory, is_champion: bool) -> dict:
@@ -832,8 +912,23 @@ def score_leaderboard(
             alpha_vs_population = _topn_alpha_vs_population_metric(
                 spec, realized, top_n, population_returns, overlap_lags=overlap_lags,
             )
-            n_scored = sum(
-                1 for d in spec.by_date if realized.get(d)
+            dates_scored = sorted(d for d in spec.by_date if realized.get(d))
+            n_scored = len(dates_scored)
+            # The SAME metric, restricted to the dates every promotion-eligible
+            # arm shares (§4). This is the number a promotion gate must rank
+            # on; ``topn_alpha_vs_benchmark`` above stays each arm's own-cohort
+            # figure so the existing 21-day series is continuous (§3) and the
+            # two are never conflated — they answer different questions and the
+            # artifact names both.
+            alpha_vs_benchmark_intersection = (
+                _topn_alpha_vs_benchmark_metric(
+                    spec, realized_intersection, top_n, benchmark_ticker,
+                    overlap_lags=overlap_lags,
+                )
+                if (benchmark_ticker and realized_intersection) else None
+            )
+            n_intersection = len(
+                [d for d in spec.by_date if realized_intersection.get(d)]
             )
             return {
                 "name": spec.name,
@@ -843,6 +938,17 @@ def score_leaderboard(
                 "topn_alpha_vs_benchmark": alpha_vs_benchmark,
                 "topn_alpha_vs_population": alpha_vs_population,
                 "n_dates_scored": n_scored,
+                # alpha-engine-config-I9277/I9279 — the cohort itself, not just
+                # its size. Two arms reporting n_dates_scored: 6 over disjoint
+                # weeks were indistinguishable on this artifact before.
+                "dates_scored": dates_scored,
+                "topn_alpha_vs_benchmark_intersection": alpha_vs_benchmark_intersection,
+                "n_dates_in_intersection": n_intersection,
+                # Projected from producers/registry.py so the promotion engine
+                # resolves the arm set from THIS artifact and carries no
+                # second, hand-maintained list (alpha-engine-config-I9277).
+                "promotion_eligible": spec.promotion_eligible,
+                "ineligible_reason": spec.ineligible_reason,
                 # alpha-engine-config-I7542 — how much evidence stands behind
                 # this row. Additive: every numeric field above is unchanged.
                 "confidence": confidence_for(n_scored, min_dates_for_inference),
@@ -860,6 +966,11 @@ def score_leaderboard(
                 "topn_alpha_vs_benchmark": None,
                 "topn_alpha_vs_population": None,
                 "n_dates_scored": 0,
+                "dates_scored": [],
+                "topn_alpha_vs_benchmark_intersection": None,
+                "n_dates_in_intersection": 0,
+                "promotion_eligible": spec.promotion_eligible,
+                "ineligible_reason": spec.ineligible_reason,
                 "confidence": CONFIDENCE_INSUFFICIENT,
                 "error": str(exc),
             }
@@ -875,6 +986,10 @@ def score_leaderboard(
         "top_n": top_n,
         "benchmark_ticker": benchmark_ticker,
         "n_dates": len(dates_with_join),
+        # §4: the intersection is reported ALONGSIDE the metric, never left for
+        # a reader to reconstruct from per-row date lists.
+        "cohort_intersection": intersection,
+        "n_dates_intersection": len(intersection),
         "specs": spec_rows,
     }
 

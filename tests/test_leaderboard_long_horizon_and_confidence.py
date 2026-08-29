@@ -349,7 +349,30 @@ def _continuity_fixture():
 #   topn_alpha_vs_population   alpha-engine-config-I7576 — lift vs the scored
 #                              population, alongside (never instead of) the
 #                              unchanged SPY series
-_ADDITIVE_SINCE_CAPTURE = ("confidence", "topn_alpha_vs_population")
+#   dates_scored / n_dates_in_intersection / topn_alpha_vs_benchmark_intersection
+#   / promotion_eligible / ineligible_reason
+#                              alpha-engine-config-I9277, -I9279 — WHICH dates
+#                              a row's number was computed over, the same metric
+#                              restricted to the cohort every eligible arm
+#                              shares, and whether the arm may be promoted.
+#                              Every protected mean/se/t_stat above is
+#                              arithmetically untouched: the intersection metric
+#                              is a SEPARATE field, and on this fixture (all
+#                              arms sharing one cohort) it happens to equal the
+#                              own-cohort figure — which is the correct value,
+#                              not a coincidence being papered over.
+_ADDITIVE_SINCE_CAPTURE = (
+    "confidence",
+    "topn_alpha_vs_population",
+    "dates_scored",
+    "topn_alpha_vs_benchmark_intersection",
+    "n_dates_in_intersection",
+    "promotion_eligible",
+    "ineligible_reason",
+)
+
+# Additive keys at the TOP level of the leaderboard dict, same rule.
+_ADDITIVE_TOP_LEVEL_SINCE_CAPTURE = ("cohort_intersection", "n_dates_intersection")
 
 # Additive fields added INSIDE a metric block, rather than alongside it. Same
 # rule as above and the same test: each must carry new information about the
@@ -396,7 +419,10 @@ class TestTwentyOneDayContinuity:
         counted among the red guards."""
         champ, chals, realized = _continuity_fixture()
         lb = score_leaderboard(champ, chals, realized, top_n=2, horizon_days=21, benchmark_ticker="SPY")
-        got = {k: v for k, v in lb.items() if k != "specs"}
+        got = {
+            k: v for k, v in lb.items()
+            if k != "specs" and k not in _ADDITIVE_TOP_LEVEL_SINCE_CAPTURE
+        }
         expected = {k: v for k, v in _PRE_CHANGE_21D.items() if k != "specs"}
         assert got == expected
         assert [_numeric_only(r) for r in lb["specs"]] == _PRE_CHANGE_21D["specs"]

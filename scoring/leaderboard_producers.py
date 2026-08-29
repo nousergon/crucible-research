@@ -950,12 +950,27 @@ def _load_producer_specs(
     is tagged ``"kind": "retired"`` there by construction, distinct from a
     live ``"kind": "challenger"`` row (§3: retired arms are scored but never
     promotion-eligible; promotion consumers filter on ``kind=="challenger"``)."""
-    from producers.registry import challenger_producers, retired_producers
+    from producers.registry import (
+        RESEARCH_PRODUCERS,
+        challenger_producers,
+        retired_producers,
+    )
 
     champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
     if champ_name is not None:
-        champion = SpecHistory(name=champ_name, kind="champion")
+        champ_spec = RESEARCH_PRODUCERS.get(champ_name)
+        champion = SpecHistory(
+            name=champ_name,
+            kind="champion",
+            # alpha-engine-config-I9277: eligibility travels with the arm from
+            # the register. A champion NOT in the register is treated as
+            # eligible (it is, by definition, already serving) — the absence is
+            # surfaced separately in the artifact's `arms` block rather than
+            # silently reclassifying the live arm.
+            promotion_eligible=(champ_spec.promotion_eligible if champ_spec else True),
+            ineligible_reason=(champ_spec.ineligible_reason if champ_spec else None),
+        )
         for d in dates:
             doc = _get_json(s3, bucket, _SIGNALS_LIVE.format(date=d))
             if doc:
@@ -965,7 +980,19 @@ def _load_producer_specs(
 
     challengers: list[SpecHistory] = []
     for spec in challenger_producers():
-        hist = SpecHistory(name=spec.name, kind="challenger")
+        # The live champion is scored ONCE, from signals/, as the champion row.
+        # Since alpha-engine-config-I9277 registered `scanner_predictor_direct`
+        # (previously in no register at all), it is both the pointer's champion
+        # AND a registry challenger — without this skip it would emit a second,
+        # always-empty row for itself, since it writes no signals_shadow/.
+        if spec.name == champ_name:
+            continue
+        hist = SpecHistory(
+            name=spec.name,
+            kind="challenger",
+            promotion_eligible=spec.promotion_eligible,
+            ineligible_reason=spec.ineligible_reason,
+        )
         for d in dates:
             doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
             if doc:
@@ -975,7 +1002,12 @@ def _load_producer_specs(
         challengers.append(hist)
 
     for spec in retired_producers(as_of=as_of):
-        hist = SpecHistory(name=spec.name, kind="retired")
+        hist = SpecHistory(
+            name=spec.name,
+            kind="retired",
+            promotion_eligible=spec.promotion_eligible,
+            ineligible_reason=spec.ineligible_reason,
+        )
         for d in dates:
             doc = _get_json(s3, bucket, _SIGNALS_SHADOW.format(producer=spec.name, date=d))
             if doc:
@@ -1547,8 +1579,8 @@ def _load_cut_specs(
         GATE_LEGACY_CUT,
         HARD3_CUT_PREFIX,
         MOMZERO_CUT_PREFIX,
-        OBSERVE_ONLY_CUTS,
         PREDICTOR_UNIVERSE_CUT,
+        SLOT_ARMS,
         TECH_SCORE_CUT_PREFIX,
         TECH_SCORE_RANKS_FIELD,
         live_cut_champion,
@@ -1563,14 +1595,25 @@ def _load_cut_specs(
     # unscored rumour champion-challenger-policy.md §3 warns about, and
     # non-promotability must never quietly become non-measurement
     # (alpha-engine-config-I8060).
-    if set(OBSERVE_ONLY_CUTS) != {tech_score_cut, momzero_cut, mom121_cut, hard3_cut}:
+    #
+    # Checked against SLOT_ARMS — every arm of the slot — rather than against
+    # OBSERVE_ONLY_CUTS (alpha-engine-config-I9272). The old form asserted that
+    # the four non-champion arms were exactly the OBSERVE-ONLY ones, which made
+    # the board's measurement surface a function of PROMOTABILITY: under Brian's
+    # ruling 2026-08-29 every scored arm became promotion-eligible,
+    # OBSERVE_ONLY_CUTS emptied, and this guard would have redded the Scanner
+    # run for a register change that added no arm and removed none. Measurement
+    # is unconditional (§3); who may WIN is a separate axis and must not be able
+    # to change what is MEASURED.
+    _board_slot_arms = {FEED_CUT_NAME, tech_score_cut, momzero_cut, mom121_cut, hard3_cut}
+    if _board_slot_arms != set(SLOT_ARMS):
         raise RuntimeError(
-            f"the cuts board scores {sorted((tech_score_cut, momzero_cut, mom121_cut, hard3_cut))} "
-            f"but the registry declares OBSERVE_ONLY_CUTS={sorted(OBSERVE_ONLY_CUTS)} — "
-            "an arm in one and not the other is either unscored or unregistered. "
-            "Raised rather than asserted: `python -O` strips an assert, and this "
-            "is the check that keeps a registry edit from silently dropping an "
-            "arm off the measurement surface (alpha-engine-config-I8060)."
+            f"the cuts board scores {sorted(_board_slot_arms)} but the registry "
+            f"declares SLOT_ARMS={sorted(SLOT_ARMS)} — an arm in one and not the "
+            "other is either unscored or unregistered. Raised rather than "
+            "asserted: `python -O` strips an assert, and this is the check that "
+            "keeps a registry edit from silently dropping an arm off the "
+            "measurement surface (alpha-engine-config-I8060/I9272)."
         )
 
     # Each arm, and the membership keys it may appear under, newest name first.
@@ -2002,6 +2045,66 @@ def build_cuts_leaderboard(
         return {"status": "error", "error": str(exc)}
 
 
+def _arms_block(
+    champion: SpecHistory | None,
+    challengers: list[SpecHistory],
+    leaderboard: dict,
+) -> list[dict]:
+    """The producer register, ENUMERATED onto the artifact — one row per
+    registered arm whether or not it scored (alpha-engine-config-I9277).
+
+    This block is what makes crucible-backtester's promotion engine able to
+    drop its own ``VALID_CHAMPIONS`` tuple: the engine resolves the arm set
+    from here, so the register is the single source and "scored but ineligible
+    for no recorded reason" cannot recur as a silent omission in a second repo.
+
+    The load-bearing property is that an arm which produced NOTHING still gets
+    a row, carrying ``scored: false`` and an ``absence_reason``. Dropping it
+    instead — which is what ``specs`` does today for
+    ``scanner_top20_predictor``, an arm Brian's 2026-08-27 ruling explicitly
+    names — makes a dead arm and an unregistered arm render identically, which
+    is the §7.2 defect this fleet keeps re-finding: a well-formed artifact
+    that is silent about what it could not measure.
+    """
+    from producers.registry import RESEARCH_PRODUCERS
+
+    scored_rows = {r.get("name"): r for r in leaderboard.get("specs") or []}
+    histories = {h.name: h for h in ([champion] if champion else []) + challengers}
+    intersection = set(leaderboard.get("cohort_intersection") or [])
+
+    arms: list[dict] = []
+    for name, spec in sorted(RESEARCH_PRODUCERS.items()):
+        row = scored_rows.get(name)
+        hist = histories.get(name)
+        n_scored = int((row or {}).get("n_dates_scored") or 0)
+        if row is None:
+            absence = (
+                "not loaded — arm is registered but no history was built for it "
+                "this run (no signals_shadow/ writer exists for it)"
+            )
+        elif n_scored == 0:
+            absence = (
+                "loaded but scored ZERO cohort dates — the arm wrote no picks "
+                "that joined a realized return over this cohort"
+            )
+        else:
+            absence = None
+        arms.append({
+            "name": name,
+            "kind": spec.kind,
+            "promotion_eligible": spec.promotion_eligible,
+            "ineligible_reason": spec.ineligible_reason,
+            "scored": absence is None,
+            "absence_reason": absence,
+            "n_dates_scored": n_scored,
+            "dates_scored": (row or {}).get("dates_scored") or [],
+            "n_dates_in_intersection": len(
+                [d for d in (hist.by_date if hist else {}) if d in intersection]
+            ),
+        })
+    return arms
+
+
 def build_producer_leaderboard(
     s3: Any,
     bucket: str,
@@ -2103,6 +2206,9 @@ def build_producer_leaderboard(
         leaderboard["leaderboard_id"] = "producer"
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
+        # alpha-engine-config-I9277 — the register, projected. Read by
+        # crucible-backtester's promotion engine as THE arm set.
+        leaderboard["arms"] = _arms_block(champion, challengers, leaderboard)
         # config-I5195: zero scored cohorts is EXPECTED while cohorts are
         # immature and a DEFECT once they should have matured. The two render
         # identically as n_dates=0, which is how the original defect survived

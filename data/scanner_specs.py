@@ -54,9 +54,11 @@ duplication, and only the RANKING signal varies. The sleeve inputs
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
 
@@ -264,45 +266,234 @@ RETIRED_SPEC_NAMES: dict[str, str] = {
 }
 
 
-def live_champion_spec() -> ScannerSpec:
+# ── The champion pointer (alpha-engine-config-I9273) ─────────────────────────
+#
+# The spec slot's champion used to move ONLY by a human editing
+# ``LIVE_CHAMPION``. That is how the four-week vacuous leaderboard happened
+# (alpha-engine-config-I7808): a hand-moved pointer leaves no artifact saying
+# when it moved or why, so nothing could compare the register against the live
+# path. ``scoring/spec_promotion.py`` is now the writer of this key and
+# ``LIVE_CHAMPION`` is demoted to the DEFAULT the pointer falls back to —
+# exactly the shape ``scoring/universe_membership.py``'s
+# ``CUT_CHAMPION_POINTER_KEY`` / ``live_cut_champion`` already has for the cut
+# slot.
+SPEC_CHAMPION_POINTER_KEY = "config/scanner_spec_champion.json"
+
+DEFAULT_SPEC_CHAMPION = LIVE_CHAMPION
+"""The champion served when the pointer has never been written.
+
+``LIVE_CHAMPION`` remains the register's own declaration and is still what
+``assert_registry_coherent`` checks the ``kind`` fields against; it is no
+longer the MECHANISM by which a champion changes. A promotion writes the
+pointer; a deploy is not required and a hand edit is not the path.
+"""
+
+PROMOTABLE_SPECS: tuple[str, ...] = tuple(SCANNER_SPECS)
+"""Every arm of the spec slot is eligible to hold the live ranking.
+
+**Brian's ruling 2026-08-29, verbatim: "for the research arm, we should make
+all arms promote eligible, including think tank."** The general principle he
+stated twice that day is that *an arm that is scored must be able to win* —
+measurement without a path to promotion is a leaderboard that decides nothing,
+which is the condition alpha-engine-config-I9273 was filed about.
+
+So this tuple is derived from :data:`SCANNER_SPECS` rather than restated: a new
+arm is promotable by being registered, and there is no second list to forget.
+A genuine exclusion is a DECLARED property carrying a reason —
+:data:`DECLARED_INELIGIBLE_SPECS` — never an absence from a list
+(ARCHITECTURE §140: a disposition that is only an inference is not a state).
+"""
+
+DECLARED_INELIGIBLE_SPECS: dict[str, str] = {}
+"""Arms that are SCORED every cycle and may never hold the live ranking.
+
+Empty, and that emptiness is the ruling above rendered as data. An entry here
+is a name mapped to the REASON it cannot be promoted, and the promotion engine
+copies both onto every decision record, so a reader of the artifact learns that
+an arm is excluded and why without opening this file. Asserted at import to be
+a subset of :data:`SCANNER_SPECS` — an exclusion naming an arm that does not
+exist is a stale rule that reads as a live one.
+"""
+
+
+class ScannerSpecPointerError(RuntimeError):
+    """``config/scanner_spec_champion.json`` names something the register cannot
+    serve.
+
+    Raised rather than degrading to :data:`DEFAULT_SPEC_CHAMPION`: quietly
+    serving the default would mean the promotion engine believes one arm ranks
+    the live cut while the scanner applies another — the exact drift
+    ``SCANNER_CONTRACT.md`` exists to prevent, and the reason
+    ``universe_membership.live_cut_champion`` raises on the same condition.
+    """
+
+
+def register_for_champion(
+    champion: str, register: dict[str, ScannerSpec] | None = None
+) -> dict[str, ScannerSpec]:
+    """A NEW register in which ``champion`` is the champion and every other arm
+    is a challenger.
+
+    A promotion CONSTRUCTS the register state; it never mutates one entry's
+    ``kind``. Mutating a field can leave two champions (or none) in a module
+    whose import-time guard has already run, and the guarantee
+    ``assert_registry_coherent`` provides would then hold only for the state the
+    process started in. The constructed state is validated here, before any
+    caller can see it.
+    """
+    base = register if register is not None else SCANNER_SPECS
+    if champion not in base:
+        raise ScannerSpecPointerError(
+            f"champion {champion!r} is not a registered scanner spec "
+            f"({sorted(base)}) — refusing to construct a register around an arm "
+            "that does not exist"
+        )
+    built = {
+        name: replace(spec, kind=("champion" if name == champion else "challenger"))
+        for name, spec in base.items()
+    }
+    assert_register_coherent(built, champion)
+    return built
+
+
+def read_champion_pointer(
+    *, bucket: str | None = None, s3_client=None, strict: bool = True
+) -> str | None:
+    """The arm named by the written pointer, or ``None`` when none is written.
+
+    ``strict`` governs a READ FAILURE only, never a bad value: a pointer that
+    exists and names an unregistered arm raises
+    :class:`ScannerSpecPointerError` under both settings.
+
+    * ``strict=True`` — the promotion engine's setting. Any read failure other
+      than a missing object propagates: an engine that cannot establish which
+      arm is currently live must not write a decision claiming it displaced one.
+    * ``strict=False`` — the live scanner path's setting, and a deliberate
+      fail-soft carve-out under the AGENTS.md rule. (a) The swallowed failure is
+      a transient S3 or credential error on a READER. (b) The primary
+      deliverable survives because the register default is what the pointer
+      names in steady state, and the alternative — raising — stops the trading
+      day's candidate ranking for an observability pointer, which
+      ``SCANNER_CONTRACT.md`` §5 already rules out for this path. (c) The
+      recording surface is the ERROR log below plus
+      ``config/apply_audit/scanner_spec_champion/latest.json``: the WRITER does
+      not degrade, so a pointer the engine cannot read stops the decision series
+      and shows up as a stale audit record.
+    """
+    b = bucket or os.environ.get("S3_BUCKET")
+    if s3_client is None and not b:
+        # No bucket is declared, so there is no pointer to read and the register
+        # default IS the answer. A configuration fact, not a swallowed failure —
+        # and it is what keeps the serving path free of I/O in any context that
+        # has not been pointed at a bucket.
+        return None
+    try:
+        if s3_client is None:
+            import boto3
+
+            s3_client = boto3.client("s3")
+        body = s3_client.get_object(Bucket=b, Key=SPEC_CHAMPION_POINTER_KEY)["Body"].read()
+    except Exception as exc:  # noqa: BLE001 — absence is a legitimate state
+        if "NoSuchKey" in str(exc) or "NoSuchBucket" in str(exc) or "404" in str(exc):
+            return None
+        if strict:
+            raise
+        logger.error(
+            "[scanner_specs] %s unreadable (%s) — the live cut keeps the register "
+            "default %r this cycle; the promotion engine does NOT degrade and its "
+            "audit record is what shows this",
+            SPEC_CHAMPION_POINTER_KEY,
+            exc,
+            DEFAULT_SPEC_CHAMPION,
+        )
+        return None
+    champion = json.loads(body).get("champion")
+    if champion not in SCANNER_SPECS:
+        raise ScannerSpecPointerError(
+            f"{SPEC_CHAMPION_POINTER_KEY} names champion {champion!r}, which is not "
+            f"a registered scanner spec ({sorted(SCANNER_SPECS)}). Refusing to "
+            "resolve the live ranking from an unvalidated pointer."
+        )
+    if champion in DECLARED_INELIGIBLE_SPECS:
+        raise ScannerSpecPointerError(
+            f"{SPEC_CHAMPION_POINTER_KEY} names {champion!r}, which is declared "
+            f"ineligible to hold the live ranking: "
+            f"{DECLARED_INELIGIBLE_SPECS[champion]}"
+        )
+    return champion
+
+
+def live_champion_name(
+    *, bucket: str | None = None, s3_client=None, strict: bool = False
+) -> str:
+    """The arm the live candidate path ranks by this cycle."""
+    return read_champion_pointer(
+        bucket=bucket, s3_client=s3_client, strict=strict
+    ) or DEFAULT_SPEC_CHAMPION
+
+
+def live_champion_spec(*, bucket: str | None = None, s3_client=None) -> ScannerSpec:
     """The spec whose ``rank`` the live candidate path applies.
 
     The ONLY supported way for the orchestrator to obtain the live ranking.
-    Importing a ``_rank_*`` function directly is what let the live path and
-    this register disagree for four weeks
-    (alpha-engine-config-I7808) — ``tests/test_scanner_contract.py`` asserts
-    the orchestrator does not do it.
+    Importing a ``_rank_*`` function directly is what let the live path and this
+    register disagree for four weeks (alpha-engine-config-I7808) —
+    ``tests/test_scanner_contract.py`` asserts the orchestrator does not do it.
+
+    Resolves the WRITTEN pointer, with the register entry as the default
+    (alpha-engine-config-I9273). When the pointer names the default the register
+    object itself is returned, identity intact; when it names another arm the
+    returned spec comes from a freshly CONSTRUCTED coherent register, so the
+    live ranking follows a promotion with no code edit and the "exactly one
+    champion" guarantee is re-established rather than assumed.
     """
-    return SCANNER_SPECS[LIVE_CHAMPION]
+    name = live_champion_name(bucket=bucket, s3_client=s3_client)
+    if name == DEFAULT_SPEC_CHAMPION:
+        return SCANNER_SPECS[name]
+    return register_for_champion(name)[name]
 
 
-def assert_registry_coherent() -> None:
-    """Raise ``ValueError`` unless the register can express a real experiment.
+def challenger_specs_for(champion: str) -> list[ScannerSpec]:
+    """Every arm that is not ``champion``, as challengers of a coherent register."""
+    return [s for n, s in register_for_champion(champion).items() if n != champion]
 
-    Runs at import. Every condition here is one that produced, or would
-    reproduce, the four-week vacuous-leaderboard defect:
 
-    * exactly one champion, and ``LIVE_CHAMPION`` names it — otherwise
+def assert_register_coherent(
+    register: dict[str, ScannerSpec], live_champion: str
+) -> None:
+    """Raise ``ValueError`` unless ``register`` can express a real experiment.
+
+    Generalised from the module-global check so a register CONSTRUCTED for a
+    promoted champion is held to exactly the same invariants as the declared
+    one (alpha-engine-config-I9273) — a promotion must not be able to reach a
+    state the import-time guard would have refused.
+
+    Every condition here is one that produced, or would reproduce, the
+    four-week vacuous-leaderboard defect:
+
+    * exactly one champion, and ``live_champion`` names it — otherwise
       ``live_champion_spec()`` and the leaderboard's champion can differ;
     * the champion carries a ``rank`` — the live path has to be able to apply
       it, and a ``None`` here is the old "the live path is authoritative,
       trust me" arrangement that had no way to be checked;
     * no challenger shares the champion's ranking callable — that is the
-      vacuous comparison itself, and it is cheaper to refuse at import than to
+      vacuous comparison itself, and it is cheaper to refuse here than to
       alert on daily forever (champion-challenger-policy.md §4);
     * a retired name is not also live, so the two meanings of a name cannot
-      overlap in one leaderboard.
+      overlap in one leaderboard;
+    * every declared-ineligible arm is a registered arm, so an exclusion rule
+      cannot go stale while still reading as live.
     """
-    champions = [s for s in SCANNER_SPECS.values() if s.kind == "champion"]
+    champions = [s for s in register.values() if s.kind == "champion"]
     if len(champions) != 1:
         raise ValueError(
             f"SCANNER_SPECS must declare exactly one champion, found {len(champions)}: "
             f"{[s.name for s in champions]}"
         )
     champion = champions[0]
-    if champion.name != LIVE_CHAMPION:
+    if champion.name != live_champion:
         raise ValueError(
-            f"LIVE_CHAMPION={LIVE_CHAMPION!r} does not name the champion entry "
+            f"LIVE_CHAMPION={live_champion!r} does not name the champion entry "
             f"({champion.name!r}) — the live path and the leaderboard would rank differently"
         )
     if champion.rank is None:
@@ -310,22 +501,41 @@ def assert_registry_coherent() -> None:
             f"champion {champion.name!r} carries no rank function; the live path "
             "applies SCANNER_SPECS[LIVE_CHAMPION].rank and cannot fall back to a description"
         )
-    for spec in SCANNER_SPECS.values():
+    for spec in register.values():
         if spec.name != champion.name and spec.rank is champion.rank:
             raise ValueError(
                 f"challenger {spec.name!r} shares the champion's ranking function — "
                 "the comparison is vacuous by construction "
                 "(champion-challenger-policy.md §4, alpha-engine-config-I7808)"
             )
-    overlap = set(RETIRED_SPEC_NAMES) & set(SCANNER_SPECS)
+    overlap = set(RETIRED_SPEC_NAMES) & set(register)
     if overlap:
         raise ValueError(f"spec name(s) both live and retired: {sorted(overlap)}")
+    unknown = set(DECLARED_INELIGIBLE_SPECS) - set(register)
+    if unknown:
+        raise ValueError(
+            f"DECLARED_INELIGIBLE_SPECS names unregistered arm(s) {sorted(unknown)} — "
+            "an exclusion rule that outlives its arm reads as a live rule and is not one"
+        )
+
+
+def assert_registry_coherent() -> None:
+    """The module-global register, checked at import and by the contract tests."""
+    assert_register_coherent(SCANNER_SPECS, LIVE_CHAMPION)
 
 
 assert_registry_coherent()
 
 
 def challenger_specs() -> list[ScannerSpec]:
+    """Challengers of the DECLARED register — the shadow-write set.
+
+    Deliberately not pointer-resolved: shadow artifacts must be written for
+    every arm that is not the one the LIVE artifact already covers, and the
+    live artifact is produced by ``live_champion_spec()``. Use
+    :func:`challenger_specs_for` when a promotion has moved the pointer and the
+    shadow set must follow it.
+    """
     return [s for s in SCANNER_SPECS.values() if s.kind == "challenger"]
 
 

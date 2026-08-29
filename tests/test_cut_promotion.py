@@ -49,6 +49,7 @@ from scoring.cut_promotion import (  # noqa: E402
     CONTAMINATION_CAVEAT,
     CUT_PROMOTION_SLOT,
     FIRST_COHORT_DATE,
+    HOLD_REASON_CODES,
     MIN_VETO_HORIZON_DAYS,
     PROMOTION_MARGIN_NOTE,
     REASON_BOARD_DEFECTIVE,
@@ -67,11 +68,13 @@ from scoring.cut_promotion import (  # noqa: E402
     CutPromotionError,
     decide_cut_champion,
     decision_earliest_on,
+    first_decidable_week,
     reconcile_arms_with_ledger,
     run_cut_promotion,
 )
 from scoring.leaderboard_scoring import LONG_HORIZONS_DAYS, slot_spec  # noqa: E402
 from scoring.universe_membership import (  # noqa: E402
+    CUT_ARM_PROMOTION_EXCLUSIONS,
     CUT_CHAMPION_POINTER_KEY,
     DEFAULT_CUT_CHAMPION,
     OBSERVE_ONLY_CUTS,
@@ -89,20 +92,20 @@ CHALLENGER = "tech_score_top_60"
 
 # The DECISION machinery is exercised against a two-arm slot, explicitly.
 #
-# Brian ruled on 2026-08-21 (alpha-engine-config-I8060) and again on 2026-08-24
-# (I8261) that `tech_score_top_60` stays observe-only until it has a scored
-# cohort, so the LIVE registry has one promotable arm and the engine
-# short-circuits with `no_promotable_challenger` before any comparison. That is
-# correct, and it must not take the promotion logic out of test with it: the arm
-# returns by a one-line registry edit, and the margin / cooldown / veto paths
-# have to still be right on the day it does. So these tests state the two-arm
-# slot they need instead of inheriting whatever the registry currently declares.
+# The LIVE slot now has FIVE promotable arms (Brian's ruling 2026-08-29,
+# alpha-engine-config-I9272 — an arm which is scored must be able to win). The
+# margin / cooldown / veto paths are still exercised against an explicitly
+# stated TWO-arm slot rather than against whatever the registry declares, for
+# the same reason as before: a test that inherits the register moves every time
+# the register does, and then it is testing the register rather than the
+# decision. It also keeps these tests honest about count — a five-arm fixture
+# would let a two-arm bug hide behind three unmeasured rows.
 TWO_ARM_SLOT = replace(
     CUT_PROMOTION_SLOT,
     arms=(CHAMP, CHALLENGER),
-    observe_only_arms=tuple(
-        a for a in CUT_PROMOTION_SLOT.observe_only_arms if a != CHALLENGER
-    ),
+    scored_arms=(CHAMP, CHALLENGER),
+    observe_only_arms=(),
+    excluded_arms={},
 )
 DATE = "2026-08-22"
 FLOOR = CUT_PROMOTION_SLOT.min_weeks_for_inference
@@ -344,6 +347,8 @@ def test_the_veto_reads_the_metric_the_board_calls_primary():
 
 
 def test_arms_are_exactly_the_promotable_cuts():
+    assert CUT_PROMOTION_SLOT.scored_arms == SLOT_ARMS
+    assert CUT_PROMOTION_SLOT.excluded_arms == CUT_ARM_PROMOTION_EXCLUSIONS
     assert CUT_PROMOTION_SLOT.arms == PROMOTABLE_CUTS
     assert CUT_PROMOTION_SLOT.observe_only_arms == OBSERVE_ONLY_CUTS
     assert not set(PROMOTABLE_CUTS) & set(OBSERVE_ONLY_CUTS)
@@ -351,12 +356,20 @@ def test_arms_are_exactly_the_promotable_cuts():
     assert CUT_PROMOTION_SLOT.default_champion == DEFAULT_CUT_CHAMPION
 
 
-def test_tech_score_is_not_restored_to_promotable_by_this_change():
-    """Brian, 2026-08-24 on I8261: NOT in the same change. It has 2 scored
-    dates; arming an automatic pointer write before evidence exists re-creates
-    the exact condition of the 2026-08-21 I8060 ruling."""
-    assert PROMOTABLE_CUTS == (CHAMP,)
-    assert CHALLENGER in OBSERVE_ONLY_CUTS
+def test_tech_score_is_promotable_and_the_three_gates_still_bind():
+    """SUPERSEDES ``test_tech_score_is_not_restored_to_promotable_by_this_change``.
+
+    Brian's 2026-08-24 concern on I8261 was "arming an automatic pointer write
+    before evidence exists". His 2026-08-29 ruling restores the arm; the concern
+    is now held by MECHANISM rather than by registry membership, and this test
+    is what says so. All three gates must remain armed, or the ruling would have
+    removed a protection rather than moved one.
+    """
+    assert CHALLENGER in PROMOTABLE_CUTS
+    assert CHALLENGER not in OBSERVE_ONLY_CUTS
+    assert CUT_PROMOTION_SLOT.min_weeks_for_inference >= 5
+    assert CUT_PROMOTION_SLOT.promotion_margin > 0
+    assert CUT_PROMOTION_SLOT.cooldown_days >= 28
 
 
 def test_hysteresis_is_implemented_not_waived():
@@ -465,7 +478,7 @@ def test_a_thin_weekly_series_is_refused_and_prices_itself_against_a_calendar():
     assert d.reason_code == REASON_INSUFFICIENT_WEEKS
     assert f"min_weeks_for_inference={FLOOR}" in d.reason
     assert d.arms[CHALLENGER].n_weeks_paired == FLOOR - 1
-    assert d.decision_earliest_on in d.reason
+    assert d.decision_earliest_on["date"] in d.reason
 
 
 def test_a_hold_still_reports_every_arms_week_count():
@@ -621,7 +634,13 @@ def test_a_missing_week_makes_the_chained_read_none_never_a_shorter_span():
     )
     ev = d.arms[CHALLENGER]
     assert ev.n_weeks_paired == 9
-    assert ev.weeks_dropped_unpaired == 1
+    # The gap is a NULL DECISION COLUMN, not an unpaired week: both rows exist
+    # and cover the same span, and only the number is missing. Split apart by
+    # alpha-engine-config-I9284 — before that these two conditions shared one
+    # counter and a reader could not tell a missing cut from an uncomputable
+    # transaction cost.
+    assert ev.weeks_dropped_null_decision_column == 1
+    assert ev.weeks_dropped_unpaired == 0
     # The dropped week is excluded from the series entirely, so what IS chained
     # is the 9 weeks that paired — and the record says it is 9.
     assert ev.chained_paired_log_return == pytest.approx(0.090)
@@ -954,20 +973,21 @@ def test_the_pointer_this_engine_writes_is_the_one_the_feed_reads():
         assert live_cut_champion(bucket="b", s3_client=s3) == CHALLENGER
 
 
-def test_an_observe_only_arm_can_never_be_served_even_if_the_pointer_names_it():
-    """The registry is the last line, not the engine (alpha-engine-config-I8060,
-    reaffirmed on I8261). Even a stale pointer, a hand-edited object, or an
-    engine running an older registry cannot hand the sector teams an arm Brian
-    has not cleared — the refusal does not depend on the promotion engine being
-    correct."""
-    s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board()})
-    run_cut_promotion(
-        DATE, bucket="b", s3_client=s3, slot=TWO_ARM_SLOT,
-        ledger_rows=_ledger(champ_net=0.010, chal_net=0.100),
-    )
+def test_a_pointer_naming_a_non_promotable_arm_is_refused_at_READ_time():
+    """The registry is the last line, not the engine. A stale pointer, a
+    hand-edited object, or an engine running a different registry must not be
+    able to hand the sector teams an arm the register does not declare — and the
+    refusal must not depend on the promotion engine being correct.
+
+    Brian's ruling 2026-08-29 makes every SCORED arm promotable, so the arm this
+    test used to use (`tech_score_top_60`) is now legitimately servable. The
+    property is unchanged and is asserted here against a name that is genuinely
+    outside the register — which is the only case that was ever load-bearing.
+    """
+    s3 = _S3({CUT_CHAMPION_POINTER_KEY: {"champion": "some_cut_nobody_registered_60"}})
     with pytest.raises(Exception) as exc:
         live_cut_champion(bucket="b", s3_client=s3)
-    assert CHALLENGER in str(exc.value)
+    assert "some_cut_nobody_registered_60" in str(exc.value)
     assert CHAMP in str(exc.value)
 
 
@@ -1024,41 +1044,155 @@ def test_schema_is_referenced_by_the_producer_module():
     ).read_text(encoding="utf-8")
 
 
-# ── Observe-only: the slot with no promotable challenger (I8060 / I8261) ─────
+# ── Every scored arm may win (Brian's ruling 2026-08-29, I9272) ─────────────
+#
+# This section REPLACES the "observe-only: the slot with no promotable
+# challenger" block that locked the 2026-08-21/24 state. Brian, verbatim
+# 2026-08-29: *"for the research arm, we should make all arms promote eligible,
+# including think tank"* — the principle being that an arm which is SCORED must
+# be able to WIN. The properties those tests protected are all still asserted;
+# what changed is which state they lock.
 
 
-def test_the_live_registry_has_no_promotable_challenger_and_says_so():
-    """Brian rulings 2026-08-21 and 2026-08-24: `tech_score_top_60` is
-    observe-only until it has a scored cohort.
+def test_every_scored_arm_of_the_live_slot_is_promotion_eligible():
+    """Brian's ruling 2026-08-29 (alpha-engine-config-I9272).
 
-    The engine must NAME that state. Falling through to the comparison path and
-    reporting `champion_already_leads` would be a claim about evidence made
-    where no comparison happened — two different things rendering identically,
-    which is the §3 failure this codebase keeps paying for.
+    RED before the register change: PROMOTABLE_CUTS was the literal
+    ``("attractiveness_top_60",)`` and four of the five scored arms failed this.
     """
+    assert set(PROMOTABLE_CUTS) == set(SLOT_ARMS)
+    assert OBSERVE_ONLY_CUTS == ()
+    assert CUT_ARM_PROMOTION_EXCLUSIONS == {}
+    assert len(SLOT_ARMS) == 5
+
+
+def test_promotability_is_derived_from_the_scored_register_not_typed_out():
+    """The structural half of I9272. ``PROMOTABLE_CUTS`` must be a FUNCTION of
+    ``SLOT_ARMS`` minus declared exclusions, so an arm the builder emits and the
+    ledger scores cannot be absent from both tuples and be actionable by
+    nothing. Asserted on behaviour, not on source text: adding an exclusion must
+    move the promotable set, and nothing else may."""
+    from scoring import universe_membership as um
+
+    assert set(um.PROMOTABLE_CUTS) | set(um.OBSERVE_ONLY_CUTS) == set(um.SLOT_ARMS)
+    assert not set(um.PROMOTABLE_CUTS) & set(um.OBSERVE_ONLY_CUTS)
+    # And SLOT_ARMS itself is derived from the emitted prefixes at the feed
+    # width, not restated.
+    assert set(um.SLOT_ARMS) == {
+        f"{p}{um.ATTRACTIVENESS_FEED_TOP_N}" for p in um.CUT_SLOT_ARM_PREFIXES
+    }
+
+
+def test_an_emitted_arm_absent_from_the_register_is_a_red_run():
+    """The guard that makes I9272 unrepeatable. An arm count-matched at the feed
+    width and missing from SLOT_ARMS is scored by nothing and promotable by
+    nothing, while the artifact shows it competing.
+
+    RED before the fix: no such guard existed, which is exactly how
+    `tech_score_top_60` came to be emitted, scored, and unable to win.
+    """
+    from scoring.universe_membership import (
+        UniverseMembershipError,
+        assert_slot_register_covers_emitted_arms,
+    )
+
+    with pytest.raises(UniverseMembershipError) as exc:
+        assert_slot_register_covers_emitted_arms(
+            {"cuts": {"some_new_rule_top_60": {"tickers": []}}}, DATE
+        )
+    assert "some_new_rule_top_60" in str(exc.value)
+    assert "CUT_SLOT_ARM_PREFIXES" in str(exc.value)
+
+
+def test_a_funnel_stage_at_the_feed_width_is_not_an_arm():
+    """champion-challenger-policy.md §2 — slots are separate axes. A funnel
+    STAGE emitted at 60 answers "which names reached this point", not "how were
+    they ranked", and scoring one against the other produces a number nobody can
+    interpret. The guard above must not fire on one."""
+    from scoring.universe_membership import (
+        CHAMPION_CUT,
+        assert_slot_register_covers_emitted_arms,
+    )
+
+    assert_slot_register_covers_emitted_arms(
+        {"cuts": {CHAMPION_CUT: {"tickers": []}, CHAMP: {"tickers": []}}}, DATE
+    )  # no raise
+
+
+def test_the_live_registry_now_holds_on_EVIDENCE_not_on_registry_state():
+    """The I9272 closes-when predicate, asserted directly.
+
+    Before Brian's ruling every cycle wrote ``reason_code:
+    no_promotable_challenger`` — a REGISTRY state, not an evidence state. Two
+    evaluations, zero comparisons. The engine must now reach a hold that is
+    about the numbers.
+    """
+    # The MEASURED live evidence: one completed week, and only the champion
+    # carries a net_log_return (the other four are
+    # `turnover_unknown_so_cost_uncomputable` on the ledger's first week).
+    rows = _ledger(champ_net=0.010, chal_net=0.100, n_weeks=1)
+    for r in rows:
+        if r["arm"] != CHAMP:
+            r["net_log_return"] = None
     d = decide_cut_champion(
-        ledger_rows=_ledger(champ_net=0.010, chal_net=0.100),
-        board=_board(),
-        champion_before=CHAMP,
-        decided_on=DATE,
+        ledger_rows=rows, board=_board(), champion_before=CHAMP, decided_on=DATE
     )
     assert d.decision == "hold"
-    assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER
+    assert d.reason_code != REASON_NO_PROMOTABLE_CHALLENGER
+    assert d.reason_code == REASON_INSUFFICIENT_WEEKS
+    assert d.reason_code in HOLD_REASON_CODES
     assert d.champion == CHAMP
-    for arm in OBSERVE_ONLY_CUTS:
-        assert arm in d.reason
 
 
-def test_the_no_challenger_hold_does_not_depend_on_the_ledger_or_the_board():
-    """It is a fact about the REGISTRY. A missing ledger, a missing board, or a
-    fully populated one must not change it — otherwise the reason flips week to
-    week for a state that has not changed."""
+def test_the_no_challenger_hold_survives_and_names_its_exclusions_with_reasons():
+    """The branch is unreachable on today's register and is kept deliberately:
+    if a future exclusion shrinks the promotable set to one arm, the engine must
+    SAY there was nothing to decide rather than report `champion_already_leads`,
+    which is a claim about evidence made where no comparison happened (§3).
+
+    And it must name the exclusion WITH its reason — an absence from a list is
+    what I9272 retired.
+    """
+    one_arm = replace(
+        CUT_PROMOTION_SLOT,
+        arms=(CHAMP,),
+        scored_arms=(CHAMP, CHALLENGER),
+        observe_only_arms=(CHALLENGER,),
+        excluded_arms={CHALLENGER: "held pending a hypothetical future ruling"},
+    )
     for rows in (None, _ledger(champ_net=0.010, chal_net=0.900)):
         for board in (None, _board(), {"status": "unmeasurable", "reason": "no cohort"}):
             d = decide_cut_champion(
-                ledger_rows=rows, board=board, champion_before=CHAMP, decided_on=DATE
+                ledger_rows=rows,
+                board=board,
+                champion_before=CHAMP,
+                decided_on=DATE,
+                slot=one_arm,
             )
             assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER, (rows is None, board)
+            assert CHALLENGER in d.reason
+            assert "held pending a hypothetical future ruling" in d.reason
+            # The excluded arm is on the RECORD with its reason and its scope,
+            # never merely missing from a tuple.
+            doc = d.to_document()
+            assert doc["excluded_arms"][CHALLENGER]["reason"] == (
+                "held pending a hypothetical future ruling"
+            )
+            assert doc["excluded_arms"][CHALLENGER]["scope"] == "register"
+            assert doc["arms"][CHALLENGER]["eligible_for_promotion"] is False
+            assert doc["arms"][CHALLENGER]["ineligibility_reason"]
+
+
+def test_excluded_arms_is_present_and_empty_rather_than_absent():
+    """"No arm is excluded" and "this record does not say" are different
+    messages, and only one of them is true today (§3)."""
+    d = decide_cut_champion(
+        ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE
+    )
+    doc = d.to_document()
+    assert doc["excluded_arms"] == {}
+    assert doc["promotable_arms"] == list(PROMOTABLE_CUTS)
+    assert doc["scored_arms"] == list(SLOT_ARMS)
 
 
 def test_the_record_is_still_written_every_cycle_while_holding():
@@ -1067,44 +1201,141 @@ def test_the_record_is_still_written_every_cycle_while_holding():
     (champion-challenger-policy.md §3)."""
     s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board()})
     doc = run_cut_promotion(DATE, bucket="b", s3_client=s3)
-    assert doc["reason_code"] == REASON_NO_PROMOTABLE_CHALLENGER
+    assert doc["decision"] == "hold"
+    assert doc["reason_code"] in HOLD_REASON_CODES
     assert f"config/apply_audit/scanner_cut_champion/{DATE}.json" in s3.written
     assert "config/apply_audit/scanner_cut_champion/latest.json" in s3.written
     assert live_cut_champion(bucket="b", s3_client=s3) == CHAMP
-
-
-def test_the_live_record_still_reports_hold_no_promotable_challenger():
-    """The measured live state (s3://alpha-engine-research/config/
-    scanner_cut_champion.json reports decision=hold, reason_code=
-    no_promotable_challenger) must survive this cutover unchanged. The slot has
-    ONE promotable arm, so there is no decision to take regardless of what it
-    decides ON, and this change must not fabricate one."""
-    s3 = _S3({f"research/cuts_leaderboard/{DATE}.json": _board()})
-    doc = run_cut_promotion(DATE, bucket="b", s3_client=s3)
-    assert doc["decision"] == "hold"
-    assert doc["reason_code"] == REASON_NO_PROMOTABLE_CHALLENGER
-    assert doc["champion"] == DEFAULT_CUT_CHAMPION
     jsonschema.validate(doc, _schema())
 
 
 def test_the_observe_only_arms_are_still_scored():
-    """Non-promotable must never quietly become non-measured (§3)."""
-    import inspect
-
-    import scoring.leaderboard_producers as lp
-
-    src = inspect.getsource(lp._load_cut_specs)
-    assert "OBSERVE_ONLY_CUTS" in src
+    """Non-promotable must never quietly become non-measured (§3). With no
+    exclusions the set is empty, and the partition still has to hold."""
     assert set(SLOT_ARMS) - set(PROMOTABLE_CUTS) == set(OBSERVE_ONLY_CUTS)
+    assert OBSERVE_ONLY_CUTS == ()
 
 
-def test_restoring_an_arm_is_a_one_line_registry_edit():
-    """The exit from this state must be cheap and obvious, or the hold becomes
-    permanent by inertia. Nothing outside the registry names the arm set."""
+def test_an_immature_arm_is_recorded_ineligible_and_does_not_freeze_the_slot():
+    """alpha-engine-config-I9284. The maturity floor used to apply to every arm
+    at once, so one arm short of the floor held the entire slot on any evidence,
+    forever. With five arms that is a live deadlock — `attractiveness_hard3_
+    top_60` produced ZERO names in the ledger's first week.
+
+    RED before the fix: the all-arms `thin` gate returned before any arm carried
+    an eligibility verdict, so `ineligibility_reason` was never populated.
+    """
     d = decide_cut_champion(
-        ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE
+        ledger_rows=_ledger(champ_net=0.010, chal_net=0.100, n_weeks=1),
+        board=_board(),
+        champion_before=CHAMP,
+        decided_on=DATE,
+        slot=TWO_ARM_SLOT,
     )
-    assert "PROMOTABLE_CUTS" in d.reason
+    assert d.decision == "hold"
+    assert d.reason_code == REASON_INSUFFICIENT_WEEKS
+    ev = d.arms[CHALLENGER]
+    assert ev.eligible_for_promotion is False
+    assert REASON_INSUFFICIENT_WEEKS in (ev.ineligibility_reason or "")
+    assert "min_weeks_for_inference" in (ev.ineligibility_reason or "")
+
+
+def test_a_week_that_paired_but_carried_no_number_is_counted_separately():
+    """alpha-engine-config-I9284 deliverable 2. "The week did not pair" and "the
+    week had no number to pair with" are different conditions with different
+    fixes, and they rendered identically before this field existed.
+
+    The measured case: the ledger's first week carries ``net_log_return: null``
+    for every arm but the champion, with
+    ``net_unavailable_reason: turnover_unknown_so_cost_uncomputable``.
+    """
+    rows = _ledger(champ_net=0.010, chal_net=0.100, n_weeks=1)
+    for r in rows:
+        if r["arm"] == CHALLENGER:
+            r["net_log_return"] = None
+    d = decide_cut_champion(
+        ledger_rows=rows, board=_board(), champion_before=CHAMP,
+        decided_on=DATE, slot=TWO_ARM_SLOT,
+    )
+    ev = d.arms[CHALLENGER]
+    assert ev.n_weeks_paired == 0
+    assert ev.weeks_dropped_null_decision_column == 1
+    assert ev.weeks_dropped_unpaired == 0
+
+
+def test_decision_earliest_on_is_provisional_until_a_week_prices_every_arm():
+    """alpha-engine-config-I9284 deliverable 1. The v2 record published
+    ``decision_earliest_on: "2026-09-25"`` on a ledger whose first week paired
+    for nobody — a date its own evidence could not reach, in the field a reader
+    uses to tell a working loop from a stuck one.
+
+    RED before the fix: the value was a bare string with no provisional flag,
+    counted from FIRST_COHORT_DATE unconditionally.
+    """
+    # No ledger at all → provisional, counted from FIRST_COHORT_DATE.
+    bare = decision_earliest_on(CUT_PROMOTION_SLOT, ledger_rows=None)
+    assert bare["provisional"] is True
+    assert bare["counted_from"] == FIRST_COHORT_DATE.isoformat()
+    assert "PROVISIONAL" in bare["basis"]
+
+    # A week that prices EVERY promotable arm becomes the counting origin, and
+    # the answer stops being provisional.
+    rows = _ledger(champ_net=0.010, chal_net=0.100, n_weeks=1)
+    priced = decision_earliest_on(TWO_ARM_SLOT, ledger_rows=rows)
+    assert priced["provisional"] is False
+    assert priced["counted_from"] == rows[0]["week_start"]
+    assert priced["date"] > priced["counted_from"]
+
+    # A week where one arm carries no number is NOT a counting origin.
+    for r in rows:
+        if r["arm"] == CHALLENGER:
+            r["net_log_return"] = None
+    assert first_decidable_week(rows, slot=TWO_ARM_SLOT) is None
+    assert decision_earliest_on(TWO_ARM_SLOT, ledger_rows=rows)["provisional"] is True
+
+
+def test_an_arm_whose_basis_has_no_rank_table_is_refused_at_the_DECISION():
+    """alpha-engine-config-I7843's property, moved to where the promotion is
+    taken (I9272). Promoting to an arm with no full-universe rank table would
+    resolve a rank ceiling in a consumer on the morning of the promotion.
+
+    That used to be held by redding the whole Scanner run — which, once every
+    arm became promotable, would have redded it for two arms that publish no
+    rank table BY DESIGN. It is now an eligibility refusal carrying its reason,
+    and the run whose serving cut is healthy stays green.
+
+    RED before the fix: `cycle_ineligible_arms` did not exist and a landslide
+    challenger with no rank table promoted.
+    """
+    d = decide_cut_champion(
+        ledger_rows=_ledger(champ_net=0.010, chal_net=0.900),
+        board=_board(),
+        champion_before=CHAMP,
+        decided_on=DATE,
+        slot=TWO_ARM_SLOT,
+        cycle_ineligible_arms={CHALLENGER: "rank_table_missing: no table for its basis"},
+    )
+    assert d.decision == "hold"
+    assert d.champion == CHAMP
+    ev = d.arms[CHALLENGER]
+    assert ev.eligible_for_promotion is False
+    assert "rank_table_missing" in (ev.ineligibility_reason or "")
+    doc = d.to_document()
+    assert doc["excluded_arms"][CHALLENGER]["scope"] == "this_cycle"
+
+
+def test_the_same_landslide_challenger_promotes_once_it_is_servable():
+    """The other half of the test above — the refusal must be about the missing
+    table and nothing else, or it is a gate whose predicate nobody can name."""
+    d = decide_cut_champion(
+        ledger_rows=_ledger(champ_net=0.010, chal_net=0.900),
+        board=_board(),
+        champion_before=CHAMP,
+        decided_on=DATE,
+        slot=TWO_ARM_SLOT,
+    )
+    assert d.decision == "promote"
+    assert d.champion == CHALLENGER
 
 
 # ── The record is self-qualifying (I8257, carried onto the I8261 basis) ──────
@@ -1131,12 +1362,12 @@ def test_every_arm_carries_its_own_metric_cadence_and_source():
 
 
 def test_a_hold_that_never_reads_the_ledger_still_stamps_metric_and_source():
-    """Even the registry-only no_promotable_challenger hold — which never reads
-    a row — must not leave n_weeks_paired=0 unqualified."""
+    """Even a hold that never reads a row — the absent ledger, or the
+    registry-only short-circuit — must not leave n_weeks_paired=0 unqualified."""
     d = decide_cut_champion(
         ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE
     )
-    assert d.reason_code == REASON_NO_PROMOTABLE_CHALLENGER
+    assert d.reason_code == REASON_LEDGER_MISSING
     for ev in d.arms.values():
         assert ev.metric == CUT_PROMOTION_SLOT.primary_metric
         assert ev.cadence == "weekly"
@@ -1196,13 +1427,17 @@ def test_decision_earliest_on_is_the_weekly_floor_not_a_forward_horizon():
     d = decide_cut_champion(
         ledger_rows=None, board=None, champion_before=CHAMP, decided_on=DATE
     )
-    assert d.decision_earliest_on == expected
+    assert d.decision_earliest_on["date"] == expected
+    # And it is marked PROVISIONAL, because with no ledger there is no week that
+    # prices every promotable arm to count from (alpha-engine-config-I9284).
+    assert d.decision_earliest_on["provisional"] is True
+    assert d.decision_earliest_on["counted_from"] == FIRST_COHORT_DATE.isoformat()
     # The v1 answer, pinned so a regression to the forward-horizon projection is
     # a failing assertion and not a silently later date.
     v1 = add_trading_days(FIRST_COHORT_DATE, 126).isoformat()
     assert v1 == "2027-02-22"
     assert d.decision_earliest_on != v1
-    assert d.decision_earliest_on.startswith("2026-09")
+    assert d.decision_earliest_on["date"].startswith("2026-09")
 
 
 def test_decision_earliest_on_does_not_move_with_decided_on():
@@ -1288,9 +1523,20 @@ def test_run_cut_promotion_fails_when_the_written_record_disagrees_with_the_ledg
 # ── The frozen contract ──────────────────────────────────────────────────────
 
 
-def test_the_schema_is_v2_and_pins_the_new_decision_basis():
+def test_the_schema_is_v3_and_pins_the_new_decision_basis():
+    """v3 on the I9272/I9284 change: `decision_earliest_on` became an object,
+    and `excluded_arms` / per-arm `eligible_for_promotion` were added. Bumped
+    rather than redefined in place — a v2 reader handed a v3 record would read
+    the earliest-decision field as a string and find an object."""
     schema = _schema()
-    assert schema["properties"]["schema_version"]["const"] == 2
+    assert schema["properties"]["schema_version"]["const"] == 3
+    assert schema["properties"]["decision_earliest_on"]["type"] == "object"
+    for key in ("excluded_arms", "scored_arms", "promotable_arms"):
+        assert key in schema["required"], key
+    assert (
+        "eligible_for_promotion"
+        in schema["properties"]["arms"]["additionalProperties"]["required"]
+    )
     for key in (
         "decision_metric", "decision_cadence", "decision_source", "decision_column",
         "excluded_horizons", "decision_earliest_on", "ledger", "corroborating",

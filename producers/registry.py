@@ -53,6 +53,28 @@ class ProducerSpec:
     # still champion/challenger. Additive field (config-I2993) — defaults to
     # None so every pre-existing spec is unaffected.
     retired_date: str | None = None
+    # ── Promotion eligibility (alpha-engine-config-I9277, Brian's ruling
+    # 2026-08-29: "for the research arm, we should make all arms promote
+    # eligible, including think tank") ──────────────────────────────────────
+    #
+    # Eligibility is an EXPLICIT RECORDED PROPERTY carrying a reason, never an
+    # arm's absence from a hand-maintained list. The defect this closes: the
+    # promotion engine's ``VALID_CHAMPIONS`` tuple in crucible-backtester was
+    # a SECOND, hand-maintained register that silently omitted
+    # ``no_agent_quant`` and ``single_agent_quant`` — the only two arms with
+    # sufficient evidence to win. Nothing anywhere recorded that they were
+    # excluded, or why: they were simply not typed into a tuple in another
+    # repo. "Scored but ineligible, for no recorded reason" is exactly the
+    # silent-omission class, and an absence cannot be reviewed, alerted on, or
+    # rendered on an audit artifact.
+    #
+    # So: every arm in this dict is promotion-eligible BY DEFAULT. An
+    # exclusion must be stated here, with a reason that appears on the
+    # producer leaderboard's ``arms`` block and from there on the weekly
+    # champion audit record. ``_assert_eligibility_coherent`` below enforces
+    # that the flag and the reason cannot disagree.
+    promotion_eligible: bool = True
+    ineligible_reason: str | None = None
     # The first-party modules that IMPLEMENTED this arm, recorded when it is
     # retired (alpha-engine-config-I7827). champion-challenger-policy.md §6
     # requires the code to be DELETED rather than left dormant, and this field
@@ -95,6 +117,18 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
             "local.run",
             "local.offline_stubs",
         ),
+        # champion-challenger-policy.md §3: retired arms are scored for a
+        # trailing window as historical evidence, and §6 makes retirement an
+        # operator decision — so a retired arm is never promotion-eligible.
+        # Stated, not inferred from ``kind``: the promotion engine reads this
+        # flag, and an engine that had to re-derive "retired implies
+        # ineligible" is one refactor away from not doing so.
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-07-12 (alpha-engine-config-I2993) — scored for the "
+            "champion-challenger-policy.md §3 trailing window as historical "
+            "evidence only; §6 makes reinstatement an operator decision"
+        ),
     ),
     "no_agent_quant": ProducerSpec(
         name="no_agent_quant",
@@ -112,6 +146,39 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         "candidates; deterministic quant + composite; no multi-agent fan-out, no "
         "macro/CIO (config#1223 / M3 baseline)",
         build=run_single_agent_producer,
+    ),
+    "scanner_predictor_direct": ProducerSpec(
+        name="scanner_predictor_direct",
+        kind="challenger",
+        version="v1",
+        description="scanner top-~60 candidates passed straight to the "
+        "predictor, its top-N by predicted_alpha taken as the arm's picks. "
+        "LIVE since 2026-07-13 (config-I2364 operator bootstrap). Registered "
+        "here 2026-08-29 (alpha-engine-config-I9277): it had been a promotion "
+        "arm for six weeks while existing in NO producer register — only in "
+        "crucible-backtester's VALID_CHAMPIONS literal.",
+        # build=None: when this arm is the live champion its picks ARE
+        # signals/{date}/signals.json, which the leaderboard scores as the
+        # champion row. It writes no signals_shadow/ of its own, so if the
+        # pointer ever moves OFF it, it becomes unscoreable until a shadow
+        # writer exists — recorded on the board as an explicit absence
+        # (scored=false + absence_reason), never as a silent missing row.
+        build=None,
+    ),
+    "scanner_top20_predictor": ProducerSpec(
+        name="scanner_top20_predictor",
+        kind="challenger",
+        version="v1",
+        description="scanner top-20 (not top-60) passed directly to the "
+        "predictor — the arm Brian's 2026-08-27 ruling names. Registered here "
+        "2026-08-29 (alpha-engine-config-I9277); previously only in "
+        "crucible-backtester's VALID_CHAMPIONS literal.",
+        # build=None and NO signals_shadow/ writer exists: this arm is scored
+        # today only as a crucible-backtester end-to-end counterfactual, which
+        # is a DIFFERENT source and cohort from every other arm on this board
+        # (alpha-engine-config-I9279). Until a shadow writer exists it appears
+        # on the board as an explicit unscored arm with an absence reason.
+        build=None,
     ),
     "thinktank_coverage": ProducerSpec(
         name="thinktank_coverage",
@@ -204,6 +271,67 @@ def retired_producers(as_of: str | _date | None = None) -> list[ProducerSpec]:
     return out
 
 
+def promotion_eligible_producers() -> list[ProducerSpec]:
+    """EVERY arm the promotion engine may move the live pointer onto.
+
+    THE single register for promotion eligibility (alpha-engine-config-I9277,
+    Brian's ruling 2026-08-29: "for the research arm, we should make all arms
+    promote eligible, including think tank"). crucible-backtester's
+    ``champion_promotion.py`` no longer carries its own ``VALID_CHAMPIONS``
+    tuple; it resolves the arm set from the producer leaderboard's ``arms``
+    block, which is this function projected onto the artifact.
+
+    Note what is NOT filtered here: ``confidence``, ``n_dates_scored``, and
+    the sign of an arm's alpha are all evidence questions the GATE weighs,
+    never eligibility questions. An arm grading negative is still eligible —
+    that is the whole point of a winner-take-all slot, and Brian ruled with
+    both currently-scored arms grading negative.
+    """
+    return [p for p in RESEARCH_PRODUCERS.values() if p.promotion_eligible]
+
+
+def ineligible_producers() -> dict[str, str]:
+    """``{arm_name: reason}`` for every registered arm that may NOT be promoted.
+
+    The reason is load-bearing: it is carried onto the producer leaderboard and
+    from there onto the weekly champion audit record, so "this arm was scored
+    but could not win" is always a stated fact with a justification attached,
+    never an arm's silent absence from a tuple.
+    """
+    return {
+        p.name: (p.ineligible_reason or "no reason recorded")
+        for p in RESEARCH_PRODUCERS.values()
+        if not p.promotion_eligible
+    }
+
+
+def _assert_eligibility_coherent() -> None:
+    """Import-time guard: the flag and the reason can never disagree.
+
+    An ineligible arm with no reason reintroduces exactly the silent-omission
+    defect I9277 closes — the exclusion would render on the audit artifact as
+    a blank, which reads as "no reason to state" rather than "nobody stated
+    one". An ELIGIBLE arm carrying a reason is the same bug mirrored: a reader
+    (or a future filter) would trust the prose over the flag.
+    """
+    for spec in RESEARCH_PRODUCERS.values():
+        if not spec.promotion_eligible and not spec.ineligible_reason:
+            raise ValueError(
+                f"producer {spec.name!r} is promotion_eligible=False with no "
+                "ineligible_reason — an exclusion MUST carry a recorded reason "
+                "(alpha-engine-config-I9277)"
+            )
+        if spec.promotion_eligible and spec.ineligible_reason:
+            raise ValueError(
+                f"producer {spec.name!r} is promotion_eligible=True but carries "
+                f"ineligible_reason={spec.ineligible_reason!r} — the flag and the "
+                "reason contradict each other (alpha-engine-config-I9277)"
+            )
+
+
+_assert_eligibility_coherent()
+
+
 def champion_producer() -> ProducerSpec | None:
     """The live ``kind=="champion"`` producer, or ``None`` when no spec is
     currently registered as champion (config-I2993: retiring a spec does not
@@ -237,5 +365,15 @@ def champion_producer() -> ProducerSpec | None:
 # (union-extended over its own fail-closed baselines); this row is the
 # policy-level declaration and the drift-test anchor for the producer side.
 EMPTY_BUY_CANDIDATES_BY_CONTRACT_PRODUCERS = ("signals_envelope",)
-FILLING_CHAMPION_ARMS = ("scanner_predictor_direct", "thinktank_coverage")
+
+# DERIVED from the register, not typed a second time (alpha-engine-config
+# -I9277). As a hand-maintained literal this tuple was
+# ``("scanner_predictor_direct", "thinktank_coverage")`` — it had silently
+# gone stale when ``scanner_top20_predictor`` became a promotion arm on
+# 2026-08-27, so a promotion onto that arm would have hit the executor's
+# coherence assertion with the arm in NEITHER the filling nor the noop set.
+# Same defect class as VALID_CHAMPIONS, same fix: one register, projected.
+FILLING_CHAMPION_ARMS = tuple(
+    sorted(p.name for p in RESEARCH_PRODUCERS.values() if p.promotion_eligible)
+)
 NOOP_CHAMPION_ARMS = ("agentic",)
