@@ -40,6 +40,13 @@ _install_ls_patch()
 # on sys.path until that line runs (mirrors lambda/handler.py's pattern).
 from nousergon_lib.logging import monitor_handler, setup_logging  # noqa: E402
 
+from invocation_budget import (  # noqa: E402
+    BlockTimeout,
+    InvocationBudget,
+    NoBudget,
+    run_bounded,
+)
+
 _FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(
     os.environ.get(
@@ -58,6 +65,43 @@ setup_logging(
 logger = logging.getLogger(__name__)
 
 _init_done = False
+
+# Per-block wall-clock ceilings for the FOUR secondary aggregations bolted onto
+# this stage (alpha-engine-config-I9102). The primary deliverable — the rolling
+# 4-week mean — runs first and unbounded; it took 1.6s on 2026-08-28 and 0.6s
+# the week before, and it is the only thing this stage owes the pipeline.
+#
+# Every number below is a BUDGET, not an accommodation (sf-pipeline-policy.md
+# §4). Each is the block's observed duration with headroom, measured from this
+# function's own CloudWatch REPORT/log timeline:
+#
+#   calibration_kappa      0.6s   (2026-08-21, -22, -28: 0.59s / 0.60s / 0.59s)
+#   control_bands          0.4-1.4s (0.39s / 0.92s / 1.41s over the same three)
+#   agent_quality          NEVER COMPLETED. Its predecessor died in 0.2s on the
+#                          I8177 date-type bug every week from 2026-06-23 to
+#                          2026-08-22; the first run after that fix (2026-08-28)
+#                          entered it and was still inside it 298s later, because
+#                          evals.judge_outcome_ic.open_research_db downloads the
+#                          356 MB s3://alpha-engine-research/research.db snapshot
+#                          into a 512 MB function. 240s is a deliberate first
+#                          budget for a block with no completed observation:
+#                          generous enough that the download plausibly finishes
+#                          at the raised memory/CPU, bounded enough that it can
+#                          never again spend the stage's whole invocation.
+#                          Re-size from the first COMPLETED run, not from this.
+#   producer_leaderboard   60-95s (2026-08-21: 96.9s, -22: 61.4s — an ArcticDB
+#                          load_universe_ohlcv walk over ~905 symbols). 240s is
+#                          ~2.5x the worst observation, which is where a block
+#                          that grows with the universe needs to sit.
+#
+# The ceilings sum to 600s. With the primary deliverable (~1.6s) and the 20s
+# reserve that fits inside the function's 900s ceiling with ~280s spare, so the
+# worst case is every block spending its whole ceiling and the stage STILL
+# returning normally — never the SF state being the thing that stops it.
+_CEILING_CALIBRATION_S = 60.0
+_CEILING_CONTROL_BANDS_S = 60.0
+_CEILING_AGENT_QUALITY_S = 240.0
+_CEILING_PRODUCER_LEADERBOARD_S = 240.0
 
 
 def _emit_producer_failure_alert(*, producer: str, artifact: str, exc: BaseException) -> None:
@@ -156,7 +200,7 @@ def _run(event, context):
 
     # Imports deferred until after _ensure_init in case the rolling-mean
     # module ever pulls config that depends on SSM-loaded secrets.
-    from evals.rolling_mean import compute_and_emit_4w_mean
+    from evals.rolling_mean import EvalFloorUnmeasurable, compute_and_emit_4w_mean
 
     end_time_iso = event.get("end_time_iso")
     end_time = (
@@ -183,11 +227,63 @@ def _run(event, context):
 
     try:
         summary = compute_and_emit_4w_mean(end_time=end_time)
+    except EvalFloorUnmeasurable:
+        # alpha-engine-config-I9321 — this one PROPAGATES, and the ordering of
+        # these two handlers is the whole fix.
+        #
+        # `{"status": "ERROR"}` is a SUCCESSFUL Lambda return. `EvalRollingMean`
+        # has no Choice state reading `status`; its only exit on success goes
+        # straight to `CheckSkipRationaleClustering`. So the generic handler
+        # below converts every computation failure into a green stage carrying
+        # a field nobody reads — which is how the quality floor stopped
+        # publishing on ~2026-08-20 and the weekly pipeline never once said so.
+        #
+        # An unpublished floor blinds the alarm that is the ENTIRE notification
+        # path for a quality regression (champion-challenger-policy.md §8: the
+        # judge's scores are observability only and may never demote anything,
+        # so telling Brian is not one response among several — it is the only
+        # one). Raising surfaces it as States.TaskFailed; the SF's existing
+        # Catch still routes to `MarkEvalRollingMeanDegraded`, so the weekly
+        # pipeline continues as eval-as-observability requires, but it
+        # continues with `research_degraded_local=true` and a failed stage
+        # instead of a clean one.
+        logger.exception(
+            "[eval_rolling_mean_handler] quality floor UNMEASURABLE — failing "
+            "the stage rather than returning a green one (I9321)"
+        )
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_rolling_mean_handler] computation failed hard")
         return {"status": "ERROR", "error": str(exc)}
 
     status = "PARTIAL" if summary["failed"] else "OK"
+
+    # Everything below this line is SECONDARY (alpha-engine-config-I9102). The
+    # primary deliverable is emitted; from here on the invocation's remaining
+    # time is a resource that must be rationed, because on 2026-08-28 one
+    # secondary block spent all 298 remaining seconds and the Step Functions
+    # state raised States.Timeout on a stage that had already succeeded — which
+    # fail-opened the research/predictor branch and terminated the weekly run
+    # FAILED. Unbounded outside Lambda (tests, local runs), so behaviour there
+    # is unchanged.
+    _budget = InvocationBudget.from_context(context)
+
+    def _shortfall(producer: str, artifact: str, exc: BaseException) -> dict:
+        """Record a block the invocation could not afford, on a machine surface.
+
+        Not a silent skip: ERROR log + the same producer-failure alert a hard
+        failure raises + a status the consumer can distinguish from OK. The
+        stage keeps its primary deliverable and returns.
+        """
+        logger.error(
+            "[eval_rolling_mean_handler] %s NOT COMPLETED within this "
+            "invocation's budget: %s", producer, exc,
+        )
+        _emit_producer_failure_alert(producer=producer, artifact=artifact, exc=exc)
+        return {
+            "status": "TIMEOUT" if isinstance(exc, BlockTimeout) else "SKIPPED_NO_BUDGET",
+            "error": str(exc),
+        }
     logger.info(
         "[eval_rolling_mean_handler] done status=%s emitted=%d skipped=%d failed=%d",
         status,
@@ -206,7 +302,12 @@ def _run(event, context):
     try:
         from evals.calibration_kappa import emit_calibration_report
 
-        report = emit_calibration_report()
+        report = run_bounded(
+            emit_calibration_report,
+            name="calibration_kappa",
+            ceiling_s=_CEILING_CALIBRATION_S,
+            budget=_budget,
+        )
         calibration = {
             "status": report["status"],
             "n_cells": report["n_cells"],
@@ -218,6 +319,10 @@ def _run(event, context):
             calibration["status"],
             calibration["n_cells"],
             calibration["n_cells_sufficient"],
+        )
+    except (BlockTimeout, NoBudget) as exc:
+        calibration = _shortfall(
+            "calibration_kappa", "the eval-judge calibration κ report", exc,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         logger.error(
@@ -241,7 +346,12 @@ def _run(event, context):
     try:
         from evals.control_bands import compute_and_emit_control_bands
 
-        cb = compute_and_emit_control_bands(end_time=end_time)
+        cb = run_bounded(
+            lambda: compute_and_emit_control_bands(end_time=end_time),
+            name="control_bands",
+            ceiling_s=_CEILING_CONTROL_BANDS_S,
+            budget=_budget,
+        )
         control_bands = {
             "status": "OK" if not cb["failed"] else "PARTIAL",
             "combos_discovered": cb["combos_discovered"],
@@ -256,6 +366,10 @@ def _run(event, context):
             control_bands["combos_discovered"],
             control_bands["combos_insufficient_history"],
             control_bands["breach_count"],
+        )
+    except (BlockTimeout, NoBudget) as exc:
+        control_bands = _shortfall(
+            "control_bands", "the per-combo control-band breach emits", exc,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         logger.error(
@@ -305,17 +419,29 @@ def _run(event, context):
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         dual = now_dual()
         s3c = boto3.client("s3")
-        artifact = build_agent_quality(
-            s3c, bucket,
-            date.fromisoformat(dual.trading_day),
-            run_date=date.fromisoformat(dual.calendar_date),
+        def _build_and_write_agent_quality() -> tuple[dict, str]:
+            built = build_agent_quality(
+                s3c, bucket,
+                date.fromisoformat(dual.trading_day),
+                run_date=date.fromisoformat(dual.calendar_date),
+            )
+            return built, write_agent_quality(s3c, bucket, built)
+
+        artifact, key = run_bounded(
+            _build_and_write_agent_quality,
+            name="agent_quality",
+            ceiling_s=_CEILING_AGENT_QUALITY_S,
+            budget=_budget,
         )
-        key = write_agent_quality(s3c, bucket, artifact)
         graded = sorted(k for k, v in artifact.items() if isinstance(v, dict) and "value" in v)
         agent_quality = {"status": "OK", "key": key, "graded_components": graded}
         logger.info(
             "[eval_rolling_mean_handler] agent_quality wrote %s (%d graded: %s)",
             key, len(graded), ",".join(graded) or "(none — no signals/evals this run)",
+        )
+    except (BlockTimeout, NoBudget) as exc:
+        agent_quality = _shortfall(
+            "agent_quality", "backtest/{date}/agent_quality.json", exc,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         # The primary deliverable (the rolling mean) still survives a failure
@@ -363,7 +489,12 @@ def _run(event, context):
         bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
         dual = now_dual()
         s3c = boto3.client("s3")
-        lb = build_producer_leaderboard(s3c, bucket, dual.trading_day)
+        lb = run_bounded(
+            lambda: build_producer_leaderboard(s3c, bucket, dual.trading_day),
+            name="producer_leaderboard",
+            ceiling_s=_CEILING_PRODUCER_LEADERBOARD_S,
+            budget=_budget,
+        )
         producer_leaderboard = {
             "status": lb.get("status"),
             "key": lb.get("key"),
@@ -373,6 +504,12 @@ def _run(event, context):
             "[eval_rolling_mean_handler] producer_leaderboard status=%s key=%s n_dates=%s",
             producer_leaderboard["status"], producer_leaderboard["key"],
             producer_leaderboard["n_dates"],
+        )
+    except (BlockTimeout, NoBudget) as exc:
+        producer_leaderboard = _shortfall(
+            "producer_leaderboard",
+            "the research producer champion/challenger leaderboard",
+            exc,
         )
     except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
         logger.error(

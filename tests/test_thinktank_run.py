@@ -143,10 +143,19 @@ class _FakeBackend:
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(body)))],
             usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=200),
+            # Distinct from the group alias ("low"/"med") — the krepis I6543
+            # masquerade guard refuses to bill/record a call under the alias.
+            model="deepseek-v4-flash-max",
         )
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
+
+
+# Every tier is group-addressed (alpha-engine-config-I9302); the router call
+# is stubbed to a fixed route and cost priced from a stub PriceTable, mirroring
+# tests/test_thinktank_client.py's pattern.
+_TIER_GROUPS = {"sweep": "low", "themes": "low", "thesis": "med", "pillar": "med"}
 
 
 @pytest.fixture()
@@ -157,17 +166,13 @@ def tt_config(tmp_path, monkeypatch):
             "coverage": {"daily_new_names": 3, "rank_ceiling": 150, "sweep_chunk_size": 25},
             "budget": {"monthly_usd_default": 25.0, "ssm_param": "/thinktank/monthly_budget_usd"},
             "llm": {
-                "providers": {"fake": {"base_url": "http://fake", "key_secret": "OPENROUTER_API_KEY"}},
                 "tiers": {
                     t: {
-                        "provider": "fake",
-                        "model": f"fake/{t}",
+                        "group": group,
                         "max_tokens": 1000,
-                        "price_in_per_m": 1.0,
-                        "price_out_per_m": 2.0,
                         "structured_outputs": True,
                     }
-                    for t in ("sweep", "themes", "thesis", "pillar")
+                    for t, group in _TIER_GROUPS.items()
                 },
             },
         }
@@ -177,9 +182,32 @@ def tt_config(tmp_path, monkeypatch):
     path = tmp_path / "thinktank.yaml"
     path.write_text(yaml.safe_dump(cfg))
     monkeypatch.setenv("THINKTANK_CONFIG_PATH", str(path))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("THINKTANK_MONTHLY_BUDGET_USD", "25.0")
     monkeypatch.delenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", raising=False)
+
+    from datetime import date as _date
+
+    import krepis.router as _kr
+    from krepis.cost import PriceCard, PriceTable
+
+    def _route(group, **_kw):
+        return {
+            "schema_version": 2, "group": group, "route": "litellm_proxy",
+            "provider": "litellm", "deployment_id": group,
+            "api_base_url": "https://router.example:8443",
+            "auth_token_type": "litellm_master_key",
+            "registry_id": f"litellm:group:{group}",
+            "primary_registry_id": "deepseek-v4-flash-max", "params": {},
+        }
+
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "consumer-test")
+    monkeypatch.setattr(_kr, "resolve_group_structured", _route)
+    _price_table = PriceTable(cards=[PriceCard(
+        model_name="deepseek-v4-flash-max", effective_from=_date(2026, 1, 1),
+        input_per_1m=1.0, output_per_1m=2.0,
+        cache_read_per_1m=0.0, cache_create_per_1m=0.0,
+    )])
+    monkeypatch.setattr("krepis.cost.load_default_pricing", lambda: _price_table)
     return path
 
 

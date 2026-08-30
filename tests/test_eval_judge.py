@@ -213,50 +213,40 @@ def _make_llm_output() -> RubricEvalLLMOutput:
 
 
 class TestResolveRubricForAgent:
-    def test_sector_quant_with_team(self):
+    def test_thinktank_thesis_exact_match(self):
         from evals.judge import resolve_rubric_for_agent
 
-        assert resolve_rubric_for_agent("sector_quant:technology") == "eval_rubric_sector_quant"
-        assert resolve_rubric_for_agent("sector_quant:financials") == "eval_rubric_sector_quant"
+        assert resolve_rubric_for_agent("thinktank_thesis") == "eval_rubric_thinktank_thesis"
 
-    def test_sector_qual_with_team(self):
+    def test_thinktank_theme_exact_match(self):
         from evals.judge import resolve_rubric_for_agent
 
-        assert resolve_rubric_for_agent("sector_qual:healthcare") == "eval_rubric_sector_qual"
-
-    def test_sector_peer_review_with_team(self):
-        from evals.judge import resolve_rubric_for_agent
-
-        assert resolve_rubric_for_agent("sector_peer_review:industrials") == "eval_rubric_sector_peer_review"
-
-    def test_macro_economist_exact_match(self):
-        from evals.judge import resolve_rubric_for_agent
-
-        assert resolve_rubric_for_agent("macro_economist") == "eval_rubric_macro_economist"
-
-    def test_ic_cio_exact_match(self):
-        from evals.judge import resolve_rubric_for_agent
-
-        assert resolve_rubric_for_agent("ic_cio") == "eval_rubric_ic_cio"
-
-    def test_thesis_update_with_team_and_ticker(self):
-        # Held-stock thesis update rubric promoted from "deferred"
-        # to "shipped" 2026-05-05 after confirming behavioral
-        # load-bearing-ness in the executor (position sizing reads
-        # conviction; EOD email reads bull_case). agent_id shape is
-        # ``thesis_update:{team}:{ticker}`` per
-        # research_graph._capture_if_enabled.
-        from evals.judge import resolve_rubric_for_agent
-
-        assert resolve_rubric_for_agent("thesis_update:technology:AAPL") == "eval_rubric_thesis_update"
-        assert resolve_rubric_for_agent("thesis_update:financials:JHG") == "eval_rubric_thesis_update"
-        assert resolve_rubric_for_agent("thesis_update:healthcare:LLY") == "eval_rubric_thesis_update"
+        assert resolve_rubric_for_agent("thinktank_theme") == "eval_rubric_thinktank_theme"
 
     def test_unknown_agent_returns_none(self):
         from evals.judge import resolve_rubric_for_agent
 
         assert resolve_rubric_for_agent("totally_made_up_agent") is None
         assert resolve_rubric_for_agent("") is None
+
+    def test_retired_research_graph_families_are_unmapped_not_a_default(self):
+        """alpha-engine-config-I9330: the 2026-07-12-retired research
+        graph's six agent families must resolve to a clean ``None`` skip
+        — never a crash, and never a resurrected/default rubric. RED
+        against a version that still maps any of these (the defect this
+        issue exists to retire) or that raises instead of returning
+        ``None`` (the forbidden shape per the issue's Closes-when)."""
+        from evals.judge import resolve_rubric_for_agent
+
+        for agent_id in (
+            "sector_quant:technology",
+            "sector_qual:healthcare",
+            "sector_peer_review:industrials",
+            "macro_economist",
+            "ic_cio",
+            "thesis_update:technology:AAPL",
+        ):
+            assert resolve_rubric_for_agent(agent_id) is None, agent_id
 
 
 # ── S3 key shape ──────────────────────────────────────────────────────────
@@ -491,19 +481,19 @@ class TestEvaluateArtifact:
         )
 
         with _patch_llm_client(judge_mod, fake_client) as mock_llm_cls:
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact(
                 artifact,
                 judge_model="claude-haiku-4-5",
                 api_key="sk-or-test",
-                judged_artifact_s3_key="decision_artifacts/2026/05/09/sector_quant:technology/r1.json",
+                judged_artifact_s3_key="decision_artifacts/2026/05/09/thinktank_thesis/r1.json",
             )
 
         # Result wrapping
         assert isinstance(result, RubricEvalArtifact)
-        assert result.judged_agent_id == "sector_quant:technology"
+        assert result.judged_agent_id == "thinktank_thesis"
         assert result.run_id == artifact.run_id
-        assert result.rubric_id == "eval_rubric_sector_quant"
+        assert result.rubric_id == "eval_rubric_thinktank_thesis"
         # judge_model is the STABLE logical key (persistence/dimension) —
         # PRESERVED across the migration (S3 path / CloudWatch dimension /
         # rolling-mean identity; see evaluate_artifact's docstring).
@@ -563,7 +553,7 @@ class TestEvaluateArtifact:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact(
                 artifact,
                 judge_model="claude-sonnet-4-6",
@@ -590,7 +580,7 @@ class TestEvaluateArtifact:
         )
         with _patch_llm_client(judge_mod, fake_client):
             result = judge_mod.evaluate_artifact(
-                _make_artifact("sector_quant:technology"),
+                _make_artifact("thinktank_thesis"),
                 judge_model="claude-haiku-4-5",
                 api_key="sk-or-test",
             )
@@ -607,7 +597,7 @@ class TestEvaluateArtifact:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
         # Inspect the rendered user-turn content passed to the API.
@@ -637,7 +627,7 @@ class TestEvaluateArtifact:
         ]
 
         with _patch_llm_client(judge_mod, fake_client), caplog.at_level(logging.WARNING):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact(
                 artifact,
                 judge_model="claude-haiku-4-5",
@@ -663,7 +653,7 @@ class TestEvaluateArtifact:
         )
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
                     artifact,
@@ -688,7 +678,7 @@ class TestEvaluateArtifact:
         )
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             with pytest.raises(RuntimeError):
                 judge_mod.evaluate_artifact(
                     artifact,
@@ -719,7 +709,7 @@ class TestEvaluateArtifact:
         ]
 
         with _patch_llm_client(judge_mod, fake_client), caplog.at_level("WARNING"):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             result = judge_mod.evaluate_artifact(artifact, api_key="sk-or-test")
 
         assert isinstance(result, RubricEvalArtifact)
@@ -742,7 +732,7 @@ class TestEvaluateArtifact:
         )
 
         with _patch_llm_client(judge_mod, fake_client):
-            artifact = _make_artifact("sector_quant:technology")
+            artifact = _make_artifact("thinktank_thesis")
             with pytest.raises(RuntimeError, match="attempts failed"):
                 judge_mod.evaluate_artifact(
                     artifact,
@@ -774,7 +764,7 @@ class TestEmptyInputShortCircuit:
         return DecisionArtifact(
             run_id="run-empty-1",
             timestamp="2026-05-04T13:00:00.000Z",
-            agent_id="sector_qual:financials",
+            agent_id="thinktank_theme",
             model_metadata=ModelMetadata(model_name="claude-haiku-4-5"),
             full_prompt_context=FullPromptContext(
                 system_prompt="<see config/prompts>",
@@ -827,8 +817,8 @@ class TestEmptyInputShortCircuit:
         assert "short-circuited" in result.overall_reasoning.lower()
         # Metadata must still be populated so the audit trail traces
         # back to the judged artifact + rubric + judge model.
-        assert result.judged_agent_id == "sector_qual:financials"
-        assert result.rubric_id == "eval_rubric_sector_qual"
+        assert result.judged_agent_id == "thinktank_theme"
+        assert result.rubric_id == "eval_rubric_thinktank_theme"
         assert result.rubric_version  # frontmatter version
         assert result.judge_model == "claude-haiku-4-5"
         assert result.run_id == "run-empty-1"
@@ -863,7 +853,7 @@ class TestEmptyInputShortCircuit:
             tool_calls=[_openai_tool_call("RubricEvalLLMOutput", _valid_tool_args())],
         )
 
-        artifact = _make_artifact("sector_quant:technology")
+        artifact = _make_artifact("thinktank_thesis")
         # Quant ran, did 22 tool calls, but returned no qualifying picks
         # — the agent-failure pattern from workstream #2 (separate).
         artifact.agent_output = {"ranked_picks": [], "tool_calls": [{}] * 22, "iterations": 22}

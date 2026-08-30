@@ -265,18 +265,25 @@ def test_a_tech_basis_champion_with_no_full_table_still_refuses():
         load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
 
 
-def test_an_observe_only_arm_cannot_hold_the_window_even_if_the_pointer_names_it():
-    """The consumer-side half of alpha-engine-config-I8060.
+def test_an_unregistered_arm_cannot_hold_the_window_even_if_the_pointer_names_it():
+    """The consumer-side half of alpha-engine-config-I8060, rescoped by I9272.
 
-    `tech_score_top_60` is observe-only, so a pointer naming it is refused by
+    A pointer naming an arm outside `PROMOTABLE_CUTS` is refused by
     `live_cut_champion` before the window is ever built — the refusal does not
     depend on the promotion engine, the board, or this module being correct.
+
+    `tech_score_top_60` is no longer such an arm (Brian's ruling 2026-08-29
+    makes every scored arm promotable), so the property is asserted against a
+    name that is genuinely outside the register. That is the only case this
+    guard was ever load-bearing for: a value nobody validated.
     """
     board = _board()
     m = _with_tech_basis_champion(_membership(board), board)
     with pytest.raises(UniverseMembershipError) as exc:
-        load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
-    assert "tech_score_top_60" in str(exc.value)
+        load_feed_window(
+            _store(m, champion="some_cut_nobody_registered_60"), minimum_rank_coverage=200
+        )
+    assert "some_cut_nobody_registered_60" in str(exc.value)
     assert "attractiveness_top_60" in str(exc.value)
 
 

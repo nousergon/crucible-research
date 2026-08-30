@@ -135,9 +135,6 @@ def _run(event, context):
     _started = datetime.datetime.now(datetime.UTC)
     _ensure_init()
 
-    import anthropic
-
-    from config import ANTHROPIC_API_KEY
     from evals.lambda_dry import dry_submit_result, is_dry
     from evals.orchestrator import (
         DEFAULT_HAIKU_MODEL,
@@ -188,15 +185,27 @@ def _run(event, context):
     # producers (thinktank) whose artifacts land in weekday partitions.
     extra_dates = event.get("extra_dates") or None
     agent_id_prefixes = event.get("agent_id_prefixes") or None
-    # capture_lookback_days=N expands to extra_dates covering the N days
-    # before `date` — the Saturday SF passes 6 so the week's thinktank
-    # captures ride the SAME weekly batch (unmapped agent_ids in those
-    # partitions are skipped cleanly; no prior Saturday falls in range).
+    # capture_lookback_days=N expands to extra_dates covering the N
+    # write-settled trading days before `date` — the Saturday SF passes 6
+    # so the week's thinktank captures ride the SAME weekly batch
+    # (unmapped agent_ids in those partitions are skipped cleanly).
+    #
+    # alpha-engine-config-I9331: this does NOT expand off the raw `date`.
+    # Think Tank writes day D's captures on D+1 ~14:35 UTC, and this
+    # Lambda's own weekly invocation enters at ~05:11 UTC on `date` — so
+    # `date`'s own trading day (and, depending on where `date` falls in
+    # the week, the trading day immediately before it too) is frequently
+    # NOT YET WRITTEN. `compute_judge_window_dates` shifts the window's
+    # newest boundary back by the measured write-settle lag before
+    # expanding the lookback, so every date it returns is guaranteed
+    # already written. The day this defers is not lost — it is squarely
+    # inside next week's unchanged 6-day lookback (see that function's
+    # docstring), and `load_already_judged_keys` dedups the overlap.
     lookback = int(event.get("capture_lookback_days") or 0)
     if lookback > 0:
-        from evals.orchestrator import expand_lookback_dates
+        from evals.orchestrator import compute_judge_window_dates
 
-        computed = expand_lookback_dates(date, lookback)
+        computed = compute_judge_window_dates(date, lookback)
         extra_dates = sorted(set(computed) | set(extra_dates or []), reverse=True)
 
     logger.info(
@@ -222,9 +231,15 @@ def _run(event, context):
         plan, s3=s3, bucket=bucket,
     )
 
+    # alpha-engine-config-I9263 (Brian ruling 2026-08-29: "I will not fund the
+    # anthropic account, at this point we shouldn't be using the anthropic api
+    # at all"). No provider SDK client is built here any more. `submit_batch`
+    # asks the router whether the judge's model group can serve the `batches`
+    # CAPABILITY from this Lambda and, when it cannot, takes the synchronous
+    # rung and records the degradation durably — see
+    # `evals/judge_batch_transport.py` for the ladder.
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        submit_result = submit_batch(plan, anthropic_client=client, s3_client=s3)
+        submit_result = submit_batch(plan, s3_client=s3)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_submit_handler] batch submission failed")
         return {"status": "ERROR", "stage": "submit", "error": str(exc)}
@@ -255,6 +270,13 @@ def _run(event, context):
             "skip_failed": skip_failed,
             "force_sonnet_pass": force_sonnet_pass,
             "judge_only": judge_only,
+            # I9331 deliverable 3: an expected-but-empty capture partition
+            # is a named finding, not an absence. Non-empty here does NOT
+            # halt the run (eval is observability) but MUST be visible on
+            # every surface reading this result — never collapse it into
+            # a clean-looking `capture_keys_total`.
+            "capture_partition_counts": plan["capture_partition_counts"],
+            "empty_trading_day_partitions": plan["empty_trading_day_partitions"],
         },
     }
 

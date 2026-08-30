@@ -226,7 +226,10 @@ def run_quant_analyst(
     # every ticker in the sector, same prefix across all sectors when
     # market_regime is unchanged (regime is set once at pipeline start).
     # Requires the assembled prefix to clear Haiku-4-5's 4096-token
-    # cache minimum — verified via scripts/measure_cache_prefixes.py
+    # cache minimum — verified via the retired scripts/measure_cache_prefixes.py
+    # (removed 2026-08-29, alpha-engine-config-I9263: it counted tokens through
+    # the direct Anthropic API, which Brian retired; it had no automated caller
+    # and cannot run at all now, so keeping it would be a false affordance)
     # before merge. On miss, ``cache_creation_input_tokens`` stays 0 in
     # ``graph.llm_cost_tracker`` telemetry and the rollout is a no-op —
     # no functional regression.

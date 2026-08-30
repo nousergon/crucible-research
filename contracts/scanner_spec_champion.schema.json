@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nousergon/crucible-research/contracts/scanner_spec_champion.schema.json",
+  "title": "scanner spec champion pointer + apply-audit record (v1)",
+  "description": "FROZEN contract for the scanner SPEC slot's decision record — the slot that decides HOW candidates are ranked (data/scanner_specs.py::SCANNER_SPECS), not which names the sector teams research (that is the CUT slot, contracts/scanner_cut_champion.schema.json). champion-challenger-policy.md §2 forbids conflating them: separate axes, separate registries, separate records. ONE document shape written to THREE keys by crucible-research/scoring/spec_promotion.py::run_spec_promotion on EVERY scanner evaluation — promote, demote or hold: config/scanner_spec_champion.json (the live pointer, read by data/scanner_specs.py::live_champion_spec, which the scanner orchestrator applies to rank the live cut), config/apply_audit/scanner_spec_champion/{date}.json (immutable dated history) and config/apply_audit/scanner_spec_champion/latest.json (freshness/liveness proxy). One shape rather than a separate pointer schema and audit schema on purpose: the pointer IS the latest decision record, and two shapes would let the two surfaces disagree about what was decided. Written unconditionally because champion-challenger-policy.md §3 forbids silent absence and a genuine outcome rendering identically — before this engine existed the champion moved only by a hand-edit of LIVE_CHAMPION, which is how alpha-engine-config-I7808 produced four weeks of a leaderboard scoring an arm against itself. Evolution within v1 is additive-only: consumers MUST tolerate unknown extra fields; any rename or removal, and any new reason_code slug meaning a condition an existing slug already covered, requires a schema_version bump.",
+  "type": "object",
+  "required": [
+    "schema_version", "producer", "slot_id", "decided_on", "decision",
+    "champion", "champion_before", "reason", "reason_code",
+    "decision_metric", "decision_cadence", "decision_source", "decision_field",
+    "decision_horizon_days", "reported_field", "arms", "eligibility",
+    "hysteresis", "decision_earliest_on", "board"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "producer": { "const": "crucible-research/scoring/spec_promotion.py" },
+    "slot_id": { "const": "scanner_spec" },
+    "generated_at": {
+      "type": "string",
+      "description": "UTC ISO-8601 write time. Distinct from decided_on: a re-run on the same trading day rewrites the same dated key with a later generated_at."
+    },
+    "decided_on": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "The scanner run date keying both the dated audit record and the scanner/leaderboard/{date}.json the decision read."
+    },
+    "decision": {
+      "enum": ["promote", "demote", "hold"],
+      "description": "promote = the pointer moved to an arm other than the standing default. demote = it moved BACK to default_champion, i.e. the experiment was reversed. hold = it did not move, for the reason in reason_code. Promotion and demotion clear the SAME margin and the SAME cooldown (champion-challenger-policy.md §5.2 — the same bar in reverse); they are two decision values rather than one because 'a new arm won' and 'the experiment was reversed' are different facts about the slot and a reader of the series must be able to count them separately. A hold is an OUTCOME and is always written; it is never expressed as the absence of a record."
+    },
+    "champion": {
+      "type": "string",
+      "description": "The arm whose ScannerSpec.rank the live candidate path applies until the next evaluation. MUST be a registered arm of data/scanner_specs.py::SCANNER_SPECS — live_champion_name() raises ScannerSpecPointerError on anything else rather than serving the default, because a promotion engine that believes one arm ranks the live cut while the scanner applies another is the 2026-07-22 drift (alpha-engine-config-I7808). Before the pointer moves, register_for_champion() CONSTRUCTS the target register and re-asserts its coherence — exactly one champion, the champion carries a rank, no challenger shares its callable — so an incoherent target is refused rather than served."
+    },
+    "champion_before": {
+      "type": "string",
+      "description": "The validated champion read at the start of this evaluation, or DEFAULT_SPEC_CHAMPION when no pointer had ever been written. Equal to champion on every hold. It is also the leg every arm's paired alpha is taken against, which is why a record is not interpretable without it."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prose, for the human reconstructing the decision from this artifact alone (principles.md §2.1). Names the metric, the paired observation count, the shortfall, and what holds."
+    },
+    "reason_code": {
+      "enum": [
+        "promoted",
+        "demoted",
+        "champion_already_leads",
+        "no_registered_challenger",
+        "no_eligible_challenger",
+        "no_common_cohort",
+        "insufficient_dates",
+        "leaderboard_missing",
+        "leaderboard_unmeasurable",
+        "decision_horizon_missing",
+        "champion_row_missing",
+        "margin_not_met",
+        "cooldown_active",
+        "board_defective"
+      ],
+      "description": "Machine-readable outcome. 'promoted' and 'demoted' are the only values permitted alongside a pointer movement. THREE slugs are deliberately kept apart and must never be collapsed, because collapsing them is the misread this engine exists to prevent: no_eligible_challenger = no challenger has been scored on ANY cohort date, so no comparison was possible (this is the measured 2026-08-28 board — champion 7 dates, both challengers 0 — and it is UNANSWERABLE, not a champion win); no_common_cohort = a challenger IS scored but on no date the champion also scored, so topn_alpha_vs_champion is null and there is no intersection to compare over; champion_already_leads = a real paired comparison happened and the incumbent won it. The first three plus insufficient_dates are evidence-shaped holds, are the expected steady state today, and must not alert. board_defective IS a defect and does alert: the record is written and run_spec_promotion then raises SpecPromotionError. No slug in this enum may ever be re-minted for a different condition — that is a schema bump, because it silently redefines every archived record carrying it."
+    },
+    "decision_metric": {
+      "const": "topn_alpha_vs_champion_21d_date_clustered",
+      "description": "The metric the decision is taken on. Deliberately verbose: a reader seeing only this string can tell WHAT was measured (long-only top-N realized alpha), AGAINST WHAT (the serving champion, on the SAME cohort date), and OVER WHAT (a 21-session forward window). It is the scanner board's topn_alpha_vs_champion field. leaderboard_scoring._topn_alpha_metric admits a date only when BOTH sides have a realized top-N return, so the cohort intersection is inside the metric by construction (§4, same cohort dates) and its n_dates IS the size of that intersection."
+    },
+    "decision_cadence": {
+      "const": "per_scanner_run",
+      "description": "One evaluation per scanner run. The engine is cadence-agnostic: its hysteresis is measured in CALENDAR days (cooldown_days), not invocations, so it behaves identically whether the scanner runs every weekday or weekly."
+    },
+    "decision_source": {
+      "const": "scanner/leaderboard/{date}.json",
+      "description": "The scanner leaderboard, and the only evidence the decision reads. The decision block is read from the artifact's `horizons` list and NEVER from its top level: the two carry the same rows for the primary horizon by design, but only the block carries the `status` that says whether the horizon is decidable at all."
+    },
+    "decision_field": {
+      "const": "topn_alpha_vs_champion",
+      "description": "The board field decided on. Asserted at import to differ from reported_field."
+    },
+    "decision_horizon_days": {
+      "type": "integer",
+      "description": "The forward horizon the decision block covers. Asserted at import to be a member of leaderboard_scoring.LEADERBOARD_SLOTS['scanner'].horizons_days, so the decision can never read a block that is never written."
+    },
+    "reported_field": {
+      "const": "topn_alpha_vs_population",
+      "description": "The scanner slot's primary BOARD metric, recorded on every arm and NEVER decided on. It is measured on each arm's OWN cohort dates, so ranking two arms by it compares one arm's month to another's quarter — which on this slot they always are: the champion's cohort comes from the LIVE candidates/{date}/ prefix and the challengers' from candidates_shadow/{spec}/{date}/, so the champion has history the challengers structurally cannot (alpha-engine-config-I9274)."
+    },
+    "last_promoted_on": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "decided_on of the most recent pointer movement (promote OR demote), carried forward across holds. Null until the first movement. The §5.2 cooldown is measured from it in both directions."
+    },
+    "leaderboard_key": {
+      "type": ["string", "null"],
+      "description": "The scanner/leaderboard/{date}.json this decision was taken from, so every number can be joined back to its source. Null when no board was available, which is the leaderboard_missing hold."
+    },
+    "arms": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "EVERY registered arm of SCANNER_SPECS, ALWAYS — on a hold, and including an arm with no scored cohort at all (champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted). n_dates_paired is the measurability surface: it is 0 for every challenger today and climbing it past min_dates_for_inference is the precondition for any pointer movement. `required` is not pinned to particular names because PROMOTABLE_SPECS is derived from SCANNER_SPECS itself — Brian's ruling 2026-08-29 that every scored arm must be able to win — so registering an arm adds it here with no schema edit.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "present", "is_champion", "kind", "eligible_for_promotion",
+          "ineligible_reason_code", "n_dates_scored", "n_dates_paired",
+          "mean_paired_alpha_vs_champion", "confidence", "metric", "cadence",
+          "source"
+        ],
+        "properties": {
+          "present": {
+            "type": "boolean",
+            "description": "False when the decision path never read a board row for this arm at all (no board, no decision-horizon block, the registry-only short-circuit, a defective board). A false here means the numbers beside it are placeholders and are NOT a claim about the board — reconcile_arms_with_board skips exactly these."
+          },
+          "is_champion": { "type": "boolean" },
+          "kind": { "enum": ["champion", "challenger"] },
+          "eligible_for_promotion": {
+            "type": "boolean",
+            "description": "Whether THIS arm could have taken the pointer on THIS evaluation. Every registered arm is promotion-eligible as a registry matter (see the top-level `eligibility` block); this field is the EVIDENCE question and the two are never rendered as one. False is always accompanied by a non-null ineligible_reason_code — an arm is never excluded by absence."
+          },
+          "ineligible_reason_code": {
+            "type": ["string", "null"],
+            "enum": [
+              null,
+              "is_serving_champion",
+              "no_scored_cohort",
+              "no_common_cohort_with_champion",
+              "paired_cohort_below_evidence_floor",
+              "declared_ineligible"
+            ],
+            "description": "Why this arm could not be promoted this evaluation. A closed taxonomy, asserted at import to be DISJOINT from the decision-level reason_code enum: 'the slot held because nothing was comparable' and 'this arm was not comparable' are different statements and one slug meaning both would make the series unreadable. no_scored_cohort (never measured) and no_common_cohort_with_champion (measured, but on no date the champion also scored) are the two that must never be confused with the arm having lost — on the measured 2026-08-28 board both challengers carry the first."
+          },
+          "ineligible_reason": {
+            "type": ["string", "null"],
+            "description": "Prose for the same condition, so a reader of one arm's block does not have to hold the slug taxonomy in their head."
+          },
+          "n_dates_scored": {
+            "type": "integer", "minimum": 0,
+            "description": "Cohort dates this arm scored on its own prefix at the decision horizon. For a challenger this comes from candidates_shadow/{spec}/{date}/candidates.json; for the champion from the LIVE candidates/{date}/candidates.json."
+          },
+          "n_dates_paired": {
+            "type": "integer", "minimum": 0,
+            "description": "Cohort dates this arm AND the champion BOTH scored — the intersection the decision is taken over, read from the paired metric's own n_dates (and from cohort_intersection_dates when the board carries it). THE measurability surface for this slot. 0 means there is no comparison, which is a HOLD and never a champion win. Reconciled against the cited board after the record is written; a disagreement raises SpecPromotionError. Always 0 for the champion, which is not differenced against itself."
+          },
+          "mean_paired_alpha_vs_champion": {
+            "type": ["number", "null"],
+            "description": "The decision number: the arm's mean top-N realized alpha MINUS the champion's, per shared cohort date, clustered across those dates. For a challenger this IS the margin — the series is already differenced against the champion, so no second subtraction is done. Null whenever n_dates_paired is 0, and null for the champion itself: a 0.0 there would read as a measured flat result rather than as the baseline it is."
+          },
+          "se": { "type": ["number", "null"] },
+          "t_stat": { "type": ["number", "null"] },
+          "se_method": {
+            "type": ["string", "null"],
+            "description": "How se was computed, carried from the board. The scanner board applies a Newey-West HAC correction whenever its cohort dates are spaced closer than the horizon (alpha-engine-config-I8263), which at daily cohort dates and a 21-session horizon they are. Recorded so a reader can see whether the margin was cleared with or without statistical support — which is NOT a gate: champion-challenger-policy.md §5 rejects a publication-grade bar for an operational loop."
+          },
+          "alpha_vs_population": {
+            "type": ["object", "null"],
+            "description": "The arm's topn_alpha_vs_population block, copied verbatim from the board. REPORTED, never decided on — see reported_field. It is carried here so an arm that cannot be compared is still visibly MEASURED, rather than rendering as an arm about which nothing is known."
+          },
+          "confidence": {
+            "enum": ["ok", "thin", "insufficient"],
+            "description": "How much evidence stands behind this arm's PAIRED count (not its scored count) — leaderboard_scoring.confidence_for over n_dates_paired against min_dates_for_inference."
+          },
+          "metric": { "const": "topn_alpha_vs_champion_21d_date_clustered" },
+          "cadence": { "const": "per_scanner_run" },
+          "source": { "const": "scanner/leaderboard/{date}.json" }
+        }
+      }
+    },
+    "eligibility": {
+      "type": "object",
+      "required": ["promotable_arms", "declared_ineligible", "note"],
+      "description": "The REGISTRY half of eligibility, distinct from the per-arm EVIDENCE half above. Brian's ruling 2026-08-29, verbatim: 'for the research arm, we should make all arms promote eligible, including think tank' — the principle being that an arm that is SCORED must be able to WIN. promotable_arms is therefore derived from SCANNER_SPECS itself rather than restated, so registering an arm makes it promotable with no second list to forget, and declared_ineligible is the ONLY mechanism by which an arm may be excluded. It maps a name to the REASON, and it is empty. An exclusion is never an absence from a list (ARCHITECTURE §140: a disposition that is only an inference is not a state).",
+      "properties": {
+        "promotable_arms": { "type": "array", "items": { "type": "string" } },
+        "declared_ineligible": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "{arm: reason}. Asserted at import to be a subset of the registered arms — an exclusion rule that outlives its arm reads as a live rule and is not one."
+        },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hysteresis": {
+      "type": "object",
+      "required": [
+        "promotion_margin", "promotion_margin_units", "promotion_margin_note",
+        "cooldown_days", "min_dates_for_inference", "demotion_margin_is_symmetric",
+        "count_matched_width", "benchmark_ticker"
+      ],
+      "description": "The §5.2 parameters this evaluation applied, recorded with the decision so a past record stays interpretable after the registry changes. Source of truth is spec_promotion.py::SPEC_PROMOTION_SLOT, which names all six facts champion-challenger-policy.md §10 requires of a slot registry: metric, horizon, benchmark, count-matching width, evidence floor and hysteresis margins.",
+      "properties": {
+        "promotion_margin": { "type": "number", "exclusiveMinimum": 0 },
+        "promotion_margin_units": {
+          "const": "mean 21-session top-N realized alpha difference vs champion"
+        },
+        "promotion_margin_note": {
+          "type": "string", "minLength": 1,
+          "description": "The derivation, carried on every record so no reader has to do it: the fleet's ~1%/yr operational bar over a 21-session window (1/12 of a trading year) is 0.01/12 = 0.00083, and the scanner-CUT slot's retired 0.005-per-126-sessions bar scaled to 21 sessions is 0.005 x 21/126 = 0.00083. Two derivations that agree, which is the reason to state both. The note also states what the margin is NOT: not a significance test, not sized to the noise floor."
+        },
+        "cooldown_days": { "type": "integer", "exclusiveMinimum": 0 },
+        "min_dates_for_inference": {
+          "type": "integer", "minimum": 1,
+          "description": "PAIRED cohort dates, not scored ones. Below it a per-date mean is an anecdote, not an inference (alpha-engine-config-I7542)."
+        },
+        "demotion_margin_is_symmetric": {
+          "const": true,
+          "description": "champion-challenger-policy.md §5.2: demotion of a sitting champion requires the same margin in reverse plus the cooldown. Asserted rather than described, so a future asymmetry is a schema violation and not a code detail."
+        },
+        "count_matched_width": {
+          "type": "integer", "exclusiveMinimum": 0,
+          "description": "§4 count-matching: every arm is scored at this top-N on the board. The arms are additionally count-matched at GENERATION to the scanner's own momentum_top_n (generation_width_param), so no arm can win on breadth at either stage."
+        },
+        "generation_width_param": { "type": "string" },
+        "benchmark_ticker": { "type": "string" }
+      }
+    },
+    "defect": {
+      "type": ["string", "null"],
+      "description": "Set when an input could not be honestly interpreted — today, a scanner leaderboard reporting duplicate arm rows. The record is written FIRST and run_spec_promotion then raises SpecPromotionError: a defect must never erase the evidence of itself. Note the asymmetry: a MISSING or UNMEASURABLE board is not a defect, it is an honest hold; a CORRUPT one is both, because rows that may belong to another pass are worse than no rows."
+    },
+    "decision_earliest_on": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "FIRST_COHORT_DATE (2026-08-21 — the first date on which more than one arm emitted a shadow candidate set, so the intersection could be non-empty at all) plus decision_horizon_days forward sessions plus min_dates_for_inference-1 further cohort dates, projected onto the NYSE calendar. The earliest date this slot could possibly carry enough PAIRED cohort dates to decide, independent of how many runs have already held. A CEILING, not a promise: a gap in a shadow prefix — and tech_score_gate has one, having written only 2026-08-21 and 2026-08-28 — pushes the real date out, and arms.*.n_dates_paired is what says where it actually stands."
+    },
+    "board": {
+      "type": "object",
+      "required": ["key", "present", "horizon_days"],
+      "description": "Provenance of the decision evidence. present:false means no leaderboard was available at all — distinct from a board that exists and reports status='unmeasurable', which champion-challenger-policy.md §7.2 requires never render identically.",
+      "properties": {
+        "key": { "const": "scanner/leaderboard/{date}.json" },
+        "present": { "type": "boolean" },
+        "horizon_days": { "type": "integer" },
+        "status": { "type": ["string", "null"] },
+        "n_dates": { "type": "integer", "minimum": 0 },
+        "arms_present": { "type": "array", "items": { "type": "string" } },
+        "cohort_intersection_note": { "type": "string" }
+      }
+    }
+  }
+}

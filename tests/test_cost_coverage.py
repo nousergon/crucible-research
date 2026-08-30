@@ -9,6 +9,8 @@ correct; the number was about something else.
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import pytest
 
 from scripts.cost_coverage import (
@@ -241,3 +243,150 @@ class TestStagesEntered:
     def test_unmeasured_is_a_different_exception_from_a_breach(self):
         assert not issubclass(CostCoverageUnmeasured, CostCoverageError)
         assert not issubclass(CostCoverageError, CostCoverageUnmeasured)
+
+
+# ── alpha-engine-config-I9261 ────────────────────────────────────────────
+#
+# The 2026-08-29 weekly run terminated DegradedRun on
+# `weekly_aggregate_costs_fail_open` reporting that `replay-concordance`
+# "ran and emitted no cost record". It had emitted — 24 priced rows,
+# $0.0182848, flushed one second after the stage exited — into
+# `_cost_raw/2026-08-29/`, while the check read `_cost_raw/2026-08-28/`
+# (the run_date). The five thinktank producers it reported as `observed`
+# came from Friday's DAILY pipelines; this execution's `stages_entered`
+# was ['ChallengerShadow', 'ReplayConcordance'].
+
+
+class _WindowS3:
+    """S3 fake keyed by prefix, carrying LastModified like the real API."""
+
+    def __init__(self, objects: dict[str, _dt.datetime]):
+        self._objects = objects
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        outer = self
+
+        class _P:
+            def paginate(self, **kwargs):
+                prefix = kwargs["Prefix"]
+                contents = [
+                    {"Key": k, "LastModified": ts}
+                    for k, ts in sorted(outer._objects.items())
+                    if k.startswith(prefix)
+                ]
+                return [{"Contents": contents} if contents else {}]
+
+        return _P()
+
+
+_ROOT = "decision_artifacts/_cost_raw"
+_STARTED = _dt.datetime(2026, 8, 29, 9, 0, 49, tzinfo=_dt.UTC)
+_NOW = _dt.datetime(2026, 8, 29, 14, 2, 40, tzinfo=_dt.UTC)
+
+
+def _observed(**kw):
+    from scripts.cost_coverage import observed_producers_for_execution
+
+    return observed_producers_for_execution(
+        kw.pop("s3"), "alpha-engine-research", _ROOT,
+        started_at=_STARTED, now=_NOW, **kw,
+    )
+
+
+def test_a_producer_in_tomorrows_partition_is_this_executions_producer():
+    """The exact live failure. run_date=2026-08-28, records in 2026-08-29.
+
+    The weekly SF starts 09:00 UTC on the day AFTER its run_date, so every
+    one of its producers writes to a partition the run_date-keyed read
+    never opened.
+    """
+    s3 = _WindowS3({
+        f"{_ROOT}/2026-08-29/krepis-b1444bfa3454/replay-concordance.0.jsonl":
+            _dt.datetime(2026, 8, 29, 12, 27, 43, tzinfo=_dt.UTC),
+    })
+    assert _observed(s3=s3) == {"replay-concordance"}
+
+
+def test_another_runs_object_in_the_run_date_partition_is_not_coverage():
+    """`single-agent-quant` scored `covered` off a 14-hours-earlier object.
+
+    That coincidence is the only reason the live breach named one stage
+    rather than two, and it is why the published `observed` set described
+    a different execution. An object flushed before this execution started
+    cannot be this execution's producer.
+    """
+    s3 = _WindowS3({
+        # Friday's daily pipelines, hours before the weekly run started.
+        f"{_ROOT}/2026-08-28/8e9fff668cc8/thinktank-sweep.0.jsonl":
+            _dt.datetime(2026, 8, 28, 15, 16, 30, tzinfo=_dt.UTC),
+        f"{_ROOT}/2026-08-28/krepis-7faeb93de042/single-agent-quant.0.jsonl":
+            _dt.datetime(2026, 8, 28, 22, 20, 7, tzinfo=_dt.UTC),
+    })
+    assert _observed(s3=s3) == set()
+
+
+def test_the_execution_window_spans_the_dates_it_ran_across():
+    """A run that crosses UTC midnight writes to both partitions."""
+    s3 = _WindowS3({
+        f"{_ROOT}/2026-08-29/r1/replay-concordance.0.jsonl":
+            _dt.datetime(2026, 8, 29, 12, 0, tzinfo=_dt.UTC),
+        f"{_ROOT}/2026-08-30/r2/single-agent-quant.0.jsonl":
+            _dt.datetime(2026, 8, 30, 1, 0, tzinfo=_dt.UTC),
+    })
+    from scripts.cost_coverage import observed_producers_for_execution
+
+    observed = observed_producers_for_execution(
+        s3, "alpha-engine-research", _ROOT,
+        started_at=_STARTED,
+        now=_dt.datetime(2026, 8, 30, 2, 0, tzinfo=_dt.UTC),
+    )
+    assert observed == {"replay-concordance", "single-agent-quant"}
+
+
+def test_a_listing_failure_is_unmeasured_not_an_empty_observed_set():
+    """An empty `observed` would be reported as universal silence — the
+    alarming direction — for a fault in the check itself."""
+    from scripts.cost_coverage import CostCoverageUnmeasured
+
+    class _Boom:
+        def get_paginator(self, name):
+            raise RuntimeError("s3 unreachable")
+
+    with pytest.raises(CostCoverageUnmeasured, match="NOT a coverage finding"):
+        _observed(s3=_Boom())
+
+
+def test_a_listed_object_without_last_modified_is_unmeasured():
+    from scripts.cost_coverage import CostCoverageUnmeasured
+
+    s3 = _WindowS3({f"{_ROOT}/2026-08-29/r/replay-concordance.0.jsonl": None})
+    with pytest.raises(CostCoverageUnmeasured, match="LastModified"):
+        _observed(s3=s3)
+
+
+def test_execution_started_at_refuses_to_default():
+    """No fabricated start time — it would silently move the window."""
+    from scripts.cost_coverage import CostCoverageUnmeasured, execution_started_at
+
+    with pytest.raises(CostCoverageUnmeasured, match="execution ARN"):
+        execution_started_at("")
+
+    class _Boom:
+        def describe_execution(self, **kw):
+            raise RuntimeError("denied")
+
+    with pytest.raises(CostCoverageUnmeasured, match="NOT a coverage finding"):
+        execution_started_at("arn:x", sfn_client=_Boom())
+
+
+def test_execution_started_at_normalises_to_utc():
+    from scripts.cost_coverage import execution_started_at
+
+    class _Sfn:
+        def describe_execution(self, **kw):
+            return {"startDate": _dt.datetime(2026, 8, 29, 9, 0, 49)}
+
+    assert execution_started_at("arn:x", sfn_client=_Sfn()) == _STARTED.replace(
+        microsecond=0
+    )

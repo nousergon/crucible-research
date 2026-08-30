@@ -131,6 +131,11 @@ def test_list_capture_keys_agent_prefix_filter():
         s3.create_bucket(Bucket=BUCKET)
         k1 = _put_capture(s3, date="2026-07-02", agent_id=THESIS_AGENT_ID, run_id="a")
         k2 = _put_capture(s3, date="2026-07-02", agent_id=THEME_AGENT_ID, run_id="b")
+        # Deliberately NOT thinktank_-prefixed — this test's whole point is
+        # the family filter excluding a non-thinktank agent_id.
+        # ``list_capture_keys`` never resolves a rubric, so any arbitrary
+        # non-thinktank label works here regardless of what
+        # ``resolve_rubric_for_agent`` maps.
         k3 = _put_capture(s3, date="2026-07-02", agent_id="ic_cio", run_id="c")
 
         allk = list_capture_keys(s3, date="2026-07-02", bucket=BUCKET)
@@ -148,7 +153,8 @@ def test_build_batch_plan_extra_dates_and_family_filter(monkeypatch, tmp_path):
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
         # thinktank artifacts across two weekday partitions + one graph
-        # artifact on the same dates that must be filtered OUT
+        # artifact on the same dates that must be filtered OUT by
+        # agent_id_prefixes before rubric resolution is ever consulted.
         _put_capture(s3, date="2026-06-29", agent_id=THESIS_AGENT_ID, run_id="r1")
         _put_capture(s3, date="2026-06-30", agent_id=THEME_AGENT_ID, run_id="r2")
         _put_capture(s3, date="2026-06-30", agent_id="ic_cio", run_id="r3")
@@ -171,8 +177,8 @@ def test_build_batch_plan_default_shape_unchanged():
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        _put_capture(s3, date="2026-07-02", agent_id="ic_cio", run_id="r1")
-        _put_capture(s3, date="2026-07-01", agent_id="ic_cio", run_id="r0")
+        _put_capture(s3, date="2026-07-02", agent_id=THESIS_AGENT_ID, run_id="r1")
+        _put_capture(s3, date="2026-07-01", agent_id=THESIS_AGENT_ID, run_id="r0")
         plan = build_batch_plan(date="2026-07-02", bucket=BUCKET, s3_client=s3)
         assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
 
@@ -192,6 +198,78 @@ def test_expand_lookback_dates_trading_days():
     assert expand_lookback_dates("2026-07-01", 3) == [
         "2026-06-30", "2026-06-29", "2026-06-26",
     ]
+
+
+def test_effective_capture_ceiling_date_clears_the_write_lag():
+    """alpha-engine-config-I9331: Think Tank writes day D's captures on
+    D+1 ~14:35 UTC; the weekly judge enters ~05:11 UTC on its anchor day.
+    The ceiling must be at least 2 calendar days behind the anchor so
+    D+1's write always lands on a day strictly before the judge runs."""
+    from evals.orchestrator import (
+        CAPTURE_WRITE_SETTLE_DAYS,
+        effective_capture_ceiling_date,
+    )
+
+    assert CAPTURE_WRITE_SETTLE_DAYS >= 2
+
+    # The measured incident date: weekly SF anchored 2026-08-29 (Saturday),
+    # entered EvalJudgeSubmitWeekly at 05:11 UTC while decision_artifacts/
+    # 2026/08/28/ (Friday) was still 9+ hours from being written.
+    ceiling = effective_capture_ceiling_date("2026-08-29")
+    assert ceiling == "2026-08-27"
+    # RED against the pre-fix wiring: the old code passed the raw anchor
+    # straight to expand_lookback_dates, whose newest returned date is
+    # `previous_trading_day(anchor)` — exactly the partition that had not
+    # been written yet.
+    from datetime import date as _date
+
+    from krepis.trading_calendar import previous_trading_day
+
+    unsafe_newest = str(previous_trading_day(_date(2026, 8, 29)))
+    assert unsafe_newest == "2026-08-28"
+    assert ceiling != unsafe_newest
+
+
+def test_compute_judge_window_dates_never_includes_the_unsafe_partition():
+    from evals.orchestrator import compute_judge_window_dates
+
+    window = compute_judge_window_dates("2026-08-29", 6)
+    assert "2026-08-28" not in window  # written same day as the judge run
+    assert "2026-08-29" not in window  # the (non-trading) anchor itself
+    assert window[0] == "2026-08-27"   # newest safe partition
+    assert len(window) == 7
+
+
+def test_compute_judge_window_dates_recovers_the_deferred_day_next_cycle():
+    """The Friday a week's window defers is squarely inside the FOLLOWING
+    week's unchanged lookback — deferred one cycle, never dropped."""
+    from evals.orchestrator import compute_judge_window_dates
+
+    this_week = compute_judge_window_dates("2026-08-29", 6)
+    next_week = compute_judge_window_dates("2026-09-05", 6)
+    assert "2026-08-28" not in this_week
+    assert "2026-08-28" in next_week
+
+
+def test_build_batch_plan_names_an_empty_expected_partition():
+    """alpha-engine-config-I9331 deliverable 3: a trading day inside the
+    window with zero captures is a named finding, not a silent absence.
+    A non-trading day in the window (the raw anchor here) is not flagged."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        _put_capture(s3, date="2026-07-01", agent_id="ic_cio", run_id="r0")
+        # 2026-07-02 (a trading day) is left empty on purpose.
+        plan = build_batch_plan(
+            date="2026-07-02",
+            extra_dates=["2026-07-01"],
+            bucket=BUCKET,
+            s3_client=s3,
+        )
+        assert plan["capture_partition_counts"] == {
+            "2026-07-02": 0, "2026-07-01": 1,
+        }
+        assert plan["empty_trading_day_partitions"] == ["2026-07-02"]
 
 
 def test_build_batch_plan_skips_already_judged(monkeypatch):
@@ -226,7 +304,7 @@ def test_single_date_plan_skips_dedup_lookup():
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        k1 = _put_capture(s3, date="2026-07-04", agent_id="ic_cio", run_id="r1")
+        k1 = _put_capture(s3, date="2026-07-04", agent_id=THESIS_AGENT_ID, run_id="r1")
         # a (bogus) manifest claiming r1 was judged must be IGNORED on
         # the single-date path
         s3.put_object(

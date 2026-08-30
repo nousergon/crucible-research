@@ -177,7 +177,73 @@ class ScannerLeaderboardBuildError(RuntimeError):
     """
 
 
-def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
+def _attach_stage_coverage(
+    result: dict, *, stage: str, run_date: str | None, window_start,
+) -> None:
+    """Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    §2.3a rescope): the assertion lives in the stage's own handler,
+    immediately before it returns, rather than a separate end-of-run SF
+    state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+
+    Shared by every terminal return of this handler — the default ``scan``
+    mode path (stage="Scanner") AND the ``scanner_leaderboard`` leaf
+    (stage="ScannerLeaderboard", alpha-engine-config-I9050). Before this was
+    extracted, the leaf mode's early return at the mode-dispatch line never
+    reached the assertion block further down `_run` — that block only ever
+    ran for the default scan path, so no code path ever asserted coverage
+    for the ScannerLeaderboard stage and its `_stage_coverage/{date}/
+    ScannerLeaderboard.json` object was never written.
+    """
+    if not run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument.
+        logger.error(
+            "[scanner_handler] stage-coverage assertion SKIPPED for %s: "
+            "no execution run_date on this event (execution identity absent)",
+            stage,
+        )
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+        }
+        return
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            stage, run_date=run_date, window_start=window_start,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": f"assertion unavailable: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+        # alpha-engine-config-I8155: the krepis landing this arc makes
+        # run_date a required, contract-enforced kwarg (TypeError on
+        # omission, StageCoverageContractError on blank/None). Both are
+        # library-internal contract failures, not stage failures — log
+        # loudly and degrade to UNMEASURED rather than raising out of
+        # the handler.
+        logger.error(
+            "[scanner_handler] stage-coverage assertion raised for "
+            "%s: %s: %s", stage, type(exc).__name__, exc,
+        )
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+        }
+
+
+def _run_scanner_leaderboard(
+    s3_client, bucket: str, run_date: str, *, execution_run_date: str | None = None, window_start=None,
+) -> dict:
     """``mode="scanner_leaderboard"`` — build ONLY ``scanner/leaderboard/{date}.json``.
 
     alpha-engine-config-I7813. The board is observe-only: the dashboard's
@@ -218,7 +284,70 @@ def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
             f"scanner leaderboard build did not write scanner/leaderboard/{run_date}.json: "
             f"status={state!r} error={(status or {}).get('error')!r}"
         )
-    return {
+
+    # ── Scanner SPEC promotion decision (alpha-engine-config-I9273) ─────────
+    # Decides which registered arm of SCANNER_SPECS ranks the live candidate cut
+    # and WRITES that decision — promote, demote or hold — to
+    # config/scanner_spec_champion.json plus an immutable dated audit record.
+    # Runs HERE because this is the moment the board it reads exists, and the
+    # freshly built leaderboard is handed in directly rather than re-fetched, so
+    # the decision reads the exact artifact this run produced.
+    #
+    # Before this engine existed the spec champion moved ONLY by a hand-edit of
+    # LIVE_CHAMPION, which is how alpha-engine-config-I7808 produced four weeks
+    # of a leaderboard scoring an arm against itself: a hand-moved pointer
+    # leaves no artifact anyone can compare the live path against.
+    #
+    # CADENCE-AGNOSTIC: its hysteresis is measured in CALENDAR days
+    # (cooldown_days), not invocations, so it behaves identically whether this
+    # leaf state runs weekly or the scanner runs every weekday.
+    #
+    # FAIL-SOFT + LOUD. The live candidates.json is already written and must
+    # never be downgraded by a decision step, and a promotion failure is SAFE —
+    # the pointer keeps naming the standing champion. It is never SILENT: the
+    # engine raises on a defective board, and that raise lands here as an ERROR
+    # log, an ops alert and an explicit status in the summary.
+    promotion_status: dict = {"status": "not_attempted"}
+    logger.info("[scanner_handler] attempting spec promotion run_date=%s", run_date)
+    try:
+        from scoring.spec_promotion import run_spec_promotion
+
+        promotion_status = run_spec_promotion(
+            run_date,
+            bucket=bucket,
+            s3_client=s3_client,
+            leaderboard=(status or {}).get("leaderboard"),
+        )
+        logger.info(
+            "[scanner_handler] spec promotion decision=%s champion=%s reason_code=%s",
+            promotion_status.get("decision"),
+            promotion_status.get("champion"),
+            promotion_status.get("reason_code"),
+        )
+    except Exception as exc:  # noqa: BLE001 — live path already delivered; never silent
+        logger.exception(
+            "[scanner_handler] spec promotion FAILED on %s — the champion pointer "
+            "keeps naming the standing champion", run_date,
+        )
+        promotion_status = {"status": "error", "error": str(exc)}
+        try:
+            from observe_alerts import publish_observe_alert
+
+            publish_observe_alert(
+                f"scanner SPEC promotion FAILED on {run_date}: {exc}. The live "
+                "ranking keeps the standing champion; no decision record was "
+                "completed for this run (alpha-engine-config-I9273).",
+                source="research:spec_promotion",
+                dedup_key=f"spec_promotion_error:{run_date}",
+                severity="ERROR",
+            )
+        except Exception:  # noqa: BLE001 — alerting is secondary; the ERROR log is the backstop
+            logger.warning(
+                "[scanner_handler] observe_alert publish unavailable for spec "
+                "promotion (ERROR log is the backstop)"
+            )
+
+    result = {
         "status": "OK",
         "mode": _MODE_SCANNER_LEADERBOARD,
         "summary": {
@@ -227,8 +356,19 @@ def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
                 "key": (status or {}).get("key"),
                 "reason": (status or {}).get("reason"),
             },
+            "spec_promotion": {
+                "status": promotion_status.get("status", "ok"),
+                "decision": promotion_status.get("decision"),
+                "champion": promotion_status.get("champion"),
+                "reason_code": promotion_status.get("reason_code"),
+                "error": promotion_status.get("error"),
+            },
         },
     }
+    _attach_stage_coverage(
+        result, stage="ScannerLeaderboard", run_date=execution_run_date, window_start=window_start,
+    )
+    return result
 
 
 def _run(event, context):
@@ -347,7 +487,10 @@ def _run(event, context):
             "error": f"unknown mode {mode!r}: expected one of {_MODES}",
         }
     if mode == _MODE_SCANNER_LEADERBOARD:
-        return _run_scanner_leaderboard(s3_client, bucket, run_date)
+        return _run_scanner_leaderboard(
+            s3_client, bucket, run_date,
+            execution_run_date=execution_run_date, window_start=_started,
+        )
 
     try:
         artifact = build_candidates_artifact(
@@ -551,6 +694,12 @@ def _run(event, context):
     # priced) raises an observe alert and lands in the summary, which is the
     # §7.2 invariant this ledger's whole arc is about.
     ledger_status: dict = {"status": "not_attempted"}
+    # Bound BEFORE the try: the cut-promotion block below reads it, and a raise
+    # inside this try would otherwise reach that block as a NameError — which
+    # its broad handler would render as "cut promotion FAILED", a true statement
+    # with a false cause. `None` there means "servability unchecked", which the
+    # engine records explicitly rather than assuming a pass.
+    _membership_doc: dict | None = None
     logger.info("[scanner_handler] attempting weekly cut ledger run_date=%s", run_date)
     try:
         from scoring.universe_membership import read_latest_membership
@@ -681,6 +830,14 @@ def _run(event, context):
             bucket=bucket,
             s3_client=s3_client,
             leaderboard=(cuts_leaderboard_status or {}).get("leaderboard"),
+            # The membership this run just wrote. The engine reads it for ONE
+            # thing: whether each promotable arm's basis carries a
+            # full-universe rank table, so it never promotes to an arm that
+            # would break a consumer's rank ceiling on the morning of the
+            # promotion (alpha-engine-config-I7843/I9272). Passing the
+            # in-memory artifact rather than re-fetching the key means the
+            # decision reads the exact document this run produced.
+            membership=_membership_doc,
         )
         logger.info(
             "[scanner_handler] cut promotion decision=%s champion=%s reason_code=%s",
@@ -814,51 +971,12 @@ def _run(event, context):
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
     result = {"status": "OK", "summary": summary, "date": run_date}
-    if not execution_run_date:
-        # alpha-engine-config-I8155: never fabricate a date to satisfy the
-        # (now-required) run_date argument. The event's own required-field
-        # guard above makes this unreachable today, but the check stays as
-        # the contract boundary rather than relying on that upstream guard.
-        logger.error(
-            "[scanner_handler] stage-coverage assertion SKIPPED for Scanner: "
-            "no execution run_date on this event (execution identity absent)"
-        )
-        result["stage_coverage"] = {
-            "stage": "Scanner",
-            "status": "UNMEASURED",
-            "reason": "execution run_date absent from event",
-        }
-    else:
-        try:
-            from krepis.stage_coverage import assert_stage_coverage
-
-            result["stage_coverage"] = assert_stage_coverage(
-                "Scanner", run_date=execution_run_date, window_start=_started,
-            )
-        except ImportError as exc:
-            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-            # the handler's own outcome is unchanged (config-I7214).
-            logger.error("stage-coverage assertion unavailable: %s", exc)
-            result["stage_coverage"] = {
-                "stage": "Scanner",
-                "status": "UNMEASURED",
-                "reason": f"assertion unavailable: {exc}",
-            }
-        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
-            # alpha-engine-config-I8155: the krepis landing this arc makes
-            # run_date a required, contract-enforced kwarg (TypeError on
-            # omission, StageCoverageContractError on blank/None). Both are
-            # library-internal contract failures, not stage failures — log
-            # loudly and degrade to UNMEASURED rather than raising out of
-            # the handler.
-            logger.error(
-                "[scanner_handler] stage-coverage assertion raised for "
-                "Scanner: %s: %s", type(exc).__name__, exc,
-            )
-            result["stage_coverage"] = {
-                "stage": "Scanner",
-                "status": "UNMEASURED",
-                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
-            }
+    # alpha-engine-config-I8155: the event's own required-field guard above
+    # makes a missing execution_run_date unreachable today, but
+    # _attach_stage_coverage's own guard stays as the contract boundary
+    # rather than relying on that upstream guard.
+    _attach_stage_coverage(
+        result, stage="Scanner", run_date=execution_run_date, window_start=_started,
+    )
 
     return result

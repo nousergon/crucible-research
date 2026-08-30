@@ -519,7 +519,8 @@ CONCURRENT_AGENTS: int = LLM_CFG["concurrent_agents"]
 # ── AWS / Environment ─────────────────────────────────────────────────────────
 S3_BUCKET: str = os.environ.get("S3_BUCKET", "alpha-engine-research")
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
-ANTHROPIC_API_KEY: str = get_secret("ANTHROPIC_API_KEY", required=False, default="") or ""
+# ANTHROPIC_API_KEY removed (alpha-engine-config-I9302 / Brian 2026-08-29 ruling):
+# every LLM call resolves through krepis.router — no direct Anthropic linkage.
 FMP_API_KEY: str = get_secret("FMP_API_KEY", required=False, default="") or ""
 FRED_API_KEY: str = get_secret("FRED_API_KEY", required=False, default="") or ""
 # config#2575 (OpenRouter shadow-judge tier) — SSM-first with env fallback,

@@ -466,21 +466,31 @@ def _check_fan_in_coverage(event, bucket: str, date_str: str):
 
     import boto3
 
-    from scripts.aggregate_costs import _INPUT_PREFIX, _list_jsonl_keys
+    from scripts.aggregate_costs import _INPUT_PREFIX
     from scripts.cost_coverage import (
         evaluate_coverage,
-        observed_producers,
+        execution_started_at,
+        observed_producers_for_execution,
         stages_entered,
     )
 
-    keys = _list_jsonl_keys(
-        boto3.client("s3"), bucket, f"{_INPUT_PREFIX}/{date_str}/"
+    # alpha-engine-config-I9261. This read used to be a single prefix,
+    # f"{_INPUT_PREFIX}/{date_str}/". `date_str` is the SF's run_date; the
+    # cost sink partitions by the record's own UTC ts. The weekly pipeline
+    # starts 09:00 UTC on the day AFTER its run_date, so every one of its
+    # producers wrote into a partition the check never opened, while the
+    # partition it DID open held the previous day's daily-pipeline objects.
+    # `entered` is a fact about this execution; `observed` now is too.
+    execution_arn = declaration.get("execution_arn", "")
+    sfn_client = boto3.client("stepfunctions")
+    started_at = execution_started_at(execution_arn, sfn_client=sfn_client)
+    observed = observed_producers_for_execution(
+        boto3.client("s3"),
+        bucket,
+        _INPUT_PREFIX,
+        started_at=started_at,
     )
-    observed = observed_producers(keys)
-    entered = stages_entered(
-        declaration.get("execution_arn", ""),
-        sfn_client=boto3.client("stepfunctions"),
-    )
+    entered = stages_entered(execution_arn, sfn_client=sfn_client)
     verdict = evaluate_coverage(
         observed=observed, declaration=declaration, entered=entered
     )
