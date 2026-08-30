@@ -15,7 +15,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-
 from nousergon_lib.arena import ArenaConfig, ArmRegister
 from nousergon_lib.contracts import validate as validate_contract
 

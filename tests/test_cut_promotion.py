@@ -22,7 +22,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nousergon_lib.arena import ArenaConfig
 
 from scoring.cut_arena import ARENA_CONFIG, bootstrap_register, run_arena_cycle
 from scoring.cut_promotion import (
@@ -45,7 +44,7 @@ from scoring.cut_promotion import (
     reconcile_arms_with_ledger,
     run_cut_promotion,
 )
-from scoring.leaderboard_scoring import LONG_HORIZONS_DAYS, slot_spec
+from scoring.leaderboard_scoring import LONG_HORIZONS_DAYS
 from scoring.universe_membership import (
     CUT_ARM_PROMOTION_EXCLUSIONS,
     CUT_CHAMPION_POINTER_KEY,

@@ -82,6 +82,8 @@ from nousergon_lib.arena import (
 from nousergon_lib.contracts import conformance_errors
 
 from scoring.universe_membership import (
+    _ARM_BASIS,
+    _ARM_PILLAR_WEIGHTS,
     ATTRACTIVENESS_CUT_PREFIX,
     ATTRACTIVENESS_FEED_TOP_N,
     CHALLENGER_CUT_PREFIX,
@@ -91,8 +93,6 @@ from scoring.universe_membership import (
     PROMOTABLE_CUTS,
     SLOT_ARMS,
     TECH_SCORE_CUT_PREFIX,
-    _ARM_BASIS,
-    _ARM_PILLAR_WEIGHTS,
     _bucket,
     _client,
 )
