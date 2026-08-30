@@ -432,7 +432,6 @@ class TestEpisodicParity:
         import types
 
         stub_config = types.ModuleType("config")
-        stub_config.ANTHROPIC_API_KEY = "test-key"
         stub_config.PER_STOCK_CLASS = "low"
         monkeypatch.setitem(sys.modules, "config", stub_config)
 

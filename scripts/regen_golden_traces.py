@@ -15,7 +15,8 @@ Two modes:
   schema-valid authored fixture).
 * ``--live`` — additionally call the real judge on the sector_quant
   golden and record its actual dimension scores as the parse case, so
-  the fixture is a real captured trace. Needs ``ANTHROPIC_API_KEY``.
+  the fixture is a real captured trace. Needs krepis router credentials
+  (``KREPIS_LITELLM_PROXY_URL``, ``KREPIS_ROUTER_CREDENTIAL_SECRET``).
 
 Usage:
     python scripts/regen_golden_traces.py
@@ -203,7 +204,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--live", action="store_true",
-        help="capture a real judge response (needs ANTHROPIC_API_KEY)",
+        help="capture a real judge response (needs krepis router credentials)",
     )
     args = ap.parse_args()
 

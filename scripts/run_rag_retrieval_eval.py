@@ -10,7 +10,7 @@ Requires ``RAG_DATABASE_URL`` + ``VOYAGE_API_KEY`` in the environment.
 Rerank conditions (cross_encoder + llm_judge) additionally require:
 
     pip install 'alpha-engine-lib[rerank] @ git+https://github.com/nousergon/nousergon-lib@v0.11.0'
-    # (LLM-judge path also needs ANTHROPIC_API_KEY)
+    # (LLM-judge path uses evals.judge via the krepis router)
 
 When the ``[rerank]`` extras aren't installed on the eval runner, pass
 ``--skip-rerank`` to drop the rerank conditions from the sweep and only
