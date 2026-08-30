@@ -286,6 +286,83 @@ class TestScannerCoverage:
         assert result["stage_coverage"]["status"] == "UNMEASURED"
 
 
+class TestScannerLeaderboardCoverage:
+    """alpha-engine-config-I9050: the ``scanner_leaderboard`` leaf mode
+    (mode="scanner_leaderboard") dispatches to ``_run_scanner_leaderboard``
+    and returns BEFORE `_run`'s scan-path body — including, before this fix,
+    before the only ``assert_stage_coverage`` call in the file. A
+    file-level "does this file call assert_stage_coverage anywhere" check
+    (``TestTotalityAndEnforcement`` above) could never catch this: the file
+    already carried a call, for the unrelated "Scanner" stage. Only an
+    end-to-end exercise of the leaf mode itself — asserting the call
+    actually happens, under the correct stage name, on THIS path — catches
+    a stage that runs and writes its declared artifact
+    (``scanner/leaderboard/{date}.json``) while never refreshing its
+    ``_stage_coverage/{date}/ScannerLeaderboard.json`` companion."""
+
+    def test_verdict_lands_under_correct_stage_name(self, scanner_mod, stub_stage_coverage):
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        stub_stage_coverage.assert_called_once()
+        args, kwargs = stub_stage_coverage.call_args
+        assert args[0] == "ScannerLeaderboard"
+        # Same execution-run_date contract as the Scanner stage (config-I8155):
+        # keyed by the un-normalized event value, not the trading day.
+        assert kwargs["run_date"] == "2026-05-30"
+        assert kwargs["run_date"] != "2026-05-29"
+        assert kwargs["window_start"] is not None
+
+    def test_missing_lib_module_does_not_change_outcome(self, scanner_mod, absent_stage_coverage):
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "ScannerLeaderboard"
+
+    def test_unmeasurable_leaderboard_still_asserts_coverage(self, scanner_mod, stub_stage_coverage):
+        # The "unmeasurable" board status is a legitimate written decision
+        # (docstring on `_run_scanner_leaderboard`), not a failure — the
+        # handler still returns OK and must still assert coverage.
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={
+                    "status": "unmeasurable",
+                    "key": "scanner/leaderboard/2026-05-29.json",
+                    "reason": "no cohort has matured",
+                },
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        stub_stage_coverage.assert_called_once()
+        assert stub_stage_coverage.call_args[0][0] == "ScannerLeaderboard"
+
+
 # ── SignalsEnvelope ──────────────────────────────────────────────────────
 
 
@@ -711,6 +788,9 @@ class TestAggregateCostsCoverage:
 # exists in the SF at all.
 _WEEKLY_SF_STAGE_TO_HANDLER_FILE = {
     "Scanner": "lambda/scanner_handler.py",
+    # alpha-engine-config-I9050: the leaf ``scanner_leaderboard`` mode's
+    # assertion path was never wired — see TestScannerLeaderboardCoverage.
+    "ScannerLeaderboard": "lambda/scanner_handler.py",
     "SignalsEnvelope": "lambda/signals_envelope_handler.py",
     "ChallengerShadow": "lambda/handler.py",
     "EvalJudgeSubmitFirstSaturday": "lambda/eval_judge_submit_handler.py",
