@@ -177,7 +177,73 @@ class ScannerLeaderboardBuildError(RuntimeError):
     """
 
 
-def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
+def _attach_stage_coverage(
+    result: dict, *, stage: str, run_date: str | None, window_start,
+) -> None:
+    """Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
+    §2.3a rescope): the assertion lives in the stage's own handler,
+    immediately before it returns, rather than a separate end-of-run SF
+    state. OBSERVE MODE ONLY — never enables enforcement, never raises.
+
+    Shared by every terminal return of this handler — the default ``scan``
+    mode path (stage="Scanner") AND the ``scanner_leaderboard`` leaf
+    (stage="ScannerLeaderboard", alpha-engine-config-I9050). Before this was
+    extracted, the leaf mode's early return at the mode-dispatch line never
+    reached the assertion block further down `_run` — that block only ever
+    ran for the default scan path, so no code path ever asserted coverage
+    for the ScannerLeaderboard stage and its `_stage_coverage/{date}/
+    ScannerLeaderboard.json` object was never written.
+    """
+    if not run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (now-required) run_date argument.
+        logger.error(
+            "[scanner_handler] stage-coverage assertion SKIPPED for %s: "
+            "no execution run_date on this event (execution identity absent)",
+            stage,
+        )
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+        }
+        return
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        result["stage_coverage"] = assert_stage_coverage(
+            stage, run_date=run_date, window_start=window_start,
+        )
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
+        # the handler's own outcome is unchanged (config-I7214).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": f"assertion unavailable: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+        # alpha-engine-config-I8155: the krepis landing this arc makes
+        # run_date a required, contract-enforced kwarg (TypeError on
+        # omission, StageCoverageContractError on blank/None). Both are
+        # library-internal contract failures, not stage failures — log
+        # loudly and degrade to UNMEASURED rather than raising out of
+        # the handler.
+        logger.error(
+            "[scanner_handler] stage-coverage assertion raised for "
+            "%s: %s: %s", stage, type(exc).__name__, exc,
+        )
+        result["stage_coverage"] = {
+            "stage": stage,
+            "status": "UNMEASURED",
+            "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+        }
+
+
+def _run_scanner_leaderboard(
+    s3_client, bucket: str, run_date: str, *, execution_run_date: str | None = None, window_start=None,
+) -> dict:
     """``mode="scanner_leaderboard"`` — build ONLY ``scanner/leaderboard/{date}.json``.
 
     alpha-engine-config-I7813. The board is observe-only: the dashboard's
@@ -281,7 +347,7 @@ def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
                 "promotion (ERROR log is the backstop)"
             )
 
-    return {
+    result = {
         "status": "OK",
         "mode": _MODE_SCANNER_LEADERBOARD,
         "summary": {
@@ -299,6 +365,10 @@ def _run_scanner_leaderboard(s3_client, bucket: str, run_date: str) -> dict:
             },
         },
     }
+    _attach_stage_coverage(
+        result, stage="ScannerLeaderboard", run_date=execution_run_date, window_start=window_start,
+    )
+    return result
 
 
 def _run(event, context):
@@ -417,7 +487,10 @@ def _run(event, context):
             "error": f"unknown mode {mode!r}: expected one of {_MODES}",
         }
     if mode == _MODE_SCANNER_LEADERBOARD:
-        return _run_scanner_leaderboard(s3_client, bucket, run_date)
+        return _run_scanner_leaderboard(
+            s3_client, bucket, run_date,
+            execution_run_date=execution_run_date, window_start=_started,
+        )
 
     try:
         artifact = build_candidates_artifact(
@@ -898,51 +971,12 @@ def _run(event, context):
     # immediately before it returns, rather than a separate end-of-run SF
     # state. OBSERVE MODE ONLY — never enables enforcement, never raises.
     result = {"status": "OK", "summary": summary, "date": run_date}
-    if not execution_run_date:
-        # alpha-engine-config-I8155: never fabricate a date to satisfy the
-        # (now-required) run_date argument. The event's own required-field
-        # guard above makes this unreachable today, but the check stays as
-        # the contract boundary rather than relying on that upstream guard.
-        logger.error(
-            "[scanner_handler] stage-coverage assertion SKIPPED for Scanner: "
-            "no execution run_date on this event (execution identity absent)"
-        )
-        result["stage_coverage"] = {
-            "stage": "Scanner",
-            "status": "UNMEASURED",
-            "reason": "execution run_date absent from event",
-        }
-    else:
-        try:
-            from krepis.stage_coverage import assert_stage_coverage
-
-            result["stage_coverage"] = assert_stage_coverage(
-                "Scanner", run_date=execution_run_date, window_start=_started,
-            )
-        except ImportError as exc:
-            # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
-            # the handler's own outcome is unchanged (config-I7214).
-            logger.error("stage-coverage assertion unavailable: %s", exc)
-            result["stage_coverage"] = {
-                "stage": "Scanner",
-                "status": "UNMEASURED",
-                "reason": f"assertion unavailable: {exc}",
-            }
-        except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
-            # alpha-engine-config-I8155: the krepis landing this arc makes
-            # run_date a required, contract-enforced kwarg (TypeError on
-            # omission, StageCoverageContractError on blank/None). Both are
-            # library-internal contract failures, not stage failures — log
-            # loudly and degrade to UNMEASURED rather than raising out of
-            # the handler.
-            logger.error(
-                "[scanner_handler] stage-coverage assertion raised for "
-                "Scanner: %s: %s", type(exc).__name__, exc,
-            )
-            result["stage_coverage"] = {
-                "stage": "Scanner",
-                "status": "UNMEASURED",
-                "reason": f"assertion raised: {type(exc).__name__}: {exc}",
-            }
+    # alpha-engine-config-I8155: the event's own required-field guard above
+    # makes a missing execution_run_date unreachable today, but
+    # _attach_stage_coverage's own guard stays as the contract boundary
+    # rather than relying on that upstream guard.
+    _attach_stage_coverage(
+        result, stage="Scanner", run_date=execution_run_date, window_start=_started,
+    )
 
     return result
