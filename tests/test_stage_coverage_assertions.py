@@ -25,8 +25,9 @@ pins, per handler:
    pinned below, sourced 2026-08-13 from
    ``nousergon-data/infrastructure/step_function.json``'s Scanner /
    SignalsEnvelope / ChallengerShadow / EvalJudgeSubmit{FirstSaturday,
-   Weekly} / EvalJudgePoll / EvalJudgeProcess / EvalRollingMean /
-   RationaleClustering / AggregateCosts Task states — an enumeration test
+   Weekly} / EvalJudgeProcess / EvalRollingMean / RationaleClustering /
+   AggregateCosts Task states (``EvalJudgePoll`` retired with the async
+   batch API, alpha-engine-config-I9329) — an enumeration test
    that only lists what EXISTS is blind to where one is missing, so this
    list is the independently-sourced denominator, not a scan of the repo).
 
@@ -53,6 +54,7 @@ indistinguishable from an assertion that found nothing wrong
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import sys
 from pathlib import Path
@@ -102,20 +104,6 @@ def runner_mod():
 @pytest.fixture
 def submit_mod():
     mod = _load_handler("eval_judge_submit_handler.py", "lambda_i7214_eval_judge_submit_handler")
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def poll_mod():
-    mod = _load_handler("eval_judge_poll_handler.py", "lambda_i7214_eval_judge_poll_handler")
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def process_mod():
-    mod = _load_handler("eval_judge_process_handler.py", "lambda_i7214_eval_judge_process_handler")
     mod._init_done = False
     yield mod
 
@@ -298,6 +286,83 @@ class TestScannerCoverage:
         assert result["stage_coverage"]["status"] == "UNMEASURED"
 
 
+class TestScannerLeaderboardCoverage:
+    """alpha-engine-config-I9050: the ``scanner_leaderboard`` leaf mode
+    (mode="scanner_leaderboard") dispatches to ``_run_scanner_leaderboard``
+    and returns BEFORE `_run`'s scan-path body — including, before this fix,
+    before the only ``assert_stage_coverage`` call in the file. A
+    file-level "does this file call assert_stage_coverage anywhere" check
+    (``TestTotalityAndEnforcement`` above) could never catch this: the file
+    already carried a call, for the unrelated "Scanner" stage. Only an
+    end-to-end exercise of the leaf mode itself — asserting the call
+    actually happens, under the correct stage name, on THIS path — catches
+    a stage that runs and writes its declared artifact
+    (``scanner/leaderboard/{date}.json``) while never refreshing its
+    ``_stage_coverage/{date}/ScannerLeaderboard.json`` companion."""
+
+    def test_verdict_lands_under_correct_stage_name(self, scanner_mod, stub_stage_coverage):
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        stub_stage_coverage.assert_called_once()
+        args, kwargs = stub_stage_coverage.call_args
+        assert args[0] == "ScannerLeaderboard"
+        # Same execution-run_date contract as the Scanner stage (config-I8155):
+        # keyed by the un-normalized event value, not the trading day.
+        assert kwargs["run_date"] == "2026-05-30"
+        assert kwargs["run_date"] != "2026-05-29"
+        assert kwargs["window_start"] is not None
+
+    def test_missing_lib_module_does_not_change_outcome(self, scanner_mod, absent_stage_coverage):
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={"status": "ok", "key": "scanner/leaderboard/2026-05-29.json"},
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        assert result["stage_coverage"]["status"] == "UNMEASURED"
+        assert result["stage_coverage"]["stage"] == "ScannerLeaderboard"
+
+    def test_unmeasurable_leaderboard_still_asserts_coverage(self, scanner_mod, stub_stage_coverage):
+        # The "unmeasurable" board status is a legitimate written decision
+        # (docstring on `_run_scanner_leaderboard`), not a failure — the
+        # handler still returns OK and must still assert coverage.
+        with (
+            patch.object(scanner_mod, "_ensure_init"),
+            patch("boto3.client", return_value=MagicMock()),
+            patch(
+                "scoring.leaderboard_producers.build_scanner_leaderboard",
+                return_value={
+                    "status": "unmeasurable",
+                    "key": "scanner/leaderboard/2026-05-29.json",
+                    "reason": "no cohort has matured",
+                },
+            ),
+        ):
+            result = scanner_mod.handler(
+                {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
+            )
+        assert result["status"] == "OK"
+        stub_stage_coverage.assert_called_once()
+        assert stub_stage_coverage.call_args[0][0] == "ScannerLeaderboard"
+
+
 # ── SignalsEnvelope ──────────────────────────────────────────────────────
 
 
@@ -438,7 +503,14 @@ class TestEvalJudgeSubmitCoverage:
             patch.object(submit_mod, "_ensure_init"),
             patch("anthropic.Anthropic", return_value=MagicMock()),
             patch("boto3.client", return_value=MagicMock()),
-            patch("evals.orchestrator.build_batch_plan", return_value={"capture_keys_total": 5, "skipped_unmapped": 0}),
+            patch(
+                "evals.orchestrator.build_batch_plan",
+                return_value={
+                    "capture_keys_total": 5, "skipped_unmapped": 0,
+                    "capture_partition_counts": {"2026-05-16": 5},
+                    "empty_trading_day_partitions": [],
+                },
+            ),
             patch("evals.orchestrator._persist_client_side_skips", return_value=(0, 0, None, [])),
             patch("evals.orchestrator.submit_batch", return_value=_submit_result()),
         ):
@@ -475,124 +547,53 @@ class TestEvalJudgeSubmitCoverage:
         stub_stage_coverage.assert_not_called()
 
 
-# ── EvalJudgePoll ────────────────────────────────────────────────────────
-
-
-class TestEvalJudgePollCoverage:
-    def test_verdict_lands_when_submit_iso_present(self, poll_mod, stub_stage_coverage):
-        with (
-            patch.object(poll_mod, "_ensure_init"),
-            patch("anthropic.Anthropic", return_value=MagicMock()),
-            patch(
-                "evals.orchestrator.poll_batch",
-                return_value={"processing_status": "ended", "request_counts": {}, "ended_at": "2026-05-16T23:00:00Z"},
-            ),
-        ):
-            result = poll_mod.handler(
-                {"batch_id": "msgbatch_123", "submit_iso": "2026-05-16T22:30:00Z"},
-                context=None,
-            )
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
-        args, kwargs = stub_stage_coverage.call_args
-        assert args[0] == "EvalJudgePoll"
-        assert kwargs["run_date"] == "2026-05-16"
-
-    def test_no_assertion_without_submit_iso(self, poll_mod, stub_stage_coverage):
-        # No reliable run_date to attribute to — silence over a wrong
-        # attribution (config-I7214).
-        with (
-            patch.object(poll_mod, "_ensure_init"),
-            patch("anthropic.Anthropic", return_value=MagicMock()),
-            patch(
-                "evals.orchestrator.poll_batch",
-                return_value={"processing_status": "ended", "request_counts": {}, "ended_at": None},
-            ),
-        ):
-            result = poll_mod.handler({"batch_id": "msgbatch_123"}, context=None)
-        # alpha-engine-config-I8155: skipped for absent execution identity,
-        # but the skip is now RECORDED as UNMEASURED rather than omitted.
-        assert result["stage_coverage"]["status"] == "UNMEASURED"
-        assert result["stage_coverage"]["stage"] == "EvalJudgePoll"
-        stub_stage_coverage.assert_not_called()
-
-    def test_missing_lib_module_does_not_change_outcome(self, poll_mod, absent_stage_coverage):
-        with (
-            patch.object(poll_mod, "_ensure_init"),
-            patch("anthropic.Anthropic", return_value=MagicMock()),
-            patch(
-                "evals.orchestrator.poll_batch",
-                return_value={"processing_status": "ended", "request_counts": {}, "ended_at": "2026-05-16T23:00:00Z"},
-            ),
-        ):
-            result = poll_mod.handler(
-                {"batch_id": "msgbatch_123", "submit_iso": "2026-05-16T22:30:00Z"},
-                context=None,
-            )
-        assert result["stage_coverage"]["status"] == "UNMEASURED"
-        assert result["processing_status"] == "ended"
-
-
-# ── EvalJudgeProcess ─────────────────────────────────────────────────────
-
-
-def _process_summary() -> dict:
-    return {
-        "haiku_evaluated": 8,
-        "sonnet_evaluated": 2,
-        "skipped_unmapped": 0,
-        "skipped_empty_input": 0,
-        "failed": [],
-        "complete": True,
-        "budget_stopped": False,
-    }
+# ── EvalJudgeProcess (spot substrate) ────────────────────────────────────
+#
+# The stage survived alpha-engine-config-I9329; its SUBSTRATE changed. The
+# Lambda handler is gone and `evals/judge_spot_run.py` carries the assertion
+# now, so the subject of these tests is that module's `_stage_coverage`, not a
+# handler event. run_date is no longer recovered from `plan_s3_key` — the SF
+# passes it as `--date` — so the UNMEASURED-on-unrecoverable-identity case
+# (alpha-engine-config-I8155) has no path here and its test is retired with the
+# handler.
 
 
 class TestEvalJudgeProcessCoverage:
-    def _invoke(self, process_mod, event: dict):
-        with (
-            patch.object(process_mod, "_ensure_init"),
-            patch("anthropic.Anthropic", return_value=MagicMock()),
-            patch("evals.orchestrator.process_batch_results", return_value=_process_summary()),
-            patch("evals.eval_manifest.build_manifests", return_value=set()),
-        ):
-            return process_mod.handler(event, context=None)
+    def test_verdict_lands_with_the_run_date_the_sf_passed(self, stub_stage_coverage):
+        from evals.judge_spot_run import _stage_coverage
 
-    def test_verdict_lands_with_run_date_from_plan_s3_key(self, process_mod, stub_stage_coverage):
-        result = self._invoke(
-            process_mod,
-            {
-                "batch_id": "msgbatch_123",
-                "plan_s3_key": "decision_artifacts/_eval_batch_plans/2026-05-16/msgbatch_123.json",
-            },
-        )
-        assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        started = datetime.datetime(2026, 5, 16, 9, 0, tzinfo=datetime.UTC)
+        result = _stage_coverage(run_date="2026-05-16", window_start=started)
+
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "EvalJudgeProcess"
         assert kwargs["run_date"] == "2026-05-16"
+        assert kwargs["window_start"] == started
+        assert result is stub_stage_coverage.return_value
 
-    def test_missing_lib_module_does_not_change_outcome(self, process_mod, absent_stage_coverage):
-        result = self._invoke(
-            process_mod,
-            {
-                "batch_id": "msgbatch_123",
-                "plan_s3_key": "decision_artifacts/_eval_batch_plans/2026-05-16/msgbatch_123.json",
-            },
-        )
-        assert result["status"] == "OK"
-        assert result["stage_coverage"]["status"] == "UNMEASURED"
-        assert result["stage_coverage"]["stage"] == "EvalJudgeProcess"
+    def test_missing_lib_module_does_not_change_outcome(self, absent_stage_coverage):
+        """Observe mode: an absent krepis.stage_coverage degrades to
+        UNMEASURED *with a reason*, and never raises out of the run."""
+        from evals.judge_spot_run import _stage_coverage
 
-    def test_no_assertion_without_recoverable_plan_s3_key(self, process_mod, stub_stage_coverage):
-        # alpha-engine-config-I8155: no fabricated run_date when the
-        # execution identity can't be recovered from plan_s3_key at all.
-        result = self._invoke(
-            process_mod,
-            {"batch_id": "msgbatch_123", "plan_s3_key": "too/short.json"},
+        result = _stage_coverage(
+            run_date="2026-05-16",
+            window_start=datetime.datetime(2026, 5, 16, 9, 0, tzinfo=datetime.UTC),
         )
-        assert result["status"] == "OK"
-        assert result["stage_coverage"]["status"] == "UNMEASURED"
-        stub_stage_coverage.assert_not_called()
+        assert result["stage"] == "EvalJudgeProcess"
+        assert result["status"] == "UNMEASURED"
+        assert result["reason"]
+
+    def test_a_raising_assertion_never_kills_the_run(self, stub_stage_coverage):
+        from evals.judge_spot_run import _stage_coverage
+
+        stub_stage_coverage.side_effect = RuntimeError("registry unreachable")
+        result = _stage_coverage(
+            run_date="2026-05-16",
+            window_start=datetime.datetime(2026, 5, 16, 9, 0, tzinfo=datetime.UTC),
+        )
+        assert result["status"] == "UNMEASURED"
+        assert "RuntimeError" in result["reason"]
 
 
 # ── EvalRollingMean ──────────────────────────────────────────────────────
@@ -777,18 +778,54 @@ class TestAggregateCostsCoverage:
 # an enumeration of what exists here is blind to a handler this repo was
 # supposed to instrument but didn't touch, which is exactly the gap this
 # totality test exists to catch.
+# Values are REPO-RELATIVE PATHS, not bare `lambda/` filenames
+# (alpha-engine-config-I9329). A stage's substrate is not part of its
+# contract: `EvalJudgeProcess` still runs, still carries the assertion, and is
+# no longer a Lambda. Keying on `lambda/<file>` made the map unable to express
+# that, and the only way to keep it type-checking would have been to delete
+# the row — which is how a live stage's coverage assertion goes dark without
+# anyone deciding to drop it. `EvalJudgePoll` IS deleted: that state no longer
+# exists in the SF at all.
 _WEEKLY_SF_STAGE_TO_HANDLER_FILE = {
-    "Scanner": "scanner_handler.py",
-    "SignalsEnvelope": "signals_envelope_handler.py",
-    "ChallengerShadow": "handler.py",
-    "EvalJudgeSubmitFirstSaturday": "eval_judge_submit_handler.py",
-    "EvalJudgeSubmitWeekly": "eval_judge_submit_handler.py",
-    "EvalJudgePoll": "eval_judge_poll_handler.py",
-    "EvalJudgeProcess": "eval_judge_process_handler.py",
-    "EvalRollingMean": "eval_rolling_mean_handler.py",
-    "RationaleClustering": "rationale_clustering_handler.py",
-    "AggregateCosts": "aggregate_costs_handler.py",
+    "Scanner": "lambda/scanner_handler.py",
+    # alpha-engine-config-I9050: the leaf ``scanner_leaderboard`` mode's
+    # assertion path was never wired — see TestScannerLeaderboardCoverage.
+    "ScannerLeaderboard": "lambda/scanner_handler.py",
+    "SignalsEnvelope": "lambda/signals_envelope_handler.py",
+    "ChallengerShadow": "lambda/handler.py",
+    "EvalJudgeSubmitFirstSaturday": "lambda/eval_judge_submit_handler.py",
+    "EvalJudgeSubmitWeekly": "lambda/eval_judge_submit_handler.py",
+    "EvalJudgeProcess": "evals/judge_spot_run.py",
+    "EvalRollingMean": "lambda/eval_rolling_mean_handler.py",
+    "RationaleClustering": "lambda/rationale_clustering_handler.py",
+    "AggregateCosts": "lambda/aggregate_costs_handler.py",
 }
+
+
+def _assert_stage_coverage_call_args(source: str) -> list[str]:
+    """Every ``assert_stage_coverage(...)`` call's argument text.
+
+    Paren-matched rather than regex-bounded so a nested call in an argument
+    does not truncate the span — a truncated span silently stops covering the
+    kwargs after it, which is the same class of blindness the enforcement
+    check exists to prevent. The bare ``from ... import`` line is skipped: it
+    is not a call.
+    """
+    calls: list[str] = []
+    needle = "assert_stage_coverage("
+    idx = source.find(needle)
+    while idx != -1:
+        i = idx + len(needle)
+        depth = 1
+        while i < len(source) and depth:
+            if source[i] == "(":
+                depth += 1
+            elif source[i] == ")":
+                depth -= 1
+            i += 1
+        calls.append(source[idx + len(needle):i - 1])
+        idx = source.find(needle, i)
+    return calls
 
 
 class TestTotalityAndEnforcement:
@@ -802,7 +839,7 @@ class TestTotalityAndEnforcement:
             if filename in checked_files:
                 continue
             checked_files.add(filename)
-            source = (_LAMBDA_DIR / filename).read_text()
+            source = (_REPO_ROOT / filename).read_text()
             assert "assert_stage_coverage" in source, (
                 f"{filename} backs weekly-SF stage {stage!r} but never calls assert_stage_coverage (config-I7214)"
             )
@@ -815,7 +852,7 @@ class TestTotalityAndEnforcement:
         declared = set(_WEEKLY_SF_STAGE_TO_HANDLER_FILE)
         found_any = False
         for filename in set(_WEEKLY_SF_STAGE_TO_HANDLER_FILE.values()):
-            source = (_LAMBDA_DIR / filename).read_text()
+            source = (_REPO_ROOT / filename).read_text()
             for stage in declared:
                 if f'"{stage}"' in source:
                     found_any = True
@@ -825,25 +862,33 @@ class TestTotalityAndEnforcement:
         """Enforcement is a single flag the lib owns (per config-I7214's
         contract) — no shipped call site in this repo may pass it.
         OBSERVE MODE ONLY until the ruled Saturday 2026-08-15 02:00 PT
-        soak boundary. Every call site here passes exactly the stage
-        name (positional) plus run_date= and window_start= — nothing
-        else — so a literal ``enforce`` token anywhere in a handler file
-        is itself the finding."""
+        soak boundary.
+
+        Scanned over the ARGUMENTS of each ``assert_stage_coverage(...)``
+        call, not over the whole file (narrowed by
+        alpha-engine-config-I9329). A whole-file substring scan asserted
+        something it could not see — it fired on
+        ``evals.judge_coverage.enforce_coverage``, an unrelated function that
+        is the judge's own coverage VERDICT, and a check that reports a
+        finding on a legitimately-named neighbour teaches readers to
+        suppress it.
+        """
         for filename in set(_WEEKLY_SF_STAGE_TO_HANDLER_FILE.values()):
-            source = (_LAMBDA_DIR / filename).read_text()
-            for token in ("enforce=", "enforce_", "raise_on_breach"):
-                assert token not in source, (
-                    f"{filename} appears to pass an enforcement flag to "
-                    f"assert_stage_coverage (config-I7214: observe mode "
-                    f"only)"
-                )
+            source = (_REPO_ROOT / filename).read_text()
+            for call_args in _assert_stage_coverage_call_args(source):
+                for token in ("enforce=", "enforce_", "raise_on_breach"):
+                    assert token not in call_args, (
+                        f"{filename} passes an enforcement flag to "
+                        f"assert_stage_coverage (config-I7214: observe mode "
+                        f"only): {call_args!r}"
+                    )
 
     def test_every_call_site_passes_window_start(self):
         """window_start must be a timezone-aware datetime captured at
         handler entry, not omitted — an assertion with no window_start
         can't distinguish this cycle's artifact from a stale leftover."""
         for filename in set(_WEEKLY_SF_STAGE_TO_HANDLER_FILE.values()):
-            source = (_LAMBDA_DIR / filename).read_text()
+            source = (_REPO_ROOT / filename).read_text()
             assert "window_start=" in source, (
                 f"{filename} calls assert_stage_coverage without threading window_start (config-I7214)"
             )

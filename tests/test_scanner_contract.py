@@ -214,11 +214,11 @@ def test_only_count_matched_arms_may_hold_the_feed():
     """The pointer is writable by an automated promotion engine, so the set of
     values it may take is closed and every member is 60 wide.
 
-    The SET shrank on 2026-08-21 (Brian ruling, alpha-engine-config-I8060):
-    `tech_score_top_60` is observe-only until it has weeks of measured
-    performance. This test pins the closed-and-count-matched property, which is
-    what the contract guarantees, rather than a specific membership — the
-    membership moves on a ruling and the property must not.
+    The SET shrank on 2026-08-21 (alpha-engine-config-I8060) and was restored in
+    full on 2026-08-29 (I9272, Brian: "an arm which is scored must be able to
+    win"). This test pins the closed-and-count-matched property, which is what
+    the contract guarantees, rather than a specific membership — the membership
+    moves on a ruling and the property must not.
     """
     from scoring.universe_membership import (
         DEFAULT_CUT_CHAMPION,
@@ -228,7 +228,10 @@ def test_only_count_matched_arms_may_hold_the_feed():
     )
 
     assert DEFAULT_CUT_CHAMPION in PROMOTABLE_CUTS
-    assert PROMOTABLE_CUTS == ("attractiveness_top_60",)
+    # Closed: the promotable set is a SUBSET of the scored register, never a
+    # free-form name. It is the whole register today (no exclusions).
+    assert set(PROMOTABLE_CUTS) <= set(SLOT_ARMS)
+    assert set(PROMOTABLE_CUTS) == set(SLOT_ARMS) - set(OBSERVE_ONLY_CUTS)
     assert all(name.endswith(f"_{ATTRACTIVENESS_FEED_TOP_N}") for name in PROMOTABLE_CUTS)
     # Count-matching holds across the WHOLE slot, so an observe-only arm can be
     # promoted later without re-baselining its history against a new width.
@@ -236,7 +239,11 @@ def test_only_count_matched_arms_may_hold_the_feed():
     # Ineligible must not mean unmeasured: every arm is in exactly one bucket.
     assert not set(PROMOTABLE_CUTS) & set(OBSERVE_ONLY_CUTS)
     assert set(SLOT_ARMS) == set(PROMOTABLE_CUTS) | set(OBSERVE_ONLY_CUTS)
-    assert "tech_score_top_60" in OBSERVE_ONLY_CUTS
+    # `tech_score_top_60` was observe-only between 2026-08-21 and 2026-08-29 and
+    # is promotable again under Brian's I9272 ruling. What the contract pins is
+    # the PARTITION, not either arm's side of it.
+    assert "tech_score_top_60" in SLOT_ARMS
+    assert not set(PROMOTABLE_CUTS) & set(OBSERVE_ONLY_CUTS)
 
 
 def test_tech_score_cut_flags_when_it_equals_the_live_cut():

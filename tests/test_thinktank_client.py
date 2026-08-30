@@ -16,7 +16,7 @@ from thinktank.client import (
     ThinktankClient,
     ThinktankLLMError,
 )
-from thinktank.settings import ProviderSpec, ThinktankSettings, TierSpec
+from thinktank.settings import ThinktankSettings, TierSpec
 
 
 class _Out(BaseModel):
@@ -34,19 +34,77 @@ def _settings() -> ThinktankSettings:
         stale_after_days=30,
         monthly_budget_usd_default=25.0,
         budget_ssm_param="/thinktank/monthly_budget_usd",
-        providers={"fake": ProviderSpec(name="fake", base_url="http://x", key_secret="OPENROUTER_API_KEY")},
         tiers={
             "thesis": TierSpec(
                 name="thesis",
-                provider="fake",
-                model="fake/model",
+                group="med",
                 max_tokens=100,
-                price_in_per_m=1.0,
-                price_out_per_m=2.0,
                 structured_outputs=True,
             )
         },
     )
+
+
+# Every tier is group-addressed (alpha-engine-config-I9302): resolving a
+# client means calling krepis.router.resolve_group_structured. This suite
+# tests ThinktankClient's OWN validation/retry/cost/SFT logic, not routing
+# itself (that is test_thinktank_group_addressing.py's job) — so the router
+# call is stubbed to a fixed route and every fixture below asserts on the
+# `client_factory` test seam exactly as it did before I9302 removed the
+# pinned-provider mode; only how the ModelSpec is obtained has changed.
+_FAKE_ROUTE = {
+    "schema_version": 2,
+    "group": "med",
+    "route": "litellm_proxy",
+    "provider": "litellm",
+    "deployment_id": "med",
+    "api_base_url": "https://router.example:8443",
+    "auth_token_type": "litellm_master_key",
+    "registry_id": "litellm:group:med",
+    "primary_registry_id": "deepseek-v4-flash-max",
+    "params": {},
+}
+
+
+@pytest.fixture(autouse=True)
+def _stub_router(monkeypatch):
+    import krepis.router as _kr
+
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "consumer-test")
+    monkeypatch.setattr(_kr, "resolve_group_structured", lambda *a, **k: dict(_FAKE_ROUTE))
+    # A FAILED call is priced from the addressed deployment
+    # (thinktank/client.py::_priceable_model_for_failed_call), mapped back to
+    # an upstream model via this function — bound into thinktank.client's own
+    # namespace at import time, so patch it there.
+    import thinktank.client as _tc
+
+    monkeypatch.setattr(_tc, "served_model_for_deployment", lambda _name: "deepseek-v4-flash-max")
+
+
+@pytest.fixture(autouse=True)
+def _stub_price_card(monkeypatch):
+    """Group-addressed cost is priced from the model that actually SERVED
+    (``krepis.cost.PriceCard``), not a per-tier literal — there is no
+    pinned tier left to carry one (alpha-engine-config-I9302). $1/M in,
+    $2/M out reproduces the pre-I9302 fixture's own numbers so the retry/
+    validation/SFT assertions below are unaffected by the routing change."""
+    from datetime import date as _date
+
+    from krepis.cost import PriceCard, PriceTable
+
+    table = PriceTable(
+        cards=[
+            PriceCard(
+                model_name="deepseek-v4-flash-max",
+                effective_from=_date(2026, 1, 1),
+                input_per_1m=1.0,
+                output_per_1m=2.0,
+                cache_read_per_1m=0.0,
+                cache_create_per_1m=0.0,
+            )
+        ]
+    )
+    monkeypatch.setattr("krepis.cost.load_default_pricing", lambda: table)
 
 
 class _FakeCompletions:
@@ -60,11 +118,14 @@ class _FakeCompletions:
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=body))],
             usage=SimpleNamespace(prompt_tokens=1_000_000, completion_tokens=500_000),
+            # A real served model, distinct from the "med" group alias — the
+            # krepis I6543 masquerade guard refuses to bill/record a call
+            # under the bare alias (krepis.llm.LLMClient._served_model_for).
+            model="deepseek-v4-flash-max",
         )
 
 
 def _client(bodies: list[str], monkeypatch) -> tuple[ThinktankClient, _FakeCompletions]:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     fake = _FakeCompletions(bodies)
     holder = SimpleNamespace(chat=SimpleNamespace(completions=fake))
     client = ThinktankClient(
@@ -144,6 +205,7 @@ class _ScriptedCompletions:
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=item))],
                 usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+                model="deepseek-v4-flash-max",
             )
         return item
 
@@ -208,7 +270,6 @@ def test_transport_decode_error_is_transient_and_retried(monkeypatch, no_backoff
     classifies it, it escapes the retry loop entirely — which is how one
     gateway hiccup killed the 2026-07-30 daily Think Tank run.
     """
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     client, fake = _scripted_client(
         [
             _decode_error_of_a_keepalive_only_body(),
@@ -223,7 +284,6 @@ def test_transport_decode_error_is_transient_and_retried(monkeypatch, no_backoff
 
 def test_transport_decode_error_fails_loud_after_retries_exhausted(monkeypatch, no_backoff):
     """Bounded, not swallowed: a PERSISTENT decode failure still raises."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     client, fake = _scripted_client([_decode_error_of_a_keepalive_only_body() for _ in range(_STRUCTURED_ATTEMPTS)])
     with pytest.raises(ThinktankLLMError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
@@ -240,7 +300,6 @@ def test_transient_provider_error_propagates_for_the_sdk_to_retry(monkeypatch):
     status/connection failures). It is not swallowed here."""
     from openai import APIConnectionError
 
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     client, fake = _scripted_client([APIConnectionError(request=SimpleNamespace())])
     with pytest.raises(APIConnectionError):
         client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)

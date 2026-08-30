@@ -39,7 +39,6 @@ import copy
 import json
 import logging
 import os
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -72,111 +71,17 @@ _REPORT_PREFIX = "decision_artifacts/_perturbation/_report/"
 # reasoning, score-consistent rankings, complete coverage. A well-behaved
 # judge should score these HIGH; the corruptions below break one
 # dimension at a time and the judge should notice.
-
-_QUANT_REFERENCE: dict[str, Any] = {
-    "ranked_picks": [
-        {
-            "ticker": "AAPL",
-            "quant_score": 82,
-            "rationale": (
-                "RSI-14 at 58 (neutral-bullish, not overbought); 20d/50d MA "
-                "crossover confirmed 6 sessions ago; relative strength vs XLK "
-                "+4.2% over 21d; avg daily volume 58M shares supports liquidity."
-            ),
-            "key_metrics": {"rsi_14": 58, "rs_vs_sector_21d": 0.042,
-                            "ma_cross": "20>50", "avg_vol_20d": 58_000_000},
-        },
-        {
-            "ticker": "MSFT",
-            "quant_score": 74,
-            "rationale": (
-                "RSI-14 at 54; price holding above 50d MA; relative strength "
-                "vs XLK +1.8% over 21d; volume steady at 24M. Slightly weaker "
-                "momentum than AAPL hence the lower score."
-            ),
-            "key_metrics": {"rsi_14": 54, "rs_vs_sector_21d": 0.018,
-                            "ma_cross": "above_50d", "avg_vol_20d": 24_000_000},
-        },
-        {
-            "ticker": "NVDA",
-            "quant_score": 61,
-            "rationale": (
-                "RSI-14 at 71 (approaching overbought); strong 21d RS of +9.1% "
-                "but extension risk caps the score; volume elevated at 41M."
-            ),
-            "key_metrics": {"rsi_14": 71, "rs_vs_sector_21d": 0.091,
-                            "ma_cross": "20>50", "avg_vol_20d": 41_000_000},
-        },
-    ],
-}
-
-_QUANT_INPUT_SNAPSHOT: dict[str, Any] = {
-    "team_id": "technology",
-    "run_date": "2026-05-09",
-    "market_regime": "neutral",
-    "sector_tickers": ["AAPL", "MSFT", "NVDA"],
-    "technical_scores_team": {
-        "AAPL": {"rsi_14": 58, "technical_score": 82},
-        "MSFT": {"rsi_14": 54, "technical_score": 74},
-        "NVDA": {"rsi_14": 71, "technical_score": 61},
-    },
-}
-
-_QUAL_REFERENCE: dict[str, Any] = {
-    "assessments": [
-        {
-            "ticker": "AAPL",
-            "qual_score": 78,
-            "bull_case": (
-                "Services revenue grew 14% YoY to $24B last quarter, lifting "
-                "gross margin to 46% because services carry ~70% margin vs ~36% "
-                "on hardware; this mix shift compounds as the installed base of "
-                "2.2B devices monetizes, so EPS can grow faster than revenue."
-            ),
-            "bear_case": (
-                "China iPhone units fell 9% YoY and Greater China is 17% of "
-                "revenue, so a prolonged share-loss to Huawei would offset much "
-                "of the services tailwind; regulatory pressure on App Store fees "
-                "is a second, slower drag on the highest-margin line."
-            ),
-            "catalysts": ["WWDC AI roadmap (June)", "Q3 services print"],
-            "risks": ["China share loss", "App Store fee regulation"],
-            "conviction": 72,
-        },
-        {
-            "ticker": "MSFT",
-            "qual_score": 71,
-            "bull_case": (
-                "Azure grew 30% YoY with AI services contributing ~7 points of "
-                "that growth; Copilot attach on the 400M M365 commercial seats "
-                "is early (<5%) so there is a long monetization runway as price "
-                "moves from $30/seat into the base."
-            ),
-            "bear_case": (
-                "Capex guided to $50B+ to fund AI capacity compresses near-term "
-                "free cash flow, and if Copilot attach stalls below ~10% the "
-                "ROIC on that capex disappoints versus the multiple."
-            ),
-            "catalysts": ["Copilot attach disclosure", "Azure AI revenue split"],
-            "risks": ["AI capex ROIC", "Copilot adoption stall"],
-            "conviction": 66,
-        },
-    ],
-}
-
-_QUAL_INPUT_SNAPSHOT: dict[str, Any] = {
-    "team_id": "technology",
-    "run_date": "2026-05-09",
-    "market_regime": "neutral",
-    # `sector_tickers` / `sector_population` are the non-degenerate
-    # signal the judge's _is_degenerate_input check requires for
-    # sector_qual — without them the judge short-circuits to
-    # `degenerate_input` and emits no dimension scores.
-    "sector_tickers": ["AAPL", "MSFT", "NVDA"],
-    "sector_population": ["AAPL", "MSFT", "NVDA"],
-    "quant_top_picks": ["AAPL", "MSFT", "NVDA"],
-}
-
+#
+# RETIRED 2026-08-29 (alpha-engine-config-I9330): the sector_quant and
+# sector_qual reference fixtures + their 8 corruptions were removed here.
+# ``evals.judge.resolve_rubric_for_agent`` no longer maps either family
+# (retired 2026-07-12 research graph), so ``evaluate_artifact`` now
+# raises "No rubric mapped" for them BEFORE the judge is ever called —
+# ``judge-perturbation-smoke.yml`` runs this module's live battery on
+# every PR touching ``evals/judge.py``, so leaving those corruptions in
+# would have turned this PR's own smoke run into a hard failure. Only
+# the Think Tank families remain (the only ones producing artifacts —
+# measured 2026-08-29: 83/83 trailing-7-day captures were Think Tank).
 
 # Thinktank thesis (company-level) — mirrors CompanyThesisLLM
 # (thinktank/schemas.py) + the input_data_snapshot shape built in
@@ -305,16 +210,6 @@ _THINKTANK_THEME_INPUT_SNAPSHOT: dict[str, Any] = {
 
 
 REFERENCE_FIXTURES: dict[str, dict[str, Any]] = {
-    "eval_rubric_sector_quant": {
-        "agent_id": "sector_quant:technology",
-        "agent_output": _QUANT_REFERENCE,
-        "input_data_snapshot": _QUANT_INPUT_SNAPSHOT,
-    },
-    "eval_rubric_sector_qual": {
-        "agent_id": "sector_qual:technology",
-        "agent_output": _QUAL_REFERENCE,
-        "input_data_snapshot": _QUAL_INPUT_SNAPSHOT,
-    },
     "eval_rubric_thinktank_thesis": {
         "agent_id": "thinktank_thesis",
         "agent_output": _THINKTANK_THESIS_REFERENCE,
@@ -333,100 +228,6 @@ REFERENCE_FIXTURES: dict[str, dict[str, Any]] = {
 # Each takes a deep-copyable agent_output dict and returns a corrupted
 # copy that degrades exactly ONE rubric dimension. Pure + deterministic
 # so they are unit-tested without any LLM call.
-
-_NUM_RE = re.compile(r"\d")
-
-
-def _strip_numerical_grounding(out: dict) -> dict:
-    """Quant: remove every concrete number — empty key_metrics, scrub
-    digits from rationales. Targets `numerical_grounding`."""
-    for p in out.get("ranked_picks", []):
-        p["key_metrics"] = {}
-        p["rationale"] = "Strong technical setup; momentum looks favorable here."
-    return out
-
-
-def _break_ranking_coherence(out: dict) -> dict:
-    """Quant: reassign scores ASCENDING down the existing list order so
-    the pick listed first (and whose rationale describes it as strongest)
-    now carries the LOWEST quant_score — list rank, score, and rationale
-    all contradict each other. Tickers + rationales untouched, so the
-    incoherence is purely score-vs-rank-vs-narrative. Targets
-    `ranking_coherence`."""
-    picks = out.get("ranked_picks", [])
-    # e.g. 3 picks → [60, 72, 84]; first-listed gets the worst score.
-    for i, p in enumerate(picks):
-        p["quant_score"] = 60 + i * 12
-    return out
-
-
-def _flatten_signal_calibration(out: dict) -> dict:
-    """Quant: collapse all quant_scores to an identical value so there is
-    no differentiation/gradient across picks. Targets `signal_calibration`."""
-    for p in out.get("ranked_picks", []):
-        p["quant_score"] = 75
-    return out
-
-
-def _gut_output_completeness(out: dict) -> dict:
-    """Quant: drop to a single pick with an empty rationale — inadequate
-    coverage for the team's contract. Targets `output_completeness`."""
-    picks = out.get("ranked_picks", [])
-    if picks:
-        first = picks[0]
-        first["rationale"] = ""
-        first["key_metrics"] = {}
-        out["ranked_picks"] = [first]
-    return out
-
-
-def _strip_citation_grounding(out: dict) -> dict:
-    """Qual: replace fact-grounded bull/bear with generic vague claims.
-    Targets `citation_grounding`."""
-    for a in out.get("assessments", []):
-        a["bull_case"] = "The company is well run and has good prospects."
-        a["bear_case"] = "There are some risks and the macro could be a headwind."
-    return out
-
-
-def _flatten_reasoning_depth(out: dict) -> dict:
-    """Qual: collapse multi-step cause→effect chains to single-clause
-    assertions. Targets `reasoning_depth`."""
-    for a in out.get("assessments", []):
-        a["bull_case"] = "Revenue is growing."
-        a["bear_case"] = "Competition exists."
-    return out
-
-
-def _misalign_evidence(out: dict) -> dict:
-    """Qual: set a very bullish qual_score while the bear_case dominates a
-    thin bull_case — score no longer reflects the evidence balance.
-    Targets `evidence_alignment`."""
-    for a in out.get("assessments", []):
-        a["qual_score"] = 94
-        a["conviction"] = 95
-        a["bull_case"] = "Probably fine."
-        # bear_case left as the substantive, fact-heavy original.
-    return out
-
-
-def _verbosity_pad(out: dict) -> dict:
-    """Cross-cutting: take the numerical-grounding corruption and PAD each
-    rationale with long filler so the (worse) output is LONGER than the
-    reference. A verbosity-biased judge would reward the length; a good
-    judge still scores `numerical_grounding` down. Targets
-    `numerical_grounding` via the verbosity-bias failure mode."""
-    out = _strip_numerical_grounding(out)
-    filler = (
-        " It is worth emphasizing, broadly speaking, that this name remains a "
-        "high-quality franchise with a durable position and many attractive "
-        "qualities that investors have long appreciated across cycles and "
-        "regimes, all things considered, on balance, generally."
-    )
-    for p in out.get("ranked_picks", []):
-        p["rationale"] = (p.get("rationale", "") + filler * 3)
-    return out
-
 
 def _strip_input_groundedness(out: dict) -> dict:
     """Thinktank thesis: delete every citation of the provided inputs (board
@@ -490,22 +291,6 @@ class Corruption:
 
 
 CORRUPTIONS: list[Corruption] = [
-    Corruption("strip_numerical_grounding", "eval_rubric_sector_quant",
-               "numerical_grounding", _strip_numerical_grounding),
-    Corruption("break_ranking_coherence", "eval_rubric_sector_quant",
-               "ranking_coherence", _break_ranking_coherence),
-    Corruption("flatten_signal_calibration", "eval_rubric_sector_quant",
-               "signal_calibration", _flatten_signal_calibration),
-    Corruption("gut_output_completeness", "eval_rubric_sector_quant",
-               "output_completeness", _gut_output_completeness),
-    Corruption("verbosity_pad_numerical", "eval_rubric_sector_quant",
-               "numerical_grounding", _verbosity_pad),
-    Corruption("strip_citation_grounding", "eval_rubric_sector_qual",
-               "citation_grounding", _strip_citation_grounding),
-    Corruption("flatten_reasoning_depth", "eval_rubric_sector_qual",
-               "reasoning_depth", _flatten_reasoning_depth),
-    Corruption("misalign_evidence", "eval_rubric_sector_qual",
-               "evidence_alignment", _misalign_evidence),
     Corruption("strip_input_groundedness", "eval_rubric_thinktank_thesis",
                "input_groundedness", _strip_input_groundedness),
     Corruption("vacuous_moat", "eval_rubric_thinktank_thesis",

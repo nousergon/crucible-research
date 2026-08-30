@@ -201,44 +201,41 @@ loud failure for the operator to diagnose."""
 
 def resolve_rubric_for_agent(agent_id: str) -> str | None:
     """Return the rubric prompt name for ``agent_id``, or ``None`` if
-    the agent type is intentionally unevaluated.
+    the agent type is unmapped — either genuinely unevaluated, or a
+    retired agent family.
 
-    Mapping mirrors the captured agent_id taxonomy (see
-    The retired research graph's sector_team_node + cio_node + macro_economist_node):
+    RETIRED 2026-08-29 (alpha-engine-config-I9330): the six branches for
+    ``sector_quant:{team_id}``, ``sector_qual:{team_id}``,
+    ``sector_peer_review:{team_id}``, ``thesis_update:{team}:{ticker}``,
+    ``macro_economist``, and ``ic_cio`` belonged to the LangGraph
+    sector-team/macro/IC research graph retired 2026-07-12 in favor of
+    Think Tank. Measured 2026-08-29 against the trailing 7-day capture
+    window: 83 artifacts, ALL Think Tank (71 ``thinktank_thesis`` + 12
+    ``thinktank_theme``) — zero artifacts of any retired family. Do not
+    re-add these branches from an old prompt asset or docstring without
+    first confirming the sector-team/macro/IC graph is live again; if it
+    is, the correct fix is re-adding the mapping AND removing this note,
+    not resurrecting one branch from memory.
 
-      sector_quant:{team_id}        → eval_rubric_sector_quant
-      sector_qual:{team_id}         → eval_rubric_sector_qual
-      sector_peer_review:{team_id}  → eval_rubric_sector_peer_review
-      macro_economist               → eval_rubric_macro_economist
-      ic_cio                        → eval_rubric_ic_cio
-      thesis_update:{team}:{ticker} → eval_rubric_thesis_update
+    Unknown agent_ids (this includes every retired family above, and any
+    genuinely-unevaluated agent type such as ``executor:*``) return
+    ``None`` so the caller can skip cleanly (``skipped_unmapped``) rather
+    than crash on rubric lookup or silently grade with the wrong rubric —
+    that clean-skip behavior is load-bearing for the weekly run
+    (``evals/orchestrator.py``'s ``skipped_unmapped`` counters) and must
+    never become a raise or a default fallback.
 
-    Unknown agent_ids return None so the caller can skip cleanly
-    rather than crash on rubric lookup.
+    Live families:
 
-    The thesis_update rubric was added 2026-05-05 after confirming the
-    held-stock update is alpha-load-bearing: executor's position_sizer
-    reads conviction (0.7× multiplier on declining); eod_reconcile reads
-    bull_case (EOD email rationale). Silent regression in this output
-    directly costs alpha through wrong sizing on held positions, so the
-    rubric makes the regression visible weeks before it shows up in
-    alpha-vs-SPY.
+      thinktank_thesis  → eval_rubric_thinktank_thesis
+      thinktank_theme   → eval_rubric_thinktank_theme
+
+    Think-tank ids (config#1579 P2) are deliberately COARSE (not
+    per-ticker/per-theme) so the rolling-mean floor's >=3-samples-per-combo
+    gate is met; ticker/theme identity rides in run_id + the snapshot.
     """
-    if agent_id.startswith("sector_quant:"):
-        return "eval_rubric_sector_quant"
-    if agent_id.startswith("sector_qual:"):
-        return "eval_rubric_sector_qual"
-    if agent_id.startswith("sector_peer_review:"):
-        return "eval_rubric_sector_peer_review"
-    if agent_id.startswith("thesis_update:"):
-        return "eval_rubric_thesis_update"
-    if agent_id == "macro_economist":
-        return "eval_rubric_macro_economist"
-    if agent_id == "ic_cio":
-        return "eval_rubric_ic_cio"
-    # Think-tank family (config#1579 P2) — deliberately COARSE ids (not
-    # per-ticker/per-theme) so the rolling-mean floor's >=3-samples-per-combo
-    # gate is met; ticker/theme identity rides in run_id + the snapshot.
+    # Think-tank family — the only agent families still producing
+    # artifacts (measured 2026-08-29, see docstring above).
     if agent_id == "thinktank_thesis":
         return "eval_rubric_thinktank_thesis"
     if agent_id == "thinktank_theme":
@@ -909,13 +906,46 @@ OpenRouter, I6367 ruling). Matches ``LLM_CALLSITE_REGISTRY.yaml`` rows
 ``model_group: low``, ``transport: krepis_llm``."""
 
 JUDGE_EXEC_CONTEXT = "lambda"
-"""Both judge call sites run as Lambda invocations: ``evaluate_artifact``
-from the batch Process Lambda's Sonnet-escalation tail (plus ad-hoc
-replay / ``judge_only`` smoke, which run off-laptop against the same
-Lambda-shaped environment) and ``evaluate_artifact_openrouter`` from
-``lambda/openrouter_shadow_handler.py``. A future non-Lambda caller
-should pass its own declared context rather than assume this one
-(model-router-policy R28/R29 — a fact, never a routing preference)."""
+"""Default execution context for a judge call — see :func:`judge_exec_context`.
+
+Historically a hard constant, on the reasoning that "both judge call sites run
+as Lambda invocations": ``evaluate_artifact`` from the batch Process Lambda's
+Sonnet-escalation tail and ``evaluate_artifact_openrouter`` from
+``lambda/openrouter_shadow_handler.py``. That docstring also said *"a future
+non-Lambda caller should pass its own declared context rather than assume this
+one"* — alpha-engine-config-I9309 is that caller, and this is it doing so.
+
+Kept as the DEFAULT rather than deleted: every existing Lambda call site is
+still a Lambda, and a context is a FACT about where code runs, never a routing
+preference (``model-router-policy`` R28/R29), so the default must stay true for
+the callers it describes."""
+
+
+def judge_exec_context() -> str:
+    """The execution context to declare to the router for a judge call.
+
+    Reads ``KREPIS_EXEC_CONTEXT`` when the environment states one, else
+    :data:`JUDGE_EXEC_CONTEXT`. The env var is krepis's own — the same one
+    ``thinktank_spot_bootstrap.sh`` already exports for the fleet's other
+    EC2-resident routed call site — rather than a judge-specific name, because
+    the fact being stated ("this process runs on EC2") belongs to the process,
+    not to this module.
+
+    Resolved per CALL, not at import: the module is imported once into an
+    image that runs in more than one context, and a value frozen at import time
+    would be a constant wearing a function's clothes — and untestable without
+    reloading the module.
+
+    Getting this wrong is not cosmetic. ``_entry_reachable_from`` gates which
+    registry rows a context may use, so a spot box claiming ``lambda`` could be
+    handed a route reachable only from Lambda and fail at connect time, or —
+    worse — silently resolve a different member than the one the registry
+    intends for EC2.
+    """
+    import os
+
+    declared = os.environ.get("KREPIS_EXEC_CONTEXT", "").strip()
+    return declared or JUDGE_EXEC_CONTEXT
 
 
 def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
@@ -970,7 +1000,7 @@ def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
 
     spec, route = resolve_group_spec(
         JUDGE_MODEL_GROUP,
-        exec_context=JUDGE_EXEC_CONTEXT,
+        exec_context=judge_exec_context(),
         # THE call shape this judge cannot do without (alpha-engine-config-I7904).
         # Every request below forces a tool call, and `low`'s declared primary
         # refuses one outright — a permanent 400, identical on all three

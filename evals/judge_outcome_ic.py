@@ -112,9 +112,12 @@ import math
 import os
 import sqlite3
 import tempfile
+import time
 from collections import defaultdict
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from nousergon_lib.dates import expected_last_close
@@ -145,6 +148,60 @@ RESEARCH_DB_S3_KEY = "research.db"
 # agent_id family that carries a per-ticker identity (see
 # evals/judge.resolve_rubric_for_agent's taxonomy).
 _TICKER_BEARING_PREFIX = "thesis_update:"
+
+
+# ── Eval-scan budget (alpha-engine-config-I9205) ───────────────────────────
+#
+# ``load_eval_artifacts`` walks the whole ``decision_artifacts/_eval/``
+# prefix and issues one ``GetObject`` per artifact. Measured live
+# 2026-08-28: 4,679 artifacts / 26,058,127 bytes, sequential ``get_object``
+# at ~117.8 ms each → ~551 s for ONE scan. ``build_agent_quality`` ran the
+# scan TWICE, so the block consumed ~1,102 s against a 240 s handler
+# ceiling and timed out on all three of its first real executions. The
+# driver is REQUEST LATENCY, not bytes (26 MB) and not memory (peak 519 MB
+# of 1024 MB).
+#
+# Three bounds, all live on the Lambda handler path and none of them
+# disable-able by a caller:
+#
+# 1. WINDOW — objects are pre-filtered on the listing's ``LastModified``
+#    before any ``GetObject`` is issued. The join key is each artifact's
+#    DecisionArtifact CAPTURE date, which is always <= the moment the judge
+#    WROTE the eval, so an upper-bounded ``LastModified`` filter is a strict
+#    SUPERSET of the capture window it stands for: it can never drop an
+#    artifact the IC would have joined. 400 days ≈ a 12-month capture window
+#    plus a month of judge lag.
+# 2. CEILING — a hard object-count assertion that RAISES rather than
+#    proceeding. A 240 s timeout is unattributable; ``EvalScanBudgetExceeded``
+#    names the number that blew the budget.
+# 3. CONCURRENCY — the residual GETs run on a bounded thread pool, which is
+#    what turns ~551 s of serialized round-trips into ~20 s of wall clock.
+#
+# Both knobs resolve from these module constants at CALL time (the public
+# parameters default to ``None``), so no call site can pin a stale value and
+# a test can lower the ceiling to prove the bound is live.
+DEFAULT_EVAL_LOOKBACK_DAYS = 400
+
+# Hard ceiling on the number of eval artifacts one scan may fetch. ~4.7k
+# today, accreting ~750/week; 25k is ~7 months of headroom at that rate and
+# ~35 s of wall clock at EVAL_SCAN_MAX_WORKERS. Breaching it is a real
+# signal (the judge's emission rate changed, or the window regressed), not a
+# reason to fetch anyway.
+MAX_EVAL_OBJECTS = 25_000
+
+# Bounded fan-out for the residual GETs. botocore clients are thread-safe
+# for concurrent API calls; 32 keeps us far below the per-prefix S3 request
+# rate and below the Lambda's socket budget.
+EVAL_SCAN_MAX_WORKERS = 32
+
+
+class EvalScanBudgetExceeded(RuntimeError):
+    """The ``_eval/`` scan selected more objects than its declared ceiling.
+
+    Raised BEFORE any ``GetObject`` is issued, so it costs nothing and its
+    message carries the numbers needed to re-set the budget. Deliberately a
+    hard failure: silently fetching an unbounded prefix on a Lambda handler
+    path is what produced the ``agent_quality`` timeout (I9205)."""
 
 
 # ── Pure-stdlib Student-t two-sided p ──────────────────────────────────────
@@ -486,44 +543,140 @@ def compute_judge_outcome_ic(
 
 
 def load_eval_artifacts(
-    s3: Any, bucket: str, prefix: str | None = None,
+    s3: Any,
+    bucket: str,
+    prefix: str | None = None,
+    *,
+    lookback_days: int | None = None,
+    max_objects: int | None = None,
+    max_workers: int | None = None,
+    now: datetime | None = None,
 ) -> list[dict]:
-    """Every persisted RubricEvalArtifact JSON under the ``_eval/`` prefix.
+    """Every persisted RubricEvalArtifact JSON under the ``_eval/`` prefix,
+    windowed, ceilinged and fetched on a bounded thread pool.
 
-    Scans the FULL prefix — both the canonical flat layout
-    (``{prefix}{judge_run_id}_{basename}``, config#793) and the legacy
-    nested ``{prefix}{date}/{judge_run_id}/{basename}`` partition — so
-    the whole judged history participates. The eval_date used for the
-    outcome join comes from each artifact's ``judged_artifact_s3_key``
-    (layout-independent), never from the eval key itself. The
-    ``latest.json`` operator sidecar is not an eval artifact and is
-    skipped by name."""
+    Scans both the canonical flat layout (``{prefix}{judge_run_id}_
+    {basename}``, config#793) and the legacy nested ``{prefix}{date}/
+    {judge_run_id}/{basename}`` partition, so the whole judged history in
+    the window participates. The eval_date used for the outcome join comes
+    from each artifact's ``judged_artifact_s3_key`` (layout-independent),
+    never from the eval key itself. The ``latest.json`` operator sidecar is
+    not an eval artifact and is skipped by name.
+
+    Bounds (alpha-engine-config-I9205 — see the module constants above):
+
+    * ``lookback_days`` — keep only objects whose ``LastModified`` is within
+      the window. ``None`` → :data:`DEFAULT_EVAL_LOOKBACK_DAYS`; ``0``
+      requests the full history explicitly (still ceilinged). Because a
+      judge writes an eval at or after the artifact's capture, this filter
+      is a strict superset of the capture window and cannot drop a joinable
+      artifact.
+    * ``max_objects`` — ``None`` → :data:`MAX_EVAL_OBJECTS`. Exceeding it
+      raises :class:`EvalScanBudgetExceeded` before any ``GetObject``.
+      There is no value that disables the ceiling.
+    * ``max_workers`` — ``None`` → :data:`EVAL_SCAN_MAX_WORKERS`.
+
+    Emits one INFO line per scan carrying the per-phase durations and the
+    object/byte counters, so the next budget is set from measurement rather
+    than from a comment (I9205 deliverable 6).
+    """
     if prefix is None:
         from evals.judge import DEFAULT_EVAL_PREFIX  # deferred — see attribute_evals
 
         prefix = DEFAULT_EVAL_PREFIX
 
-    artifacts: list[dict] = []
+    lookback = DEFAULT_EVAL_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    ceiling = MAX_EVAL_OBJECTS if max_objects is None else max_objects
+    workers = EVAL_SCAN_MAX_WORKERS if max_workers is None else max_workers
+    cutoff = (
+        ((now or datetime.now(UTC)) - timedelta(days=lookback)) if lookback else None
+    )
+
+    # ── list phase ────────────────────────────────────────────────────────
+    t0 = time.monotonic()
+    n_listed = 0
+    n_windowed_out = 0
+    n_undated = 0
+    selected: list[str] = []
+    selected_bytes = 0
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []) or []:
             key = obj["Key"]
             if not key.endswith(".json") or key.split("/")[-1] == "latest.json":
                 continue
-            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-            try:
-                doc = json.loads(body)
-            except ValueError as exc:
-                # A corrupt artifact is a real defect worth surfacing, but
-                # one bad file must not sink the whole history join —
-                # recorded here (WARN names the key) per no-silent-fails.
-                logger.warning(
-                    "[judge_outcome_ic] unparseable eval artifact s3://%s/%s "
-                    "skipped: %s", bucket, key, exc,
-                )
-                continue
-            if isinstance(doc, dict):
-                artifacts.append(doc)
+            n_listed += 1
+            if cutoff is not None:
+                last_modified = obj.get("LastModified")
+                if last_modified is None:
+                    # A listing row without LastModified is a contract
+                    # violation of the S3 API, so this branch should be
+                    # unreachable against real S3. It degrades toward
+                    # KEEPING the object (never dropping data the IC would
+                    # have joined) and the failure mode — an object that
+                    # escapes the window and inflates the scan — is recorded
+                    # on the WARN below and in the ``n_undated`` counter of
+                    # the scan's INFO line.
+                    n_undated += 1
+                elif last_modified < cutoff:
+                    n_windowed_out += 1
+                    continue
+            selected.append(key)
+            selected_bytes += int(obj.get("Size") or 0)
+    list_s = time.monotonic() - t0
+
+    if n_undated:
+        logger.warning(
+            "[judge_outcome_ic] %d eval object(s) under s3://%s/%s had no "
+            "LastModified and bypassed the %s-day window (kept, never dropped)",
+            n_undated, bucket, prefix, lookback,
+        )
+
+    # ── ceiling assertion — before a single GetObject is issued ───────────
+    if len(selected) > ceiling:
+        raise EvalScanBudgetExceeded(
+            f"eval scan selected {len(selected)} objects under "
+            f"s3://{bucket}/{prefix} (listed {n_listed}, window "
+            f"{lookback or 'ALL'}d) — ceiling is {ceiling}. Refusing to "
+            f"issue an unbounded prefix walk on a handler path; narrow the "
+            f"window or re-set MAX_EVAL_OBJECTS from a measured scan."
+        )
+
+    # ── fetch phase — bounded fan-out ────────────────────────────────────
+    t1 = time.monotonic()
+
+    def _fetch(key: str) -> tuple[str, bytes]:
+        return key, s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+
+    artifacts: list[dict] = []
+    n_unparseable = 0
+    if selected:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(selected)))) as pool:
+            for key, body in pool.map(_fetch, selected):
+                try:
+                    doc = json.loads(body)
+                except ValueError as exc:
+                    # A corrupt artifact is a real defect worth surfacing, but
+                    # one bad file must not sink the whole history join —
+                    # recorded here (WARN names the key) per no-silent-fails.
+                    n_unparseable += 1
+                    logger.warning(
+                        "[judge_outcome_ic] unparseable eval artifact s3://%s/%s "
+                        "skipped: %s", bucket, key, exc,
+                    )
+                    continue
+                if isinstance(doc, dict):
+                    artifacts.append(doc)
+    fetch_s = time.monotonic() - t1
+
+    logger.info(
+        "[judge_outcome_ic] eval scan s3://%s/%s: listed=%d windowed_out=%d "
+        "fetched=%d parsed=%d unparseable=%d bytes=%d workers=%d "
+        "lookback_days=%s ceiling=%d list_s=%.2f fetch_s=%.2f total_s=%.2f",
+        bucket, prefix, n_listed, n_windowed_out, len(selected), len(artifacts),
+        n_unparseable, selected_bytes, max(1, min(workers, len(selected) or 1)),
+        lookback or "ALL", ceiling, list_s, fetch_s, list_s + fetch_s,
+    )
     return artifacts
 
 
@@ -548,6 +701,7 @@ def build_judge_outcome_ic_block(
     *,
     conn: sqlite3.Connection | None = None,
     eval_prefix: str | None = None,
+    evals: list[dict] | None = None,
     policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> dict[str, Any]:
     """Load → attribute → join → compute; returns the frozen block.
@@ -557,15 +711,54 @@ def build_judge_outcome_ic_block(
     on genuinely broken preconditions (S3 listing failure, missing DB
     snapshot) — the caller decides the isolation posture; absent HISTORY
     (no evals, no attributable pairs, no resolved outcomes) is a
-    legitimate ``status="insufficient"``, never an error."""
-    evals = load_eval_artifacts(s3, bucket, prefix=eval_prefix)
+    legitimate ``status="insufficient"``, never an error.
+
+    ``evals`` is an ALREADY-LOADED artifact list. ``scripts/build_agent_quality``
+    needs the same list for its rubric metrics and used to load it a second
+    time here, doubling a ~551 s prefix scan on the Lambda handler path
+    (alpha-engine-config-I9205); it now loads once and injects. When ``evals``
+    is None the function loads for itself, so every other caller is unchanged.
+    Passing both ``evals`` and ``eval_prefix`` is a contradiction (the prefix
+    could not have produced that list) and raises."""
+    if evals is not None and eval_prefix is not None:
+        raise ValueError(
+            "build_judge_outcome_ic_block: pass evals= OR eval_prefix=, not "
+            "both — an injected list cannot be re-derived from a prefix."
+        )
+    injected = evals is not None
+    t0 = time.monotonic()
+    if evals is None:
+        evals = load_eval_artifacts(s3, bucket, prefix=eval_prefix)
+    load_s = time.monotonic() - t0
+
+    t1 = time.monotonic()
     attribution = attribute_evals(evals)
+    attribute_s = time.monotonic() - t1
+
+    t2 = time.monotonic()
     owns_conn = conn is None
     if owns_conn:
         conn = open_research_db(s3, bucket)
+    db_pull_s = time.monotonic() - t2
+    t3 = time.monotonic()
     try:
         outcomes = outcome_store.load_primary_outcomes(conn, policy=policy)
     finally:
         if owns_conn:
             conn.close()
-    return compute_judge_outcome_ic(attribution, outcomes, policy=policy)
+    outcomes_s = time.monotonic() - t3
+
+    t4 = time.monotonic()
+    block = compute_judge_outcome_ic(attribution, outcomes, policy=policy)
+    compute_s = time.monotonic() - t4
+
+    logger.info(
+        "[judge_outcome_ic] block built status=%s n_evals=%d injected=%s "
+        "n_attributed=%d n_unattributable=%d n_outcomes=%d | load_s=%.2f "
+        "attribute_s=%.2f db_pull_s=%.2f outcomes_s=%.2f compute_s=%.2f "
+        "total_s=%.2f",
+        block.get("status"), len(evals), injected, len(attribution.attributed),
+        attribution.n_unattributable, len(outcomes), load_s, attribute_s,
+        db_pull_s, outcomes_s, compute_s, time.monotonic() - t0,
+    )
+    return block

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,21 +24,35 @@ class TestResearchPreflight:
         with pytest.raises(ValueError, match="unknown mode"):
             ResearchPreflight(bucket="b", mode="bogus")
 
-    def test_weekly_mode_checks_anthropic_key_and_arcticdb(self):
+    def test_weekly_mode_checks_router_reachability_and_arcticdb(self):
+        """The weekly gate is ROUTER REACHABILITY, not a vendor credential.
+
+        alpha-engine-config-I9302: this used to assert ANTHROPIC_API_KEY.
+        Direct Anthropic is retired, so that check would pass on a box with no
+        router and fail on a correctly configured one — wrong in both
+        directions. What the run needs is krepis' env contract plus both model
+        classes actually resolving.
+        """
         pf = ResearchPreflight(bucket="b", mode="weekly")
         with patch.object(pf, "check_env_vars") as env, \
              patch.object(pf, "check_s3_bucket") as s3, \
              patch.object(pf, "_check_arcticdb_universe") as arctic, \
+             patch.object(pf, "_check_router_resolves_weekly_classes") as router, \
              patch.object(pf, "_check_deferred_imports") as deferred:
             pf.run()
-        # Two check_env_vars calls: AWS_REGION then ANTHROPIC_API_KEY.
         assert env.call_args_list[0].args == ("AWS_REGION",)
-        assert env.call_args_list[1].args == ("ANTHROPIC_API_KEY",)
+        assert env.call_args_list[1].args == (
+            "KREPIS_LITELLM_PROXY_URL", "KREPIS_ROUTER_CREDENTIAL_SECRET"
+        )
+        assert not any(
+            "ANTHROPIC_API_KEY" in c.args for c in env.call_args_list
+        ), "the retired vendor's credential must not gate the weekly run"
+        router.assert_called_once()
         s3.assert_called_once()
         deferred.assert_called_once()
         arctic.assert_called_once()
 
-    def test_alerts_mode_skips_anthropic_key_arcticdb_and_deferred_imports(self):
+    def test_alerts_mode_skips_router_check_arcticdb_and_deferred_imports(self):
         pf = ResearchPreflight(bucket="b", mode="alerts")
         with patch.object(pf, "check_env_vars") as env, \
              patch.object(pf, "check_s3_bucket") as s3, \
@@ -48,9 +63,40 @@ class TestResearchPreflight:
         assert env.call_args_list[0].args == ("AWS_REGION",)
         s3.assert_called_once()
         arctic.assert_not_called()
+        # Alerts make no LLM call at all — resolving a model class there would
+        # fail a healthy run for a dependency it does not have.
         # Alerts handler doesn't import scripts.aggregate_costs — no
         # need to pay the eager-import cost in that mode.
         deferred.assert_not_called()
+
+
+class TestRouterReachabilityPreflight:
+    """Locks ``ResearchPreflight._check_router_resolves_weekly_classes``
+    (alpha-engine-config-I9302)."""
+
+    def test_resolves_both_weekly_model_classes(self):
+        pf = ResearchPreflight(bucket="b", mode="weekly")
+        spec = SimpleNamespace(model="m", api_key_env="K")
+        resolve = MagicMock(return_value=(spec, {}))
+        with patch.dict(sys.modules, {"krepis.router": SimpleNamespace(
+            resolve_group_spec=resolve
+        )}):
+            pf._check_router_resolves_weekly_classes()
+        # One resolution per weekly model class — PER_STOCK and STRATEGIC.
+        import config
+        assert [c.args[0] for c in resolve.call_args_list] == [
+            config.PER_STOCK_CLASS, config.STRATEGIC_CLASS
+        ]
+
+    def test_raises_when_a_class_cannot_be_served_from_here(self):
+        """Fails loud. A weekly run that cannot resolve its model classes has
+        nothing to fall back to, so degrading here would hide the outage."""
+        pf = ResearchPreflight(bucket="b", mode="weekly")
+        resolve = MagicMock(side_effect=ValueError("no reachable member"))
+        with patch.dict(sys.modules, {"krepis.router": SimpleNamespace(
+            resolve_group_spec=resolve
+        )}), pytest.raises(RuntimeError, match="does not resolve"):
+            pf._check_router_resolves_weekly_classes()
 
 
 class TestDeferredImportPreflight:

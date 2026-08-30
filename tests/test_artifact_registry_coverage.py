@@ -43,6 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Captured 2026-05-27.
 EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     "archive/manager.py": 5,
+    # alpha-engine-config-I9307 — one PUT, to the SAME
+    # signals_shadow/{arm}/{date}/signals.json prefix archive/manager.py
+    # already writes and the registry already declares
+    # (research_signals_shadow_*). This is a deliberate one-off backfill entry
+    # point, not a scheduled producer: the weekly pass writes these arms'
+    # shadows through producers/runner.py like every other challenger.
+    "scripts/backfill_filling_arm_shadows.py": 1,
     # research/{run_date}/self_test.json (the §2.3a numeric-correctness verdict)
     # + ops/checks/ae-research-self-test/latest.json (its console envelope).
     # BOTH REGISTERED in ARTIFACT_REGISTRY.yaml as research_self_test /
@@ -100,7 +107,34 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # (same rationale as evals/control_bands.py above).
     "evals/judge_reanchor.py": 1,
     "evals/last_week_scorecard.py": 2,
-    "evals/orchestrator.py": 2,
+    # 3 since alpha-engine-config-I9263 (2026-08-29). The third PUT is the
+    # batch-plan manifest written under the synthetic `sync-{date}` batch id
+    # when the judge degrades to the synchronous rung — the SAME artifact
+    # class and the SAME `decision_artifacts/_eval_batch_plans/` prefix the
+    # other two already write, differing only in the batch id embedded in the
+    # key, so no new ARTIFACT_REGISTRY row is warranted.
+    "evals/orchestrator.py": 3,
+    # Judge transport-degradation record (alpha-engine-config-I9263). One PUT:
+    # `decision_artifacts/_eval_batch_plans/{date}/degradation.json`, written
+    # only when the eval judge drops from the batch rung to the synchronous
+    # one. Co-located with the batch-plan manifests above and read the same
+    # way — the transport record for a run sits beside that run's plan — so it
+    # rides the same already-registered prefix rather than opening a new one.
+    "evals/judge_batch_transport.py": 1,
+    # Eval-judge spot run record (alpha-engine-config-I9309). One PUT:
+    # `decision_artifacts/_eval_batch_plans/{date}/spot_run.json`, the durable
+    # statement of what the spot run covered — planned vs graded, the coverage
+    # verdict, and the transport rung. Written BEFORE the coverage verdict is
+    # enforced, deliberately: on the failing path it is the only artifact that
+    # explains the failure, so writing it afterwards would mean the runs most
+    # needing evidence leave none.
+    #
+    # Same already-grandfathered prefix as the plan manifest and the
+    # degradation record above (`decision_artifacts/_eval_batch_plans/`,
+    # variable {date} cardinality) — one listing answers what was planned,
+    # what transport served it, and what it covered, rather than making a
+    # reader know three prefixes.
+    "evals/judge_spot_run.py": 1,
     # Phase B weekly judge-sensitivity scorecard (config#752). Single PUT
     # site (loop over dated + latest json/md keys in emit_perturbation_report)
     # writing decision_artifacts/_perturbation/_report/{date,latest}/
@@ -168,7 +202,28 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # are filed as alpha-engine-config-I7833 — three docs PRs were already open
     # against that repo's private-docs on 2026-08-20, and opening a fourth
     # against work in flight is what the engagement protocol forbids.
+    "scoring/cut_arena.py": 2,  # universe-cut arena_cycle dated + latest (alpha-engine-config-I9317)
     "scoring/cut_promotion.py": 1,
+    # Scanner-SPEC promotion decision (alpha-engine-config-I9273). 1 PUT site
+    # (the loop over the dated audit key, the latest.json mirror and the live
+    # pointer config/scanner_spec_champion.json). LOAD-BEARING, and more so
+    # than its cut-slot sibling above: the pointer is what
+    # data/scanner_specs.py::live_champion_spec resolves the LIVE candidate
+    # RANKING from, so an absent or stale pointer is not a degraded panel — it
+    # is the scanner ranking on a champion nobody chose. The record is written
+    # on EVERY evaluation — promote, demote or hold — precisely so a dead
+    # engine is distinguishable from an engine that decided to hold
+    # (champion-challenger-policy.md §3). Before this producer existed the
+    # champion moved only by a hand-edit of LIVE_CHAMPION, which is how
+    # alpha-engine-config-I7808 produced four weeks of a leaderboard scoring an
+    # arm against itself: the ABSENCE of this artifact is precisely the bug
+    # class this guard exists for. ARTIFACT_REGISTRY.yaml rows for
+    # config_scanner_spec_champion + config_apply_audit_scanner_spec_champion
+    # (liveness_via the audit latest.json, cadence = the scanner-leaderboard
+    # leaf state) are handed to the session's single private-docs PR rather
+    # than opened as a competing one against work in flight — the same call the
+    # cut slot's pin records above, and tracked on alpha-engine-config-I9273.
+    "scoring/spec_promotion.py": 1,
     # One-time historical backfill of the membership artifact. Writes the DATED
     # key only (never the latest pointer the predictor resolves from) — an
     # operator-invoked reconstruction script, not a pipeline producer, hence no

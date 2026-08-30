@@ -88,7 +88,7 @@ ENV ALPHA_ENGINE_CODE_SHA=${GIT_SHA}
 # Research Lambda invocation). Treat `Dockerfile` + `Dockerfile.alerts`
 # + `requirements.txt` as one tri-state pin that must move in lockstep.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.79" && \
+RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.99" && \
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
@@ -138,6 +138,9 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 COPY freshness.py ${LAMBDA_TASK_ROOT}/
 COPY observe_alerts.py ${LAMBDA_TASK_ROOT}/
 COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
+# invocation_budget.py — repo-ROOT single-file module bounding the SECONDARY
+# aggregations hung off a stage's primary deliverable (alpha-engine-config-I9102).
+COPY invocation_budget.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
@@ -152,15 +155,14 @@ COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
 # SF runs the batch chain (submit/poll/process) below.
 COPY lambda/eval_judge_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_handler.py
 
-# Eval-judge Anthropic Message Batches API chain (ROADMAP §1642
-# closure 2026-05-07). Three Lambdas share this image, each with a
-# CMD override:
-#   * eval_judge_submit_handler.handler   — builds + submits batch
-#   * eval_judge_poll_handler.handler     — retrieves processing_status
-#   * eval_judge_process_handler.handler  — streams + persists results
+# Eval-judge Submit Lambda — the ONLY remaining leg of what was a
+# three-Lambda batch chain (submit/poll/process). Poll and Process are
+# retired by alpha-engine-config-I9329: Poll was residue of the retired
+# async batch API (nothing left to poll), and Process moved substrate —
+# it now runs to completion on a spot box via evals/judge_spot_run.py,
+# under no execution ceiling. Submit stays a Lambda because its work is an
+# S3 listing and a plan manifest: seconds, no LLM call, no ceiling risk.
 COPY lambda/eval_judge_submit_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_submit_handler.py
-COPY lambda/eval_judge_poll_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_poll_handler.py
-COPY lambda/eval_judge_process_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_process_handler.py
 
 # Rolling-4-week-mean Lambda handler (PR 4b) — same image, separate
 # Lambda overriding CMD to ["eval_rolling_mean_handler.handler"].

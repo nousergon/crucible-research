@@ -14,6 +14,13 @@ flag short-circuit:
 
 Mirrors ``tests/test_eval_judge_handler.py`` /
 ``tests/test_rationale_clustering_handler.py`` handler-load style.
+
+**Scope narrowed by alpha-engine-config-I9329.** The chain was
+Submit → Poll → Process. Poll and Process are retired as Lambdas — Poll was
+residue of the retired async batch API, and Process moved substrate to a spot
+box, whose dry path is ``python -m evals.judge_spot_run --preflight-only``
+(an on-box flag, covered on the box, not an event key covered here). What is
+left is Submit and rationale clustering.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ import pytest
 from evals.lambda_dry import (
     DRY_FLAG,
     DRY_SENTINEL_BATCH_ID,
+    DRY_SENTINEL_PLAN_S3_KEY,
+    dry_submit_result,
     is_dry,
 )
 
@@ -50,24 +59,6 @@ def _load_handler(filename: str, module_name: str):
 def submit_mod():
     mod = _load_handler(
         "eval_judge_submit_handler.py", "lambda_eval_judge_submit_handler"
-    )
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def poll_mod():
-    mod = _load_handler(
-        "eval_judge_poll_handler.py", "lambda_eval_judge_poll_handler"
-    )
-    mod._init_done = False
-    yield mod
-
-
-@pytest.fixture
-def process_mod():
-    mod = _load_handler(
-        "eval_judge_process_handler.py", "lambda_eval_judge_process_handler"
     )
     mod._init_done = False
     yield mod
@@ -128,10 +119,39 @@ class TestSubmitDry:
         # Sentinel threads to Process (status EMPTY skips the poll loop).
         assert result["status"] == "EMPTY"
         assert result["batch_id"] == DRY_SENTINEL_BATCH_ID
-        assert result["plan_s3_key"] is None
+        assert result["plan_s3_key"] == DRY_SENTINEL_PLAN_S3_KEY
         assert result["request_count"] == 0
         assert result["processing_status"] == "ended_empty"
         assert result["dry_run"] is True
+
+    def test_no_null_anywhere_in_the_dry_submit_return(self):
+        """DERIVED, not enumerated (alpha-engine-config-I9329).
+
+        Every value the Submit dry return carries is reachable by a Step
+        Functions intrinsic on the Friday shell run, and ``States.Format``
+        raises ``States.Runtime`` on a null argument — a definition that works
+        on Saturday and dies on Friday. ``plan_s3_key`` is the value the new
+        ``ssm:sendCommand`` stage formats into its judge command, and it was
+        the null. Walking the whole structure rather than restating the keys
+        is what makes this cover the NEXT key someone adds as ``None``.
+        """
+        def _nulls(value, path="dry_submit_result"):
+            if value is None:
+                return [path]
+            if isinstance(value, dict):
+                return [p for k, v in value.items()
+                        for p in _nulls(v, f"{path}.{k}")]
+            if isinstance(value, (list, tuple)):
+                return [p for i, v in enumerate(value)
+                        for p in _nulls(v, f"{path}[{i}]")]
+            return []
+
+        offenders = _nulls(dry_submit_result("2026-05-16"))
+        assert offenders == [], (
+            f"null value(s) in the Submit dry return: {offenders} — a null "
+            "reaching a States.Format argument raises States.Runtime on the "
+            "Friday shell run only. Use a non-null sentinel."
+        )
 
     def test_non_dry_still_takes_real_path(self, submit_mod):
         """Production Saturday SF passes no dry_run_llm — must NOT
@@ -140,7 +160,9 @@ class TestSubmitDry:
              patch("boto3.client"), \
              patch("evals.orchestrator.build_batch_plan",
                    return_value={"capture_keys_total": 0,
-                                 "skipped_unmapped": 0}), \
+                                 "skipped_unmapped": 0,
+                                 "capture_partition_counts": {},
+                                 "empty_trading_day_partitions": []}), \
              patch("evals.orchestrator._persist_client_side_skips",
                    return_value=(0, 0, [], [])), \
              patch("evals.orchestrator.submit_batch",
@@ -152,67 +174,6 @@ class TestSubmitDry:
         # Real path ran (status OK, real batch id) — not the sentinel.
         assert result["batch_id"] == "msgbatch_x"
         assert result.get("dry_run") is not True
-
-
-# ── eval_judge_poll ──────────────────────────────────────────────────
-
-
-class TestPollDry:
-    def test_dry_flag_no_anthropic_terminal_ended(self, poll_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.poll_batch") as poll_batch:
-            result = poll_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID, DRY_FLAG: True},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        poll_batch.assert_not_called()
-        assert result["processing_status"] == "ended"
-        assert result["exceeded_max_wait"] is False
-        assert result["dry_run"] is True
-
-    def test_dry_sentinel_batch_id_alone_short_circuits(self, poll_mod):
-        # Even without the flag, the threaded sentinel batch_id is dry.
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.poll_batch") as poll_batch:
-            result = poll_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID}, context=None
-            )
-        anthropic_cls.assert_not_called()
-        poll_batch.assert_not_called()
-        assert result["processing_status"] == "ended"
-
-
-# ── eval_judge_process ───────────────────────────────────────────────
-
-
-class TestProcessDry:
-    def test_dry_no_anthropic_no_s3_read_returns_ok(self, process_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.process_batch_results") as proc:
-            result = process_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID,
-                 "plan_s3_key": None, DRY_FLAG: True},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        # process_batch_results does the S3 plan get_object + stream +
-        # per-artifact persist — must never be called on the dry path.
-        proc.assert_not_called()
-        assert result["status"] == "OK"
-        assert result["dry_run"] is True
-        assert result["summary"]["persisted_keys"] == []
-
-    def test_dry_via_threaded_sentinel_without_flag(self, process_mod):
-        with patch("anthropic.Anthropic") as anthropic_cls, \
-             patch("evals.orchestrator.process_batch_results") as proc:
-            result = process_mod.handler(
-                {"batch_id": DRY_SENTINEL_BATCH_ID, "plan_s3_key": None},
-                context=None,
-            )
-        anthropic_cls.assert_not_called()
-        proc.assert_not_called()
-        assert result["status"] == "OK"
 
 
 # ── rationale_clustering ─────────────────────────────────────────────
@@ -278,14 +239,14 @@ class TestRationaleClusteringDry:
 
 
 class TestBootStillRuns:
-    def test_all_four_handlers_import_clean(
-        self, submit_mod, poll_mod, process_mod, clustering_mod
+    def test_both_remaining_handlers_import_clean(
+        self, submit_mod, clustering_mod
     ):
         # Each fixture exec_module'd the handler file (running its
         # module-level imports + setup_logging + flow-doctor wiring).
         # If any import/bootstrap broke, the fixture would have raised
         # before reaching here — that IS the shell-run smoke.
-        for mod in (submit_mod, poll_mod, process_mod, clustering_mod):
+        for mod in (submit_mod, clustering_mod):
             assert hasattr(mod, "handler")
             assert callable(mod.handler)
 

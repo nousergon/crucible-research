@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from datetime import date as date_type
@@ -264,7 +265,13 @@ def _load_evals(s3: Any, bucket: str, run_date: date_type) -> list[dict]:
     use case (one research run per Saturday writes all weekly evals)."""
     from evals.judge_outcome_ic import load_eval_artifacts
 
+    t0 = time.monotonic()
     artifacts = load_eval_artifacts(s3, bucket)
+    logger.info(
+        "[build_agent_quality] loaded %d eval artifacts in %.2fs (ONE scan — "
+        "the list is reused by the judge_outcome_ic block, I9205)",
+        len(artifacts), time.monotonic() - t0,
+    )
 
     if not artifacts:
         logger.warning(
@@ -338,14 +345,20 @@ def build_agent_quality(
     date_str = target_date.isoformat()
     result: dict[str, Any] = {"status": "ok", "date": date_str, "run_date": run_date.isoformat()}
 
+    t_build = time.monotonic()
+
     # signals — finalized per-ticker decisions.
+    t0 = time.monotonic()
     signals = _load_signals(s3, bucket, date_str)
+    signals_s = time.monotonic() - t0
     n_signals = len(signals) if signals else 0
     if n_signals:
         result["signal_volume_adequacy"] = {"value": n_signals, "n": n_signals}
 
     # cost_per_signal — total run cost / finalized signal count.
+    t0 = time.monotonic()
     total_cost = _total_cost_usd(s3, bucket, run_date)
+    cost_s = time.monotonic() - t0
     if total_cost is not None and n_signals:
         result["cost_per_signal"] = {
             "value": round(total_cost / n_signals, 4),
@@ -355,7 +368,9 @@ def build_agent_quality(
 
     # judge rubric metrics — over REAL evals (skip-markers carry an empty
     # dimension_scores + a judge_skip_reason; they are excluded).
+    t0 = time.monotonic()
     evals = _load_evals(s3, bucket, run_date)
+    evals_s = time.monotonic() - t0
     real = [
         e for e in evals
         if not e.get("judge_skip_reason") and (e.get("dimension_scores") or [])
@@ -391,11 +406,16 @@ def build_agent_quality(
     # doctrine (config#1684) is honored inside the module: broken
     # preconditions RAISE out of build_judge_outcome_ic_block rather than
     # degrade into a fabricated "insufficient".
+    t0 = time.monotonic()
     try:
         from evals.judge_outcome_ic import build_judge_outcome_ic_block
 
+        # ``evals=`` — the SAME list loaded above. Loading it again here was a
+        # duplicated unbounded N+1 prefix scan (~551s each, measured
+        # 2026-08-28) that put this block ~1,102s over a 240s handler ceiling
+        # and timed out every real execution (alpha-engine-config-I9205).
         result["judge_outcome_ic"] = build_judge_outcome_ic_block(
-            s3, bucket, conn=outcomes_conn,
+            s3, bucket, conn=outcomes_conn, evals=evals,
         )
     except Exception as exc:  # noqa: BLE001 — per-block isolation, see above
         logger.warning(
@@ -405,11 +425,13 @@ def build_agent_quality(
         result["judge_outcome_ic"] = {
             "schema_version": 1, "status": "error", "error": str(exc),
         }
+    ic_s = time.monotonic() - t0
 
     # Agent runtime metrics from the AlphaEngine/Agents prod telemetry
     # (config#1154/#1149): validation-failure rate (fleet), retry-storm count +
     # latency p95 (per-agent). Best-effort — a CW error or absent prod data leaves
     # a component off the artifact → grader renders N/A, never breaks the others.
+    t_cw = time.monotonic()
     try:
         cw_client = cw or boto3.client("cloudwatch", region_name="us-east-1")
         for key, fn in (
@@ -426,7 +448,21 @@ def build_agent_quality(
                 result[key] = blk
     except Exception as exc:  # noqa: BLE001 — CW client creation failed
         logger.warning("[agent_quality] cloudwatch client unavailable: %s", exc)
+    cw_s = time.monotonic() - t_cw
 
+    # Per-phase timings + input counters (alpha-engine-config-I9205
+    # deliverable 6). The block's ceiling in lambda/eval_rolling_mean_handler
+    # is only re-settable from a COMPLETED run's measurement, and before this
+    # line neither prefix scan emitted anything at all — the 240s timeout was
+    # unattributable from CloudWatch.
+    logger.info(
+        "[build_agent_quality] built date=%s run_date=%s n_signals=%d "
+        "n_evals=%d n_real_evals=%d ic_status=%s | signals_s=%.2f cost_s=%.2f "
+        "evals_s=%.2f judge_outcome_ic_s=%.2f cloudwatch_s=%.2f total_s=%.2f",
+        date_str, run_date.isoformat(), n_signals, len(evals), len(real),
+        (result.get("judge_outcome_ic") or {}).get("status"),
+        signals_s, cost_s, evals_s, ic_s, cw_s, time.monotonic() - t_build,
+    )
     return result
 
 

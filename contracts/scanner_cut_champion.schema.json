@@ -1,20 +1,44 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/nousergon/crucible-research/contracts/scanner_cut_champion.schema.json",
-  "title": "scanner cut champion pointer + apply-audit record (v2)",
-  "description": "FROZEN contract for the scanner-cut champion/challenger slot's decision record. ONE document shape written to THREE keys by crucible-research/scoring/cut_promotion.py::run_cut_promotion on EVERY weekly evaluation, promote or hold: config/scanner_cut_champion.json (the live pointer, read by scoring/universe_membership.py::live_cut_champion / resolve_feed_cut), config/apply_audit/scanner_cut_champion/{date}.json (immutable dated history) and config/apply_audit/scanner_cut_champion/latest.json (freshness/liveness proxy). One shape rather than a separate pointer schema and audit schema on purpose: the pointer IS the latest decision record, and two shapes would let the two surfaces disagree about what was decided. Written unconditionally because champion-challenger-policy.md §3 forbids silent absence and a genuine outcome rendering identically — a pointer that stops being written must not read as a pointer that decided to hold (the config#2054 lesson, whose fix on the sibling producer-champion slot is config/apply_audit/producer_champion/). V1→V2 (alpha-engine-config-I8261, Brian's ruling 2026-08-24): the DECISION BASIS moved from a leaderboard forward-window horizon (topn_alpha_vs_population at 126 sessions) to the chained weekly series on research/cuts_weekly_ledger/ledger.parquet — the paired weekly difference vs the serving champion. 126 and 252 remain, demoted from decision basis to corroborating VETOES, blocking only when mature. Because horizon_days / primary_metric / arms.* no longer mean what a v1 reader would take them to mean, and because several v1 reason_code slugs describe conditions that can no longer arise, this is a version bump and not an additive change: silently redefining those fields under schema_version 1 is how a multi-year decision series becomes uninterpretable. Within v2, evolution is additive-only: consumers MUST tolerate unknown extra fields; any rename or removal, and any new reason_code slug meaning a condition an existing slug already covered, requires a further schema_version bump.",
+  "title": "universe-cut champion serving pointer + apply-audit record (v4)",
+  "description": "FROZEN contract for the universe-cut slot's SERVING POINTER. ONE document shape written to THREE keys by crucible-research/scoring/cut_promotion.py::run_cut_promotion on EVERY weekly evaluation, whatever the outcome: config/scanner_cut_champion.json (the live pointer, read by scoring/universe_membership.py::live_cut_champion / resolve_feed_cut), config/apply_audit/scanner_cut_champion/{date}.json (immutable, dated) and config/apply_audit/scanner_cut_champion/latest.json (its mirror). SINCE v4 (alpha-engine-config-I9317) THIS IS NOT WHERE THE DECISION IS TAKEN. The decision is taken by nousergon_lib.arena.engine.run_cycle -- the fleet's single implementation of champion-challenger-policy.md sections 3-6 -- and its full record, with every ladder rung, every pairwise verdict and the confidence-sequence bound behind the pointer, is the arena_cycle artifact at arena/universe_cut/{date}.json. This document transcribes that decision onto the key the serving path reads, and the `arena` block names the cycle it came from. A pointer that does not name its cycle is a claim with no evidence attached.",
   "type": "object",
   "required": [
-    "schema_version", "producer", "slot_id", "decided_on", "decision",
-    "champion", "champion_before", "reason", "reason_code",
-    "decision_metric", "decision_cadence", "decision_source", "decision_column",
-    "arms", "hysteresis", "corroborating", "excluded_horizons",
-    "decision_earliest_on", "ledger"
+    "schema_version",
+    "producer",
+    "slot_id",
+    "decided_on",
+    "decision",
+    "champion",
+    "champion_before",
+    "reason",
+    "reason_code",
+    "decision_metric",
+    "decision_cadence",
+    "decision_source",
+    "decision_column",
+    "arms",
+    "corroborating",
+    "excluded_horizons",
+    "ledger",
+    "excluded_arms",
+    "scored_arms",
+    "promotable_arms",
+    "arena",
+    "score_definition"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
-    "producer": { "const": "crucible-research/scoring/cut_promotion.py" },
-    "slot_id": { "const": "scanner_cut" },
+    "schema_version": {
+      "const": 4,
+      "description": "v3 -> v4 on the alpha-engine-config-I9317 arena wiring. NOT additive: the required `hysteresis` and `decision_earliest_on` blocks are GONE because the mechanisms they described are abolished (champion-challenger-policy.md section 5.0 removes minimum-evidence floors fleetwide, section 5.2 removes the promotion margin and the cooldown -- Brian's rulings 2026-08-29). A required `arena` block was added. A v3 reader handed a v4 record would find no `hysteresis` block and read a promotion as though a 0.0002/week margin had been cleared, when no margin was applied at all. v2 -> v3 on I9272/I9284; v1 -> v2 on the I8261 cutover."
+    },
+    "producer": {
+      "const": "crucible-research/scoring/cut_promotion.py"
+    },
+    "slot_id": {
+      "const": "scanner_cut"
+    },
     "generated_at": {
       "type": "string",
       "description": "UTC ISO-8601 write time. Distinct from decided_on: a re-run on the same trading day rewrites the same dated key with a later generated_at."
@@ -22,47 +46,48 @@
     "decided_on": {
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-      "description": "Trading-day-normalised scanner run date — matches the dated audit key and the cuts leaderboard consulted for the vetoes."
+      "description": "Trading-day-normalised scanner run date \u2014 matches the dated audit key and the cuts leaderboard consulted for the vetoes."
     },
     "decision": {
-      "enum": ["promote", "hold"],
+      "enum": [
+        "promote",
+        "hold"
+      ],
       "description": "promote = the pointer moved this evaluation (champion != champion_before). hold = it did not, for the reason in reason_code. A hold is an OUTCOME and is always written; it is never expressed as the absence of a record."
     },
     "champion": {
-      "enum": ["attractiveness_top_60", "tech_score_top_60"],
-      "description": "The cut the sector-team feed resolves from until the next evaluation. MUST be a member of scoring/universe_membership.py::PROMOTABLE_CUTS — live_cut_champion() raises on anything else rather than serving the default, because a promotion engine that believes one arm is live while the funnel serves another is the 2026-07-22 drift (alpha-engine-config-I7808)."
+      "type": "string",
+      "minLength": 1,
+      "description": "The cut the sector-team feed resolves from until the next evaluation. MUST be a member of scoring/universe_membership.py::PROMOTABLE_CUTS \u2014 live_cut_champion() raises on anything else rather than serving the default, because a promotion engine that believes one arm is live while the funnel serves another is the 2026-07-22 drift (alpha-engine-config-I7808). NOT an enum since v4: the enum was a hand-maintained literal of two arm names, and the slot has carried five promotable arms since Brian's ruling 2026-08-29 (alpha-engine-config-I9272) -- a promotion to any of the other three would have failed its own contract. The closed set is enforced where it is DERIVED, in universe_membership.live_cut_champion, which raises on a pointer naming anything outside PROMOTABLE_CUTS. A registry restated as a literal in a second file is the drift class this repo has now paid for four times."
     },
     "champion_before": {
-      "enum": ["attractiveness_top_60", "tech_score_top_60"],
-      "description": "The validated champion read at the start of this evaluation, or DEFAULT_CUT_CHAMPION (attractiveness_top_60) when no pointer had ever been written. Equal to champion on every hold. It is also the leg every arm's paired weekly difference is taken against, which is why a record is not interpretable without it."
+      "type": "string",
+      "minLength": 1,
+      "description": "The validated champion read at the start of this evaluation, or DEFAULT_CUT_CHAMPION (attractiveness_top_60) when no pointer had ever been written. Equal to champion on every hold. It is also the leg every arm's paired weekly difference is taken against, which is why a record is not interpretable without it. NOT an enum since v4: the enum was a hand-maintained literal of two arm names, and the slot has carried five promotable arms since Brian's ruling 2026-08-29 (alpha-engine-config-I9272) -- a promotion to any of the other three would have failed its own contract. The closed set is enforced where it is DERIVED, in universe_membership.live_cut_champion, which raises on a pointer naming anything outside PROMOTABLE_CUTS. A registry restated as a literal in a second file is the drift class this repo has now paid for four times."
     },
     "reason": {
       "type": "string",
       "minLength": 1,
-      "description": "Prose, for the human reconstructing the decision from this artifact alone (principles.md §2.1). Names the metric, the observation count, the shortfall, and what holds."
+      "description": "Prose, for the human reconstructing the decision from this artifact alone (principles.md \u00a72.1). Names the metric, the observation count, the shortfall, and what holds."
     },
     "reason_code": {
       "enum": [
         "promoted",
         "champion_already_leads",
-        "no_promotable_challenger",
         "weekly_ledger_missing",
-        "weekly_ledger_arm_missing",
-        "insufficient_weeks",
-        "margin_not_met",
-        "cooldown_active",
-        "corroborating_horizon_disagrees",
-        "board_defective"
+        "arena_unmeasurable",
+        "arena_unservable",
+        "arena_bootstrap"
       ],
-      "description": "Machine-readable outcome. 'promoted' is the only value permitted alongside decision='promote'. weekly_ledger_missing is the EXPECTED steady state until the ledger's producer is wired (alpha-engine-config-I8264) and must not alert; insufficient_weeks is the expected state for the ~5 weeks after that and must not alert; no_promotable_challenger means the SLOT has one promotable arm so no comparison was possible — a registry state, not an evidence state, expected while tech_score_top_60 is observe-only (Brian rulings 2026-08-21 I8060 and 2026-08-24 I8261) — and must not alert. board_defective IS a defect and does alert: the record is written and run_cut_promotion then raises. RETIRED in v1 and never re-minted (cut_promotion.py::RETIRED_V1_REASON_CODES, asserted disjoint at import): board_missing, board_unmeasurable, decision_horizon_immature, decision_horizon_unmeasurable, arm_row_missing, arm_metric_missing, insufficient_dates. A v1 record may carry those; a v2 record never does. Note board_missing in particular is GONE rather than renamed — under v2 an absent cuts leaderboard is not a hold at all, because the board is only the veto source and an unmeasured veto is non-blocking (champion-challenger-policy.md §5.1)."
+      "description": "Machine-readable outcome, a TRANSCRIPTION of the arena engine's own pointer status (nousergon_lib.arena.engine.PointerDecision.status) plus the one condition that precedes a cycle. 'promoted' is the only value permitted alongside decision='promote' except 'arena_bootstrap', which moves the pointer on a slot that had no eligible incumbent to hold (section 9.1). 'weekly_ledger_missing' means the ledger object does not exist -- an absent store, distinct from a slot that produced no comparison. 'arena_unmeasurable' means no challenger shares a usable window with the incumbent; it ALARMS (section 11: unmeasurable is a first-class status carrying a reason, not a quiet hold). 'arena_unservable' means no arm passed its section 5.3 serving preconditions and is a hard failure of the slot. RETIRED at v4 and never to be re-minted for another condition: insufficient_weeks (the section 5.0-abolished evidence floor), margin_not_met and cooldown_active (the section 5.2-abolished hysteresis), corroborating_horizon_disagrees (a second decision basis on a forward horizon), weekly_ledger_arm_missing (a slot-wide hold on one arm's absence), board_defective (a hold on the corruption of an artifact the decision does not read) and no_promotable_challenger (the 2026-08-21/28 defect itself, now structurally unreachable)."
     },
     "decision_metric": {
-      "const": "paired_weekly_net_log_return_vs_champion",
-      "description": "The metric the decision is taken on. Deliberately verbose: a reader seeing only this string can tell WHAT was differenced (net — after transaction cost), AGAINST WHAT (the serving champion, same week), and AT WHAT CADENCE (weekly, non-overlapping). Net rather than gross because at weekly rebalance turnover is first-order and this slot's arms have wildly different churn (42% vs 76% week-over-week retention, measured 2026-07-27) — an arm that wins gross and loses net is the classic trap."
+      "const": "weekly_population_relative_net_log_return",
+      "description": "The per-date score every arm is graded on: net-of-cost weekly log return MINUS the equal-weight return of the population the arm selected from. Population-relative, never SPY-relative: grading a selection stage against a market index inverted wins and losses on 2026-08-17 when SPY trailed the drawn-from population by 140bp at 21d, and ArenaConfig refuses a selection-stage slot configured against SPY. The pairing against another arm is the engine's job and is deliberately NOT in the name -- every pair is differenced on its OWN longest common window (champion-challenger-policy.md section 4)."
     },
     "decision_cadence": {
       "const": "weekly",
-      "description": "One observation per holding period, and the holding period is one weekly re-cut. Successive observations ABUT rather than overlap, which is what makes leaderboard_scoring.date_clustered_stats's 'each date = one independent cluster' contract true here in fact rather than by assumption — and what makes champion-challenger-policy.md §5.1's PSR/DSR/PBO battery computable at all, since those are statistics of a return series."
+      "description": "One observation per holding period, and the holding period is one weekly re-cut. Successive observations ABUT rather than overlap, which is what makes leaderboard_scoring.date_clustered_stats's 'each date = one independent cluster' contract true here in fact rather than by assumption \u2014 and what makes champion-challenger-policy.md \u00a75.1's PSR/DSR/PBO battery computable at all, since those are statistics of a return series."
     },
     "decision_source": {
       "const": "research/cuts_weekly_ledger/ledger.parquet",
@@ -70,173 +95,471 @@
     },
     "decision_column": {
       "type": "string",
-      "description": "The ledger column differenced against the champion's SAME column in the SAME week (default net_log_return). Asserted at import to be a member of weekly_ledger.LEDGER_COLS, so the decision can never read a field that is never written."
+      "description": "The ledger column the score's first term is read from (default net_log_return). Asserted at import against weekly_ledger.LEDGER_COLS. See score_definition for the full arithmetic."
     },
     "last_promoted_on": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-      "description": "decided_on of the most recent promote decision, carried forward across holds. Null until the first promotion. The §5.2 cooldown is measured from it."
+      "description": "decided_on of the most recent promote decision, carried forward across holds. Null until the first promotion. The \u00a75.2 cooldown is measured from it."
     },
     "leaderboard_key": {
-      "type": ["string", "null"],
-      "description": "The research/cuts_leaderboard/{date}.json the VETOES were evaluated from, so the corroborating numbers can be joined back to their source. Null when no board was available — which under v2 is not a hold: it makes every veto unmeasured and therefore non-blocking (§5.1)."
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The research/cuts_leaderboard/{date}.json the VETOES were evaluated from, so the corroborating numbers can be joined back to their source. Null when no board was available \u2014 which under v2 is not a hold: it makes every veto unmeasured and therefore non-blocking (\u00a75.1)."
     },
     "arms": {
       "type": "object",
-      "required": ["attractiveness_top_60"],
-      "description": "Every PROMOTABLE arm, ALWAYS — including on a hold and including when an arm has no ledger rows (champion-challenger-policy.md §3: an unscored cycle is recorded as a miss, never omitted). n_weeks_paired is the measurability surface: it is 0 until the ledger's producer is wired and climbing it past min_weeks_for_inference is the precondition for any promotion. `required` names only attractiveness_top_60 because PROMOTABLE_CUTS shrank to it on 2026-08-21 (alpha-engine-config-I8060) and Brian declined to restore tech_score_top_60 on 2026-08-24 (I8261) — it has 2 scored dates, and arming an automatic pointer write before evidence exists re-creates the I8060 condition. tech_score_top_60 remains valid here. OBSERVE-ONLY arms are deliberately NOT carried in this block — this record is about the decision, and their evidence lives on the ledger and on research/cuts_leaderboard/{date}.json, both of which cover every arm of the slot. The reason string names them so a reader is not left inferring they went away.",
+      "minProperties": 1,
+      "description": "Every arm the weekly ledger SCORES, always -- including on a hold, including an arm that produced nothing, and including a retired arm inside its trailing scoring window. Every number here is READ OFF the arena cycle at arena.cycle_key: the ladder for the arm's own record, the incumbent comparison for its head-to-head with its confidence-sequence bound, the pairwise ranking for its standing. None of it is recomputed -- a second implementation of sections 3-6 on the pointer is the drift champion-challenger-policy.md section 10 forbids. Which arms appear is a function of scored_arms on the record, not of this schema file.",
       "additionalProperties": {
         "type": "object",
         "required": [
-          "present", "is_champion", "n_weeks_scored", "n_weeks_paired",
-          "mean_paired_log_return", "chained_paired_log_return", "confidence",
-          "metric", "cadence", "source"
+          "present",
+          "is_champion",
+          "n_weeks_scored",
+          "n_weeks_paired",
+          "mean_paired_log_return",
+          "metric",
+          "cadence",
+          "source",
+          "score_definition",
+          "eligible_for_promotion",
+          "confseq_supported",
+          "pairwise_wins",
+          "pairwise_losses",
+          "pairwise_unmeasurable"
         ],
         "properties": {
           "present": {
-            "type": "boolean",
-            "description": "False when the decision path never read ledger rows for this arm at all (ledger absent, the registry-only short-circuit, a defective board). A false here means the numbers beside it are placeholders and are NOT a claim about the ledger — reconcile_arms_with_ledger skips exactly these."
+            "type": "boolean"
           },
           "is_champion": {
-            "type": "boolean",
-            "description": "True for champion_before. Its own paired difference is 0.0 by construction (it is differenced against itself), which is why a challenger must be strictly positive to lead and why a tie resolves to the incumbent before the margin is consulted."
+            "type": "boolean"
+          },
+          "arm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "n_weeks_scored": {
-            "type": "integer", "minimum": 0,
-            "description": "Ledger rows this arm has at the CURRENT ledger_version. Rows at an older version are set aside, not averaged in — a version is bumped only when a column's MEANING changes."
+            "type": "integer",
+            "minimum": 0,
+            "description": "Weeks that became population-relative scores on this arm's ladder. Reconciled against the cited ledger after the record is written; a disagreement raises CutPromotionError."
+          },
+          "n_weeks_missed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ladder_weeks": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mean_score": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "first_week": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_week": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "weeks_dropped_stale_version": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "weeks_dropped_null_decision_column": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "weeks_dropped_span_mismatch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "eligible_for_promotion": {
+            "type": "boolean"
+          },
+          "ineligibility_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retired_on": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "n_weeks_paired": {
-            "type": "integer", "minimum": 0,
-            "description": "How many of those rows pair against a champion row for the SAME week_start AND the same week_end, with both legs carrying decision_column. THE measurability surface for this slot. Reconciled against the cited ledger after the record is written; a disagreement raises CutPromotionError."
+            "type": "integer",
+            "minimum": 0,
+            "description": "Paired weeks on the longest common window shared with the incumbent -- read off the arena cycle, never recomputed here."
           },
-          "weeks_dropped_unpaired": { "type": "integer", "minimum": 0 },
-          "weeks_dropped_window_mismatch": {
-            "type": "integer", "minimum": 0,
-            "description": "Weeks whose two legs agreed on week_start but disagreed on week_end. The holding period ends when the next cut lands, so those rows are not describing the same window and differencing them would compare different spans (§4, same cohort dates). Dropped and counted, never silently paired."
-          },
-          "weeks_dropped_stale_version": { "type": "integer", "minimum": 0 },
           "mean_paired_log_return": {
-            "type": ["number", "null"],
-            "description": "The decision number: mean over the paired weekly differences. For a challenger this IS the margin — the series is already differenced against the champion, so no second subtraction is done."
+            "type": [
+              "number",
+              "null"
+            ]
           },
-          "chained_paired_log_return": {
-            "type": ["number", "null"],
-            "description": "Sum of the paired weekly log differences over first_week→last_week — the chained relative return, which is what 'decide on the chained weekly series' means arithmetically. Null when any week in the span is missing: a gap in a compounding series is not a zero, it is a span that cannot be stated."
+          "paired_first_week": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "se": { "type": ["number", "null"] },
-          "t_stat": { "type": ["number", "null"] },
-          "se_method": {
-            "type": ["string", "null"],
-            "description": "How se was computed. Expected to be the iid clustered SE here, and legitimately so for the first time: the ledger's weeks abut, so 'each date = one independent cluster' holds in fact. A HAC SE is what a forward-window series needs (alpha-engine-config-I8263) and is not what this is. Recorded so a reader can see whether the margin was cleared with or without statistical support — which is NOT a gate: champion-challenger-policy.md §5 rejects a publication-grade bar for an operational loop."
+          "paired_last_week": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "first_week": { "type": ["string", "null"] },
-          "last_week": { "type": ["string", "null"] },
-          "confidence": { "enum": ["ok", "thin", "insufficient"] },
-          "mean_vs_embedded_champion_leg": {
-            "type": ["number", "null"],
-            "description": "DIAGNOSTIC, never a decision input. weekly_ledger.paired_weekly_differences differences this arm's column against the champion_log_return leg carried inside the arm's OWN row, and that leg is a GROSS basket return. Differencing a NET arm against a GROSS champion charges the challenger's transaction cost and not the incumbent's — a systematic bias against the challenger in a slot whose arms differ mainly in churn. The decision therefore joins champion rows explicitly and differences net-against-net; this field records what the embedded leg would have said so the gap is visible rather than argued about."
+          "confseq_lower": {
+            "type": [
+              "number",
+              "null"
+            ]
           },
-          "n_weeks_vs_embedded_champion_leg": { "type": "integer", "minimum": 0 },
-          "metric": { "const": "paired_weekly_net_log_return_vs_champion" },
-          "cadence": { "const": "weekly" },
-          "source": { "const": "research/cuts_weekly_ledger/ledger.parquet" }
-        }
-      }
-    },
-    "hysteresis": {
-      "type": "object",
-      "required": [
-        "promotion_margin", "promotion_margin_units", "promotion_margin_note",
-        "cooldown_days", "min_weeks_for_inference", "corroborating_horizons_days"
-      ],
-      "description": "The §5.2 parameters this evaluation applied, recorded with the decision so a past record stays interpretable after the registry changes. Source of truth is cut_promotion.py::CUT_PROMOTION_SLOT. The units fields are required rather than optional because the v1→v2 cutover changed what the margin is denominated in, and a bare number carried across that boundary would be read as the same bar in different clothes.",
-      "properties": {
-        "promotion_margin": { "type": "number", "exclusiveMinimum": 0 },
-        "promotion_margin_units": {
-          "const": "mean weekly paired net log-return difference vs champion"
-        },
-        "promotion_margin_note": {
-          "type": "string", "minLength": 1,
-          "description": "The conversion from the retired v1 bar, carried on every record so no reader has to do it: 0.005 of mean lift over 126 sessions is 0.005/25.2 weeks ≈ 0.0002 per week. The cutover deliberately changes the decision BASIS and not the BAR — importing a different bar under cover of a mechanism change would make the two effects indistinguishable afterwards. The note also states what the margin is NOT: it is not a significance test and is not sized to the noise floor; min_weeks_for_inference and cooldown_days bound oscillation."
-        },
-        "cooldown_days": { "type": "integer", "exclusiveMinimum": 0 },
-        "min_weeks_for_inference": {
-          "type": "integer", "minimum": 1,
-          "description": "Completed PAIRED WEEKS, not cohort dates. Successor to v1's min_dates_for_inference, renamed rather than reused because the unit changed from an overlapping forward-window observation to a non-overlapping holding period."
-        },
-        "corroborating_horizons_days": {
-          "type": "array", "items": { "type": "integer", "minimum": 126 },
-          "description": "The forward horizons holding a VETO. Every entry is asserted ≥ MIN_VETO_HORIZON_DAYS (126) and present in leaderboard_scoring.LONG_HORIZONS_DAYS at import — a veto horizon must match the scanner's ~1-year objective, which is the substance of alpha-engine-config-I7580."
+          "confseq_upper": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "confseq_supported": {
+            "type": "boolean",
+            "description": "True only when the whole anytime-valid interval sits above zero -- the promotion signal under section 5.0."
+          },
+          "comparison_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comparison_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pairwise_wins": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pairwise_losses": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pairwise_unmeasurable": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "metric": {
+            "const": "weekly_population_relative_net_log_return"
+          },
+          "cadence": {
+            "const": "weekly"
+          },
+          "source": {
+            "const": "research/cuts_weekly_ledger/ledger.parquet"
+          },
+          "score_definition": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
     "corroborating": {
-      "type": ["object", "null"],
-      "description": "What the long horizons said. They hold a VETO and never a vote: a mature block may refuse a promotion the weekly series proposes, and none may propose one — enforced structurally, since they are consulted only after the weekly series has already named a leader. Keyed by horizon under 'horizons'; each entry carries mature/leader/disagrees and a note. An absent, immature, duplicated or below-floor block is recorded mature:false, disagrees:false with the reason in words — an unmeasured gate is reported, never counted as a pass (§5.1). Null on a hold taken before any leader was proposed (no ledger, no challenger, thin series, defective board), because there was nothing for a veto to be about.",
-      "properties": {
-        "role": { "const": "veto_only" },
-        "proposed": { "type": "string" },
-        "blocking": { "type": "boolean" },
-        "blocked_by": { "type": "array", "items": { "type": "integer" } },
-        "mature_horizons": { "type": "array", "items": { "type": "integer" } },
-        "horizons": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What the long forward horizons (126d, 252d) said. REPORTED ONLY since v4 and consulted by nothing. They held a veto under the pre-arena engine; the `blocking` / `blocked_by` fields are retained so an archived record stays comparable with its predecessors, and no code path reads them. A forward-window horizon measures a hold the weekly re-cut guarantees never happens, its 'mature' test is a minimum-cohort count of the kind section 5.0 abolishes, and section 4.1 admits one decision basis per slot."
+    },
+    "defect": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Set when an input could not be honestly interpreted -- today, a cuts leaderboard reporting duplicate arm rows. Since v4 a defect does NOT change the pointer decision: the board feeds no part of it, and holding a decision on the corruption of an artifact that does not inform it would be a gate with no mechanism behind it. The record is written, then run_cut_promotion RAISES CutPromotionError -- record first, then fail."
+    },
+    "excluded_horizons": {
+      "type": "object",
+      "description": "Per PROMOTABLE arm, what the horizons that are neither a decision input nor a reported corroboration measured, and why they are excluded. Today: 21d, carrying the pre-repair-fundamentals contamination caveat WITH the number so a reader cannot mistake it for a clean read.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
           "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "required": ["horizon_days", "role", "mature", "disagrees", "note"],
-            "properties": {
-              "horizon_days": { "type": "integer", "minimum": 126 },
-              "metric": { "type": "string" },
-              "role": { "const": "veto_only" },
-              "status": { "type": ["string", "null"] },
-              "mature": { "type": "boolean" },
-              "leader": { "type": ["string", "null"] },
-              "disagrees": { "type": "boolean" },
-              "note": { "type": "string", "minLength": 1 }
+          "required": [
+            "horizon_days",
+            "n_dates_scored",
+            "excluded_reason"
+          ],
+          "properties": {
+            "horizon_days": {
+              "type": "integer"
+            },
+            "n_dates_scored": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mean": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "t_stat": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "metric": {
+              "type": "string"
+            },
+            "excluded_reason": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }
       }
     },
-    "defect": {
-      "type": ["string", "null"],
-      "description": "Set when an input could not be honestly interpreted — today, a cuts leaderboard reporting duplicate arm rows. The record is written FIRST and run_cut_promotion then raises CutPromotionError: a defect must never erase the evidence of itself. Note the asymmetry a v1 reader will not expect: a MISSING board is not a defect and not even a hold under v2 (the veto is simply unmeasured), while a CORRUPT board is both — a safety mechanism that may be reading someone else's numbers is worse than one that is switched off."
-    },
-    "excluded_horizons": {
+    "ledger": {
       "type": "object",
-      "description": "Per PROMOTABLE arm, what the horizons that are NEITHER a decision input NOR a veto measured, and why they are excluded. Today that is 21d alone (cut_promotion.py::excluded_horizons_days, asserted disjoint from corroborating_horizons_days at import — strictly stronger than v1's forbidden_horizons_days, which barred 21d from PROPOSING but said nothing about vetoing). Written on every evaluation, including when there is no board, so a reader does not have to open research/cuts_leaderboard/{date}.json to learn that an excluded number exists or that it is contaminated: every 21d date scored so far predates the 2026-08-20 fundamentals repair (alpha-engine-config-I8255) and its t_stat used an iid standard error over overlapping windows that inflates |t| by roughly sqrt(lags+1) (alpha-engine-config-I8263 / crucible-research-PR732). Keyed {arm: {str(horizon_days): entry}}.",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "object",
-          "required": ["horizon_days", "n_dates_scored", "excluded_reason"],
-          "properties": {
-            "horizon_days": { "type": "integer" },
-            "n_dates_scored": { "type": "integer", "minimum": 0 },
-            "mean": { "type": ["number", "null"] },
-            "t_stat": { "type": ["number", "null"] },
-            "metric": { "type": "string" },
-            "excluded_reason": { "type": "string", "minLength": 1 }
+      "required": [
+        "key",
+        "ledger_version",
+        "present"
+      ],
+      "description": "Provenance of the per-date score evidence. present:false means the ledger object does not exist on S3 -- absence, never an empty-but-healthy series (champion-challenger-policy.md section 7.2). `per_arm` carries, for every scored arm, how many ledger rows were seen, how many became scores, and the three reasons a row did not: a stale ledger_version, a null decision or population column (an uncomputable transaction cost -- the ledger's whole first week is of this kind), and a row priced over a different span from the rest of the slot that week. Three counters and not one, because they have three different fixes.",
+      "properties": {
+        "key": {
+          "const": "research/cuts_weekly_ledger/ledger.parquet"
+        },
+        "ledger_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "rows_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "column": {
+          "type": "string"
+        },
+        "arms_present": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       }
     },
-    "decision_earliest_on": {
-      "type": "string",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-      "description": "FIRST_COHORT_DATE (2026-08-20, alpha-engine-config-I8255) plus min_weeks_for_inference weekly holding periods, projected onto the NYSE calendar — the earliest date this slot could possibly carry enough paired weekly observations to decide, independent of how many cycles have already held. Under v1 the same field was FIRST_COHORT_DATE + 126 sessions = 2027-02-22; on the weekly basis it is 2026-09-25, five months earlier, and that gap is the practical content of Brian's 2026-08-24 ruling. A CEILING, not a promise: it says the evidence cannot exist before this date, never that it will exist on it — a missed weekly run pushes the real date out, and arms.*.n_weeks_paired is what says where it actually stands."
-    },
-    "ledger": {
+    "excluded_arms": {
       "type": "object",
-      "required": ["key", "ledger_version", "present"],
-      "description": "Provenance of the decision evidence. present:false means the ledger object does not exist at all — distinct from an existing store with no usable rows, which champion-challenger-policy.md §7.2 requires never render identically.",
+      "description": "Scored arms that may NOT hold the feed, arm -> {arm, reason, scored}. Present on EVERY record, EMPTY under Brian's ruling 2026-08-29 -- a reader must be able to tell \"no arm is excluded\" from \"this record does not say\". Before alpha-engine-config-I9272 non-promotability was expressible only as an absence from PROMOTABLE_CUTS, which no artifact could report and no reader could distinguish from an oversight.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "arm",
+          "reason"
+        ],
+        "properties": {
+          "arm": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scored": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "scored_arms": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "SLOT_ARMS -- every arm the weekly ledger scores. Derived in universe_membership from the prefixes the cut builder emits at the feed width, so a scored-but-unregistered arm cannot recur."
+    },
+    "promotable_arms": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "PROMOTABLE_CUTS -- scored_arms minus the keys of excluded_arms. Recorded so the eligible set on the day of the decision is reconstructable from the artifact alone (principles.md section 2.1)."
+    },
+    "score_definition": {
+      "type": "string",
+      "description": "The arithmetic that turns ledger columns into the per-date score, e.g. 'net_log_return - population_log_return'. Carried on the record so a reader never has to open the producer to learn what a ladder rung is denominated in."
+    },
+    "arena": {
+      "type": "object",
+      "required": [
+        "slot",
+        "slot_kind",
+        "benchmark",
+        "as_of",
+        "status",
+        "moved",
+        "incumbent_arm_id",
+        "champion_arm_id",
+        "cycle_key",
+        "latest_key",
+        "register_key",
+        "active_arms",
+        "scored_arms",
+        "config",
+        "retirements"
+      ],
+      "description": "WHERE the decision was actually taken and under what parameters. Required, not optional: this document is deliberately the smaller of the two artifacts now, and a pointer that does not name the cycle it was transcribed from cannot be reconciled against it. `config` carries the ArenaConfig the cycle ran under -- alpha, diff_clip, cap, grace_weeks, min_active_arms, retired_trailing_cycles, retire_evidence -- which champion-challenger-policy.md section 10 requires every slot to name in its registry. `cycle_key` is the authoritative arena_cycle artifact; `retirements` is every verdict INCLUDING the non-retirements and their reasons, because a retirement list containing only retirements cannot be audited (section 6.1).",
       "properties": {
-        "key": { "const": "research/cuts_weekly_ledger/ledger.parquet" },
-        "ledger_version": { "type": "integer", "minimum": 1 },
-        "present": { "type": "boolean" },
-        "rows_read": { "type": "integer", "minimum": 0 },
-        "column": { "type": "string" },
-        "arms_present": { "type": "array", "items": { "type": "string" } }
+        "slot": {
+          "const": "universe_cut"
+        },
+        "slot_kind": {
+          "const": "universe_cut"
+        },
+        "benchmark": {
+          "const": "population"
+        },
+        "as_of": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "status": {
+          "enum": [
+            "decided",
+            "held",
+            "unmeasurable",
+            "unservable",
+            "bootstrap"
+          ]
+        },
+        "moved": {
+          "type": "boolean"
+        },
+        "engine_reason": {
+          "type": "string"
+        },
+        "incumbent_arm_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "champion_arm_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cycle_key": {
+          "type": "string",
+          "pattern": "^arena/universe_cut/"
+        },
+        "latest_key": {
+          "const": "arena/universe_cut/latest.json"
+        },
+        "register_key": {
+          "const": "arena/universe_cut/register.json"
+        },
+        "active_arms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scored_arms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "config": {
+          "type": "object",
+          "required": [
+            "alpha",
+            "diff_clip",
+            "cap",
+            "grace_weeks",
+            "min_active_arms",
+            "retired_trailing_cycles",
+            "retire_evidence"
+          ],
+          "properties": {
+            "alpha": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "diff_clip": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "variance_mode": {
+              "type": "string"
+            },
+            "min_paired_dates": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "grace_weeks": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "min_active_arms": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "retired_trailing_cycles": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "retire_evidence": {
+              "enum": [
+                "point",
+                "anytime_valid"
+              ]
+            }
+          }
+        },
+        "retirements": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "note": {
+          "type": "string"
+        }
       }
     }
   }
