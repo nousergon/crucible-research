@@ -76,18 +76,6 @@ entries:
     tracking: alpha-engine-config-I9302
 
   - path: config.py
-    pattern: anthropic:env_key
-    reason: >-
-      `ANTHROPIC_API_KEY: str = get_secret(...)` is a config LOADER field, not
-      a call site — no live ChatAnthropic/anthropic.Anthropic construction
-      reads it (measured: zero live constructors in this repo). Consumers
-      that still touch the field are manual/dev-only tooling, each with its
-      own allowlist entry below. Retiring the field itself is a config.py
-      edit outside this session's scope (crucible-research-I9302 named only
-      scripts/measure_cache_prefixes.py, thinktank/, and this workflow).
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-  - path: config.py
     pattern: openrouter:env_key
     reason: >-
       Same shape as the openrouter-guard's own pre-existing allowance for this
@@ -119,14 +107,6 @@ entries:
     reason: >-
       Same docstring, same migration (PR759, alpha-engine-config-I9263) — not
       a live call site. Sibling-owned; not edited this session.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
-  - path: lambda/eval_judge_handler.py
-    pattern: anthropic:env_key
-    reason: >-
-      Comment explaining import ordering relative to ANTHROPIC_API_KEY's
-      SSM-loaded value — not a live env-var read at this line. Sibling-owned
-      (lambda/eval_judge_*); not edited this session.
     expires: "2026-09-05"
     tracking: alpha-engine-config-I9263
   - path: tests/test_eval_judge_batch_transport.py
@@ -236,33 +216,6 @@ entries:
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
-  - path: scripts/regen_golden_traces.py
-    pattern: anthropic:env_key
-    reason: >-
-      `--help` text / comment on a manual, ad-hoc, non-CI-wired dev script
-      ("Needs ANTHROPIC_API_KEY" to capture a real trace) — not an automated
-      call site. Baseline sweep for alpha-engine-config-I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
-  - path: scripts/run_rag_retrieval_eval.py
-    pattern: anthropic:env_key
-    reason: >-
-      Comment noting the LLM-judge path also needs ANTHROPIC_API_KEY — this
-      script itself does not read it; describes a dependency of a manual,
-      non-CI-wired eval tool. Baseline sweep for alpha-engine-config-I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
-  - path: scripts/smoke_eval_judge.py
-    pattern: anthropic:env_key
-    reason: >-
-      Comment on a `.env`-loading step of a manual, non-CI-wired smoke script
-      — not an automated call site. Baseline sweep for alpha-engine-config-
-      I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
   - path: tests/live_smoke/judge_perturbation_smoke.py
     pattern: openrouter:env_key
     reason: >-
@@ -354,15 +307,6 @@ entries:
     reason: >-
       Same data literal, same guard test, different secret name. Baseline
       sweep for alpha-engine-config-I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
-  - path: tests/test_research_outcome_migration_parity.py
-    pattern: anthropic:env_key
-    reason: >-
-      `stub_config.ANTHROPIC_API_KEY = "test-key"` sets an attribute on a test
-      STUB config object for a migration-parity fixture — not a live secret
-      read. Baseline sweep for alpha-engine-config-I9302.
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 

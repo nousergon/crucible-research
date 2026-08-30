@@ -143,8 +143,7 @@ def _run(event, context):
     artifacts for ``event["date"]`` and persists the eval results."""
     _ensure_init()
 
-    # Imports deferred until after _ensure_init so any module that
-    # reads ANTHROPIC_API_KEY at import time sees the SSM-loaded value.
+    # Imports deferred until after _ensure_init (Lambda cold-start pattern).
     from evals.orchestrator import (
         DEFAULT_HAIKU_ESCALATE_THRESHOLD,
         DEFAULT_HAIKU_MODEL,

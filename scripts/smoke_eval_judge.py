@@ -41,8 +41,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Load .env before importing config-dependent modules so ANTHROPIC_API_KEY
-# is visible to ChatAnthropic at call time.
+# Load .env before importing krepis router env (KREPIS_* credentials).
 load_dotenv(override=True)
 
 from nousergon_lib.decision_capture import DecisionArtifact  # noqa: E402
