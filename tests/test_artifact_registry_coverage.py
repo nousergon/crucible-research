@@ -202,6 +202,7 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # are filed as alpha-engine-config-I7833 — three docs PRs were already open
     # against that repo's private-docs on 2026-08-20, and opening a fourth
     # against work in flight is what the engagement protocol forbids.
+    "scoring/cut_arena.py": 2,  # universe-cut arena_cycle dated + latest (alpha-engine-config-I9317)
     "scoring/cut_promotion.py": 1,
     # Scanner-SPEC promotion decision (alpha-engine-config-I9273). 1 PUT site
     # (the loop over the dated audit key, the latest.json mirror and the live

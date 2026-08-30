@@ -80,32 +80,32 @@ def _doc(**over) -> dict:
         "slot_id": "scanner_cut",
         "decided_on": DATE,
         "decision": "hold",
-        "reason_code": "insufficient_weeks",
-        "reason": "no eligible challenger has 5 paired weeks",
+        "reason_code": "arena_unmeasurable",
+        "reason": "no challenger shares a usable window with the incumbent",
         "champion": CHAMP,
         "champion_before": CHAMP,
-        "decision_metric": "paired_weekly_net_log_return_vs_champion",
+        "decision_metric": "weekly_population_relative_net_log_return",
         "decision_cadence": "weekly",
         "decision_source": "research/cuts_weekly_ledger/ledger.parquet",
         "excluded_arms": {},
-        "decision_earliest_on": {
-            "date": "2026-09-25",
-            "provisional": True,
-            "counted_from": "2026-08-20",
-            "basis": "PROVISIONAL — no ledger week prices every promotable arm",
+        "arena": {
+            "cycle_key": f"arena/universe_cut/{DATE}.json",
+            "status": "unmeasurable",
         },
         "arms": {
             CHAMP: {
-                "n_weeks_paired": 1, "mean_paired_log_return": 0.0,
-                "t_stat": None, "confidence": "thin",
-                "eligible_for_promotion": False,
-                "ineligibility_reason": "insufficient_weeks: n_weeks_paired=1",
+                "n_weeks_paired": 1,
+                "mean_paired_log_return": 0.0,
+                "confseq_supported": False,
+                "comparison_status": "incumbent",
+                "eligible_for_promotion": True,
             },
             "tech_score_top_60": {
-                "n_weeks_paired": 0, "mean_paired_log_return": None,
-                "t_stat": None, "confidence": "insufficient",
-                "eligible_for_promotion": False,
-                "ineligibility_reason": "insufficient_weeks: n_weeks_paired=0",
+                "n_weeks_paired": 0,
+                "mean_paired_log_return": None,
+                "confseq_supported": False,
+                "comparison_status": "unmeasurable",
+                "eligible_for_promotion": True,
             },
         },
     }
@@ -124,8 +124,8 @@ def test_a_hold_is_delivered_as_loudly_as_a_promotion():
     assert len(sink.calls) == 1
     subject, body, _ = sink.calls[0]
     assert "promoted: none" in subject
-    assert "insufficient_weeks" in subject
-    assert "insufficient_weeks" in body
+    assert "arena_unmeasurable" in subject
+    assert "arena_unmeasurable" in body
 
 
 def test_a_promotion_names_the_arm_that_won_in_the_subject():
@@ -157,28 +157,18 @@ def test_an_unmeasured_arm_renders_as_a_dash_never_as_zero():
     # would pass against a `_fmt` that renders None as 0 — the mutant this test
     # exists to kill, which survived the first version of this assertion.
     cells = [c.strip() for c in line.strip().strip("|").split("|")]
-    mean_cell, t_cell = cells[3], cells[4]
+    mean_cell, confseq_cell = cells[3], cells[4]
     assert mean_cell == "—", cells
-    assert t_cell == "—", cells
+    assert confseq_cell == "no", cells
     # And the champion's genuine 0.0 IS a number, rendered as one.
     champ_line = next(ln for ln in body.splitlines() if f"`{CHAMP}` |" in ln)
     assert "+0.000000" in champ_line
 
 
-def test_a_provisional_earliest_date_is_never_rendered_as_a_commitment():
-    """alpha-engine-config-I9284: `decision_earliest_on` is the field a reader
-    uses to tell a working loop from a stuck one."""
+def test_v4_records_without_earliest_date_still_render():
     body = build_body_md(_doc(), VERDICT_SLOT)
-    assert "2026-09-25 (PROVISIONAL)" in body
-    assert "no ledger week prices every promotable arm" in body
-
-
-def test_a_v1_bare_string_earliest_date_is_labelled_as_v1_not_relabelled():
-    """A v1 record carried a bare string here. Rendering it under the v3 field's
-    meaning would be a fabricated fact — the whole reason the version bumped."""
-    body = build_body_md(_doc(decision_earliest_on="2027-02-22"), VERDICT_SLOT)
-    assert "schema v1 field" in body
-    assert "PROVISIONAL" not in body
+    assert "Earliest possible decision" not in body
+    assert "arena/universe_cut" in body
 
 
 def test_excluded_arms_is_stated_even_when_empty():
@@ -208,7 +198,7 @@ def test_an_undelivered_verdict_escalates_rather_than_passing_silently():
     message, kw = alerts.calls[0]
     assert kw["severity"] == "error"
     assert DATE in message
-    assert "insufficient_weeks" in message
+    assert "arena_unmeasurable" in message
 
 
 def test_a_raising_send_is_recorded_and_escalated_never_swallowed_or_propagated():
@@ -292,7 +282,6 @@ def test_a_defective_board_still_delivers_before_the_raise(monkeypatch):
     with pytest.raises(CutPromotionError):
         run_cut_promotion(DATE, bucket="b", s3_client=s3, ledger_rows=None)
     assert len(sent) == 1
-    assert sent[0]["reason_code"] == "board_defective"
     assert sent[0]["defect"]
 
 

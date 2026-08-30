@@ -818,7 +818,7 @@ def test_every_promotable_arm_is_readable_by_the_long_horizon_veto(slot_built):
     # And the decision path itself still produces a full arms block.
     decision = decide_cut_champion(
         ledger_rows=None, board=lb, champion_before=FEED_CUT_NAME,
-        decided_on="2026-07-03",
+        decided_on="2026-08-29",
     )
     assert set(decision.arms) == set(CUT_PROMOTION_SLOT.arms)
 

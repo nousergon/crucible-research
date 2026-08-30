@@ -46,7 +46,6 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scoring.cut_promotion import (  # noqa: E402
-    REASON_BOARD_DEFECTIVE,
     decide_cut_champion,
 )
 from scoring.leaderboard_producers import _write_leaderboard  # noqa: E402
@@ -169,13 +168,13 @@ def test_promotion_refuses_to_decide_on_the_live_defective_board(live_defective_
         ledger_rows=[],
         board=live_defective_board,
         champion_before="attractiveness_top_60",
-        decided_on="2026-08-19",
+        decided_on="2026-08-29",
     )
     assert decision.decision == "hold"
-    assert decision.reason_code == REASON_BOARD_DEFECTIVE
     assert decision.defect is not None
     assert "attractiveness_top_20x2" in decision.defect
-    # The champion never moves on a board the engine has disqualified.
+    # v4: the board no longer selects the reason_code — only records the defect.
+    assert decision.reason_code != "board_defective"
     assert decision.champion == "attractiveness_top_60"
 
 
@@ -198,7 +197,7 @@ def test_a_clean_immature_board_still_holds_on_immaturity_not_on_a_defect():
     }
     decision = decide_cut_champion(
         ledger_rows=[], board=board,
-        champion_before="attractiveness_top_60", decided_on="2026-08-21",
+        champion_before="attractiveness_top_60", decided_on="2026-08-29",
     )
-    assert decision.reason_code != REASON_BOARD_DEFECTIVE
+    assert decision.reason_code != "board_defective"
     assert decision.defect is None

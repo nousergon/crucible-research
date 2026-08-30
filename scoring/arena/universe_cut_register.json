@@ -1,0 +1,82 @@
+[
+  {
+    "arm_id": "universe_cut:attractiveness_mom121_top_60:789bdf621fb0",
+    "date": "2026-08-17",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "universe_cut:attractiveness_mom121_top_60:789bdf621fb0",
+      "bootstrap": true,
+      "created_date": "2026-08-17",
+      "name": "attractiveness_mom121_top_60",
+      "notes": "backfilled at the alpha-engine-config-I9317 arena wiring from CUT_SLOT_ARM_PREFIXES; created_date recovered from repository history",
+      "slot": "universe_cut",
+      "spec_hash": "789bdf621fb0",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "universe_cut:attractiveness_momzero_top_60:83fe3bc27625",
+    "date": "2026-08-17",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "universe_cut:attractiveness_momzero_top_60:83fe3bc27625",
+      "bootstrap": true,
+      "created_date": "2026-08-17",
+      "name": "attractiveness_momzero_top_60",
+      "notes": "backfilled at the alpha-engine-config-I9317 arena wiring from CUT_SLOT_ARM_PREFIXES; created_date recovered from repository history",
+      "slot": "universe_cut",
+      "spec_hash": "83fe3bc27625",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "universe_cut:attractiveness_top_60:90aa88291c29",
+    "date": "2026-08-20",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "universe_cut:attractiveness_top_60:90aa88291c29",
+      "bootstrap": true,
+      "created_date": "2026-08-20",
+      "name": "attractiveness_top_60",
+      "notes": "backfilled at the alpha-engine-config-I9317 arena wiring from CUT_SLOT_ARM_PREFIXES; created_date recovered from repository history",
+      "slot": "universe_cut",
+      "spec_hash": "90aa88291c29",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "universe_cut:tech_score_top_60:7aa0ff7705c2",
+    "date": "2026-08-20",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "universe_cut:tech_score_top_60:7aa0ff7705c2",
+      "bootstrap": true,
+      "created_date": "2026-08-20",
+      "name": "tech_score_top_60",
+      "notes": "backfilled at the alpha-engine-config-I9317 arena wiring from CUT_SLOT_ARM_PREFIXES; created_date recovered from repository history",
+      "slot": "universe_cut",
+      "spec_hash": "7aa0ff7705c2",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "universe_cut:attractiveness_hard3_top_60:e8d6a34d9def",
+    "date": "2026-08-24",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "universe_cut:attractiveness_hard3_top_60:e8d6a34d9def",
+      "bootstrap": true,
+      "created_date": "2026-08-24",
+      "name": "attractiveness_hard3_top_60",
+      "notes": "backfilled at the alpha-engine-config-I9317 arena wiring from CUT_SLOT_ARM_PREFIXES; created_date recovered from repository history",
+      "slot": "universe_cut",
+      "spec_hash": "e8d6a34d9def",
+      "supersedes": null
+    }
+  }
+]
