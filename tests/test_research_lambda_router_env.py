@@ -46,6 +46,21 @@ def test_the_helper_is_actually_called_for_the_main_function():
     )
 
 
+def test_eval_judge_submit_gets_router_env():
+    """alpha-engine-config-I9263: eval-judge-submit resolves model groups via
+    krepis.router; without AppConfig addressing it fails at runtime with the
+    misleading 'LLM_MODEL_REGISTRY.yaml not found' (measured watch-rerun-3)."""
+    text = _text()
+    assert re.search(
+        r'deploy_eval_judge_submit\(\)[\s\S]*?_apply_router_env "\$FUNCTION_EVAL_JUDGE_SUBMIT"',
+        text,
+    ), (
+        "deploy_eval_judge_submit must call _apply_router_env — the submit "
+        "Lambda is the weekly SF's eval-judge entry point and routes through "
+        "krepis like the main runner"
+    )
+
+
 def test_the_environment_is_merged_not_replaced():
     """`update-function-configuration --environment` REPLACES the whole
     variable map. The function's other ~20 variables — provider keys,
