@@ -197,6 +197,12 @@ def build_body_md(doc: dict, slot: VerdictSlot, *, console_base_url: str | None 
         # relabelled as though it meant what the v2 field means.
         lines.append(f"**Earliest possible decision (schema v1 field):** {earliest}")
 
+    if doc.get("arena", {}).get("cycle_key"):
+        lines.append(
+            f"**Arena cycle:** `{doc['arena']['cycle_key']}` "
+            f"(`{doc['arena'].get('status')}`)"
+        )
+
     if doc.get("defect"):
         lines.append(f"**DEFECT:** {doc['defect']} — the run raised after writing this record.")
 
@@ -204,11 +210,11 @@ def build_body_md(doc: dict, slot: VerdictSlot, *, console_base_url: str | None 
         "",
         "### Arms",
         "",
-        "| arm | role | paired weeks | mean/week | t | confidence | eligible |",
+        "| arm | role | paired weeks | mean paired | confseq ok | comparison | eligible |",
         "|---|---|---|---|---|---|---|",
     ]
     if not arms:
-        lines.append("| _the record names no arms_ | — | — | — | — | — | — |")
+        lines.append("| _the record names no arms_ | — | — | — | — | — | — | — |")
     for name, ev in arms.items():
         if name == before:
             role = "champion"
@@ -223,8 +229,8 @@ def build_body_md(doc: dict, slot: VerdictSlot, *, console_base_url: str | None 
         lines.append(
             f"| `{name}` | {role} | {ev.get('n_weeks_paired', '—')} "
             f"| {_fmt(ev.get('mean_paired_log_return'))} "
-            f"| {_fmt(ev.get('t_stat'), '+.2f')} "
-            f"| {ev.get('confidence', '—')} | {eligible} |"
+            f"| {'yes' if ev.get('confseq_supported') else 'no'} "
+            f"| {ev.get('comparison_status') or '—'} | {eligible} |"
         )
 
     # Arms excluded from promotion by the REGISTER, as opposed to by this

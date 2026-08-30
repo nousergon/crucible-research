@@ -125,7 +125,14 @@ pydantic~=2.13
 # repo — scoring/boost_signals.py's `from alpha_engine_lib.secrets import
 # get_secret` — fixed in the same PR to `from nousergon_lib.secrets import
 # get_secret` (matching every other call site in this repo already).
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.79
+# v0.124.79 -> v0.124.99 (alpha-engine-config-I9317): nousergon_lib.arena, the
+# fleet's single implementation of champion-challenger-policy.md §§3-6, first
+# ships in v0.124.98 (lib#372) together with the arena_cycle contract schema.
+# scoring/cut_arena.py imports both, so this bump is part of the change and not
+# an incidental dependency refresh. The [contracts] extra is load-bearing here:
+# nousergon_lib.contracts.validate needs jsonschema and the cycle artifact is
+# validated on the write path.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.99
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
