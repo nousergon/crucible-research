@@ -412,6 +412,8 @@ def _continuity_fixture():
 #   topn_alpha_vs_population   alpha-engine-config-I7576 — lift vs the scored
 #                              population, alongside (never instead of) the
 #                              unchanged SPY series
+#   topn_alpha_vs_population_by_date  alpha-engine-config-I9405 — per-date
+#                              population lift series alongside the aggregate
 #   dates_scored / n_dates_in_intersection / topn_alpha_vs_benchmark_intersection
 #   / promotion_eligible / ineligible_reason
 #                              alpha-engine-config-I9277, -I9279 — WHICH dates
@@ -430,6 +432,7 @@ def _continuity_fixture():
 _ADDITIVE_SINCE_CAPTURE = (
     "confidence",
     "topn_alpha_vs_population",
+    "topn_alpha_vs_population_by_date",
     "dates_scored",
     "topn_alpha_vs_benchmark_intersection",
     "n_dates_in_intersection",

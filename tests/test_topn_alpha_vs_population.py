@@ -180,15 +180,33 @@ def test_population_metric_is_the_arithmetic_it_claims():
         (0.06 + 0.00) / 2 - (-0.02 + 0.06 + 0.00 - 0.03 + 0.08) / 5,
         (0.04 + 0.07) / 2 - (0.01 - 0.05 + 0.04 + 0.07 + 0.02) / 5,
     ]
-    got = _topn_alpha_vs_population_metric(CHAMP, REALIZED, 2, POPULATION)
+    got, by_date = _topn_alpha_vs_population_metric(CHAMP, REALIZED, 2, POPULATION)
     assert got["mean"] == pytest.approx(sum(per_date) / 3, abs=1e-6)
     assert got["n_dates"] == 3
+    assert set(by_date) == {"2026-08-03", "2026-08-04", "2026-08-05"}
+    assert got["mean"] == pytest.approx(
+        sum(by_date.values()) / len(by_date), abs=1e-6,
+    )
 
 
 def test_metric_present_on_every_row(scored):
     for row in scored["specs"]:
         assert "topn_alpha_vs_population" in row
+        assert "topn_alpha_vs_population_by_date" in row
         assert row["topn_alpha_vs_population"]["n_dates"] == 3
+
+
+def test_by_date_keys_match_metric_n_dates_and_reconcile_with_mean(scored):
+    """The per-date map and the clustered aggregate must be the SAME
+    measurement — not two independent computations that can drift."""
+    for row in scored["specs"]:
+        metric = row["topn_alpha_vs_population"]
+        by_date = row["topn_alpha_vs_population_by_date"]
+        assert isinstance(by_date, dict)
+        assert len(by_date) == metric["n_dates"]
+        assert metric["mean"] == pytest.approx(
+            sum(by_date.values()) / len(by_date), abs=1e-6,
+        )
 
 
 def test_metric_needs_no_benchmark():
@@ -255,6 +273,7 @@ def test_failed_row_carries_the_new_field_as_null():
     row = _row(board, "broken")
     assert "error" in row
     assert row["topn_alpha_vs_population"] is None
+    assert row["topn_alpha_vs_population_by_date"] is None
 
 
 # ── The defect this contract exists to prevent ───────────────────────────────
@@ -273,6 +292,7 @@ def test_metric_is_null_without_a_supplied_population():
     board = score_leaderboard(CHAMP, [CHAL], REALIZED, top_n=2)
     for row in board["specs"]:
         assert row["topn_alpha_vs_population"] is None
+        assert row["topn_alpha_vs_population_by_date"] is None
 
 
 def test_supplied_population_is_not_the_realized_mean():
@@ -306,3 +326,5 @@ def test_multi_horizon_passes_each_horizons_own_population():
     assert m21["topn_alpha_vs_population"]["mean"] != pytest.approx(
         m126["topn_alpha_vs_population"]["mean"]
     )
+    assert "topn_alpha_vs_population_by_date" in m21
+    assert "topn_alpha_vs_population_by_date" in m126

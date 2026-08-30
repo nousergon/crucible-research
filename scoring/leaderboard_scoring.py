@@ -790,7 +790,7 @@ def _topn_alpha_vs_population_metric(
     population_returns: Mapping[str, float] | None,
     *,
     overlap_lags: int | None = None,
-) -> dict | None:
+) -> tuple[dict | None, dict[str, float] | None]:
     """Date-clustered long-only top-N excess over the scored population
     (alpha-engine-config-I7576): mean(spec top-N) − mean(all scored names),
     per date, clustered across dates.
@@ -828,7 +828,8 @@ def _topn_alpha_vs_population_metric(
     population return both exist.
     """
     if not population_returns:
-        return None
+        return None, None
+    by_date: dict[str, float] = {}
     per_date: list[float] = []
     for date_str, day in spec.by_date.items():
         ret = realized.get(date_str)
@@ -838,8 +839,13 @@ def _topn_alpha_vs_population_metric(
         spec_r = _top_n_return_by_date(day, ret, top_n)
         if spec_r is None:
             continue
-        per_date.append(spec_r - pop_r)
-    return date_clustered_stats(per_date, overlap_lags=overlap_lags)
+        diff = spec_r - pop_r
+        by_date[date_str] = diff
+        per_date.append(diff)
+    stats = date_clustered_stats(per_date, overlap_lags=overlap_lags)
+    if stats is None:
+        return None, None
+    return stats, by_date
 
 
 def paired_alpha_vs_champion(
@@ -1214,8 +1220,11 @@ def score_leaderboard(
             )
             # None unless the caller supplied genuine full-population returns —
             # never derived from the pick-narrowed `realized` map.
-            alpha_vs_population = _topn_alpha_vs_population_metric(
-                spec, realized, top_n, population_returns, overlap_lags=overlap_lags,
+            alpha_vs_population, alpha_vs_population_by_date = (
+                _topn_alpha_vs_population_metric(
+                    spec, realized, top_n, population_returns,
+                    overlap_lags=overlap_lags,
+                )
             )
             dates_scored = sorted(d for d in spec.by_date if realized.get(d))
             n_scored = len(dates_scored)
@@ -1245,6 +1254,7 @@ def score_leaderboard(
                 "topn_alpha_vs_champion": alpha_vs_champion,
                 "topn_alpha_vs_benchmark": alpha_vs_benchmark,
                 "topn_alpha_vs_population": alpha_vs_population,
+                "topn_alpha_vs_population_by_date": alpha_vs_population_by_date,
                 "n_dates_scored": n_scored,
                 # alpha-engine-config-I9277/I9279 — the cohort itself, not just
                 # its size. Two arms reporting n_dates_scored: 6 over disjoint
@@ -1279,6 +1289,7 @@ def score_leaderboard(
                 "topn_alpha_vs_champion": None,
                 "topn_alpha_vs_benchmark": None,
                 "topn_alpha_vs_population": None,
+                "topn_alpha_vs_population_by_date": None,
                 "n_dates_scored": 0,
                 "dates_scored": [],
                 "topn_alpha_vs_benchmark_intersection": None,
