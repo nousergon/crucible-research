@@ -1,0 +1,237 @@
+# Console component descriptor — console-policy.md §2.6.
+#
+# WHAT THIS EXISTS FOR (alpha-engine-config-I9497). Measured 2026-08-31
+# across all 278 rows of `nous-ergon-ops/governance/observability.d/` and
+# every roster repo's descriptor: `crucible-research` was the ONLY Crucible
+# repo with no outcome-bound console entity of any kind. It has substrate
+# rows for its Lambdas (`alpha-engine-research-*`) and CI rows
+# (`crucible-research-gitleaks`, `-lambda-deploy-drift`), and not one of them
+# binds a signal, a universe count, a regime, or the freshness of the
+# artifact the whole downstream pipeline consumes.
+#
+# ── Identity: a PRODUCER identity, not a second Lambda row ─────────────────
+#
+# `alpha-engine-research-signals-envelope` is the Lambda; this row is the
+# ARTIFACT-producing identity that Lambda carries, declared with
+# `parent_component` pointing at it. That is this registry's existing
+# mechanism for a component no discoverer can see on its own (precedent:
+# `ae-research-self-test` parented to `alpha-engine-research-runner`,
+# `crucible-backtester-attestation` parented to the weekly spot dispatcher).
+# It is deliberately NOT a second row over one substrate object: `origin` here
+# names the producer call site, never `aws:lambda:...`, so nothing derives a
+# second discovery of the same function — the `router-funded-depth-probe`
+# failure (ops-PR904) is what that would be.
+#
+# ── Why this row cannot render a false transparency gap ────────────────────
+#
+# A registry row with `lifecycle: in-service` and no observation renders
+# UNREPORTED (`console/adapters/yaml_directory.py::_state_from_row`) — §9.2's
+# transparency-gap count itself. The `document-fields` binding below is what
+# stops that: that driver emits a COMPONENT entity under this row's own
+# `component_id` as an OBSERVATION claim, and observation outranks a
+# declaration-without-lifecycle for `state` (`console/index/merge.py::
+# _state_rank`, 1 vs 3). The row falls back to UNREPORTED only if research
+# genuinely stops stamping its own health — which is the finding, and which
+# `signals_envelope_handler.py` already alerts on separately.
+#
+# The binding cadence equals the row cadence (10080) on purpose: §9.6's own
+# staleness threshold is `cadence x 1.5 + the observing source's poll
+# cadence`, while the driver's is `cadence x 1.5`, so the driver flips to
+# `MISSED` — a DISCLOSED state — strictly before §9.6 could ever count this
+# row as a staleness-honesty violation.
+
+component_id: crucible-research-signals
+owning_repo: crucible-research
+substrate: lambda
+origin: "crucible-research lambda/signals_envelope_handler.py (health stamp) + archive/manager.py::_s3_put — health/research.json and signals/latest.json"
+parent_component: alpha-engine-research-signals-envelope
+parent_component_reason: >-
+  The artifacts below are written by the `alpha-engine-research-signals-
+  envelope` Lambda, which has its own row and its own `aws:lambda:` origin.
+  This row is the producer identity for those S3 keys, not a second
+  declaration of that function: no discoverer enumerates it, so without
+  `parent_component` it would be reported ABSENT out of a blind spot.
+owner: brian
+lifecycle: in-service
+cadence_minutes: 10080
+cadence_source: >-
+  Stage of `ne-weekly-freshness-pipeline`, whose trigger is the EventBridge
+  rule `alpha-engine-saturday` — cron(0 9 ? * THU-SAT *). The same number and
+  the same measured provenance the sibling
+  `governance/observability.d/alpha-engine-research-signals-envelope.yaml`
+  row declares for the same stage: the rule fires on three days so a failed
+  Saturday run has two retry slots inside the same week, and the business
+  cadence it serves is weekly, so 10080 is the longest silence a healthy
+  stage can show.
+
+authority_tier: observe-and-report
+authority_tier_reason: >-
+  The signals envelope produces an artifact downstream consumers read; it
+  places no order and promotes no model. Every acting decision on top of
+  `signals.json` belongs to the executor and to champion promotion.
+
+signals:
+  execution:
+    status: emitted
+    reason: >-
+      `health/research.json` carries `status`, `last_success`, `run_date` and
+      `duration_seconds`, written by `lambda/signals_envelope_handler.py` at
+      the end of every production run. Probed 2026-08-31: `status: ok`,
+      `last_success: 2026-08-29T11:11:12Z`, `duration_seconds: 96.5`.
+  cost:
+    status: unknown
+    reason: >-
+      Not audited — the health stamp carries no token or spend record, and
+      this row asserts nothing about the LLM cost of the research graph that
+      it cannot read.
+  resource:
+    status: unknown
+    reason: >-
+      Not audited — the health stamp carries no memory/CPU record; the
+      parent Lambda's REPORT line does, under its own row.
+  data:
+    status: emitted
+    reason: >-
+      `health/research.json::summary` carries `universe_count`,
+      `market_regime` and `dated_key` — the shape and identity of the
+      artifact the run produced, not merely that it ran. Probed 2026-08-31:
+      903 tickers, regime `bull`, `signals/2026-08-28/signals.json`.
+  outcome:
+    status: emitted
+    reason: >-
+      `health/research.json::deliverables` states, per required deliverable,
+      whether it was actually PRODUCED — the difference between a run that
+      exited zero and a run that delivered. The `document-fields` binding
+      below renders the run's verdict and the `object-store` binding renders
+      the freshness of `signals/latest.json`, the artifact the executor's
+      upstream gate blocks on. Audited 2026-08-31 (alpha-engine-config-I9497).
+
+log_location: s3://alpha-engine-research/health/research.json
+log_location_reason: >-
+  Declared per §6.2 from the fixed pointer this row's `metrics` binding
+  actually reads and which was probed live 2026-08-31 — not from a naming
+  convention. The parent Lambda's CloudWatch stream is declared on the
+  parent's own row; this row monitors the durable health stamp.
+alert_channel: unknown
+alert_channel_reason: >-
+  Unaudited at registration. `signals_envelope_handler.py` publishes an
+  observe-alert when the health stamp write itself fails, but where that
+  alert LANDS was not verified here, and naming a channel that does not fire
+  is worse than recording the gap.
+severity_source: metrics.module_status
+severity_source_reason: >-
+  The `document-fields` binding below reads `status` directly off the health
+  stamp; nothing re-derives it. Rendered as text with no baseline — a status
+  token is not better-or-worse than a number, and §5.4 forbids a colour where
+  there is no baseline to be better than.
+console_surface: descriptor:metrics/document-fields,artifacts/object-store
+console_surface_reason: >-
+  Declared alpha-engine-config-I9497. This descriptor is the WHOLE onboarding
+  act (console-policy.md §2.6): the console's gatherer reads it directly from
+  this repo via `observability-registry-publish.yml`. No console-repo edit,
+  no console config entry, and NO `governance/observability.d/` row — adding
+  one for a component a repo descriptor already declares is the duplicate
+  that broke the fleet registry publish for nine minutes on 2026-08-28
+  (alpha-engine-config-I9002).
+retention: unknown
+retention_reason: >-
+  Not audited. `health/research.json` and `signals/latest.json` are both
+  last-write-wins pointers (current value only); the dated
+  `signals/{date}/signals.json` keys are retained but no policy was verified
+  at registration.
+
+# ── Metrics: the run's own verdict, read by FIELD NAME ─────────────────────
+#
+# A metric is read from a structured record addressed by field name, never a
+# pattern matched against prose (console-policy.md §2.6). A FIXED key that
+# always exists is bound rather than the dated `signals/{date}/signals.json`
+# — a date-templated key would render ABSENT every day that is not today,
+# which is a detector that cries wolf rather than one that measures.
+#
+# `baseline: null` is declared EXPLICITLY on every numeric field rather than
+# omitted: §5.4 says green means better than the baseline and where there is
+# no baseline there is no colour, and the explicit null is the difference
+# between "deliberately uncoloured" and "somebody forgot".
+metrics:
+  - driver: document-fields
+    documents:
+      - key: "s3://alpha-engine-research/health/research.json"
+        fields:
+          module_status:
+            path: status
+            render: text
+          last_success:
+            path: last_success
+            render: text
+          run_date:
+            path: run_date
+            render: text
+          run_duration_seconds:
+            path: duration_seconds
+            unit: seconds
+            baseline: null
+            render: duration
+          universe_count:
+            path: summary.universe_count
+            unit: tickers
+            baseline: null
+            render: count
+          market_regime:
+            path: summary.market_regime
+            render: text
+          dated_signals_key:
+            path: summary.dated_key
+            render: text
+          producer:
+            path: summary.producer
+            render: text
+          run_error:
+            path: error
+            render: text
+    # Equal to this row's own declared cadence — see the header for why the
+    # driver must be able to disclose staleness before §9.6 audits it.
+    cadence_minutes: 10080
+
+# ── Artifacts ──────────────────────────────────────────────────────────────
+#
+# `object-store` is a HEAD, not a body read: it renders freshness with the
+# four-field row contract (state · source · as-of · evidence link).
+# `signals/latest.json` is the artifact `crucible-executor/executor/
+# upstream_artifact_gate.py` blocks the trading day on, so its freshness is a
+# fact with a consumer, not a curiosity.
+#
+# WHAT IS DELIBERATELY NOT BOUND HERE, and why it is a follow-up rather than
+# an omission: the weekly champion/challenger verdict
+# (`research/producer_leaderboard_champion_gate/{date}.json`) and the
+# producer leaderboard (`research/producer_leaderboard/{date}.json`). Both
+# are DATE-KEYED with no `latest` pointer, and no console driver substitutes
+# a date into a key — binding either would render ABSENT on every day that is
+# not the day it was written. Giving them a `latest` pointer is a producer
+# change, which `alpha-engine-config-I9041` puts out of scope until Crucible's
+# clause-1 clock has run, so it is filed instead of hacked around. That
+# follow-up is what deliverable 5 of I9497 (a Decision entity for champion
+# promotion) is blocked on.
+artifacts:
+  - driver: object-store
+    key: "s3://alpha-engine-research/signals/latest.json"
+    cadence_minutes: 10080
+  - driver: object-store
+    key: "s3://alpha-engine-research/health/research.json"
+    cadence_minutes: 10080
+
+# ── Lineage (§6) ───────────────────────────────────────────────────────────
+#
+# `consumes` is the direction that matters: the forward edge is a property of
+# the producer and is written down somewhere already, while "who breaks if
+# this is stale" exists nowhere unless somebody states it.
+# Left EMPTY on purpose, not by omission: the envelope handler's own input
+# set was NOT audited at registration, and `consumes` is the edge that exists
+# nowhere unless somebody states it — a guessed edge is worse than a declared
+# gap, because a reader would treat it as measured. Same shape as
+# `governance/observability.d/crucible-backtester-attestation.yaml`'s own
+# empty `consumes`. Filed alongside I9497 rather than invented here.
+consumes: []
+produces:
+  - "s3://alpha-engine-research/signals/latest.json"
+  - "s3://alpha-engine-research/signals/{trading_day}/signals.json"
+  - "s3://alpha-engine-research/health/research.json"
