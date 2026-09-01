@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from data.substrate.reader import NEWS_AGGREGATES_PREFIX
-from freshness import FreshnessVerdict, assert_upstream_fresh
+from freshness import FreshnessVerdict, assert_upstream_fresh, publish_grouped_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -198,13 +198,25 @@ def load_context(store: Any) -> ContextBundle:
     # Markdown macro report there is no object-metadata inference here. A
     # payload that cannot be read, or one carrying no usable date, yields an
     # ``undated`` verdict — loud, never silently fresh.
+    # alert=False: this evaluation checks TWO upstream anchors
+    # (regime_substrate, news_aggregates). Each publishing its own alert
+    # immediately would page once per anchor even when both trace to the
+    # same failure; instead every verdict is collected below and published
+    # through ONE grouped call at the end of ``load_context`` (freshness.py
+    # fan-out contract, alpha-engine-config-I8173).
     bundle.freshness["regime_substrate"] = assert_upstream_fresh(
         f"{REGIME_SUBSTRATE_PREFIX}/",
         as_of=_regime_substrate_as_of(bundle.regime_substrate),
         cadence=REGIME_SUBSTRATE_CADENCE,
         on_stale="degrade",
         degraded_reason=_ANCHOR_DEGRADED_REASON,
+        remediation=(
+            f"a new {REGIME_SUBSTRATE_PREFIX}/{{run_id}}.json + updated "
+            f"{REGIME_SUBSTRATE_PREFIX}/latest.json written by the weekly "
+            "RegimeSubstrate Lambda"
+        ),
         source="research:thinktank_daily",
+        alert=False,
     )
 
     for name, present in (
@@ -231,6 +243,18 @@ def load_context(store: Any) -> ContextBundle:
         cadence=NEWS_AGGREGATES_CADENCE,
         on_stale="degrade",
         degraded_reason=_ANCHOR_DEGRADED_REASON,
+        remediation=f"a fresh row written under {NEWS_AGGREGATES_PREFIX} for today",
+        source="research:thinktank_daily",
+        alert=False,
+    )
+
+    # ONE grouped alert for everything collected above (currently at most
+    # two verdicts, but the mechanism is what matters — see freshness.py's
+    # fan-out contract). Genuinely distinct causes (different driver,
+    # upstream prefix, or as-of) still page separately; only findings that
+    # trace to the SAME failure collapse into one notification.
+    publish_grouped_alerts(
+        [bundle.freshness["regime_substrate"], bundle.freshness["news_aggregates"]],
         source="research:thinktank_daily",
     )
 

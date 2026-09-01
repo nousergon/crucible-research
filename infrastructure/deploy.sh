@@ -380,7 +380,7 @@ variables.update({
     # errors, falling through to a filesystem walk that finds nothing here --
     # so a missing one surfaces later as "LLM_MODEL_REGISTRY.yaml not found",
     # naming neither AppConfig nor the cause.
-    "KREPIS_APPCONFIG_APPLICATION": "alpha-engine",
+    "KREPIS_APPCONFIG_APPLICATION": "yq405wh",
     "KREPIS_APPCONFIG_CONFIG_PROFILE": "llm-model-registry",
     "KREPIS_APPCONFIG_ENVIRONMENT": "production",
 })
@@ -1188,6 +1188,7 @@ _deploy_image_shared_lambda() {
 # fleet-wide before renaming: the only invoker is deploy.yml, in this repo.
 deploy_eval_judge_submit() {
   _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_SUBMIT"  "eval_judge_submit_handler"  300 512
+  _apply_router_env "$FUNCTION_EVAL_JUDGE_SUBMIT"
 }
 
 # Daily cost aggregation Lambda — ROADMAP L1146. Shared image with the
