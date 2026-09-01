@@ -62,12 +62,12 @@ class TestEveryPublishedFunctionGetsIt:
         "target",
         [
             '"$FUNCTION_MAIN"',
-            '"$FUNCTION_EVAL_JUDGE"',
             '"$FUNCTION_EVAL_ROLLING_MEAN"',
             '"$FUNCTION_RATIONALE_CLUSTERING"',
             '"$fn_name"',  # the shared-image path: submit / poll / process /
             # aggregate_costs / scanner / signals_envelope /
-            # openrouter_shadow / perturbation_battery
+            # openrouter_shadow. eval-judge and perturbation-battery were
+            # removed (alpha-engine-config-I9756, 2026-09-01).
         ],
     )
     def test_target_is_covered(self, deploy, target):
