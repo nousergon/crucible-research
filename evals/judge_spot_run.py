@@ -197,6 +197,31 @@ def main(argv: list[str] | None = None) -> int:
     ``ResponseCode`` the Step Function reads. A traceback and a
     ``sys.exit(3)`` are both failures, but only one of them says which kind.
     """
+    try:
+        return _run(argv)
+    finally:
+        # config-I7423: spot runs call LLMs via the same default sink as the
+        # retired Lambda Process handler, but unlike a Lambda container this
+        # process exits for real — so atexit would eventually fire. The buffer
+        # threshold is 200 records per group; a full judge corpus is ~114, so
+        # without an explicit flush ``evaljudge-sync`` emits nothing and
+        # ``AggregateCosts`` names EvalJudgeProcess (measured watch-rerun-8,
+        # 2026-08-30).
+        try:
+            from krepis.cost_sink import flush_default_sink
+
+            _n = flush_default_sink()
+            if _n:
+                logger.info("[judge_spot_run] cost sink flushed: %d object(s)", _n)
+        except ImportError as exc:
+            logger.error(
+                "[judge_spot_run] cost-sink flush unavailable — records lost: %s",
+                exc,
+            )
+
+
+def _run(argv: list[str] | None = None) -> int:
+    """Judge spot run body — separated so ``main`` can flush in ``finally``."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

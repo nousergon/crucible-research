@@ -238,20 +238,31 @@ def freshness_alerts(monkeypatch, request):
     live would page the operator from the test suite and make hermeticity
     depend on which credentials happen to be absent.
 
-    The seam replaced is ``freshness._publish``, i.e. the transport only —
-    the detection, the ERROR log, the raise/degrade decision and the verdict
-    a consumer persists are all still exercised for real. Yields the list of
-    ``{"verdict", "source", "severity"}`` records so a test can assert that
-    staleness DID alert.
+    The seam replaced is ``freshness._publish_raw``, the single low-level
+    transport call both a per-verdict alert (``_publish``) and a grouped
+    alert (``publish_grouped_alerts``) funnel through — so this one patch
+    covers both without a test having to know which path fired. The
+    detection, the ERROR log, the raise/degrade decision, the driver
+    attribution and the verdict a consumer persists are all still exercised
+    for real. Yields the list of ``{"message", "dedup_key", "source",
+    "severity"}`` records so a test can assert that staleness DID alert, and
+    how many DISTINCT alerts fired (one per group, not one per finding).
     """
     published: list[dict] = []
     if "live_freshness_alerts" in request.fixturenames:
         return published
 
-    def _record(verdict, *, source, severity):
-        published.append({"verdict": verdict, "source": source, "severity": severity})
+    def _record(message, *, source, severity, dedup_key):
+        published.append(
+            {
+                "message": message,
+                "dedup_key": dedup_key,
+                "source": source,
+                "severity": severity,
+            }
+        )
 
     import freshness
 
-    monkeypatch.setattr(freshness, "_publish", _record)
+    monkeypatch.setattr(freshness, "_publish_raw", _record)
     return published

@@ -19,8 +19,11 @@ from moto import mock_aws
 from freshness import (
     CADENCE_TOLERANCE_DAYS,
     FreshnessVerdict,
+    StaleGroup,
     UpstreamStaleError,
     assert_upstream_fresh,
+    group_stale_verdicts,
+    publish_grouped_alerts,
     s3_last_modified,
 )
 
@@ -207,3 +210,215 @@ def test_s3_last_modified_missing_object_is_none_not_an_exception():
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="alpha-engine-research")
     assert s3_last_modified(s3, bucket="alpha-engine-research", key="absent.md") is None
+
+
+# ── Grouping / fan-out — alpha-engine-config-I8173's own bug class ─────────
+#
+# The historical incident this section pins: one dead producer
+# (``decision_artifacts/`` last write 2026-07-11) fanned out into 47
+# independent ERROR pages, one per artifact subtype, because each call to
+# ``assert_upstream_fresh`` alerted on its own. These tests prove the
+# grouping mechanism collapses that fan-out to one page, that genuinely
+# distinct causes still page separately, and that one unbroken episode does
+# not re-page across repeat evaluations.
+
+
+def _stale_batch(n: int, *, as_of: datetime, checked_at: datetime) -> list[FreshnessVerdict]:
+    """N findings that all trace to the SAME frozen producer — the shape of
+    the real 47-subtype incident (``decision_artifacts/*/<subtype>``)."""
+    return [
+        assert_upstream_fresh(
+            f"decision_artifacts/*/subtype_{i}",
+            as_of=as_of,
+            cadence="weekly",
+            checked_at=checked_at,
+            on_stale="degrade",
+            degraded_reason="weekly rollup skips this subtype's contribution",
+            remediation="a new decision_artifacts/{Y}/{M}/{D}/<subtype>/*.json write",
+            source="crucible-research.evals.rationale_clustering",
+            alert=False,
+        )
+        for i in range(n)
+    ]
+
+
+def test_47_same_cause_findings_collapse_to_one_alert(freshness_alerts):
+    as_of = datetime(2026, 7, 11, tzinfo=UTC)
+    checked_at = datetime(2026, 8, 22, tzinfo=UTC)  # 42.4 days — the real measured age
+    verdicts = _stale_batch(47, as_of=as_of, checked_at=checked_at)
+    assert all(v.status == "stale" for v in verdicts)
+    assert all(v.driver == "producer-halted" for v in verdicts)
+
+    groups = publish_grouped_alerts(
+        verdicts, source="crucible-research.evals.rationale_clustering"
+    )
+
+    assert len(groups) == 1
+    assert len(groups[0].members) == 47
+    # One notification for the group, not 47 (observability-policy §7.2a).
+    assert len(freshness_alerts) == 1
+    message = freshness_alerts[0]["message"]
+    assert "47" in message  # exact count named, even though it is truncated
+    assert "decision_artifacts" in message
+    # The group NAMES its members — the first ones verbatim, not "see logs".
+    assert "subtype_0" in message
+    assert "subtype_9" in message
+    # Truncation is marked in-band, and the count stays exact (never a
+    # sample presented as a census, observability-policy.md §5.1).
+    assert "more" in message
+    assert "47 total" in message
+    assert freshness_alerts[0]["source"] == "crucible-research.evals.rationale_clustering"
+
+
+def test_distinct_causes_still_publish_separately(freshness_alerts):
+    """Two findings that do NOT share a cause must not be merged into one
+    alert — grouping is legitimate only when the evidence says one failure."""
+    checked_at = datetime(2026, 8, 22, tzinfo=UTC)
+    same_producer = _stale_batch(3, as_of=datetime(2026, 7, 11, tzinfo=UTC), checked_at=checked_at)
+    unrelated = assert_upstream_fresh(
+        "regime/",
+        as_of=None,  # never written — a DIFFERENT driver entirely
+        cadence="weekly",
+        checked_at=checked_at,
+        on_stale="degrade",
+        degraded_reason="macro anchor missing",
+        source="research:thinktank_daily",
+        alert=False,
+    )
+
+    groups = publish_grouped_alerts(
+        [*same_producer, unrelated], source="crucible-research.evals.rationale_clustering"
+    )
+
+    assert len(groups) == 2
+    assert len(freshness_alerts) == 2
+    dedup_keys = {rec["dedup_key"] for rec in freshness_alerts}
+    assert len(dedup_keys) == 2  # distinct episodes, distinct dedup keys
+
+
+def test_distinct_causes_same_prefix_different_as_of_still_separate(freshness_alerts):
+    """Same upstream family, same driver, but a DIFFERENT as-of — e.g. one
+    subtype's producer resumed writing while the rest stayed frozen. That is
+    two failures, not one, even though the artifact prefix matches."""
+    checked_at = datetime(2026, 8, 22, tzinfo=UTC)
+    old_episode = _stale_batch(2, as_of=datetime(2026, 7, 11, tzinfo=UTC), checked_at=checked_at)
+    newer_but_still_stale = assert_upstream_fresh(
+        "decision_artifacts/*/subtype_recovered_then_refroze",
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
+        cadence="weekly",
+        checked_at=checked_at,
+        on_stale="degrade",
+        degraded_reason="weekly rollup skips this subtype's contribution",
+        source="crucible-research.evals.rationale_clustering",
+        alert=False,
+    )
+
+    groups = group_stale_verdicts([*old_episode, newer_but_still_stale])
+    assert len(groups) == 2
+
+
+def test_episode_key_is_stable_across_repeat_evaluations_until_the_producer_writes():
+    """One unbroken episode pages once, not once per evaluation. No new
+    persisted state: the SAME as-of timestamp yields the SAME dedup key on a
+    second, independent evaluation run — which is what lets the alert
+    transport's own dedup marker suppress the repeat. The moment the
+    producer writes again (a new as-of), the key moves."""
+    checked_run_1 = datetime(2026, 8, 15, tzinfo=UTC)
+    checked_run_2 = datetime(2026, 8, 22, tzinfo=UTC)  # next weekly evaluation
+    as_of = datetime(2026, 7, 11, tzinfo=UTC)
+
+    run_1 = group_stale_verdicts(_stale_batch(5, as_of=as_of, checked_at=checked_run_1))
+    run_2 = group_stale_verdicts(_stale_batch(5, as_of=as_of, checked_at=checked_run_2))
+    assert run_1[0].episode_key() == run_2[0].episode_key()
+
+    # Still stale against the weekly tolerance (21d > 10d), but a NEWER
+    # write than the frozen 2026-07-11 — a different episode, not a healed
+    # producer.
+    producer_wrote_again = group_stale_verdicts(
+        _stale_batch(5, as_of=datetime(2026, 8, 1, tzinfo=UTC), checked_at=checked_run_2)
+    )
+    assert producer_wrote_again[0].episode_key() != run_2[0].episode_key()
+
+
+def test_group_names_its_members_not_just_a_count():
+    group = StaleGroup(
+        driver="producer-halted",
+        upstream_prefix="decision_artifacts",
+        as_of=datetime(2026, 7, 11, tzinfo=UTC),
+        members=tuple(_stale_batch(3, as_of=datetime(2026, 7, 11, tzinfo=UTC), checked_at=datetime(2026, 8, 22, tzinfo=UTC))),
+    )
+    banner = group.banner()
+    for i in range(3):
+        assert f"subtype_{i}" in banner
+    assert "3 findings" in banner
+
+
+# ── Driver attribution — the closed set, computed on every evaluation ──────
+
+
+def test_driver_producer_halted_when_a_stale_as_of_exists():
+    verdict = assert_upstream_fresh(
+        "x", as_of=NOW - timedelta(days=400), cadence="weekly", checked_at=NOW,
+        on_stale="degrade", degraded_reason="test",
+    )
+    assert verdict.driver == "producer-halted"
+
+
+def test_driver_never_written_when_as_of_is_none():
+    verdict = assert_upstream_fresh(
+        "x", as_of=None, cadence="weekly", checked_at=NOW,
+        on_stale="degrade", degraded_reason="test",
+    )
+    assert verdict.driver == "never-written"
+
+
+def test_driver_timestamp_unreadable_when_as_of_does_not_parse():
+    verdict = assert_upstream_fresh(
+        "x", as_of="not-a-date", cadence="weekly", checked_at=NOW,
+        on_stale="degrade", degraded_reason="test",
+    )
+    assert verdict.driver == "timestamp-unreadable"
+
+
+def test_driver_is_none_only_for_fresh():
+    verdict = assert_upstream_fresh(
+        "x", as_of=NOW - timedelta(days=1), cadence="weekly", checked_at=NOW
+    )
+    assert verdict.is_fresh
+    assert verdict.driver is None
+
+
+def test_driver_unattributed_is_a_reachable_terminal_branch_not_dead_code():
+    """The closed set's defensive branch — reached whenever ``status`` and
+    the coerced timestamp disagree in a way the three named branches don't
+    cover. Exercised directly since ``assert_upstream_fresh`` itself cannot
+    construct this combination (its own contract keeps status/stamp
+    consistent) — this pins that the terminal branch exists and is not a
+    silent fallthrough that would otherwise be untestable dead code."""
+    from freshness import _attribute_driver
+
+    assert (
+        _attribute_driver(status="stale", as_of_input=NOW, stamp=None)
+        == "unattributed"
+    )
+
+
+def test_driver_and_remediation_are_recorded_on_every_evaluation_not_only_when_alerting():
+    """Attribution must not be alert-conditional — it is computed and
+    persisted even when ``alert=False`` (the batched-fan-out path)."""
+    verdict = assert_upstream_fresh(
+        "decision_artifacts/*/subtype_x",
+        as_of=datetime(2026, 7, 11, tzinfo=UTC),
+        cadence="weekly",
+        checked_at=datetime(2026, 8, 22, tzinfo=UTC),
+        on_stale="degrade",
+        degraded_reason="test",
+        remediation="a fresh write under decision_artifacts/*/subtype_x",
+        alert=False,
+    )
+    record = verdict.as_record()
+    assert record["driver"] == "producer-halted"
+    assert record["remediation"] == "a fresh write under decision_artifacts/*/subtype_x"
+    import json
+
+    assert json.loads(json.dumps(record)) == record
