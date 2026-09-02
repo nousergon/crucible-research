@@ -18,7 +18,6 @@ set -euo pipefail
 
 FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
-FUNCTION_EVAL_JUDGE="alpha-engine-research-eval-judge"
 # Eval-judge Submit Lambda. Poll and Process are retired
 # (alpha-engine-config-I9329): Poll was async-batch-API residue, and Process
 # now runs on a spot box over SSM, not as a Lambda.
@@ -29,7 +28,6 @@ FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
 FUNCTION_SCANNER="alpha-engine-research-scanner"
 FUNCTION_SIGNALS_ENVELOPE="alpha-engine-research-signals-envelope"
 FUNCTION_OPENROUTER_SHADOW="alpha-engine-research-openrouter-shadow"
-FUNCTION_PERTURBATION_BATTERY="alpha-engine-research-perturbation-battery"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -832,85 +830,6 @@ build_and_deploy_alerts() {
   echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
-# ── Eval-judge function: reuses the main container image ─────────────────────
-#
-# The eval-judge Lambda runs ``lambda/eval_judge_handler.py`` (LLM-as-judge
-# orchestrator). It needs the same dependency set as the main runner
-# (langchain_anthropic, alpha_engine_lib, prompt loader, schemas), so
-# rather than build a parallel image we point this function at the same
-# ECR image and override CMD via ``--image-config`` to
-# ``eval_judge_handler.handler``.
-#
-# Prerequisite: build_and_deploy_main must have run at least once on this
-# branch so the ECR ${ECR_REPO}:latest image contains
-# /var/task/eval_judge_handler.py (Dockerfile COPY of lambda/eval_judge_handler.py).
-
-deploy_eval_judge() {
-  echo "=== Deploying $FUNCTION_EVAL_JUDGE (image-share with $FUNCTION_MAIN) ==="
-
-  IMAGE_URI="$ECR_REPO:latest"
-  IMAGE_CONFIG='{"Command":["eval_judge_handler.handler"]}'
-
-
-  if _lambda_function_exists "$FUNCTION_EVAL_JUDGE"; then
-    aws lambda update-function-code \
-      --function-name "$FUNCTION_EVAL_JUDGE" \
-      --image-uri "$IMAGE_URI" \
-      --region "$REGION" > /dev/null
-    echo "  Waiting for code update to complete..."
-    aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
-    # alpha-engine-config-I9102 (class sweep). The declared sizing lived ONLY
-    # in the create branch, so a merge could never re-size a function that
-    # already exists — the declaration described a provisioning event, not the
-    # live function. Values are the ones this file already declares on create
-    # and the ones the live function already carries (measured 2026-08-28), so
-    # this is a no-op today and a corrective the day either drifts.
-    aws lambda update-function-configuration \
-      --function-name "$FUNCTION_EVAL_JUDGE" \
-      --image-config "$IMAGE_CONFIG" \
-      --timeout 900 \
-      --memory-size 1024 \
-      --region "$REGION" > /dev/null
-  else
-    aws lambda create-function \
-      --function-name "$FUNCTION_EVAL_JUDGE" \
-      --package-type Image \
-      --code "ImageUri=$IMAGE_URI" \
-      --image-config "$IMAGE_CONFIG" \
-      --role "$ROLE_ARN" \
-      --timeout 900 \
-      --memory-size 1024 \
-      --region "$REGION" > /dev/null
-  fi
-  echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
-
-  _apply_cost_sink_env "$FUNCTION_EVAL_JUDGE"
-
-  _apply_deploy_stamp_env "$FUNCTION_EVAL_JUDGE"
-
-  _converge_lambda_env_deferred "$FUNCTION_EVAL_JUDGE"
-
-  echo "  Publishing Lambda version..."
-  aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
-  VERSION=$(aws lambda publish-version \
-    --function-name "$FUNCTION_EVAL_JUDGE" \
-    --query "Version" --output text \
-    --region "$REGION")
-  echo "  Published version: $VERSION"
-  aws lambda update-alias \
-    --function-name "$FUNCTION_EVAL_JUDGE" \
-    --name live \
-    --function-version "$VERSION" \
-    --region "$REGION" 2>/dev/null || \
-  aws lambda create-alias \
-    --function-name "$FUNCTION_EVAL_JUDGE" \
-    --name live \
-    --function-version "$VERSION" \
-    --region "$REGION"
-  echo "  Alias 'live' → version $VERSION"
-  _verify_live_alias "$FUNCTION_EVAL_JUDGE" "$VERSION"
-}
-
 # ── Eval-rolling-mean function: reuses the main container image ──────────────
 #
 # Rolling-4-week-mean derived metric Lambda (PR 4b). Same image-share
@@ -1287,26 +1206,11 @@ deploy_openrouter_shadow() {
   _deploy_image_shared_lambda "$FUNCTION_OPENROUTER_SHADOW" "openrouter_shadow_handler" 900 1024
 }
 
-# Weekly judge-sensitivity scorecard Lambda — config#752 Phase B (Brian's
-# 2026-07-22 operator ruling: provision this + the SF wiring). Shared image
-# with the main runner — specifically the eval-judge CMD family, because the
-# synthetic-perturbation battery makes live Anthropic calls (the no-LLM
-# eval-rolling-mean Lambda can't host it); CMD override sets the entry to
-# perturbation_battery_handler.handler. Timeout 900s (Lambda max) + memory
-# 1024MB match deploy_eval_judge — the closest analog workload (reference +
-# N corrupted variants, each judged). Invoked by the Saturday SF's
-# PerturbationBattery state (nousergon-data infrastructure/step_function.json),
-# sequenced alongside the other eval-judge-chain observability stages.
-deploy_perturbation_battery() {
-  _deploy_image_shared_lambda "$FUNCTION_PERTURBATION_BATTERY" "perturbation_battery_handler" 900 1024
-}
-
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
   main)                  build_and_deploy_main ;;
   alerts)                build_and_deploy_alerts ;;
-  eval_judge)            deploy_eval_judge ;;
   eval_judge_submit)     deploy_eval_judge_submit ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
@@ -1314,10 +1218,9 @@ case "$TARGET" in
   scanner)               deploy_scanner ;;
   signals_envelope)      deploy_signals_envelope ;;
   openrouter_shadow)     deploy_openrouter_shadow ;;
-  perturbation_battery)  deploy_perturbation_battery ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;  # ci-deploy-guard: manual — aggregate convenience target
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_submit; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow; deploy_perturbation_battery ;;  # ci-deploy-guard: manual — aggregate convenience target
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_submit|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|perturbation_battery|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge_submit; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner; deploy_signals_envelope; deploy_openrouter_shadow ;;  # ci-deploy-guard: manual — aggregate convenience target
+  *)                     echo "Usage: $0 [main|alerts|eval_judge_submit|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|signals_envelope|openrouter_shadow|both|all]"; exit 1 ;;
 esac
 
 echo ""

@@ -197,11 +197,6 @@ REGISTRY: dict[str, FunctionSpec] = {
         "signal that every other failure is reported through.",
         alias=None,
     ),
-    "alpha-engine-research-eval-judge": FunctionSpec(
-        OBSERVE,
-        "LLM-as-judge grading. Feeds evaluation, not execution — a stale "
-        "judge mis-grades a run; it does not mis-trade one.",
-    ),
     "alpha-engine-research-eval-judge-submit": FunctionSpec(
         OBSERVE,
         "Eval-judge plan/submit leg — the only Lambda left of what was the "
@@ -223,9 +218,6 @@ REGISTRY: dict[str, FunctionSpec] = {
     ),
     "alpha-engine-research-openrouter-shadow": FunctionSpec(
         OBSERVE, "Shadow judge arm. Challenger-side measurement only.",
-    ),
-    "alpha-engine-research-perturbation-battery": FunctionSpec(
-        OBSERVE, "Weekly judge-sensitivity scorecard. Measurement only.",
     ),
     "alpha-engine-research-thinktank": FunctionSpec(
         RETIRED,
