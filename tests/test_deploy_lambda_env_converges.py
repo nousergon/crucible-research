@@ -40,12 +40,13 @@ _CODE = _DEPLOY.read_text(encoding="utf-8")
 # function inside its deploy block.
 _DEFERRED_TARGETS = (
     "FUNCTION_MAIN",
-    "FUNCTION_EVAL_JUDGE",
     "FUNCTION_EVAL_ROLLING_MEAN",
     "FUNCTION_RATIONALE_CLUSTERING",
     # eval-judge-submit, aggregate-costs, scanner,
-    # signals-envelope, openrouter-shadow, perturbation-battery all share
-    # this generic function, parameterized on $fn_name.
+    # signals-envelope, openrouter-shadow all share this generic function,
+    # parameterized on $fn_name. eval-judge and perturbation-battery were
+    # removed (alpha-engine-config-I9756, 2026-09-01): both Lambdas were
+    # deleted from AWS and deploy.sh no longer defines those targets.
     "fn_name",
 )
 

@@ -98,7 +98,7 @@ def _run(harness_dir: Path, fn_name: str, *,
 def test_success_returns_zero(harness_dir: Path) -> None:
     """get-function returns 0 → helper returns 0 (caller goes to
     update path). Stdout swallowed by helper; only RC line surfaces."""
-    result = _run(harness_dir, "alpha-engine-research-eval-judge", exit_code=0)
+    result = _run(harness_dir, "alpha-engine-research-scanner", exit_code=0)
     assert result.returncode == 0
     assert "RC=0" in result.stdout
 
@@ -139,7 +139,7 @@ def test_access_denied_fails_loud(harness_dir: Path) -> None:
     and surfaced as ``Function already exist``. Post-fix the script
     exits with the real error visible."""
     result = _run(
-        harness_dir, "alpha-engine-research-eval-judge",
+        harness_dir, "alpha-engine-research-scanner",
         exit_code=255,
         stderr_text="An error occurred (AccessDeniedException) when calling the GetFunction operation: User: arn:aws:iam::... is not authorized to perform: lambda:GetFunction",
     )
@@ -157,7 +157,7 @@ def test_504_gateway_timeout_fails_loud(harness_dir: Path) -> None:
     through to create-function, surfacing as ``Function already
     exist``. Post-fix the operator sees the real cause + a retry hint."""
     result = _run(
-        harness_dir, "alpha-engine-research-eval-judge",
+        harness_dir, "alpha-engine-research-scanner",
         exit_code=255,
         stderr_text="aws: [ERROR]: An error occurred (504) when calling the GetFunction operation (reached max retries: 2): Gateway Timeout",
     )
@@ -171,7 +171,7 @@ def test_throttle_fails_loud(harness_dir: Path) -> None:
     """Throttle errors are similar — transient, retry-able. The helper
     surfaces stderr and exits non-zero rather than silently masking."""
     result = _run(
-        harness_dir, "alpha-engine-research-eval-judge",
+        harness_dir, "alpha-engine-research-scanner",
         exit_code=255,
         stderr_text="An error occurred (TooManyRequestsException) when calling the GetFunction operation: Rate exceeded",
     )
@@ -184,7 +184,7 @@ def test_unknown_error_fails_loud_with_stderr(harness_dir: Path) -> None:
     raw error text + retry hint, never silently masks. Catches future
     AWS error classes we haven't enumerated."""
     result = _run(
-        harness_dir, "alpha-engine-research-eval-judge",
+        harness_dir, "alpha-engine-research-scanner",
         exit_code=1,
         stderr_text="Connection refused",
     )
