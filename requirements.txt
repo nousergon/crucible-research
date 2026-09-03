@@ -40,7 +40,7 @@ openai>=3.5.0
 agentevals~=0.0
 
 # Data
-yfinance~=1.6.0
+yfinance~=1.7.0
 requests-ratelimiter~=0.10
 # alpha-engine-config-I7982: scoring/universe_board.py::_read_parquet calls
 # pd.read_parquet(..., engine="pyarrow") on the Lambda's live path, but
