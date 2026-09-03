@@ -34,7 +34,7 @@ langsmith~=0.11.2
 # talks to OpenRouter / self-hosted vLLM / any OpenAI-compatible endpoint via
 # base_url. NOT used by the weekly research pipeline (which stays on
 # langchain-anthropic); floor (not ~=) so provider SDK churn doesn't gate us.
-openai>=3.5.0
+openai>=3.8.0
 
 # Evals
 agentevals~=0.0
