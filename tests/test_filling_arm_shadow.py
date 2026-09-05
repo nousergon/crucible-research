@@ -427,3 +427,90 @@ def test_a_retired_arm_still_appears_on_the_artifact():
         benchmark_ticker=None,
     )
     assert {a["name"] for a in board["unmeasurable_arms"]} == {"gone"}
+
+
+# ── 2026-09-05: the filling arms' rows carried no sector, so the promotion guard
+# refused every write ─────────────────────────────────────────────────────────
+#
+# Measured on weekly SF watch-rerun-2026-09-04-{1,2,3} (ChallengerShadow):
+#   UNRESOLVED-SECTOR: 10 actionable signal(s) in signals_shadow/
+#   scanner_top20_predictor/2026-09-04/signals.json carry no resolved sector:
+#   [('ANET', None), ('ANF', None), ...] — REFUSING the write.
+# build_shadow_payload (PR767, 2026-08-29 — first live Saturday was 9/5) never
+# set `sector` on a row; scoring.promotion_guards.assert_promotable (8/20)
+# refuses any actionable row without one. Both arms therefore failed on every
+# run, and a degraded ChallengerShadow fails the weekly run at its terminal.
+# no_agent / single_agent resolve sector from the same constituents artifact
+# (fetch_sp500_sp400_with_sectors) — the filling arms now do the same.
+
+_SECTORS = {f"T{i:03d}": ("Technology" if i % 2 else "Healthcare") for i in range(60)}
+
+
+def test_shadow_rows_carry_the_constituents_sector():
+    from producers.filling_arms import build_shadow_payload
+    payload = build_shadow_payload(
+        "scanner_top20_predictor", "2026-09-04", _ranked(20),
+        pool_size=20, pool_source="predictor_cut:attractiveness_top_20",
+        sector_map=_SECTORS,
+    )
+    for row in payload["buy_candidates"]:
+        assert row["sector"] == _SECTORS[row["ticker"]]
+    for ticker, sig in payload["signals"].items():
+        assert sig["sector"] == _SECTORS[ticker]
+
+
+def test_shadow_payload_with_sectors_passes_the_promotion_guard():
+    from producers.filling_arms import build_shadow_payload
+    from scoring.promotion_guards import assert_promotable
+    payload = build_shadow_payload(
+        "scanner_predictor_direct", "2026-09-04", _ranked(20),
+        pool_size=20, pool_source="research_free_parquet", sector_map=_SECTORS,
+    )
+    assert_promotable(payload, surface="signals_shadow/scanner_predictor_direct/2026-09-04/signals.json")
+
+
+def test_a_ticker_outside_the_constituents_map_is_still_refused_by_the_guard():
+    """Mirrors no_agent: an unknown ticker gets 'Unknown', and the guard — not
+    this module — is what refuses it, with its established message."""
+    from producers.filling_arms import build_shadow_payload
+    from scoring.promotion_guards import UnresolvedSectorError, assert_promotable
+    payload = build_shadow_payload(
+        "scanner_top20_predictor", "2026-09-04", _ranked(20),
+        pool_size=20, pool_source="predictor_cut:attractiveness_top_20",
+        sector_map={k: v for k, v in _SECTORS.items() if k != "T000"},
+    )
+    assert payload["signals"]["T000"]["sector"] == "Unknown"
+    with pytest.raises(UnresolvedSectorError, match="T000"):
+        assert_promotable(payload, surface="test")
+
+
+def test_build_filling_shadow_resolves_sectors_from_the_constituents_source(monkeypatch):
+    import producers.filling_arms as fa
+    docs = {
+        "universe_membership/2026-09-04/membership.json": {
+            "predictor_universe_cut": "attractiveness_top_20",
+            "cuts": {"attractiveness_top_20": {"tickers": [f"T{i:03d}" for i in range(20)]}},
+        },
+        "predictor/predictions/2026-09-04.json": {
+            "predictions": [{"ticker": f"T{i:03d}", "predicted_alpha": 0.5 - i * 0.01} for i in range(20)],
+        },
+    }
+    calls = []
+    def _fake_fetch():
+        calls.append(1)
+        return list(_SECTORS), dict(_SECTORS)
+    monkeypatch.setattr(fa, "fetch_sp500_sp400_with_sectors", _fake_fetch)
+
+    class _AM:
+        s3 = _FakeS3(docs)
+        bucket = "b"
+
+    payload = fa.build_filling_shadow("scanner_top20_predictor", "2026-09-04", _AM())
+    assert calls == [1]
+    assert all(r["sector"] in ("Technology", "Healthcare") for r in payload["buy_candidates"])
+    # ctx-supplied map wins over the fetch (the runner may already hold one)
+    payload2 = fa.build_filling_shadow(
+        "scanner_top20_predictor", "2026-09-04", _AM(), sector_map={t: "Energy" for t in _SECTORS},
+    )
+    assert calls == [1]
+    assert {r["sector"] for r in payload2["buy_candidates"]} == {"Energy"}

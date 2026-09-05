@@ -96,6 +96,8 @@ logger = logging.getLogger(__name__)
 # Kept as literals rather than a cross-repo import (the same convention the
 # executor uses for CHALLENGER_SELECTION_LATEST_KEY): these are stable S3
 # contracts, not shared code.
+from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
+
 RESEARCH_FREE_PARQUET_KEY = "predictor/research_free_backfill/predictor_outcomes_research_free.parquet"
 MEMBERSHIP_KEY = "universe_membership/{date}/membership.json"
 PREDICTIONS_KEY = "predictor/predictions/{date}.json"
@@ -157,6 +159,7 @@ def build_shadow_payload(
     top_n: int = CHAMPION_TOP_N_DEFAULT,
     score_floor: float = CHAMPION_SCORE_FLOOR,
     score_ceiling: float = CHAMPION_SCORE_CEILING,
+    sector_map: Mapping[str, str] | None = None,
 ) -> dict:
     """The conforming ``signals_shadow`` document for one filling arm/date.
 
@@ -166,8 +169,20 @@ def build_shadow_payload(
     ``signal == "ENTER"`` and a numeric ``score``. Schema:
     ``contracts/arm_shadow_signals.schema.json``.
 
+    ``sector_map`` (``{ticker: sector}``, the constituents artifact via
+    ``fetch_sp500_sp400_with_sectors`` — the SAME source ``no_agent`` and
+    ``single_agent`` resolve from) puts a ``sector`` on every row, exactly as
+    those producers do (``sector_map.get(ticker, "Unknown")``). Measured
+    2026-09-05 (weekly SF watch-rerun-2026-09-04-1/2/3): rows written without
+    it were refused by ``scoring.promotion_guards.assert_promotable``'s
+    UNRESOLVED-SECTOR rule on every run — the executor sizes against sector
+    caps, so an actionable row with no sector is unservable — and a refused
+    ChallengerShadow degrades the whole weekly run. The guard stays the
+    refusal point; this module only supplies what the guard reads.
+
     RAISES on an empty ranking — see :class:`FillingShadowError`.
     """
+    sectors = sector_map or {}
     if not ranked:
         raise FillingShadowError(
             f"{arm}: pool {pool_source!r} for {run_date} yielded ZERO ranked names "
@@ -186,6 +201,7 @@ def build_shadow_payload(
             "score": rank_to_score(rank_fraction, score_floor, score_ceiling),
             "rating": "BUY",
             "conviction": "medium",
+            "sector": sectors.get(ticker, "Unknown"),
             "predicted_alpha": alpha,
             # §7.5 — the artifact names the arm that produced it rather than
             # carrying a literal that goes stale when the pointer moves.
@@ -422,8 +438,15 @@ def build_filling_shadow(arm: str, run_date: str, archive_manager, **_ctx) -> di
         )
     s3, bucket = _s3(archive_manager)
     ranked, pool_source = loader(s3, bucket, run_date)
+    # Sector from the constituents artifact (S3, hard-fails on a read error),
+    # the same call no_agent/single_agent make; a runner that already holds
+    # the map may pass it through ctx instead of re-reading it.
+    sector_map = _ctx.get("sector_map")
+    if not isinstance(sector_map, Mapping):
+        _, sector_map = fetch_sp500_sp400_with_sectors()
     payload = build_shadow_payload(
         arm, run_date, ranked, pool_size=len(ranked), pool_source=pool_source,
+        sector_map=sector_map,
     )
     logger.info(
         "[filling_arms] %s %s: %d selected from pool=%s (%d ranked)",
