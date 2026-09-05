@@ -104,7 +104,7 @@ def test_shadow_payload_is_readable_by_the_shared_scorer():
 
     payload = build_shadow_payload(
         "scanner_predictor_direct", "2026-08-28", _ranked(60),
-        pool_size=60, pool_source="research_free_parquet",
+        pool_size=60, pool_source="predictions_research_free",
     )
     day = _enter_ranked_and_scores(payload)
     assert day.ranked, "the shared scorer read ZERO picks out of the shadow"
@@ -126,7 +126,7 @@ def test_shadow_ranking_is_the_executors_rule():
     assert rank_to_score(1.0, 60.0, 95.0) == 60.0
     payload = build_shadow_payload(
         "scanner_predictor_direct", "2026-08-28", rank_by_alpha(rows),
-        pool_size=3, pool_source="research_free_parquet",
+        pool_size=3, pool_source="predictions_research_free",
     )
     scores = [payload["signals"][t]["score"] for t in ("BBB", "CCC", "AAA")]
     assert scores == sorted(scores, reverse=True), "score must be monotone in rank"
@@ -138,7 +138,7 @@ def test_an_empty_pool_raises_rather_than_writing_a_healthy_looking_shadow():
     with pytest.raises(FillingShadowError, match="ZERO ranked names"):
         build_shadow_payload(
             "scanner_predictor_direct", "2026-08-28", [],
-            pool_size=0, pool_source="research_free_parquet",
+            pool_size=0, pool_source="predictions_research_free",
         )
 
 
@@ -464,7 +464,7 @@ def test_shadow_payload_with_sectors_passes_the_promotion_guard():
     from scoring.promotion_guards import assert_promotable
     payload = build_shadow_payload(
         "scanner_predictor_direct", "2026-09-04", _ranked(20),
-        pool_size=20, pool_source="research_free_parquet", sector_map=_SECTORS,
+        pool_size=20, pool_source="predictions_research_free", sector_map=_SECTORS,
     )
     assert_promotable(payload, surface="signals_shadow/scanner_predictor_direct/2026-09-04/signals.json")
 
