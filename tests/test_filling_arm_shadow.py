@@ -510,7 +510,7 @@ def test_build_filling_shadow_resolves_sectors_from_the_constituents_source(monk
     assert all(r["sector"] in ("Technology", "Healthcare") for r in payload["buy_candidates"])
     # ctx-supplied map wins over the fetch (the runner may already hold one)
     payload2 = fa.build_filling_shadow(
-        "scanner_top20_predictor", "2026-09-04", _AM(), sector_map={t: "Energy" for t in _SECTORS},
+        "scanner_top20_predictor", "2026-09-04", _AM(), sector_map=dict.fromkeys(_SECTORS, "Energy"),
     )
     assert calls == [1]
     assert {r["sector"] for r in payload2["buy_candidates"]} == {"Energy"}

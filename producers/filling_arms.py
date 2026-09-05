@@ -90,14 +90,14 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
+
 logger = logging.getLogger(__name__)
 
 # The durable inputs, mirrored from crucible-executor/executor/champion.py.
 # Kept as literals rather than a cross-repo import (the same convention the
 # executor uses for CHALLENGER_SELECTION_LATEST_KEY): these are stable S3
 # contracts, not shared code.
-from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
-
 RESEARCH_FREE_PARQUET_KEY = "predictor/research_free_backfill/predictor_outcomes_research_free.parquet"
 MEMBERSHIP_KEY = "universe_membership/{date}/membership.json"
 PREDICTIONS_KEY = "predictor/predictions/{date}.json"
