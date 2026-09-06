@@ -84,7 +84,6 @@ NOT A LIVE-TRADING PATH. Everything written by this module goes to
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -98,9 +97,27 @@ logger = logging.getLogger(__name__)
 # Kept as literals rather than a cross-repo import (the same convention the
 # executor uses for CHALLENGER_SELECTION_LATEST_KEY): these are stable S3
 # contracts, not shared code.
-RESEARCH_FREE_PARQUET_KEY = "predictor/research_free_backfill/predictor_outcomes_research_free.parquet"
 MEMBERSHIP_KEY = "universe_membership/{date}/membership.json"
 PREDICTIONS_KEY = "predictor/predictions/{date}.json"
+
+# The DAILY research-free counterfactual, written once per trading day by
+# crucible-predictor ``inference/stages/research_free.py`` ->
+# ``inference/research_free_inference.py::run_research_free_inference``
+# (crucible-predictor ``config.py::PREDICTIONS_RESEARCH_FREE_KEY``).
+#
+# This replaced ``RESEARCH_FREE_PARQUET_KEY``
+# (``predictor/research_free_backfill/predictor_outcomes_research_free.parquet``)
+# on 2026-09-05, alpha-engine-config-I10067. That parquet is written by
+# crucible-backtester ``backtest.py`` phase
+# ``scanner_predictor_research_free_backfill`` — the **Backtester** stage of the
+# weekly Step Function, which runs AFTER the ResearchPredictorParallel join,
+# while this arm runs inside Branch A's ChallengerShadow, BEFORE it. So the
+# live arm was reading, mid-run, a file this same run had not written yet, and
+# failed on every canonical Saturday (measured on watch-rerun-2026-09-04-1/2/3;
+# it passed only on rerun 4, after a Backtester had run). The parquet stays
+# what it always was: the backtester's OFFLINE lift-analysis artifact. A live
+# arm consumes a live producer contract.
+PREDICTIONS_RESEARCH_FREE_KEY = "predictor/predictions_research_free/{date}.json"
 
 # The width each filling arm actually serves. The executor uses
 # ``n = len(buy_candidates) or champion_top_n_default``; because the live
@@ -267,48 +284,42 @@ def load_research_free_pool(
 ) -> tuple[list[tuple[str, float]], str]:
     """``scanner_predictor_direct``'s pool for ``run_date``.
 
-    The research-free parquet is a HISTORY, not a latest-cohort snapshot —
-    measured 2026-08-29: 2080 rows across 35 distinct ``prediction_date``
-    values, covering every recent weekly cohort date. That is what makes this
-    arm's shadow BACKFILLABLE, and it is why the champion's cohort does not
-    have to be rebuilt from zero over the next 21 sessions.
+    Reads the predictor's own daily research-free counterfactual,
+    ``predictor/predictions_research_free/{run_date}.json``, and ranks it by
+    ``predicted_alpha`` — structurally the same read as
+    :func:`load_predictor_cut_pool` performs against
+    ``predictor/predictions/{date}.json``, against the same producer, on the
+    same daily cadence, through the same :func:`_predictions_by_ticker` shape
+    reader.
 
-    RAISES when the date is absent — a filling arm silently skipping a cohort
-    date is the miss/broken conflation §3 forbids.
+    RAISES when the artifact is absent or carries no usable row — a filling arm
+    silently skipping a cohort date is the miss/broken conflation §3 forbids,
+    and the message names the PRODUCER so the fix is one hop away rather than a
+    hunt (this arm's whole history is a consumer pointed at the wrong artifact,
+    alpha-engine-config-I10067).
     """
-    import pandas as pd
-    from botocore.exceptions import ClientError
-
-    try:
-        body = s3.get_object(Bucket=bucket, Key=RESEARCH_FREE_PARQUET_KEY)["Body"].read()
-    except ClientError as e:
+    key = PREDICTIONS_RESEARCH_FREE_KEY.format(date=run_date)
+    doc = _get_json(s3, bucket, key)
+    if not doc:
         raise FillingShadowError(
-            f"research-free parquet s3://{bucket}/{RESEARCH_FREE_PARQUET_KEY} "
-            f"unreadable: {e}"
-        ) from e
-
-    df = pd.read_parquet(io.BytesIO(body))
-    required = {"ticker", "prediction_date", "predicted_alpha"}
-    missing = required - set(df.columns)
-    if missing:
-        raise FillingShadowError(
-            f"research-free parquet missing column(s) {sorted(missing)} — got {sorted(df.columns)}"
-        )
-
-    cohort = df[df["prediction_date"].astype(str) == run_date]
-    if cohort.empty:
-        available = sorted({str(d) for d in df["prediction_date"].unique()})
-        raise FillingShadowError(
-            f"research-free parquet carries no prediction_date == {run_date}; "
-            f"it holds {len(available)} date(s), latest {available[-1] if available else 'none'}"
+            f"no s3://{bucket}/{key} — this arm's ranking IS the predictor's "
+            "research-free output, so there is nothing to rank without it. "
+            "Producer: crucible-predictor inference/stages/research_free.py "
+            "-> inference/research_free_inference.py::run_research_free_inference, "
+            "which runs in the daily PredictorInference Lambda (Mon-Fri preopen)."
         )
 
     rows = [
-        (str(t), float(a))
-        for t, a in zip(cohort["ticker"], cohort["predicted_alpha"], strict=True)
-        if a == a  # NaN-safe
+        (ticker, alpha)
+        for ticker, alpha in _predictions_by_ticker(doc).items()
+        if alpha == alpha  # NaN-safe
     ]
-    return rank_by_alpha(rows), "research_free_parquet"
+    if not rows:
+        raise FillingShadowError(
+            f"s3://{bucket}/{key} carries no usable predicted_alpha — refusing "
+            "to synthesize zero candidates while reporting a healthy arm"
+        )
+    return rank_by_alpha(rows), "predictions_research_free"
 
 
 def load_predictor_cut_pool(
