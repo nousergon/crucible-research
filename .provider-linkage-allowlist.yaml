@@ -85,55 +85,22 @@ entries:
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
-  # ── sibling-owned: lambda/eval_judge_*, evals/judge.py, evals/judge_batch_
-  # transport.py (added by the same PR759 migration) and their tests. PR759
-  # (alpha-engine-config-I9263) merged 2026-08-29 retiring the direct-
-  # Anthropic construction these matches describe; the remaining hits are
-  # docstring/comment prose from that migration, or test literals asserting
-  # its absence. This session was instructed not to edit these files —
-  # short expiry so a follow-up pass re-audits the prose rather than this
-  # allowance quietly outliving its own justification.
-  - path: evals/judge_batch_transport.py
-    pattern: anthropic:env_key
-    reason: >-
-      Docstring prose describing the retired `anthropic.Anthropic(api_key=
-      ANTHROPIC_API_KEY)` construction this module (PR759, alpha-engine-
-      config-I9263, merged 2026-08-29) replaced — not a live call site.
-      Sibling-owned; not edited this session.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
-  - path: evals/judge_batch_transport.py
-    pattern: anthropic:sdk_client
-    reason: >-
-      Same docstring, same migration (PR759, alpha-engine-config-I9263) — not
-      a live call site. Sibling-owned; not edited this session.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
-  - path: tests/test_eval_judge_batch_transport.py
-    pattern: anthropic:env_key
-    reason: >-
-      Test literal asserting the retired pattern's ABSENCE from the source
-      (structural test for PR759, alpha-engine-config-I9263) — not a live
-      call site. Sibling-owned; not edited this session.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
-  - path: tests/test_eval_judge_batch_transport.py
-    pattern: anthropic:sdk_client
-    reason: >-
-      Same structural test, same reason as the env_key entry above. Sibling-
-      owned; not edited this session.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
-
-  - path: evals/judge.py
-    pattern: deepseek:base_url
-    reason: >-
-      Docstring prose reporting a measured live-egress-proxy finding
-      ("api.deepseek.com ... discard it silently") — not a live call site;
-      evals/judge.py addresses models through krepis.router exclusively.
-      Sibling-owned (named in this session's boundary); not edited.
-    expires: "2026-09-05"
-    tracking: alpha-engine-config-I9263
+  # ── removed 2026-09-07 (alpha-engine-config-I9263): five entries covering
+  # evals/judge_batch_transport.py's module docstring (anthropic:env_key,
+  # anthropic:sdk_client), tests/test_eval_judge_batch_transport.py's
+  # structural "asserts absence" tuple (anthropic:env_key, anthropic:
+  # sdk_client), and evals/judge.py's docstring (deepseek:base_url) expired
+  # 2026-09-05 and were about to be re-dated as a suppression renewal —
+  # instead the GUARD (nousergon-lib scripts/provider_linkage_guard.py) was
+  # fixed to recognize a Python docstring as prose (structural: first
+  # statement of a module/class/function) the same way it already recognizes
+  # a `#`/`//` comment as prose, and to recognize a file that declares
+  # itself with a `# provider-linkage-guard: asserts-absence` marker (added
+  # to tests/test_eval_judge_batch_transport.py) as testing a pattern's
+  # absence rather than constructing it. All three files now scan clean
+  # with no allowlist entry required. See the fix's PR body for the
+  # rationale on why an AST call-graph rewrite was rejected in favor of this
+  # narrower, structural carve-out.
 
   - path: graph/llm_cost_tracker.py
     pattern: anthropic:sdk_client
