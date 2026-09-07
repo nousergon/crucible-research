@@ -84,11 +84,12 @@ NOT A LIVE-TRADING PATH. Everything written by this module goes to
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from data.fetchers.price_fetcher import fetch_sp500_sp400_with_sectors
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +97,27 @@ logger = logging.getLogger(__name__)
 # Kept as literals rather than a cross-repo import (the same convention the
 # executor uses for CHALLENGER_SELECTION_LATEST_KEY): these are stable S3
 # contracts, not shared code.
-RESEARCH_FREE_PARQUET_KEY = "predictor/research_free_backfill/predictor_outcomes_research_free.parquet"
 MEMBERSHIP_KEY = "universe_membership/{date}/membership.json"
 PREDICTIONS_KEY = "predictor/predictions/{date}.json"
+
+# The DAILY research-free counterfactual, written once per trading day by
+# crucible-predictor ``inference/stages/research_free.py`` ->
+# ``inference/research_free_inference.py::run_research_free_inference``
+# (crucible-predictor ``config.py::PREDICTIONS_RESEARCH_FREE_KEY``).
+#
+# This replaced ``RESEARCH_FREE_PARQUET_KEY``
+# (``predictor/research_free_backfill/predictor_outcomes_research_free.parquet``)
+# on 2026-09-05, alpha-engine-config-I10067. That parquet is written by
+# crucible-backtester ``backtest.py`` phase
+# ``scanner_predictor_research_free_backfill`` — the **Backtester** stage of the
+# weekly Step Function, which runs AFTER the ResearchPredictorParallel join,
+# while this arm runs inside Branch A's ChallengerShadow, BEFORE it. So the
+# live arm was reading, mid-run, a file this same run had not written yet, and
+# failed on every canonical Saturday (measured on watch-rerun-2026-09-04-1/2/3;
+# it passed only on rerun 4, after a Backtester had run). The parquet stays
+# what it always was: the backtester's OFFLINE lift-analysis artifact. A live
+# arm consumes a live producer contract.
+PREDICTIONS_RESEARCH_FREE_KEY = "predictor/predictions_research_free/{date}.json"
 
 # The width each filling arm actually serves. The executor uses
 # ``n = len(buy_candidates) or champion_top_n_default``; because the live
@@ -157,6 +176,7 @@ def build_shadow_payload(
     top_n: int = CHAMPION_TOP_N_DEFAULT,
     score_floor: float = CHAMPION_SCORE_FLOOR,
     score_ceiling: float = CHAMPION_SCORE_CEILING,
+    sector_map: Mapping[str, str] | None = None,
 ) -> dict:
     """The conforming ``signals_shadow`` document for one filling arm/date.
 
@@ -166,8 +186,20 @@ def build_shadow_payload(
     ``signal == "ENTER"`` and a numeric ``score``. Schema:
     ``contracts/arm_shadow_signals.schema.json``.
 
+    ``sector_map`` (``{ticker: sector}``, the constituents artifact via
+    ``fetch_sp500_sp400_with_sectors`` — the SAME source ``no_agent`` and
+    ``single_agent`` resolve from) puts a ``sector`` on every row, exactly as
+    those producers do (``sector_map.get(ticker, "Unknown")``). Measured
+    2026-09-05 (weekly SF watch-rerun-2026-09-04-1/2/3): rows written without
+    it were refused by ``scoring.promotion_guards.assert_promotable``'s
+    UNRESOLVED-SECTOR rule on every run — the executor sizes against sector
+    caps, so an actionable row with no sector is unservable — and a refused
+    ChallengerShadow degrades the whole weekly run. The guard stays the
+    refusal point; this module only supplies what the guard reads.
+
     RAISES on an empty ranking — see :class:`FillingShadowError`.
     """
+    sectors = sector_map or {}
     if not ranked:
         raise FillingShadowError(
             f"{arm}: pool {pool_source!r} for {run_date} yielded ZERO ranked names "
@@ -186,6 +218,7 @@ def build_shadow_payload(
             "score": rank_to_score(rank_fraction, score_floor, score_ceiling),
             "rating": "BUY",
             "conviction": "medium",
+            "sector": sectors.get(ticker, "Unknown"),
             "predicted_alpha": alpha,
             # §7.5 — the artifact names the arm that produced it rather than
             # carrying a literal that goes stale when the pointer moves.
@@ -251,48 +284,42 @@ def load_research_free_pool(
 ) -> tuple[list[tuple[str, float]], str]:
     """``scanner_predictor_direct``'s pool for ``run_date``.
 
-    The research-free parquet is a HISTORY, not a latest-cohort snapshot —
-    measured 2026-08-29: 2080 rows across 35 distinct ``prediction_date``
-    values, covering every recent weekly cohort date. That is what makes this
-    arm's shadow BACKFILLABLE, and it is why the champion's cohort does not
-    have to be rebuilt from zero over the next 21 sessions.
+    Reads the predictor's own daily research-free counterfactual,
+    ``predictor/predictions_research_free/{run_date}.json``, and ranks it by
+    ``predicted_alpha`` — structurally the same read as
+    :func:`load_predictor_cut_pool` performs against
+    ``predictor/predictions/{date}.json``, against the same producer, on the
+    same daily cadence, through the same :func:`_predictions_by_ticker` shape
+    reader.
 
-    RAISES when the date is absent — a filling arm silently skipping a cohort
-    date is the miss/broken conflation §3 forbids.
+    RAISES when the artifact is absent or carries no usable row — a filling arm
+    silently skipping a cohort date is the miss/broken conflation §3 forbids,
+    and the message names the PRODUCER so the fix is one hop away rather than a
+    hunt (this arm's whole history is a consumer pointed at the wrong artifact,
+    alpha-engine-config-I10067).
     """
-    import pandas as pd
-    from botocore.exceptions import ClientError
-
-    try:
-        body = s3.get_object(Bucket=bucket, Key=RESEARCH_FREE_PARQUET_KEY)["Body"].read()
-    except ClientError as e:
+    key = PREDICTIONS_RESEARCH_FREE_KEY.format(date=run_date)
+    doc = _get_json(s3, bucket, key)
+    if not doc:
         raise FillingShadowError(
-            f"research-free parquet s3://{bucket}/{RESEARCH_FREE_PARQUET_KEY} "
-            f"unreadable: {e}"
-        ) from e
-
-    df = pd.read_parquet(io.BytesIO(body))
-    required = {"ticker", "prediction_date", "predicted_alpha"}
-    missing = required - set(df.columns)
-    if missing:
-        raise FillingShadowError(
-            f"research-free parquet missing column(s) {sorted(missing)} — got {sorted(df.columns)}"
-        )
-
-    cohort = df[df["prediction_date"].astype(str) == run_date]
-    if cohort.empty:
-        available = sorted({str(d) for d in df["prediction_date"].unique()})
-        raise FillingShadowError(
-            f"research-free parquet carries no prediction_date == {run_date}; "
-            f"it holds {len(available)} date(s), latest {available[-1] if available else 'none'}"
+            f"no s3://{bucket}/{key} — this arm's ranking IS the predictor's "
+            "research-free output, so there is nothing to rank without it. "
+            "Producer: crucible-predictor inference/stages/research_free.py "
+            "-> inference/research_free_inference.py::run_research_free_inference, "
+            "which runs in the daily PredictorInference Lambda (Mon-Fri preopen)."
         )
 
     rows = [
-        (str(t), float(a))
-        for t, a in zip(cohort["ticker"], cohort["predicted_alpha"], strict=True)
-        if a == a  # NaN-safe
+        (ticker, alpha)
+        for ticker, alpha in _predictions_by_ticker(doc).items()
+        if alpha == alpha  # NaN-safe
     ]
-    return rank_by_alpha(rows), "research_free_parquet"
+    if not rows:
+        raise FillingShadowError(
+            f"s3://{bucket}/{key} carries no usable predicted_alpha — refusing "
+            "to synthesize zero candidates while reporting a healthy arm"
+        )
+    return rank_by_alpha(rows), "predictions_research_free"
 
 
 def load_predictor_cut_pool(
@@ -422,8 +449,15 @@ def build_filling_shadow(arm: str, run_date: str, archive_manager, **_ctx) -> di
         )
     s3, bucket = _s3(archive_manager)
     ranked, pool_source = loader(s3, bucket, run_date)
+    # Sector from the constituents artifact (S3, hard-fails on a read error),
+    # the same call no_agent/single_agent make; a runner that already holds
+    # the map may pass it through ctx instead of re-reading it.
+    sector_map = _ctx.get("sector_map")
+    if not isinstance(sector_map, Mapping):
+        _, sector_map = fetch_sp500_sp400_with_sectors()
     payload = build_shadow_payload(
         arm, run_date, ranked, pool_size=len(ranked), pool_source=pool_source,
+        sector_map=sector_map,
     )
     logger.info(
         "[filling_arms] %s %s: %d selected from pool=%s (%d ranked)",
