@@ -12,6 +12,20 @@ took down a whole Step Function branch (three times: alpha-engine-config-I7448,
 -I9049, and the 2026-08-29 weekly run).
 """
 
+# provider-linkage-guard: asserts-absence
+#
+# This file's `TestBatchCapabilityResolution`/`test_no_anthropic_sdk_construction`
+# family (nousergon-lib scripts/provider_linkage_guard.py) compares a tuple of
+# retired-pattern literals ("anthropic.Anthropic(", "ANTHROPIC_API_KEY", ...)
+# against this module's own source with `not in`, to prove the pattern is
+# GONE — never a live call site. See alpha-engine-config-I9263: five
+# allowlist entries covering exactly this shape (this file plus
+# evals/judge_batch_transport.py's docstring) EXPIRED 2026-09-05 rather than
+# being re-dated forever, because the guard itself was fixed
+# (nousergon-lib scripts/provider_linkage_guard.py::_is_asserts_absence) to
+# recognize this structural, opt-in marker instead. Do not remove this
+# marker without confirming no test below still depends on the exemption.
+
 from __future__ import annotations
 
 import json
