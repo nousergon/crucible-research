@@ -141,6 +141,17 @@ COPY ops_alerts.py ${LAMBDA_TASK_ROOT}/
 # invocation_budget.py — repo-ROOT single-file module bounding the SECONDARY
 # aggregations hung off a stage's primary deliverable (alpha-engine-config-I9102).
 COPY invocation_budget.py ${LAMBDA_TASK_ROOT}/
+# stage_coverage_run_date.py — repo-ROOT single-file module resolving the
+# partition key EVERY stage-coverage verdict is written under
+# (alpha-engine-config-I10171). Imported by every handler below; omitting the
+# COPY would ModuleNotFoundError the whole coverage block, which is the #340
+# packaging class again and, worse, on the observer that exists to notice
+# absences.
+COPY stage_coverage_run_date.py ${LAMBDA_TASK_ROOT}/
+# stage_substatus.py — repo-ROOT single-file module deriving a stage's status
+# from its own sub-results (alpha-engine-config-I10198). Imported by every
+# handler below.
+COPY stage_substatus.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py

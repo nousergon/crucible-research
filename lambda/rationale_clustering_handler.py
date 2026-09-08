@@ -146,18 +146,28 @@ def _run(event, context):
     )
     window_days = int(event.get("window_days", DEFAULT_WINDOW_DAYS))
     dry_run = bool(event.get("dry_run", False))
-    # This handler's own event carries no `run_date` field — only
-    # end_time_iso ($$.Execution.StartTime, SF-threaded verbatim). Its date
-    # portion IS the execution's own un-normalized run_date (verified
-    # against nousergon-data/infrastructure/step_function.json —
-    # `RationaleClustering`'s Payload is `end_time_iso.$: "$$.Execution.
-    # StartTime"`, the same source InitializeInput derives $.run_date from),
-    # not a proxy for it. alpha-engine-config-I8155: `_started` (this
-    # handler's OWN invocation time, via `datetime.now(UTC)`) must never
-    # substitute for a genuinely-absent end_time_iso — that was exactly the
-    # forbidden fabrication class. When end_time_iso is absent there is no
-    # execution identity to attribute to; the assertion is skipped below.
-    _execution_run_date = end_time.date().isoformat() if end_time else None
+    # alpha-engine-config-I10171 — CORRECTION. The comment that stood here
+    # claimed the date part of `end_time_iso` ($$.Execution.StartTime) "IS
+    # the execution's own un-normalized run_date". It is the CALENDAR date,
+    # and $.run_date is the cycle's TRADING day: on the 2026-09-05 Saturday
+    # cycle for trading day 2026-09-04 this handler wrote its verdict to
+    # `_stage_coverage/2026-09-05/`, which no reader looks at once the
+    # dual-partition fallback expired (by design) that same day.
+    #
+    # `event["run_date"]` is now PREFERRED and the end_time_iso derivation is
+    # a NAMED, RECORDED fallback for off-cycle operator invocations only.
+    # alpha-engine-config-I8155 still holds: nothing substitutes for a
+    # genuinely-absent identity — the resolver returns None and the
+    # assertion is skipped below.
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    _execution_run_date, _run_date_provenance = resolve_stage_run_date(
+        event,
+        stage="RationaleClustering",
+        fallback=end_time.date().isoformat() if end_time else None,
+        fallback_source="event.end_time_iso",
+        logger=logger,
+    )
 
     logger.info(
         "[rationale_clustering_handler] start end_time_iso=%s "
@@ -198,22 +208,29 @@ def _run(event, context):
         # (now-required) run_date argument.
         logger.error(
             "[rationale_clustering_handler] stage-coverage assertion "
-            "SKIPPED for RationaleClustering: no end_time_iso on this "
-            "event (execution identity absent)",
+            "SKIPPED for RationaleClustering: neither run_date nor "
+            "end_time_iso on this event (execution identity absent)",
         )
         result["stage_coverage"] = {
             "stage": "RationaleClustering",
             "status": "UNMEASURED",
-            "reason": "execution run_date absent from event (no end_time_iso)",
+            "reason": "execution run_date absent from event (no run_date, no end_time_iso)",
+            **_run_date_provenance,
         }
     else:
         try:
             from krepis.stage_coverage import assert_stage_coverage
 
-            result["stage_coverage"] = assert_stage_coverage(
-                "RationaleClustering", run_date=_execution_run_date,
-                window_start=_started,
-            )
+            result["stage_coverage"] = {
+                **assert_stage_coverage(
+                    "RationaleClustering", run_date=_execution_run_date,
+                    window_start=_started,
+                ),
+                # alpha-engine-config-I10171: which field the partition key
+                # came from travels WITH the verdict, into the SF execution
+                # history. A fallback nobody can see afterwards is the defect.
+                **_run_date_provenance,
+            }
         except ImportError as exc:
             # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
             # the handler's own outcome is unchanged (config-I7214).
@@ -222,6 +239,7 @@ def _run(event, context):
                 "stage": "RationaleClustering",
                 "status": "UNMEASURED",
                 "reason": f"assertion unavailable: {exc}",
+                **_run_date_provenance,
             }
         except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
             # alpha-engine-config-I8155: the krepis landing this arc makes
@@ -238,6 +256,38 @@ def _run(event, context):
                 "stage": "RationaleClustering",
                 "status": "UNMEASURED",
                 "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+                **_run_date_provenance,
             }
+
+    # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b, clause
+    # `SFP-2.3b-stage-status-is-the-worst-substatus` (nous-ergon-ops-PR1119).
+    # MEASURED on the 2026-08-15 and 2026-08-22 scheduled weekly runs: this
+    # handler returned `status: "OK"` over
+    # `agent_quality = {"status": "ERROR", "error": "'str' object has no
+    # attribute 'isoformat'"}`. Those are exactly the two weeks with no
+    # `AlphaEngine/Eval/agent_quality_score` datapoint at all, and the control
+    # bands kept reading IN_CONTROL against a fortnight-old point because a
+    # band over an empty window has no breach to find.
+    #
+    # Nothing was broken: every §2.3 mechanism — this state's `Catch`,
+    # `MarkEvalRollingMeanDegraded`, `$.research_degraded_local`, the
+    # completion marker's DEGRADED status — keys off the STAGE's status, and
+    # the stage said OK. Deriving the status structurally (not from a
+    # hand-listed set of sub-keys — that list is how this survived) and
+    # RAISING is what reaches the Catch: a returned `{"status": "ERROR"}` is
+    # a *successful* Task completion to Step Functions and routes nowhere.
+    # The crash itself was repaired at source by 2026-08-29; this is the
+    # swallow that hid it.
+
+    # Applied here for the CLASS, not for a measured instance: this
+    # handler's `summary` carries `load_failures` / `cluster_failures`
+    # lists rather than status-bearing sub-results today, so the call is
+    # a no-op on every current payload. It stays because the next
+    # sub-result added here must not be able to reopen the class, and
+    # `RationaleClustering`'s own Catch already routes to
+    # `MarkRationaleClusteringDegraded`.
+    from stage_substatus import enforce_worst_substatus
+
+    enforce_worst_substatus(result, stage="RationaleClustering", logger=logger)
 
     return result

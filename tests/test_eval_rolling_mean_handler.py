@@ -93,6 +93,34 @@ class TestHandler:
         ):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _stub_control_bands_and_agent_quality(self):
+        """Same rationale as the two stubs above, for the two side paths that
+        never had one (alpha-engine-config-I10198).
+
+        These reached REAL AWS from the test process — `cloudwatch:PutMetricData`
+        and `s3:GetObject` — and every call was denied. It went unnoticed for
+        the same reason the production defect did: the handler reported
+        `status: "OK"` over the errored sub-results, so no assertion here could
+        see them. Now that the status is derived from the sub-results, an
+        unstubbed side path fails the test, which is what a wiring test is for.
+
+        The dedicated tests below override this.
+        """
+        with (
+            patch(
+                "evals.control_bands.compute_and_emit_control_bands",
+                return_value={
+                    "failed": [], "combos_discovered": 0,
+                    "combos_insufficient_history": 0, "breach_count": 0,
+                    "breach_emits": [],
+                },
+            ),
+            patch("scripts.build_agent_quality.build_agent_quality", return_value={"status": "ok"}),
+            patch("scripts.build_agent_quality.write_agent_quality", return_value="k"),
+        ):
+            yield
+
     def test_ok_when_no_failures(self, handler_mod):
         with (
             patch.object(handler_mod, "_ensure_init"),
@@ -112,18 +140,56 @@ class TestHandler:
         assert result["status"] == "OK"
         assert result["calibration"]["status"] == "ok"
 
-    def test_calibration_failure_is_non_fatal(self, handler_mod):
-        # κ side path failing must NOT change the primary rolling-mean
-        # status — it is recorded in the calibration field instead.
+    def test_a_failed_side_path_makes_the_STAGE_fail_not_just_the_field(self, handler_mod):
+        """alpha-engine-config-I10198 / sf-pipeline-policy §2.3b — REVERSES
+        this test's previous contract, deliberately.
+
+        It used to assert "a κ side-path failure must NOT change the primary
+        rolling-mean status — it is recorded in the calibration field
+        instead." MEASURED on the 2026-08-15 and 2026-08-22 scheduled weekly
+        runs, that is exactly what cost two entire weeks of agent-quality
+        scoring: the stage returned `status: "OK"` over
+        `agent_quality = {"status": "ERROR", ...}`, so the SF `Catch` never
+        fired, `MarkEvalRollingMeanDegraded` never ran,
+        `$.research_degraded_local` was never set, and every surface read
+        green while `AlphaEngine/Eval/agent_quality_score` published nothing.
+
+        Recording a failure in a field nothing consumes is not recording it.
+        The stage now RAISES — a returned `{"status": "ERROR"}` dict is a
+        *successful* Task completion to Step Functions and would route
+        nowhere; only a raise reaches the Catch this state already has.
+        """
+        from stage_substatus import StageSubResultError
+
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
             patch("evals.calibration_kappa.emit_calibration_report", side_effect=RuntimeError("S3 down")),
+            pytest.raises(StageSubResultError) as excinfo,
+        ):
+            handler_mod.handler({}, context=None)
+        assert "calibration" in str(excinfo.value)
+        assert "S3 down" in str(excinfo.value)
+
+    def test_an_unclassified_substatus_is_reported_but_never_raised_over(self, handler_mod):
+        """`empty`, `PARTIAL`, `insufficient` are real vocabulary this fleet
+        emits. They must be NAMED — never defaulted to a pass — but raising
+        over an unrecognised WORD would degrade a healthy pipeline, which is
+        the chronic-false-positive class alpha-engine-config-I10130 exists
+        for."""
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
+            patch(
+                "evals.calibration_kappa.emit_calibration_report",
+                return_value=_calib_report("a_word_no_vocabulary_knows"),
+            ),
         ):
             result = handler_mod.handler({}, context=None)
         assert result["status"] == "OK"
-        assert result["calibration"]["status"] == "ERROR"
-        assert "S3 down" in result["calibration"]["error"]
+        assert result["substatus_unclassified"] is True
+        paths = [f["path"] for f in result["substatus_findings"]]
+        assert "calibration" in paths
 
     def test_partial_when_any_failure(self, handler_mod):
         with (
@@ -208,18 +274,32 @@ class TestHandler:
         assert result["agent_quality"]["key"] == "backtest/2026-06-22/agent_quality.json"
         assert set(result["agent_quality"]["graded_components"]) == {"signal_volume_adequacy", "judge_rubric_pass_rate"}
 
-    def test_agent_quality_failure_is_non_fatal(self, handler_mod):
-        # A producer failure MUST NOT change the primary rolling-mean status —
-        # it is recorded in the agent_quality field instead.
+    def test_agent_quality_failure_fails_the_stage(self, handler_mod):
+        """alpha-engine-config-I10198 / sf-pipeline-policy §2.3b — REVERSES
+        this test's previous contract, deliberately. It asserted that a
+        producer failure "MUST NOT change the primary rolling-mean status".
+        MEASURED on the 2026-08-15 and 2026-08-22 weekly runs, that is exactly
+        how `agent_quality = {"status": "ERROR", "error": "'str' object has no
+        attribute 'isoformat'"}` rode out under `status: "OK"` and cost two
+        entire weeks of agent-quality scoring with every surface green.
+
+        The primary deliverable surviving is still true and still valuable —
+        the rolling mean was emitted, and it is in the payload logged at ERROR
+        immediately before the raise. What changes is that the STAGE no longer
+        claims to have succeeded, so the `Catch` this state already carries
+        routes to `MarkEvalRollingMeanDegraded`.
+        """
+        from stage_substatus import StageSubResultError
+
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
             patch("scripts.build_agent_quality.build_agent_quality", side_effect=RuntimeError("S3 list failed")),
+            pytest.raises(StageSubResultError) as excinfo,
         ):
-            result = handler_mod.handler({}, context=None)
-        assert result["status"] == "OK"
-        assert result["agent_quality"]["status"] == "ERROR"
-        assert "S3 list failed" in result["agent_quality"]["error"]
+            handler_mod.handler({}, context=None)
+        assert "agent_quality" in str(excinfo.value)
+        assert "S3 list failed" in str(excinfo.value)
 
     # ── producer leaderboard wiring (config#1223 B4 / #1221 shared scorer) ────
     def test_producer_leaderboard_surfaced_in_result(self, handler_mod):
@@ -241,8 +321,13 @@ class TestHandler:
         assert result["producer_leaderboard"]["key"] == "research/producer_leaderboard/2026-06-22.json"
         assert result["producer_leaderboard"]["n_dates"] == 3
 
-    def test_producer_leaderboard_failure_is_non_fatal(self, handler_mod):
-        # A leaderboard failure MUST NOT change the primary rolling-mean status.
+    def test_producer_leaderboard_failure_fails_the_stage(self, handler_mod):
+        """Same reversal, same reason (alpha-engine-config-I10198). Every
+        named sub-result is covered by ONE structural derivation — this test
+        exists because the class is what matters, not because the leaderboard
+        was the sub-result that happened to break."""
+        from stage_substatus import StageSubResultError
+
         with (
             patch.object(handler_mod, "_ensure_init"),
             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
@@ -250,11 +335,11 @@ class TestHandler:
                 "scoring.leaderboard_producers.build_producer_leaderboard",
                 side_effect=RuntimeError("closes read failed"),
             ),
+            pytest.raises(StageSubResultError) as excinfo,
         ):
-            result = handler_mod.handler({}, context=None)
-        assert result["status"] == "OK"
-        assert result["producer_leaderboard"]["status"] == "ERROR"
-        assert "closes read failed" in result["producer_leaderboard"]["error"]
+            handler_mod.handler({}, context=None)
+        assert "producer_leaderboard" in str(excinfo.value)
+        assert "closes read failed" in str(excinfo.value)
 
 
 # ── alpha-engine-config-I9321 ────────────────────────────────────────────

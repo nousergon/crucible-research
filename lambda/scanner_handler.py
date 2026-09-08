@@ -179,6 +179,7 @@ class ScannerLeaderboardBuildError(RuntimeError):
 
 def _attach_stage_coverage(
     result: dict, *, stage: str, run_date: str | None, window_start,
+    provenance: dict[str, str] | None = None,
 ) -> None:
     """Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
     §2.3a rescope): the assertion lives in the stage's own handler,
@@ -206,14 +207,20 @@ def _attach_stage_coverage(
             "stage": stage,
             "status": "UNMEASURED",
             "reason": "execution run_date absent from event",
+            **(provenance or {}),
         }
         return
     try:
         from krepis.stage_coverage import assert_stage_coverage
 
-        result["stage_coverage"] = assert_stage_coverage(
-            stage, run_date=run_date, window_start=window_start,
-        )
+        result["stage_coverage"] = {
+            **assert_stage_coverage(
+                stage, run_date=run_date, window_start=window_start,
+            ),
+            # alpha-engine-config-I10171: which field the partition key came
+            # from travels WITH the verdict, into the SF execution history.
+            **(provenance or {}),
+        }
     except ImportError as exc:
         # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
         # the handler's own outcome is unchanged (config-I7214).
@@ -222,6 +229,7 @@ def _attach_stage_coverage(
             "stage": stage,
             "status": "UNMEASURED",
             "reason": f"assertion unavailable: {exc}",
+            **(provenance or {}),
         }
     except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
         # alpha-engine-config-I8155: the krepis landing this arc makes
@@ -238,11 +246,13 @@ def _attach_stage_coverage(
             "stage": stage,
             "status": "UNMEASURED",
             "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            **(provenance or {}),
         }
 
 
 def _run_scanner_leaderboard(
     s3_client, bucket: str, run_date: str, *, execution_run_date: str | None = None, window_start=None,
+    run_date_provenance: dict[str, str] | None = None,
 ) -> dict:
     """``mode="scanner_leaderboard"`` — build ONLY ``scanner/leaderboard/{date}.json``.
 
@@ -366,7 +376,8 @@ def _run_scanner_leaderboard(
         },
     }
     _attach_stage_coverage(
-        result, stage="ScannerLeaderboard", run_date=execution_run_date, window_start=window_start,
+        result, stage="ScannerLeaderboard", run_date=execution_run_date,
+        window_start=window_start, provenance=run_date_provenance,
     )
     return result
 
@@ -429,7 +440,26 @@ def _run(event, context):
     # key one execution's verdicts share) — passing the normalized trading
     # day instead landed this stage's verdict under the WRONG prefix on the
     # 2026-08-22 weekly run. `execution_run_date` is never reassigned.
-    execution_run_date = run_date
+    #
+    # alpha-engine-config-I10171: routed through the shared resolver. This
+    # stage's Payload already threads `run_date.$: "$.run_date"` so it was
+    # never a partition-split writer, but the preference is now STATED here
+    # rather than inferred from a Payload in another repo — a future Payload
+    # edit dropping the field is recorded as a fallback, not silently
+    # re-splitting the partition.
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    execution_run_date, _run_date_provenance = resolve_stage_run_date(
+        event,
+        # One Lambda backs two stages; name the one this invocation is, so
+        # the resolver's log line cannot attribute a leaf-mode fallback to
+        # the stage that was working (config-I7214's own rationale).
+        stage=(
+            "ScannerLeaderboard"
+            if event.get("mode") == _MODE_SCANNER_LEADERBOARD else "Scanner"
+        ),
+        logger=logger,
+    )
 
     # ── Trading-day normalization (DATE_CONVENTIONS) ─────────────────────────
     # Every trade artifact in the system keys by the TRADING DAY, not the
@@ -490,6 +520,7 @@ def _run(event, context):
         return _run_scanner_leaderboard(
             s3_client, bucket, run_date,
             execution_run_date=execution_run_date, window_start=_started,
+            run_date_provenance=_run_date_provenance,
         )
 
     try:
@@ -976,7 +1007,8 @@ def _run(event, context):
     # _attach_stage_coverage's own guard stays as the contract boundary
     # rather than relying on that upstream guard.
     _attach_stage_coverage(
-        result, stage="Scanner", run_date=execution_run_date, window_start=_started,
+        result, stage="Scanner", run_date=execution_run_date,
+        window_start=_started, provenance=_run_date_provenance,
     )
 
     return result
