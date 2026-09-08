@@ -33,6 +33,10 @@ def _make_cw(combos: list[list[dict]], series_by_idx: dict[int, list[float]]):
     ]
     cw.get_paginator.return_value = paginator
 
+    # `base` is the instant the NEWEST weekly bucket closes, so a test
+    # passing end_time=base sees every bucket as complete. A test that
+    # wants the newest bucket still open passes an earlier end_time
+    # (alpha-engine-config-I10165).
     base = datetime(2026, 6, 9, tzinfo=_UTC)
     results = []
     for idx in range(len(combos)):
@@ -40,7 +44,7 @@ def _make_cw(combos: list[list[dict]], series_by_idx: dict[int, list[float]]):
         # oldest-first values → descending timestamps (newest first) to
         # mimic CloudWatch default ScanBy.
         n = len(vals)
-        ts = [base - timedelta(weeks=(n - 1 - i)) for i in range(n)]
+        ts = [base - timedelta(weeks=(n - i)) for i in range(n)]
         results.append({
             "Id": f"m{idx}",
             "Timestamps": list(reversed(ts)),
@@ -266,7 +270,7 @@ class TestComputeAndEmit:
 
         # base timestamp in _make_cw is 2026-06-09; weeks count back.
         # Reset to keep only the last 4 weekly points.
-        reset = datetime(2026, 6, 9, tzinfo=_UTC) - timedelta(weeks=3, days=1)
+        reset = datetime(2026, 6, 9, tzinfo=_UTC) - timedelta(weeks=4, days=1)
         out = cb.compute_and_emit_control_bands(
             end_time=datetime(2026, 6, 9, tzinfo=_UTC),
             reset_before=reset,
@@ -274,3 +278,152 @@ class TestComputeAndEmit:
         )
         assert out["combos_insufficient_history"] == 1
         assert out["breach_count"] == 0
+
+
+# ── alpha-engine-config-I10165 ────────────────────────────────────────────
+#
+# Three defects, all measured against the live series on 2026-09-08, all
+# of which made the alarm `alpha-engine-eval-control-breach` report a
+# condition that was not true at the time it reported it.
+
+
+class TestCusumResetAfterSignal:
+    """A tabular CUSUM is reset once it signals (Montgomery §9.1.3).
+
+    Without the reset the accumulator carries a past excursion forward
+    indefinitely, so every later evaluation of the same window
+    re-reports the same excursion as a live drift.
+    """
+
+    def test_accumulator_resets_on_signal(self):
+        # A deep 3-point excursion signals, then one recovering point.
+        # Without reset C- stays ~9-12; with reset it drains to a small
+        # residue.
+        series = [3.65, 3.67, 3.69, 4.00]
+        no_reset = cb.tabular_cusum(
+            series, target=3.913, sigma=0.0553, reset_after_signal=False,
+        )
+        with_reset = cb.tabular_cusum(
+            series, target=3.913, sigma=0.0553, reset_after_signal=True,
+        )
+        assert no_reset.breached_low is True
+        assert with_reset.breached_low is True
+        assert no_reset.c_minus > 8.0
+        assert with_reset.c_minus < no_reset.c_minus
+        assert with_reset.c_minus < cb.DEFAULT_CUSUM_H
+
+    def test_reset_is_the_default(self):
+        series = [3.65, 3.67, 3.69, 4.00]
+        assert (
+            cb.tabular_cusum(series, target=3.913, sigma=0.0553).c_minus
+            == cb.tabular_cusum(
+                series, target=3.913, sigma=0.0553, reset_after_signal=True,
+            ).c_minus
+        )
+
+    def test_upward_side_resets_too(self):
+        series = [4.35, 4.33, 4.31, 4.00]
+        no_reset = cb.tabular_cusum(
+            series, target=4.0, sigma=0.05, reset_after_signal=False,
+        )
+        with_reset = cb.tabular_cusum(
+            series, target=4.0, sigma=0.05, reset_after_signal=True,
+        )
+        assert no_reset.breached_high and with_reset.breached_high
+        assert with_reset.c_plus < no_reset.c_plus
+
+
+class TestCusumCurrencyGate:
+    """A CUSUM signal the latest point has already reversed is not a
+    CURRENT out-of-control state, and the metric it feeds counts combos
+    that are *currently* out of control.
+
+    Live case, 2026-09-05:
+    ``thinktank_thesis/context_integration/claude-sonnet-4-6`` reported
+    ``cusum_low: C- 7.86 > h 5.0 (sustained downward drift from center
+    3.913)`` while its latest 4w-mean was 4.002 — ABOVE its own center,
+    at z = +1.62, and its highest value in six months. The alarm had
+    been latched on that report for 8.7 days.
+    """
+
+    def test_recovered_excursion_is_not_out_of_control(self):
+        # Baseline ~3.92 (flat), then a deep dip, then full recovery.
+        series = [3.933, 3.909, 3.936, 3.885, 3.645, 3.675, 3.687, 4.002]
+        r = cb.evaluate_series(series, min_history=8)
+        assert r.latest_z is not None and r.latest_z > 0, (
+            "precondition: the latest point sits above the baseline center"
+        )
+        assert r.cusum_signal_low is True, (
+            "the in-window excursion is still recorded for observability"
+        )
+        assert r.cusum_low is False
+        assert r.shewhart_low is False
+        assert r.status == cb.STATUS_IN_CONTROL
+        assert any("recovered" in x for x in r.reasons)
+
+    def test_ongoing_drift_still_alarms(self):
+        # Same excursion, but the latest point is still below center:
+        # detection must NOT be blunted.
+        series = [3.933, 3.909, 3.936, 3.885, 3.645, 3.675, 3.687, 3.660]
+        r = cb.evaluate_series(series, min_history=8)
+        assert r.latest_z is not None and r.latest_z < 0
+        assert r.cusum_low is True
+        assert r.status == cb.STATUS_OUT_OF_CONTROL
+
+    def test_shewhart_low_needs_no_currency_gate(self):
+        # latest < LCL implies latest < center, so a Shewhart breach is
+        # current by construction and alarms regardless of the CUSUM.
+        series = [4.0, 4.05, 3.95, 4.0, 4.05, 3.95, 4.0, 2.0]
+        r = cb.evaluate_series(series, min_history=8)
+        assert r.shewhart_low is True
+        assert r.status == cb.STATUS_OUT_OF_CONTROL
+
+
+class TestOpenWeeklyBucketIsDropped:
+    """The still-accumulating CloudWatch bucket is a partial average and
+    is never charted.
+
+    Live case, 2026-08-30: the 19:52Z run read the open 08-25 bucket for
+    ``thinktank_thesis/moat_and_business_quality/claude-haiku-4-5`` as
+    3.1807 and flagged ``shewhart_low`` against LCL 3.1843 — a margin of
+    0.0036. The 23:26Z run the same evening no longer breached, and the
+    bucket settled at 3.7346.
+    """
+
+    def _results(self, values, end_time):
+        combos = [_dims("alpha", "c1")]
+        cw = _make_cw(combos, values)
+        return cb._weekly_series_by_combo(
+            cw.get_metric_data.return_value["MetricDataResults"],
+            combos,
+            end_time=end_time,
+        )
+
+    def test_open_bucket_excluded(self):
+        # _make_cw lays weekly buckets back from 2026-06-09. With
+        # end_time only 2 days past the newest bucket start, that bucket
+        # has not closed.
+        vals = {0: [4.0, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 9.9]}
+        got = self._results(vals, datetime(2026, 6, 6, tzinfo=_UTC))
+        assert 9.9 not in got[0]
+        assert len(got[0]) == 7
+
+    def test_closed_bucket_retained(self):
+        vals = {0: [4.0, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 9.9]}
+        got = self._results(vals, datetime(2026, 6, 9, tzinfo=_UTC))
+        assert got[0][-1] == 9.9
+        assert len(got[0]) == 8
+
+    def test_partial_bucket_cannot_produce_a_breach(self):
+        # A flat baseline plus one partial low bucket: charting it would
+        # be a Shewhart breach; dropping it leaves an honest N/A.
+        combos = [_dims("alpha", "c1")]
+        series = {0: [4.0, 4.05, 3.95, 4.0, 4.05, 3.95, 4.0, 4.02, 2.0]}
+        cw = _make_cw(combos, series)
+        s3 = MagicMock()
+        out = cb.compute_and_emit_control_bands(
+            end_time=datetime(2026, 6, 6, tzinfo=_UTC),
+            cloudwatch_client=cw, s3_client=s3,
+        )
+        assert out["breach_count"] == 0
+        s3.put_object.assert_not_called()

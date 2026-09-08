@@ -74,9 +74,38 @@ aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regressi
 # breach) on the weekly control-band run. Catches drift/steps the flat
 # floor misses. The metric is emitted every run (incl. 0), so the stream
 # stays alive and the alarm sits OK rather than INSUFFICIENT_DATA between
-# breaches. Maximum over the day == the weekly datapoint; missing days
-# (no run) are ignored, matching the floor alarm's cadence.
+# breaches.
+#
+# alpha-engine-config-I10166 — both corrections measured 2026-09-08, and
+# both are the SAME two defects I9321 fixed on the floor alarm thirty
+# lines above. This alarm kept `--period 86400 --treat-missing-data
+# ignore`, justified in the old comment as "matching the floor alarm's
+# cadence" — a sentence already false when it was written, because the
+# floor had just moved to 604800/breaching in the same commit.
+#
+# 1. `--period 86400` on a producer that runs weekly. Measured: 25
+#    emissions between 2026-07-30 and 2026-09-05, six of them on
+#    2026-08-30, and six-day gaps elsewhere — six of every seven daily
+#    windows are empty by construction, which is precisely why the period
+#    and the missing-data policy have to change together. Every COMPLETE
+#    week since 2026-07-27 carries at least one datapoint, so 604800 is
+#    the window the producer actually fills.
+#
+# 2. `--treat-missing-data ignore` HOLDS THE LAST STATE FOREVER when data
+#    stops — strictly worse than `notBreaching`, which at least resolves
+#    to OK. Measured: this alarm went ALARM at 2026-08-30 13:19 PDT on a
+#    breach that had already reversed, then received no datapoint for the
+#    next 5.6 days, and sat red for 8.8 days indistinguishable from a
+#    dead producer. `breaching` renders "we did not evaluate the control
+#    bands this week" as a problem, which is what it is
+#    (`principles.md` §2.7: no data is never rendered as green). Verified
+#    non-flapping on the sibling floor alarm, which has run
+#    604800/breaching since 2026-08-29 with two state transitions total.
+#
+# Re-putting with changed configuration RESETS alarm state to
+# INSUFFICIENT_DATA, so this deploy also un-latches the 8.8-day ALARM and
+# lets the next evaluation produce a real transition.
 echo "[setup_eval_alarms] put alpha-engine-eval-control-breach (${BREACH_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 86400 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data ignore --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
+aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
 
 echo "[setup_eval_alarms] done — both eval alarms converged."

@@ -51,8 +51,17 @@ trim the series to the post-re-anchor points after a judge upgrade.
 Automatic reset driven off the artifact corpus' ``judge_resolved_model``
 is a noted follow-up.
 
-Run cadence: weekly, from the same ``EvalRollingMean`` Lambda that emits
-the rolling mean, AFTER the mean is emitted (it reads the mean series).
+Run cadence: nominally weekly, from the same ``EvalRollingMean`` Lambda
+that emits the rolling mean, AFTER the mean is emitted (it reads the mean
+series). **Measured 2026-09-08 it is not one run per week**: the
+``agent_quality_score_control_breach_count`` stream carries 25 emissions
+between 2026-07-30 and 2026-09-05, six of them on 2026-08-30 alone, with
+whole weeks carrying one. Every emission timestamps at *run* time, so a
+CloudWatch weekly bucket holds the average of however many reruns landed
+in it, and a mid-week run reads a partial bucket. Both are handled here:
+the open bucket is dropped (``_weekly_series_by_combo``), and the alarm
+watching this metric evaluates a weekly period
+(``infrastructure/setup_eval_alarms.sh``).
 """
 
 from __future__ import annotations
@@ -183,6 +192,7 @@ def tabular_cusum(
     sigma: float,
     k: float = DEFAULT_CUSUM_K,
     h: float = DEFAULT_CUSUM_H,
+    reset_after_signal: bool = True,
 ) -> CusumResult:
     """Standardized two-sided tabular CUSUM.
 
@@ -190,6 +200,18 @@ def tabular_cusum(
     C⁺ᵢ = max(0, C⁺ᵢ₋₁ + zᵢ − k)   (upward)
     C⁻ᵢ = max(0, C⁻ᵢ₋₁ − zᵢ − k)   (downward)
     A side signals when its statistic exceeds ``h``.
+
+    ``reset_after_signal`` (default True) restores the textbook tabular
+    CUSUM: **the accumulator is reset to zero once it signals**
+    (Montgomery, *Introduction to Statistical Quality Control*, §9.1.3 —
+    a signal means the process is investigated and the chart restarted).
+    Without the reset a single deep excursion leaves C⁻ permanently
+    inflated, so every later evaluation of the same window re-reports the
+    same past excursion as a live "sustained downward drift". Measured on
+    2026-09-05: ``thinktank_thesis/context_integration/claude-sonnet-4-6``
+    reported ``C- 7.86 > h 5.0`` while its latest 4w-mean (4.002) sat
+    **above** its own center (3.913) at z = +1.62 — a six-month high
+    reported as a regression (alpha-engine-config-I10165).
 
     Requires ``sigma > 0`` (the standardization divides by it) — callers
     gate on the zero-variance case before invoking.
@@ -206,8 +228,12 @@ def tabular_cusum(
         c_minus = max(0.0, c_minus - z - k)
         if c_plus > h:
             breached_high = True
+            if reset_after_signal:
+                c_plus = 0.0
         if c_minus > h:
             breached_low = True
+            if reset_after_signal:
+                c_minus = 0.0
     return CusumResult(c_plus, c_minus, breached_high, breached_low)
 
 
@@ -233,7 +259,8 @@ class ControlBandResult:
     shewhart_high: bool = False           # latest > UCL (observability)
     cusum_c_minus: float | None = None
     cusum_c_plus: float | None = None
-    cusum_low: bool = False               # downward drift (regression)
+    cusum_low: bool = False               # downward drift, CURRENT (alarms)
+    cusum_signal_low: bool = False        # C- signalled in-window (observability)
     cusum_high: bool = False              # upward drift (observability)
     reasons: list[str] = field(default_factory=list)
 
@@ -328,7 +355,18 @@ def evaluate_series(
     cusum = tabular_cusum(
         monitoring, target=center, sigma=sigma, k=cusum_k, h=cusum_h,
     )
-    cusum_low = cusum.breached_low
+    # A CUSUM signal states that deviation ACCUMULATED over the
+    # monitoring window. It is not by itself a statement that the process
+    # is running low *now*, and the alarm surface it feeds
+    # (``agent_quality_score_control_breach_count``) declares the number
+    # of combos **currently** OUT_OF_CONTROL. So a downward signal only
+    # alarms while the latest point is itself below the in-control
+    # center; a signal the latest observation has already reversed is
+    # recorded for observability and does not page
+    # (alpha-engine-config-I10165). The Shewhart test needs no such gate:
+    # ``latest < lcl`` already implies ``latest < center``.
+    cusum_signal_low = cusum.breached_low
+    cusum_low = cusum_signal_low and latest < center
     cusum_high = cusum.breached_high
 
     reasons: list[str] = []
@@ -339,8 +377,18 @@ def evaluate_series(
         )
     if cusum_low:
         reasons.append(
-            f"cusum_low: C- {cusum.c_minus:.2f} > h {cusum_h:.1f} "
-            f"(sustained downward drift from center {center:.3f})"
+            f"cusum_low: C- signalled > h {cusum_h:.1f} over the "
+            f"{len(monitoring)}-point monitoring window and the latest "
+            f"point {latest:.3f} is still below center {center:.3f} "
+            f"(sustained downward drift)"
+        )
+    elif cusum_signal_low:
+        reasons.append(
+            f"cusum_signal_low (observability, recovered): C- signalled "
+            f"> h {cusum_h:.1f} in-window but the latest point "
+            f"{latest:.3f} is at/above center {center:.3f} "
+            f"(z {latest_z:+.2f}) — the excursion has reversed, not "
+            f"alarmed"
         )
     # Upward signals are observability-only — recorded, not alarmed.
     if shewhart_high:
@@ -368,6 +416,7 @@ def evaluate_series(
         cusum_c_minus=cusum.c_minus,
         cusum_c_plus=cusum.c_plus,
         cusum_low=cusum_low,
+        cusum_signal_low=cusum_signal_low,
         cusum_high=cusum_high,
         reasons=reasons,
     )
@@ -381,6 +430,7 @@ def _weekly_series_by_combo(
     combos: list[list[dict[str, str]]],
     *,
     reset_before: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> dict[int, list[float]]:
     """Map combo index → its weekly series, oldest-first.
 
@@ -389,7 +439,19 @@ def _weekly_series_by_combo(
     series in chronological order. When ``reset_before`` is set, points
     older than it are dropped so the baseline doesn't straddle a judge
     re-anchor (L4578(a)).
+
+    **The still-open weekly bucket is dropped.** A CloudWatch bucket
+    whose window has not yet elapsed holds a partial average, and the
+    Shewhart chart tests exactly that latest point. Measured
+    2026-08-30: the run at 19:52Z read the open 08-25 bucket for
+    ``thinktank_thesis/moat_and_business_quality/claude-haiku-4-5`` as
+    3.1807 and flagged ``shewhart_low`` against an LCL of 3.1843 — a
+    margin of 0.0036; the run at 23:26Z the same evening no longer
+    breached, and that bucket settled at 3.7346. A partial bucket is
+    not an observation of the week, so it is never charted
+    (alpha-engine-config-I10165). ``end_time`` defaults to now.
     """
+    cutoff = end_time or datetime.now(UTC)
     by_id = {r["Id"]: r for r in metric_data_results}
     series_by_combo: dict[int, list[float]] = {}
     for idx in range(len(combos)):
@@ -398,6 +460,12 @@ def _weekly_series_by_combo(
             series_by_combo[idx] = []
             continue
         pairs = list(zip(result.get("Timestamps", []), result.get("Values", []), strict=True))
+        # Drop the bucket still accumulating: its window end is in the
+        # future relative to this run, so its Average is partial.
+        pairs = [
+            (t, v) for t, v in pairs
+            if t + timedelta(seconds=_WEEK_SECONDS) <= cutoff
+        ]
         if reset_before is not None:
             pairs = [(t, v) for t, v in pairs if t >= reset_before]
         pairs.sort(key=lambda tv: tv[0])  # chronological
@@ -458,6 +526,7 @@ def compute_and_emit_control_bands(
     metric_data_results = _get_metric_data_all(cw, queries, start, end)
     series_by_combo = _weekly_series_by_combo(
         metric_data_results, combos, reset_before=reset_before,
+        end_time=end,
     )
 
     zscore_data: list[dict[str, Any]] = []
@@ -666,6 +735,7 @@ def _emit_control_breach_entry(
                 "cusum_c_minus": result.cusum_c_minus,
                 "shewhart_low": result.shewhart_low,
                 "cusum_low": result.cusum_low,
+                "cusum_signal_low": result.cusum_signal_low,
                 "n_points": result.n_points,
                 "reasons": result.reasons,
                 "window_start": window_start.isoformat(),
