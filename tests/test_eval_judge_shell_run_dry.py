@@ -162,6 +162,7 @@ class TestSubmitDry:
                    return_value={"capture_keys_total": 0,
                                  "skipped_unmapped": 0,
                                  "capture_partition_counts": {},
+                                 "skipped_already_judged": 0,
                                  "empty_trading_day_partitions": []}), \
              patch("evals.orchestrator._persist_client_side_skips",
                    return_value=(0, 0, [], [])), \

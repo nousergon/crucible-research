@@ -51,12 +51,24 @@ class TestEmitEvalMetric:
         ])
         sent = emit_eval_metric(eval_, cloudwatch_client=cw)
 
+        # The return counts REVIEWS, not datapoints — callers accumulate it
+        # as "reviews emitted" and the sumsq companion is a statistic about
+        # those reviews, not more of them (alpha-engine-config-I10186).
         assert sent == 3
         cw.put_metric_data.assert_called_once()
         kwargs = cw.put_metric_data.call_args.kwargs
         assert kwargs["Namespace"] == "AlphaEngine/Eval"
-        assert len(kwargs["MetricData"]) == 3
-        assert all(d["MetricName"] == "agent_quality_score" for d in kwargs["MetricData"])
+        assert len(kwargs["MetricData"]) == 6
+        scores = [
+            d for d in kwargs["MetricData"]
+            if d["MetricName"] == "agent_quality_score"
+        ]
+        sumsqs = [
+            d for d in kwargs["MetricData"]
+            if d["MetricName"] == "agent_quality_score_sumsq"
+        ]
+        assert len(scores) == 3
+        assert len(sumsqs) == 3
 
     def test_dimensions_carry_agent_criterion_judge_model(self):
         from evals.metrics import emit_eval_metric

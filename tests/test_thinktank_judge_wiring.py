@@ -298,20 +298,30 @@ def test_build_batch_plan_skips_already_judged(monkeypatch):
         assert k2 not in {""}  # keep k2 referenced
 
 
-def test_single_date_plan_skips_dedup_lookup():
-    """Default single-date invocation must not consult manifests at all
-    (byte-identical legacy behavior)."""
+def test_single_date_plan_still_dedups():
+    """A single-date plan consults the manifests too
+    (alpha-engine-config-I10169).
+
+    The dedup used to be gated on ``len(all_dates) > 1``, on the reasoning
+    that a single-date plan cannot overlap an earlier one. It can, and did:
+    nine judge runs between 2026-07-26 15:10Z and 2026-07-27 03:29Z graded
+    2698 artifacts covering 321 distinct (agent, run_id, judge_model)
+    triples — 8.4x re-judging of one corpus — and seven runs on
+    2026-08-30/31 graded 876 covering 142, 6.17x. Every duplicate emitted a
+    full set of ``agent_quality_score`` datapoints, which is what put 2408
+    reviews in the CloudWatch week of 2026-07-22 for a combo whose
+    neighbouring weeks carry twelve."""
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
         k1 = _put_capture(s3, date="2026-07-04", agent_id=THESIS_AGENT_ID, run_id="r1")
-        # a (bogus) manifest claiming r1 was judged must be IGNORED on
-        # the single-date path
+        # a manifest claiming r1 was judged is now HONOURED on the
+        # single-date path too
         s3.put_object(
             Bucket=BUCKET,
             Key="decision_artifacts/_eval_by_capture/2026-07-04/manifest.json",
             Body=json.dumps({"entries": [{"judged_artifact_s3_key": k1}]}),
         )
         plan = build_batch_plan(date="2026-07-04", bucket=BUCKET, s3_client=s3)
-        assert [e["run_id"] for e in plan["plan_entries"]] == ["r1"]
-        assert plan["skipped_already_judged"] == 0
+        assert [e["run_id"] for e in plan["plan_entries"]] == []
+        assert plan["skipped_already_judged"] == 1

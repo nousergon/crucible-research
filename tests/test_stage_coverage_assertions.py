@@ -508,6 +508,7 @@ class TestEvalJudgeSubmitCoverage:
                 return_value={
                     "capture_keys_total": 5, "skipped_unmapped": 0,
                     "capture_partition_counts": {"2026-05-16": 5},
+                    "skipped_already_judged": 0,
                     "empty_trading_day_partitions": [],
                 },
             ),

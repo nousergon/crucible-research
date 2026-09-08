@@ -149,7 +149,11 @@ from typing import Any
 
 import boto3
 
-from evals.metrics import DEFAULT_METRIC_NAME, DEFAULT_NAMESPACE
+from evals.metrics import (
+    DEFAULT_METRIC_NAME,
+    DEFAULT_NAMESPACE,
+    SUMSQ_METRIC_NAME,
+)
 from evals.rolling_mean import (
     _CHANGELOG_BUCKET,
     _CHANGELOG_PREFIX,
@@ -245,6 +249,81 @@ cannot be read back from the existing streams; having the judge emit a
 per-week sum-of-squares (or the rubric-score histogram) would make it
 measurable per combo. Tracked as a follow-up."""
 
+SOURCE_SUMSQ_METRIC_NAME = SUMSQ_METRIC_NAME
+"""The squared-score companion stream. ``Sum`` over a weekly bucket, with
+that bucket's ``SampleCount`` and ``Average``, is the sufficient statistic
+for sigma_w -- see ``within_week_sd`` (alpha-engine-config-I10186)."""
+
+POOLED_SIGMA_B_ENABLED = False
+"""Whether the pooled prior is APPLIED to the verdicts, as opposed to
+merely measured and published.
+
+**It is off, and it is off because of a measured stop signal.** The
+estimator below is built, tested and evaluated against the live corpus;
+what it is not is switched on, because switching it on retires the only
+downward breach this corpus currently carries.
+
+Measured 2026-09-08, all 20 live combos, pooling ON vs OFF:
+
+* ``thinktank_theme/grounding_in_inputs/claude-haiku-4-5``
+  **OUT_OF_CONTROL -> IN_CONTROL** (z -2.18 -> -1.86). Its own sigma_b is
+  0.000 on three moving ranges, so pooling hands it 0.175 — and the
+  evidence carrying its CUSUM signal is the 2026-08-25 week, 3.61 on
+  n=189, whose sigma_i widens from 0.073 to 0.190 under that prior. The
+  2.6x widening lands precisely on the week that had the reviews to prove
+  the decline. ``crucible-research-PR799`` assessed this combo as a real
+  sustained decline, and nothing measured since contradicts that.
+* Three upward outliers are damped, which is the argument FOR pooling:
+  ``moat_and_business_quality/claude-haiku-4-5`` +5.34 -> +3.12,
+  ``risk_specificity/claude-haiku-4-5`` +5.79 -> +3.62,
+  ``valuation_linkage/claude-haiku-4-5`` +5.65 -> +3.30. Combos with
+  latest |z| > 3 go 6 -> 5. But upward signals never alarm, so that is a
+  cosmetic gain paid for with the one alarm that fires.
+
+Losing sensitivity to a real regression is a stop signal, not a tuning
+parameter, so the flag exists rather than the default being changed. The
+pooled value IS computed and published on every run
+(``sigma_b_pooled`` in the summary, logged at INFO) so the decision is
+made against fresh evidence rather than against this comment.
+
+Measured pooled value 2026-09-08: **0.248**, range-weighted across 14
+combos and 51 moving ranges. Note this is a LARGER number than the
+0.13-0.20 quoted for "pooled sigma_b" in ``alpha-engine-config-I10186``:
+that figure is the intercept of the sigma_w-fitting regression over
+adjacent weekly PAIRS, this one is the range-weighted mean of the
+per-combo moving-range estimates after sampling subtraction. Different
+estimators over different populations; both are reported rather than one
+being quietly adopted as the other."""
+
+SHRINKAGE_PRIOR_RANGES = 3
+"""Strength of the pooled prior on sigma_b, in units of moving ranges
+(alpha-engine-config-I10188 deliverable 2).
+
+``process_sigma`` fits sigma_b from the baseline's moving ranges. On the
+4-point baselines this corpus can offer that is THREE ranges, and measured
+2026-09-08 it floors at exactly 0.000 for 7 of 20 combos. Zero is a
+defensible ANSWER for a combo with a long series; on three ranges it is an
+estimate with no degrees of freedom, and it hands those combos limits set
+entirely by the sampling term.
+
+The fix is a hierarchical estimator, not a floor constant: a floor would
+hide the degrees-of-freedom problem behind a number, while shrinkage
+MODELS it — each combo's variance estimate is pulled toward the pooled
+value with weight ``m/(m + m0)``, m being the moving ranges that combo
+actually has. At m0 = 3 a 3-range combo is weighted 50/50 with the pool
+and a 20-range combo keeps 87% of its own estimate, so the correction
+fades out on its own as the corpus matures rather than needing to be
+removed later. m0 = 3 is the number of ranges a combo must have before its
+own estimate outweighs the pool, and it is set equal to the observed
+minimum deliberately: a combo at the thinnest baseline the gate admits
+gets exactly half its scale from its peers.
+
+The pooled value measured 2026-09-08 across all 20 combos is 0.13-0.20.
+This WIDENS limits on the thinnest combos, which is the honest direction
+-- their old zero said their weekly scores never move, which three ranges
+cannot establish -- but it does cost sensitivity exactly where the corpus
+is thinnest. That trade is reported in the PR, not tuned around."""
+
 MIN_REVIEWS_PER_WEEK = 4
 """Minimum judged reviews for a week to be an OBSERVATION of the process.
 
@@ -297,6 +376,39 @@ corpus is too thin (`alpha-engine-config-I10169`), so an alarm on it
 would be red from birth and would be muted rather than acted on. The
 threshold belongs with the corpus fix, and is tracked there."""
 
+REVIEW_FLOOR_BREACH_METRIC_NAME = (
+    "agent_quality_score_weekly_review_floor_breach_count"
+)
+"""Dimensionless single-datapoint metric = how many discovered combos had
+FEWER than ``MIN_REVIEWS_PER_WEEK`` judged reviews in the newest COMPLETE
+calendar week -- counting a combo with no bucket at all as a breach.
+
+This is the judged-corpus floor alarm ``alpha-engine-config-I10169``
+deliverable 3 asks for, and it is deliberately ONE dimensionless stream
+rather than a per-combo alarm: CloudWatch alarms reject SEARCH expressions,
+so a per-combo floor would need one alarm per combo and would go silent on
+exactly the combos that stopped emitting.
+
+It is the detector for the failure it was written from. Measured
+2026-09-08: the weekly SF's scheduled Saturday firing FAILED on 2026-08-15
+and 2026-08-22, and every operator rerun that recovered it was launched
+with ``skip_eval_judge: true`` -- six of six on 08-15, three of three on
+08-22 -- so the executions that finally SUCCEEDED judged nothing at all.
+Zero eval artifacts exist for either date. Both weeks are empty for all 20
+combos, every combo kept reporting IN_CONTROL against a fortnight-old
+point, and nothing anywhere went red. On this metric each of those weeks
+reads 20 of 20."""
+
+COMBOS_DISCOVERED_METRIC_NAME = "agent_quality_score_control_combos_discovered"
+"""Dimensionless single-datapoint metric = the size of the combo matrix
+this run found. The denominator for every count above it: an unmeasurable
+count of 4 means something different against 20 combos than against 200,
+and expressing a threshold as a FRACTION of the matrix (which is what
+``alpha-engine-config-I10187`` wants once the corpus supports alarming on
+it) is impossible without the denominator being a metric of its own. The
+value was already computed and returned in the summary dict; only the
+emission was missing."""
+
 BREACH_COUNT_METRIC_NAME = "agent_quality_score_control_breach_count"
 """Dimensionless single-datapoint metric = number of combos currently
 OUT_OF_CONTROL (downward). The CloudWatch alarm fires on ``>= 1``.
@@ -330,11 +442,20 @@ class WeeklyObservation:
     ``reviews`` is the week's CloudWatch ``SampleCount`` — the number of
     judged reviews behind ``value``. It is not decoration: the limits are
     a function of it (alpha-engine-config-I10167).
+
+    ``sumsq`` is the week's ``Sum`` of ``agent_quality_score_sumsq`` -- the
+    sum of the SQUARED scores of the same reviews. With ``reviews`` and
+    ``value`` it is the sufficient statistic for the within-week review SD
+    (``within_week_sd``), which CloudWatch cannot report directly
+    (alpha-engine-config-I10186). ``None`` means the companion stream had
+    no bucket for this week, which is the normal state for every week
+    judged before that stream existed.
     """
 
     week_index: int
     value: float
     reviews: int
+    sumsq: float | None = None
 
 
 def _adjacent_pairs(
@@ -353,6 +474,137 @@ def _adjacent_pairs(
         for i in range(1, len(observations))
         if observations[i].week_index - observations[i - 1].week_index == 1
     ]
+
+
+REVIEW_SD_SOURCE_MEASURED = "measured"
+REVIEW_SD_SOURCE_FALLBACK = "fallback_global_constant"
+
+
+def within_week_sd(
+    observations: list[WeeklyObservation],
+    *,
+    min_reviews: int = 2,
+) -> float | None:
+    """sigma_w for ONE combo, measured from its own judged reviews.
+
+    Each week contributes its within-week sum of squared deviations,
+    recovered from the two statistics CloudWatch does report::
+
+        SS_i = Sum(sumsq)_i - n_i * mean_i^2          (n_i - 1 d.f.)
+        sigma_w^2 = sum_i SS_i / sum_i (n_i - 1)
+
+    i.e. the classic pooled within-group variance, with the combo's weeks
+    as the groups. Pooling across the combo's weeks rather than reporting
+    a separate sigma_w per week is deliberate: a 12-review week carries 11
+    degrees of freedom and a per-week estimate from it would be noisier
+    than the constant it replaces, while the quantity the chart actually
+    needs -- the spread of a single review's score for THIS agent, THIS
+    criterion, THIS judge -- has no reason to move week to week and every
+    reason to differ between combos. That is the axis the global constant
+    was wrong on (alpha-engine-config-I10186).
+
+    Returns ``None`` when no week carries the companion statistic (every
+    week judged before the ``agent_quality_score_sumsq`` stream existed) or
+    when no week has >= 2 reviews. The caller falls back to
+    ``REVIEW_SCORE_SD`` and RECORDS that it did -- a limit computed from an
+    assumed sigma and one computed from a measured sigma must never be
+    indistinguishable after the fact.
+    """
+    ss_total = 0.0
+    df_total = 0
+    for o in observations:
+        if o.sumsq is None or o.reviews < max(2, min_reviews):
+            continue
+        # Floating-point: Sum(sumsq) and n*mean^2 are nearly equal for a
+        # near-constant week, so the difference can land just below zero.
+        ss = max(0.0, o.sumsq - o.reviews * o.value ** 2)
+        ss_total += ss
+        df_total += o.reviews - 1
+    if df_total <= 0:
+        return None
+    return (ss_total / df_total) ** 0.5
+
+
+def resolve_review_sd(
+    observations: list[WeeklyObservation],
+    *,
+    fallback: float = REVIEW_SCORE_SD,
+) -> tuple[float, str]:
+    """``(sigma_w, source)`` for one combo — measured where the corpus
+    supports it, the global constant where it does not, and never silently
+    either way (alpha-engine-config-I10186 deliverable 3)."""
+    measured = within_week_sd(observations)
+    if measured is None or measured <= 0.0:
+        return fallback, REVIEW_SD_SOURCE_FALLBACK
+    return measured, REVIEW_SD_SOURCE_MEASURED
+
+
+def pooled_process_sigma(
+    estimates: list[tuple[float, int]],
+) -> float | None:
+    """The fleet-wide sigma_b, pooled in VARIANCE space across combos and
+    weighted by each combo's moving-range count
+    (alpha-engine-config-I10188 deliverable 2).
+
+    ``estimates`` is ``[(sigma_b_raw, n_moving_ranges), ...]``. Variance
+    space rather than sigma space because variances are what add: a
+    weighted mean of standard deviations is not the standard deviation of
+    anything. Weighting by ranges rather than by combo gives a combo with
+    a long series proportionally more say in the pool it is contributing
+    to, which is the same principle the shrinkage below applies in the
+    other direction.
+
+    Returns None when no combo has a range to contribute — there is then
+    nothing to pool toward, and ``shrink_process_sigma`` passes the raw
+    estimate through unchanged rather than inventing a prior.
+    """
+    num = 0.0
+    den = 0
+    for sigma_b, n_ranges in estimates:
+        if n_ranges <= 0:
+            continue
+        num += n_ranges * sigma_b ** 2
+        den += n_ranges
+    if den <= 0:
+        return None
+    return (num / den) ** 0.5
+
+
+def shrink_process_sigma(
+    sigma_b: float,
+    *,
+    n_ranges: int,
+    pooled: float | None,
+    prior_ranges: int = SHRINKAGE_PRIOR_RANGES,
+) -> float:
+    """Shrink one combo's sigma_b toward the pooled value, with weight set
+    by how many moving ranges that combo actually has
+    (alpha-engine-config-I10188 deliverable 2)::
+
+        w = m / (m + m0)
+        sigma_b_shrunk^2 = w * sigma_b^2 + (1 - w) * pooled^2
+
+    This is the standard hierarchical/empirical-Bayes shrinkage of a
+    variance estimate toward a group mean, and it is chosen over a floor
+    constant deliberately: a floor asserts a minimum that is true of
+    nothing, while this asserts that a combo with three moving ranges has
+    told us about half of what we know about its variation and its peers
+    have told us the rest. It self-retires — at 20 ranges the combo keeps
+    87% of its own estimate — so nothing has to be removed later.
+
+    ``pooled=None`` (nothing to pool toward) returns ``sigma_b`` unchanged
+    rather than fabricating a prior.
+    """
+    if pooled is None or n_ranges <= 0:
+        return sigma_b
+    w = n_ranges / (n_ranges + prior_ranges)
+    return (w * sigma_b ** 2 + (1.0 - w) * pooled ** 2) ** 0.5
+
+
+def moving_range_count(observations: list[WeeklyObservation]) -> int:
+    """How many adjacent-week moving ranges a series supports — the
+    degrees of freedom behind its sigma_b, and the shrinkage weight."""
+    return len(_adjacent_pairs(observations))
 
 
 def process_sigma(
@@ -502,7 +754,12 @@ class ControlBandResult:
     n_points: int                          # ADMITTED weekly observations
     center: float | None = None
     sigma: float | None = None             # sigma-hat of the LATEST week
-    sigma_b: float | None = None           # process sigma, sampling removed
+    sigma_b: float | None = None           # process sigma, SHRUNK (used)
+    sigma_b_raw: float | None = None       # this combo's own MR estimate
+    sigma_b_pooled: float | None = None    # the prior it was shrunk toward
+    moving_ranges: int = 0                 # d.o.f. behind sigma_b_raw
+    review_sd: float | None = None         # sigma_w actually used
+    review_sd_source: str | None = None    # measured | fallback_global_constant
     reviews_latest: int | None = None
     unmeasurable_weeks: int = 0            # weeks below MIN_REVIEWS_PER_WEEK
     missing_weeks: int = 0                 # calendar slots with no bucket
@@ -529,7 +786,9 @@ def evaluate_series(
     cusum_k: float = DEFAULT_CUSUM_K,
     cusum_h: float = DEFAULT_CUSUM_H,
     min_reviews: int = MIN_REVIEWS_PER_WEEK,
-    review_sd: float = REVIEW_SCORE_SD,
+    review_sd: float | None = None,
+    sigma_b_pooled: float | None = None,
+    shrinkage_prior_ranges: int = SHRINKAGE_PRIOR_RANGES,
     latest_complete_week: int | None = None,
     max_staleness_weeks: int = DEFAULT_MAX_STALENESS_WEEKS,
 ) -> ControlBandResult:
@@ -569,8 +828,30 @@ def evaluate_series(
     closed. When the newest admitted observation lags it by more than
     ``max_staleness_weeks``, the combo is ``STALE`` — the process has
     gone unmeasured, and that is never reported as in control.
+
+    ``review_sd`` (sigma_w) defaults to **None**, meaning "measure it from
+    this combo's own reviews and fall back to ``REVIEW_SCORE_SD`` only if
+    the corpus cannot" (``resolve_review_sd``,
+    ``alpha-engine-config-I10186``). Which of the two was used is reported
+    on ``review_sd_source`` and carried into the changelog entry, so a
+    breach is always attributable to a KNOWN sigma. Passing a float pins
+    it, which is what the tests do.
+
+    ``sigma_b_pooled`` is the fleet-wide process sigma this combo's own
+    estimate is shrunk toward, with weight set by its moving-range count
+    (``shrink_process_sigma``, ``alpha-engine-config-I10188``). None
+    disables shrinkage and reproduces the unpooled estimator exactly.
     """
     ordered = sorted(observations, key=lambda o: o.week_index)
+    # sigma_w is resolved over EVERY week the combo has, admitted or not:
+    # a thin week is a bad estimate of the week's MEAN, which is why it is
+    # excluded from the chart, but its reviews are perfectly good evidence
+    # about the spread of a single review, which is what sigma_w is.
+    if review_sd is None:
+        resolved_sd, sd_source = resolve_review_sd(ordered)
+    else:
+        resolved_sd, sd_source = review_sd, REVIEW_SD_SOURCE_MEASURED
+    review_sd = resolved_sd
     admitted = [o for o in ordered if o.reviews >= min_reviews]
     unmeasurable = len(ordered) - len(admitted)
     missing = (
@@ -590,6 +871,8 @@ def evaluate_series(
             reviews_latest=admitted[-1].reviews if admitted else None,
             unmeasurable_weeks=unmeasurable,
             missing_weeks=missing,
+            review_sd=resolved_sd,
+            review_sd_source=sd_source,
             reasons=reasons,
         )
 
@@ -636,7 +919,18 @@ def evaluate_series(
     latest_obs = admitted[-1]
     latest = latest_obs.value
     center = sum(o.value for o in baseline) / len(baseline)
-    sigma_b = process_sigma(baseline, review_sd=review_sd)
+    sigma_b_raw = process_sigma(baseline, review_sd=review_sd)
+    n_ranges = moving_range_count(baseline)
+    # alpha-engine-config-I10188 d2: three moving ranges is not enough to
+    # establish that a combo's weekly score never moves, and floor-fitting
+    # it at 0.000 (7 of 20 combos, measured 2026-09-08) hands those combos
+    # limits set entirely by the sampling term. Shrink toward the pool.
+    sigma_b = shrink_process_sigma(
+        sigma_b_raw,
+        n_ranges=n_ranges,
+        pooled=sigma_b_pooled,
+        prior_ranges=shrinkage_prior_ranges,
+    )
 
     if not _adjacent_pairs(baseline):
         # Every baseline week is isolated by a gap, so no moving range
@@ -647,6 +941,11 @@ def evaluate_series(
             n_points=n,
             center=center,
             sigma_b=None,
+            sigma_b_raw=None,
+            sigma_b_pooled=sigma_b_pooled,
+            moving_ranges=0,
+            review_sd=resolved_sd,
+            review_sd_source=sd_source,
             latest=latest,
             reviews_latest=latest_obs.reviews,
             unmeasurable_weeks=unmeasurable,
@@ -732,6 +1031,19 @@ def evaluate_series(
         reasons.append(
             f"cusum_high (observability): C+ {cusum.c_plus:.2f} > h {cusum_h:.1f}"
         )
+    if shewhart_low or cusum_low:
+        # A breach must be attributable to a KNOWN sigma
+        # (alpha-engine-config-I10186 deliverable 3): the same series
+        # under a measured sigma_w and under the global constant produce
+        # different limits, and after the fact the two are otherwise
+        # indistinguishable.
+        reasons.append(
+            f"sigma_provenance: sigma_w {resolved_sd:.3f} "
+            f"({sd_source}); sigma_b {sigma_b:.3f} shrunk from own "
+            f"{sigma_b_raw:.3f} on {n_ranges} moving range(s) toward "
+            f"pooled "
+            f"{'n/a' if sigma_b_pooled is None else format(sigma_b_pooled, '.3f')}"
+        )
     if unmeasurable or missing:
         reasons.append(
             f"weeks_not_observed: {unmeasurable} below min_reviews "
@@ -746,6 +1058,11 @@ def evaluate_series(
         center=center,
         sigma=sigma,
         sigma_b=sigma_b,
+        sigma_b_raw=sigma_b_raw,
+        sigma_b_pooled=sigma_b_pooled,
+        moving_ranges=n_ranges,
+        review_sd=resolved_sd,
+        review_sd_source=sd_source,
         reviews_latest=latest_obs.reviews,
         unmeasurable_weeks=unmeasurable,
         missing_weeks=missing,
@@ -827,6 +1144,17 @@ def _weekly_series_by_combo(
             counts_result.get("Values", []),
             strict=True,
         ))
+        # Third half of the query triple: Sum of the squared-score
+        # companion stream, from which sigma_w is measured per combo
+        # (alpha-engine-config-I10186). Absent for every week judged
+        # before that stream existed, which is why it is Optional all the
+        # way down rather than defaulted to a number.
+        sumsq_result = by_id.get(f"s{idx}", {})
+        sumsqs = dict(zip(
+            sumsq_result.get("Timestamps", []),
+            sumsq_result.get("Values", []),
+            strict=True,
+        ))
         pairs = list(zip(result.get("Timestamps", []), result.get("Values", []), strict=True))
         # Drop the bucket still accumulating: its window end is in the
         # future relative to this run, so its Average is partial.
@@ -842,6 +1170,7 @@ def _weekly_series_by_combo(
                 week_index=_week_index(t),
                 value=float(v),
                 reviews=int(counts.get(t, 0)),
+                sumsq=(None if t not in sumsqs else float(sumsqs[t])),
             )
             for t, v in pairs
         ]
@@ -856,6 +1185,7 @@ def compute_and_emit_control_bands(
     end_time: datetime | None = None,
     namespace: str = DEFAULT_NAMESPACE,
     source_metric: str = SOURCE_METRIC_NAME,
+    sumsq_metric: str = SOURCE_SUMSQ_METRIC_NAME,
     min_history: int = DEFAULT_MIN_HISTORY,
     reset_before: datetime | None = None,
     cloudwatch_client: Any | None = None,
@@ -901,6 +1231,11 @@ def compute_and_emit_control_bands(
         namespace=namespace,
         metric_name=source_metric,
         period_seconds=_WEEK_SECONDS,  # one bucket per weekly run
+        # The third query per combo (alpha-engine-config-I10186). 3 x 20 =
+        # 60 against the 500-query chunk `_get_metric_data_all` applies —
+        # the cap binds at 166 combos, and the constraint is recorded on
+        # `_build_metric_data_queries` rather than only here.
+        sumsq_metric_name=sumsq_metric,
     )
     metric_data_results = _get_metric_data_all(cw, queries, start, end)
     series_by_combo = _weekly_series_by_combo(
@@ -918,6 +1253,93 @@ def compute_and_emit_control_bands(
     failed: list[dict[str, str]] = []
 
     latest_week = latest_complete_week_index(end)
+
+    # ── Pass 1: each combo's OWN sigma_b, to build the pool ───────────
+    # alpha-engine-config-I10188 d2. Two passes over 20 combos, zero extra
+    # CloudWatch calls, and the admission/baseline-split logic is not
+    # duplicated — the alternative was a second implementation of
+    # `evaluate_series`' front half, which would drift.
+    prior_estimates: list[tuple[float, int]] = []
+    for idx in range(len(combos)):
+        try:
+            unpooled = evaluate_series(
+                series_by_combo.get(idx, []),
+                min_history=min_history,
+                latest_complete_week=latest_week,
+                sigma_b_pooled=None,
+            )
+        except Exception as exc:  # noqa: BLE001, S112
+            # Logged, not swallowed: pass 2 re-raises the same failure for
+            # this combo and records it on `failed`, which is the surface
+            # the summary reports. Contributing nothing to the pool is the
+            # correct behaviour — an estimate that could not be computed is
+            # not evidence about the fleet's process variation.
+            logger.warning(
+                "[control_bands] combo %d contributed no sigma_b to the "
+                "pool (%s: %s)", idx, type(exc).__name__, exc,
+            )
+            continue
+        if unpooled.sigma_b_raw is not None and unpooled.moving_ranges > 0:
+            prior_estimates.append(
+                (unpooled.sigma_b_raw, unpooled.moving_ranges)
+            )
+    sigma_b_pooled_measured = pooled_process_sigma(prior_estimates)
+    # Measured every run; APPLIED only when the flag says so. See
+    # POOLED_SIGMA_B_ENABLED for the stop signal that keeps it off.
+    sigma_b_pooled = (
+        sigma_b_pooled_measured if POOLED_SIGMA_B_ENABLED else None
+    )
+    logger.info(
+        "[control_bands] pooled sigma_b=%s from %d combo(s) / %d moving "
+        "range(s) — shrinkage prior %d ranges "
+        "(alpha-engine-config-I10188)",
+        "n/a" if sigma_b_pooled_measured is None
+        else f"{sigma_b_pooled_measured:.4f}",
+        len(prior_estimates), sum(m for _, m in prior_estimates),
+        SHRINKAGE_PRIOR_RANGES,
+    )
+    if not POOLED_SIGMA_B_ENABLED:
+        logger.info(
+            "[control_bands] pooled sigma_b is MEASURED but NOT APPLIED "
+            "(POOLED_SIGMA_B_ENABLED=False) — applying it retires "
+            "thinktank_theme/grounding_in_inputs/claude-haiku-4-5, the "
+            "only downward breach this corpus carries "
+            "(alpha-engine-config-I10188)"
+        )
+
+    # ── The judged-corpus floor (alpha-engine-config-I10169) ──────────
+    # Counted from the SERIES, not from a chart verdict: a combo whose
+    # newest complete week has no bucket at all must count as a breach,
+    # and a chart status cannot express that (it reports STALE or
+    # INSUFFICIENT_HISTORY, which are statements about the chart, not
+    # about the corpus).
+    review_floor_breaches: list[str] = []
+    for idx, dims in enumerate(combos):
+        latest_obs = next(
+            (
+                o for o in series_by_combo.get(idx, [])
+                if o.week_index == latest_week
+            ),
+            None,
+        )
+        if latest_obs is None or latest_obs.reviews < MIN_REVIEWS_PER_WEEK:
+            flat = _dims_to_dict(dims)
+            review_floor_breaches.append(
+                f"{flat.get('judged_agent_id')}/{flat.get('criterion')}/"
+                f"{flat.get('judge_model')}="
+                f"{0 if latest_obs is None else latest_obs.reviews}"
+            )
+    if review_floor_breaches:
+        logger.error(
+            "[control_bands] judged-corpus floor: %d of %d combo(s) had "
+            "fewer than %d reviews in the newest complete week (slot %d): "
+            "%s — the judged corpus, not the chart, is the thing that is "
+            "wrong (alpha-engine-config-I10169)",
+            len(review_floor_breaches), len(combos), MIN_REVIEWS_PER_WEEK,
+            latest_week, review_floor_breaches[:20],
+        )
+
+    # ── Pass 2: the verdicts, against the pooled prior ────────────────
     for idx, dims in enumerate(combos):
         series = series_by_combo.get(idx, [])
         try:
@@ -925,6 +1347,7 @@ def compute_and_emit_control_bands(
                 series,
                 min_history=min_history,
                 latest_complete_week=latest_week,
+                sigma_b_pooled=sigma_b_pooled,
             )
         except Exception as exc:  # noqa: BLE001 — isolate one combo's failure
             failed.append({
@@ -996,6 +1419,20 @@ def compute_and_emit_control_bands(
                 "Unit": "None",
                 "Timestamp": end,
             },
+            # The judged-corpus floor and the denominator every count
+            # above is read against (alpha-engine-config-I10169, I10187).
+            {
+                "MetricName": REVIEW_FLOOR_BREACH_METRIC_NAME,
+                "Value": float(len(review_floor_breaches)),
+                "Unit": "None",
+                "Timestamp": end,
+            },
+            {
+                "MetricName": COMBOS_DISCOVERED_METRIC_NAME,
+                "Value": float(len(combos)),
+                "Unit": "None",
+                "Timestamp": end,
+            },
         ],
     )
 
@@ -1019,6 +1456,10 @@ def compute_and_emit_control_bands(
         "breaches": breaches,
         "breach_emits": breach_emits,
         "zscores_emitted": len(zscore_data),
+        "review_floor_breach_count": len(review_floor_breaches),
+        "review_floor_breaches": review_floor_breaches,
+        "sigma_b_pooled": sigma_b_pooled_measured,
+        "sigma_b_pooled_applied": POOLED_SIGMA_B_ENABLED,
         "failed": failed,
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
@@ -1031,10 +1472,16 @@ def _empty_summary(start: datetime, end: datetime) -> dict[str, Any]:
         "combos_in_control": 0,
         "combos_insufficient_history": 0,
         "combos_insufficient_variance": 0,
+        "combos_stale": 0,
+        "combos_unmeasurable": 0,
         "breach_count": 0,
         "breaches": [],
         "breach_emits": [],
         "zscores_emitted": 0,
+        "review_floor_breach_count": 0,
+        "review_floor_breaches": [],
+        "sigma_b_pooled": None,
+        "sigma_b_pooled_applied": POOLED_SIGMA_B_ENABLED,
         "failed": [],
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
@@ -1087,7 +1534,11 @@ def _emit_control_breach_entry(
             f"Latest weekly mean: {result.latest} "
             f"(n={result.reviews_latest} reviews)\n"
             f"Center: {result.center}  sigma: {result.sigma} "
-            f"(process sigma_b {result.sigma_b})\n"
+            f"(process sigma_b {result.sigma_b}, own estimate "
+            f"{result.sigma_b_raw} on {result.moving_ranges} moving "
+            f"range(s), pooled prior {result.sigma_b_pooled})\n"
+            f"sigma_w (per-review SD): {result.review_sd} "
+            f"[{result.review_sd_source}]\n"
             f"LCL: {result.lcl}  UCL: {result.ucl}\n"
             f"Latest z: {result.latest_z}\n"
             f"CUSUM C-: {result.cusum_c_minus}  C+: {result.cusum_c_plus}\n"
@@ -1138,6 +1589,11 @@ def _emit_control_breach_entry(
                 "center": result.center,
                 "sigma": result.sigma,
                 "sigma_b": result.sigma_b,
+                "sigma_b_raw": result.sigma_b_raw,
+                "sigma_b_pooled": result.sigma_b_pooled,
+                "moving_ranges": result.moving_ranges,
+                "review_sd": result.review_sd,
+                "review_sd_source": result.review_sd_source,
                 "reviews_latest": result.reviews_latest,
                 "unmeasurable_weeks": result.unmeasurable_weeks,
                 "missing_weeks": result.missing_weeks,
