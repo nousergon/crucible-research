@@ -92,7 +92,9 @@ def _ensure_init() -> None:
     _init_done = True
 
 
-def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None:
+def _attach_stage_coverage(
+    result: dict, *, event: dict, run_date: str, window_start,
+) -> None:
     """Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
     §2.3a rescope): the assertion lives in the stage's own handler,
     immediately before it returns, rather than a separate end-of-run SF
@@ -107,13 +109,48 @@ def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None
     never reassigned by this handler. Both call sites already guard against
     a missing/blank ``date_str`` before reaching here (the handler returns
     ERROR early), so this never fabricates a substitute.
+
+    alpha-engine-config-I10171: routed through the shared resolver anyway.
+    This stage's Payload already threads ``date.$: "$.run_date"`` so it was
+    never a partition-split writer, but the preference is now STATED here
+    rather than inferred from a Payload in another repo.
     """
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    resolved, provenance = resolve_stage_run_date(
+        event, stage="AggregateCosts",
+        # `AggregateCosts`'s SF Payload is `date.$: "$.run_date"` — the same
+        # cycle trading day under another name, PREFERRED rather than a
+        # fallback (alpha-engine-config-I10171).
+        preferred_fields=("run_date", "date"),
+        fallback=run_date, fallback_source="date_str (handler local)",
+        logger=logger,
+    )
+    if not resolved:
+        # alpha-engine-config-I8155: never fabricate a date. Unreachable
+        # today (both call sites guard first) — kept as the contract boundary.
+        logger.error(
+            "[aggregate_costs_handler] stage-coverage assertion SKIPPED for "
+            "AggregateCosts: no execution run_date on this event",
+        )
+        result["stage_coverage"] = {
+            "stage": "AggregateCosts",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+            **provenance,
+        }
+        return
     try:
         from krepis.stage_coverage import assert_stage_coverage
 
-        result["stage_coverage"] = assert_stage_coverage(
-            "AggregateCosts", run_date=run_date, window_start=window_start,
-        )
+        result["stage_coverage"] = {
+            **assert_stage_coverage(
+                "AggregateCosts", run_date=resolved, window_start=window_start,
+            ),
+            # alpha-engine-config-I10171: which field the partition key came
+            # from travels WITH the verdict, into the SF execution history.
+            **provenance,
+        }
     except ImportError as exc:
         # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
         # the handler's own outcome is unchanged (config-I7214).
@@ -122,6 +159,7 @@ def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None
             "stage": "AggregateCosts",
             "status": "UNMEASURED",
             "reason": f"assertion unavailable: {exc}",
+            **provenance,
         }
     except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
         # alpha-engine-config-I8155: the krepis landing this arc makes
@@ -136,6 +174,7 @@ def _attach_stage_coverage(result: dict, *, run_date: str, window_start) -> None
             "stage": "AggregateCosts",
             "status": "UNMEASURED",
             "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            **provenance,
         }
 
 
@@ -306,7 +345,14 @@ def _run(event, context):
         # carry the capture verdict (config-I7407 deliverable 4). Raising
         # here reaches the SF's States.ALL Catch.
         _publish_capture_freshness(s3_client, bucket, target_date, skipped_result)
-        _attach_stage_coverage(skipped_result, run_date=date_str, window_start=_started)
+        _attach_stage_coverage(
+            skipped_result, event=event, run_date=date_str, window_start=_started,
+        )
+        # alpha-engine-config-I10198: the legitimate SKIPPED no-op is a real
+        # completion, so it is held to §2.3b like the OK path.
+        from stage_substatus import enforce_worst_substatus
+
+        enforce_worst_substatus(skipped_result, stage="AggregateCosts", logger=logger)
         return skipped_result
 
     logger.info(
@@ -338,7 +384,16 @@ def _run(event, context):
 
     result = {"status": "OK", "summary": summary, "date": date_str}
     _publish_capture_freshness(s3_client, bucket, target_date, result)
-    _attach_stage_coverage(result, run_date=date_str, window_start=_started)
+    _attach_stage_coverage(result, event=event, run_date=date_str, window_start=_started)
+    # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b: this stage's
+    # status is no better than the worst of its own sub-results.
+    # Structural, not a list of sub-result names — a hand-kept list is
+    # how the 2026-08-15 `agent_quality` failure rode out under
+    # `status: "OK"` for two weeks. A no-op on a payload whose
+    # sub-results all passed.
+    from stage_substatus import enforce_worst_substatus
+
+    enforce_worst_substatus(result, stage="AggregateCosts", logger=logger)
     return result
 
 

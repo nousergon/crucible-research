@@ -227,7 +227,12 @@ class TestScannerCoverage:
         ):
             result = scanner_mod.handler({"run_date": "2026-05-30"}, context=None)
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
         stub_stage_coverage.assert_called_once()
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "Scanner"
@@ -313,7 +318,12 @@ class TestScannerLeaderboardCoverage:
                 {"run_date": "2026-05-30", "mode": "scanner_leaderboard"}, context=None
             )
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
         stub_stage_coverage.assert_called_once()
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "ScannerLeaderboard"
@@ -381,7 +391,12 @@ class TestSignalsEnvelopeCoverage:
         ):
             result = signals_envelope_mod.handler({"run_date": "2026-07-14"}, context=None)
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "SignalsEnvelope"
         assert kwargs["run_date"] == "2026-07-14"
@@ -457,7 +472,12 @@ class TestChallengerShadowCoverage:
         ):
             result = runner_mod._run_challengers_only({"mode": "challengers_only", "date": "2026-05-30"})
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "ChallengerShadow"
         # alpha-engine-config-I8155: the execution's own un-normalized
@@ -520,10 +540,35 @@ class TestEvalJudgeSubmitCoverage:
     def test_force_sonnet_pass_true_files_under_first_saturday(self, submit_mod, stub_stage_coverage):
         result = self._invoke(submit_mod, {"date": "2026-05-16", "force_sonnet_pass": True})
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: this event carries NO run_date — the
+        # pre-fix live Payload — so the handler is on the recorded
+        # FALLBACK path. Recorded, never silent: the source and the
+        # reason both ride out with the verdict.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"] == "fallback:event.date ($.eval_cadence.eval_date, a CALENDAR date)"
+        assert result["stage_coverage"]["run_date_fallback_reason"]
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "EvalJudgeSubmitFirstSaturday"
         assert kwargs["run_date"] == "2026-05-16"
+
+    def test_the_sf_threaded_run_date_beats_the_calendar_eval_date(
+        self, submit_mod, stub_stage_coverage,
+    ):
+        """alpha-engine-config-I10171, the defect in one test.
+        `$.eval_cadence.eval_date` is the date part of
+        `$$.Execution.StartTime` — the CALENDAR date. On the Saturday
+        2026-09-05 cycle for trading day 2026-09-04, keying on it wrote the
+        verdict to `_stage_coverage/2026-09-05/`, a partition the reader
+        stopped consulting that same day. `run_date` must win."""
+        result = self._invoke(submit_mod, {
+            "date": "2026-09-05", "run_date": "2026-09-04",
+            "force_sonnet_pass": True,
+        })
+        assert result["status"] == "OK"
+        _, kwargs = stub_stage_coverage.call_args
+        assert kwargs["run_date"] == "2026-09-04"
+        assert result["stage_coverage"]["run_date_source"] == "event.run_date"
+        assert "run_date_fallback_reason" not in result["stage_coverage"]
 
     def test_force_sonnet_pass_false_files_under_weekly(self, submit_mod, stub_stage_coverage):
         result = self._invoke(submit_mod, {"date": "2026-05-16", "force_sonnet_pass": False})
@@ -570,7 +615,11 @@ class TestEvalJudgeProcessCoverage:
         assert args[0] == "EvalJudgeProcess"
         assert kwargs["run_date"] == "2026-05-16"
         assert kwargs["window_start"] == started
-        assert result is stub_stage_coverage.return_value
+        # alpha-engine-config-I10171: the returned verdict is the lib's dict
+        # MERGED with the partition key's provenance — no longer the stub
+        # object by identity, but a superset of it by value.
+        assert result.items() >= stub_stage_coverage.return_value.items()
+        assert result["run_date_source"] == "event.run_date"
 
     def test_missing_lib_module_does_not_change_outcome(self, absent_stage_coverage):
         """Observe mode: an absent krepis.stage_coverage degrades to
@@ -616,19 +665,62 @@ class TestEvalRollingMeanCoverage:
         with (
             patch.object(rolling_mean_mod, "_ensure_init"),
             patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_rolling_mean_summary()),
-            patch("evals.calibration_kappa.emit_calibration_report", side_effect=RuntimeError("stubbed out")),
-            patch("scripts.build_agent_quality.build_agent_quality", side_effect=RuntimeError("stubbed out")),
-            patch("scoring.leaderboard_producers.build_producer_leaderboard", side_effect=RuntimeError("stubbed out")),
+            # alpha-engine-config-I10198: these were `side_effect=RuntimeError`
+            # — the handler swallowed them into ERROR sub-results under a
+            # `status: "OK"` payload, which is now a stage failure. These are
+            # COVERAGE tests; a side path must be stubbed out CLEANLY here, or
+            # every one of them asserts against a degraded stage.
+            patch(
+                "evals.calibration_kappa.emit_calibration_report",
+                return_value={
+                    "status": "OK", "n_cells": 0, "n_cells_sufficient": 0,
+                    "n_paired_reviews": 0,
+                },
+            ),
+            patch("scripts.build_agent_quality.build_agent_quality", return_value={"status": "ok"}),
+            patch("scripts.build_agent_quality.write_agent_quality", return_value="k"),
+            patch(
+                "scoring.leaderboard_producers.build_producer_leaderboard",
+                return_value={"status": "ok", "key": None, "leaderboard": {"n_dates": 0}},
+            ),
+            patch(
+                "evals.control_bands.compute_and_emit_control_bands",
+                return_value={
+                    "failed": [], "combos_discovered": 0,
+                    "combos_insufficient_history": 0, "breach_count": 0,
+                    "breach_emits": [],
+                },
+            ),
         ):
             return rolling_mean_mod.handler(event, context=None)
 
     def test_verdict_lands_with_run_date_from_end_time(self, rolling_mean_mod, stub_stage_coverage):
         result = self._invoke(rolling_mean_mod, {"end_time_iso": "2026-06-06T00:00:00Z"})
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: this event carries NO run_date — the
+        # pre-fix live Payload — so the handler is on the recorded
+        # FALLBACK path. Recorded, never silent: the source and the
+        # reason both ride out with the verdict.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"] == "fallback:event.end_time_iso"
+        assert result["stage_coverage"]["run_date_fallback_reason"]
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "EvalRollingMean"
         assert kwargs["run_date"] == "2026-06-06"
+
+    def test_the_sf_threaded_run_date_beats_the_execution_start_time(
+        self, rolling_mean_mod, stub_stage_coverage,
+    ):
+        """alpha-engine-config-I10171. `end_time_iso` is
+        `$$.Execution.StartTime` — the CALENDAR date, one day off the
+        trading day on every Saturday cycle."""
+        result = self._invoke(rolling_mean_mod, {
+            "end_time_iso": "2026-09-05T06:00:00Z", "run_date": "2026-09-04",
+        })
+        assert result["status"] == "OK"
+        _, kwargs = stub_stage_coverage.call_args
+        assert kwargs["run_date"] == "2026-09-04"
+        assert result["stage_coverage"]["run_date_source"] == "event.run_date"
 
     def test_missing_lib_module_does_not_change_outcome(self, rolling_mean_mod, absent_stage_coverage):
         result = self._invoke(rolling_mean_mod, {"end_time_iso": "2026-06-06T00:00:00Z"})
@@ -672,10 +764,33 @@ class TestRationaleClusteringCoverage:
         ):
             result = clustering_mod.handler({"end_time_iso": "2026-05-09T00:00:00Z"}, context=None)
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: this event carries NO run_date — the
+        # pre-fix live Payload — so the handler is on the recorded
+        # FALLBACK path. Recorded, never silent: the source and the
+        # reason both ride out with the verdict.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"] == "fallback:event.end_time_iso"
+        assert result["stage_coverage"]["run_date_fallback_reason"]
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "RationaleClustering"
         assert kwargs["run_date"] == "2026-05-09"
+
+    def test_the_sf_threaded_run_date_beats_the_execution_start_time(
+        self, clustering_mod, stub_stage_coverage,
+    ):
+        """alpha-engine-config-I10171 — same class as EvalRollingMean."""
+        with (
+            patch.object(clustering_mod, "_ensure_init"),
+            patch("evals.rationale_clustering.compute_and_emit", return_value=_clustering_summary()),
+        ):
+            result = clustering_mod.handler(
+                {"end_time_iso": "2026-09-05T06:00:00Z", "run_date": "2026-09-04"},
+                context=None,
+            )
+        assert result["status"] == "OK"
+        _, kwargs = stub_stage_coverage.call_args
+        assert kwargs["run_date"] == "2026-09-04"
+        assert result["stage_coverage"]["run_date_source"] == "event.run_date"
 
     def test_missing_lib_module_does_not_change_outcome(self, clustering_mod, absent_stage_coverage):
         with (
@@ -741,7 +856,12 @@ class TestAggregateCostsCoverage:
         ):
             result = aggregate_costs_mod.handler({"date": "2026-05-25"}, context=None)
         assert result["status"] == "OK"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
         args, kwargs = stub_stage_coverage.call_args
         assert args[0] == "AggregateCosts"
         assert kwargs["run_date"] == "2026-05-25"
@@ -756,7 +876,12 @@ class TestAggregateCostsCoverage:
         ):
             result = aggregate_costs_mod.handler({"date": "2026-05-25"}, context=None)
         assert result["status"] == "SKIPPED"
-        assert result["stage_coverage"] == {"status": "COVERED", "stage": "stub"}
+        # alpha-engine-config-I10171: the verdict now carries the
+        # provenance of its own partition key alongside the stub's
+        # fields. Asserted as a superset, plus an explicit check that
+        # the key came from an event field and not a local derivation.
+        assert result["stage_coverage"].items() >= {"status": "COVERED", "stage": "stub"}.items()
+        assert result["stage_coverage"]["run_date_source"].startswith("event.")
 
     def test_missing_lib_module_does_not_change_outcome(self, aggregate_costs_mod, absent_stage_coverage):
         with (

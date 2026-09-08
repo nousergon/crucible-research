@@ -130,17 +130,49 @@ def _stage_coverage(*, run_date: str, window_start) -> dict:
     than no observer. Every failure degrades to UNMEASURED **with a reason**,
     which is a value the console can render — not silence.
     """
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    # alpha-engine-config-I10171: the SF builds this argv as
+    # `--date {$.run_date}` (nousergon-data/infrastructure/step_function.json,
+    # `EvalJudgeProcess`), so `--date` already carries the cycle's TRADING
+    # day and this stage was never a partition-split writer. Presented to the
+    # shared resolver as `{"run_date": ...}` so this substrate is held to the
+    # same STATED preference as every Lambda-backed stage — an operator run
+    # given a calendar date is recorded, not silently filed one partition
+    # over.
+    resolved, provenance = resolve_stage_run_date(
+        {"run_date": run_date}, stage="EvalJudgeProcess", logger=logger,
+    )
+    if not resolved:
+        # alpha-engine-config-I8155: never fabricate a date.
+        logger.error(
+            "[judge_spot_run] stage-coverage assertion SKIPPED for "
+            "EvalJudgeProcess: no run_date on this invocation",
+        )
+        return {
+            "stage": "EvalJudgeProcess",
+            "status": "UNMEASURED",
+            "reason": "run_date absent from this invocation",
+            **provenance,
+        }
     try:
         from krepis.stage_coverage import assert_stage_coverage
 
-        return assert_stage_coverage(
-            "EvalJudgeProcess", run_date=run_date, window_start=window_start,
-        )
+        return {
+            **assert_stage_coverage(
+                "EvalJudgeProcess", run_date=resolved,
+                window_start=window_start,
+            ),
+            # alpha-engine-config-I10171: which field the partition key came
+            # from travels WITH the verdict, into the run record.
+            **provenance,
+        }
     except ImportError as exc:
         logger.error("[judge_spot_run] stage-coverage assertion unavailable: %s", exc)
         return {
             "stage": "EvalJudgeProcess",
             "status": "UNMEASURED",
+            **provenance,
             "reason": f"assertion unavailable: {exc}",
         }
     except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
@@ -151,6 +183,7 @@ def _stage_coverage(*, run_date: str, window_start) -> dict:
         return {
             "stage": "EvalJudgeProcess",
             "status": "UNMEASURED",
+            **provenance,
             "reason": f"assertion raised: {type(exc).__name__}: {exc}",
         }
 

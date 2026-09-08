@@ -30,6 +30,8 @@ on:
       - 'retry.py'
       - 'scoring/**'
       - 'scripts/**'
+      - 'stage_coverage_run_date.py'
+      - 'stage_substatus.py'
       - 'strict_mode.py'
       - 'thesis/**'
       - 'thinktank/**'

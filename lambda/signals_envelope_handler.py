@@ -219,12 +219,20 @@ def _run(event, context):
     from nousergon_lib.dates import resolve_trading_day
 
     calendar_date = run_date[:10]
-    # alpha-engine-config-I8155: `calendar_date` is the SF execution's own
-    # run_date, un-normalized, and is never reassigned below — that is what
-    # stage_coverage groups a run's verdicts by (the ONLY key one execution's
-    # verdicts share). Alias it explicitly so the intent survives a future
-    # edit near this normalization block.
-    execution_run_date = calendar_date
+    # alpha-engine-config-I8155 / I10171: `calendar_date` is the SF-threaded
+    # `$.run_date` verbatim — the cycle's TRADING day, un-normalized here and
+    # never reassigned below. That is what stage_coverage groups a run's
+    # verdicts by (the ONLY key one execution's verdicts share), and it is
+    # why this stage's verdicts landed in the correct `_stage_coverage/
+    # 2026-09-04/` partition while the five I10171 writers did not.
+    # Routed through the shared resolver so the preference is STATED here
+    # rather than inferred from a Payload in another repo.
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    execution_run_date, _run_date_provenance = resolve_stage_run_date(
+        event, stage="SignalsEnvelope", fallback=calendar_date,
+        fallback_source="run_date local (pre-normalization)", logger=logger,
+    )
     run_date = resolve_trading_day(calendar_date)
     if run_date != calendar_date:
         logger.info(
@@ -509,16 +517,22 @@ def _run(event, context):
             "stage": "SignalsEnvelope",
             "status": "UNMEASURED",
             "reason": "execution run_date absent from event",
+            **_run_date_provenance,
         }
     else:
         try:
             from krepis.stage_coverage import assert_stage_coverage
 
-            result["stage_coverage"] = assert_stage_coverage(
-                "SignalsEnvelope",
-                run_date=execution_run_date,
-                window_start=_started,
-            )
+            result["stage_coverage"] = {
+                **assert_stage_coverage(
+                    "SignalsEnvelope",
+                    run_date=execution_run_date,
+                    window_start=_started,
+                ),
+                # alpha-engine-config-I10171: which field the partition key
+                # came from travels WITH the verdict.
+                **_run_date_provenance,
+            }
         except ImportError as exc:
             # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
             # the handler's own outcome is unchanged (config-I7214).
@@ -527,6 +541,7 @@ def _run(event, context):
                 "stage": "SignalsEnvelope",
                 "status": "UNMEASURED",
                 "reason": f"assertion unavailable: {exc}",
+                **_run_date_provenance,
             }
         except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
             # alpha-engine-config-I8155: the krepis landing this arc makes
@@ -544,6 +559,17 @@ def _run(event, context):
                 "stage": "SignalsEnvelope",
                 "status": "UNMEASURED",
                 "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+                **_run_date_provenance,
             }
+
+    # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b: this stage's
+    # status is no better than the worst of its own sub-results.
+    # Structural, not a list of sub-result names — a hand-kept list is
+    # how the 2026-08-15 `agent_quality` failure rode out under
+    # `status: "OK"` for two weeks. A no-op on a payload whose
+    # sub-results all passed.
+    from stage_substatus import enforce_worst_substatus
+
+    enforce_worst_substatus(result, stage="SignalsEnvelope", logger=logger)
 
     return result

@@ -145,15 +145,22 @@ def _run(event, context):
     )
 
     bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
-    # alpha-engine-config-I8155: `$.eval_cadence.eval_date` (delivered here as
-    # `date`) is States.ArrayGetItem(States.StringSplit($$.Execution.StartTime,
-    # 'T'), 0) — the date part of the SF execution's own start time, computed
-    # independently of (but identical in value to) $.run_date. Captured here,
-    # BEFORE the business-logic fallback below, so stage_coverage never
-    # receives a fabricated `datetime.date.today()` substitute — that
-    # fallback exists for `build_batch_plan`'s own needs, not for coverage
-    # attribution.
-    execution_run_date = event.get("date") or None
+    # alpha-engine-config-I10171 — CORRECTION to the I8155 comment that stood
+    # here. `$.eval_cadence.eval_date` is
+    # States.ArrayGetItem(States.StringSplit($$.Execution.StartTime, 'T'), 0)
+    # — the date part of the execution's start time, i.e. the CALENDAR date.
+    # It is NOT "identical in value to $.run_date": $.run_date is the cycle's
+    # TRADING day, and on a Saturday cycle they differ by a day. Keying the
+    # coverage verdict on this value wrote every one of them into
+    # `_stage_coverage/{calendar}/`, a partition no reader looks at once the
+    # dual-partition fallback expired on 2026-09-05.
+    #
+    # Captured here as the FALLBACK only; `event["run_date"]` is preferred by
+    # the resolver below. Still captured BEFORE the business-logic default so
+    # stage_coverage can never receive a fabricated `datetime.date.today()`
+    # substitute (alpha-engine-config-I8155) — that default exists for
+    # `build_batch_plan`'s own needs, not for coverage attribution.
+    _execution_run_date_fallback = event.get("date") or None
     date = event.get("date") or str(datetime.date.today())
 
     # ── Shell-run dry path ───────────────────────────────────────────
@@ -177,6 +184,20 @@ def _run(event, context):
     _stage_name = (
         "EvalJudgeSubmitFirstSaturday" if force_sonnet_pass
         else "EvalJudgeSubmitWeekly"
+    )
+    # alpha-engine-config-I10171: prefer the SF-threaded trading day; fall
+    # back to the calendar `date` above only off-cycle, and record it when
+    # we do. Resolved here rather than at first sight of `date` because the
+    # resolver's log line names the stage, and the stage is only knowable
+    # once `force_sonnet_pass` has been read.
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    execution_run_date, _run_date_provenance = resolve_stage_run_date(
+        event,
+        stage=_stage_name,
+        fallback=_execution_run_date_fallback,
+        fallback_source="event.date ($.eval_cadence.eval_date, a CALENDAR date)",
+        logger=logger,
     )
     haiku_model = event.get("haiku_model", DEFAULT_HAIKU_MODEL)
     sonnet_model = event.get("sonnet_model", DEFAULT_SONNET_MODEL)
@@ -343,14 +364,22 @@ def _run(event, context):
             "stage": _stage_name,
             "status": "UNMEASURED",
             "reason": "execution run_date absent from event",
+            **_run_date_provenance,
         }
     else:
         try:
             from krepis.stage_coverage import assert_stage_coverage
 
-            result["stage_coverage"] = assert_stage_coverage(
-                _stage_name, run_date=execution_run_date, window_start=_started,
-            )
+            result["stage_coverage"] = {
+                **assert_stage_coverage(
+                    _stage_name, run_date=execution_run_date,
+                    window_start=_started,
+                ),
+                # alpha-engine-config-I10171: which field the partition key
+                # came from travels WITH the verdict, into the SF execution
+                # history. A fallback nobody can see afterwards is the defect.
+                **_run_date_provenance,
+            }
         except ImportError as exc:
             # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe mode —
             # the handler's own outcome is unchanged (config-I7214).
@@ -359,6 +388,7 @@ def _run(event, context):
                 "stage": _stage_name,
                 "status": "UNMEASURED",
                 "reason": f"assertion unavailable: {exc}",
+                **_run_date_provenance,
             }
         except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
             # alpha-engine-config-I8155: the krepis landing this arc makes
@@ -375,6 +405,35 @@ def _run(event, context):
                 "stage": _stage_name,
                 "status": "UNMEASURED",
                 "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+                **_run_date_provenance,
             }
+
+    # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b, clause
+    # `SFP-2.3b-stage-status-is-the-worst-substatus` (nous-ergon-ops-PR1119).
+    # MEASURED on the 2026-08-15 and 2026-08-22 scheduled weekly runs: this
+    # handler returned `status: "OK"` over
+    # `agent_quality = {"status": "ERROR", "error": "'str' object has no
+    # attribute 'isoformat'"}`. Those are exactly the two weeks with no
+    # `AlphaEngine/Eval/agent_quality_score` datapoint at all, and the control
+    # bands kept reading IN_CONTROL against a fortnight-old point because a
+    # band over an empty window has no breach to find.
+    #
+    # Nothing was broken: every §2.3 mechanism — this state's `Catch`,
+    # `MarkEvalRollingMeanDegraded`, `$.research_degraded_local`, the
+    # completion marker's DEGRADED status — keys off the STAGE's status, and
+    # the stage said OK. Deriving the status structurally (not from a
+    # hand-listed set of sub-keys — that list is how this survived) and
+    # RAISING is what reaches the Catch: a returned `{"status": "ERROR"}` is
+    # a *successful* Task completion to Step Functions and routes nowhere.
+    # The crash itself was repaired at source by 2026-08-29; this is the
+    # swallow that hid it.
+
+    # Applied here for the CLASS: `submit_summary` carries counts and
+    # key lists, not status-bearing sub-results, so this is a no-op on
+    # every current payload. `EvalJudgeSubmit{FirstSaturday,Weekly}`'s
+    # Catch routes to `Extract*Error`, which is the non-halting path.
+    from stage_substatus import enforce_worst_substatus
+
+    enforce_worst_substatus(result, stage=_stage_name, logger=logger)
 
     return result

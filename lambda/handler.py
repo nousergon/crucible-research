@@ -181,6 +181,84 @@ def _resolve_self_test_date(event: dict) -> str:
     return str(resolve_trading_day(raw))
 
 
+def _assert_self_test_coverage(event: dict, window_start) -> dict:
+    """`ResearchSelfTest`'s stage-coverage self-assertion, OBSERVE MODE ONLY.
+
+    alpha-engine-config-I10194 §2. Returns a one-key dict to splat into the
+    handler's return value, so the caller reads as one expression and the
+    self-test branch keeps its single exit.
+
+    Never raises and never alters the stage's outcome: an observer that can
+    kill the stage it observes is worse than no observer. Every failure
+    degrades to UNMEASURED **with a reason** — a value the console can
+    render, not silence.
+    """
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    # `ResearchSelfTest`'s SF Payload is `date.$: "$.run_date"` — the cycle's
+    # trading day. Preferred through the shared resolver, with the raw event
+    # field as the named fallback for an off-cycle operator invocation
+    # (alpha-engine-config-I10171). Deliberately the RAW value, not
+    # `_resolve_self_test_date`'s normalized one: the verdict's partition key
+    # must be the key every other stage in the same execution files under,
+    # and normalizing here would re-split the partition this arc closed.
+    execution_run_date, provenance = resolve_stage_run_date(
+        event,
+        stage="ResearchSelfTest",
+        # `ResearchSelfTest`'s SF Payload is `date.$: "$.run_date"` — the same
+        # cycle trading day under another name, PREFERRED rather than a
+        # fallback (alpha-engine-config-I10171).
+        preferred_fields=("run_date", "date"),
+        logger=logger,
+    )
+    if not execution_run_date:
+        # alpha-engine-config-I8155: never fabricate a date to satisfy the
+        # (required) run_date argument.
+        logger.error(
+            "[self_test] stage-coverage assertion SKIPPED for "
+            "ResearchSelfTest: no execution run_date on this event",
+        )
+        return {"stage_coverage": {
+            "stage": "ResearchSelfTest",
+            "status": "UNMEASURED",
+            "reason": "execution run_date absent from event",
+            **provenance,
+        }}
+    try:
+        from krepis.stage_coverage import assert_stage_coverage
+
+        return {"stage_coverage": {
+            **assert_stage_coverage(
+                "ResearchSelfTest",
+                run_date=execution_run_date,
+                window_start=window_start,
+            ),
+            **provenance,
+        }}
+    except ImportError as exc:
+        # Loud, not silent: the krepis pin predating the module emits
+        # nothing, and "emitted nothing" is byte-identical on the console to
+        # "found nothing wrong" (config-I7334).
+        logger.error("stage-coverage assertion unavailable: %s", exc)
+        return {"stage_coverage": {
+            "stage": "ResearchSelfTest",
+            "status": "UNMEASURED",
+            "reason": f"assertion unavailable: {exc}",
+            **provenance,
+        }}
+    except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
+        logger.error(
+            "[self_test] stage-coverage assertion raised for "
+            "ResearchSelfTest: %s: %s", type(exc).__name__, exc,
+        )
+        return {"stage_coverage": {
+            "stage": "ResearchSelfTest",
+            "status": "UNMEASURED",
+            "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+            **provenance,
+        }}
+
+
 def _run_challengers_only(event: dict) -> dict:
     """Operator recovery mode (config#1683): re-emit the challenger producers'
     shadow cohort for the MOST RECENT weekly run without re-running the
@@ -247,12 +325,25 @@ def _run_challengers_only(event: dict) -> dict:
     if not calendar_date:
         raise ValueError("challengers_only requires event['date'] (YYYY-MM-DD)")
 
-    # alpha-engine-config-I8155: `calendar_date` is the SF execution's own
-    # run_date (delivered as `$.date` per the SF Payload for ChallengerShadow),
-    # un-normalized, and is never reassigned below — that is what
-    # stage_coverage groups a run's verdicts by (the ONLY key one execution's
-    # verdicts share).
-    execution_run_date = calendar_date
+    # alpha-engine-config-I8155 / I10171: `ChallengerShadow`'s SF Payload is
+    # `date.$: "$.run_date"`, so `calendar_date` already carries the cycle's
+    # TRADING day and this stage was never one of the partition-split
+    # writers. It goes through the shared resolver anyway: the preference is
+    # then STATED rather than inferred from a Payload in another repo, and a
+    # future Payload edit that dropped the field would be recorded as a
+    # fallback instead of silently re-splitting the partition.
+    from stage_coverage_run_date import resolve_stage_run_date
+
+    execution_run_date, _run_date_provenance = resolve_stage_run_date(
+        event,
+        stage="ChallengerShadow",
+        # `ChallengerShadow`'s SF Payload is `date.$: "$.run_date"` — the same
+        # cycle trading day under another name. Declared PREFERRED, not a
+        # fallback: a warning that fires on every healthy cycle is a detector
+        # nobody reads (alpha-engine-config-I10171).
+        preferred_fields=("run_date", "date"),
+        logger=logger,
+    )
 
     run_date = resolve_trading_day(calendar_date[:10])
     if run_date != calendar_date[:10]:
@@ -327,16 +418,22 @@ def _run_challengers_only(event: dict) -> dict:
                 "stage": "ChallengerShadow",
                 "status": "UNMEASURED",
                 "reason": "execution run_date absent from event",
+                **_run_date_provenance,
             }
         else:
             try:
                 from krepis.stage_coverage import assert_stage_coverage
 
-                result["stage_coverage"] = assert_stage_coverage(
-                    "ChallengerShadow",
-                    run_date=execution_run_date,
-                    window_start=_started,
-                )
+                result["stage_coverage"] = {
+                    **assert_stage_coverage(
+                        "ChallengerShadow",
+                        run_date=execution_run_date,
+                        window_start=_started,
+                    ),
+                    # alpha-engine-config-I10171: which field the partition
+                    # key came from travels WITH the verdict.
+                    **_run_date_provenance,
+                }
             except ImportError as exc:
                 # Loud, not silent: the krepis pin predates the module (krepis-PR148 not yet merged). Observe
                 # mode — the handler's own outcome is unchanged (config-I7214).
@@ -345,6 +442,7 @@ def _run_challengers_only(event: dict) -> dict:
                     "stage": "ChallengerShadow",
                     "status": "UNMEASURED",
                     "reason": f"assertion unavailable: {exc}",
+                    **_run_date_provenance,
                 }
             except Exception as exc:  # noqa: BLE001 — never let the observer kill the stage it observes
                 # alpha-engine-config-I8155: the krepis landing this arc
@@ -362,7 +460,18 @@ def _run_challengers_only(event: dict) -> dict:
                     "stage": "ChallengerShadow",
                     "status": "UNMEASURED",
                     "reason": f"assertion raised: {type(exc).__name__}: {exc}",
+                    **_run_date_provenance,
                 }
+
+        # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b: this stage's
+        # status is no better than the worst of its own sub-results.
+        # Structural, not a list of sub-result names — a hand-kept list is
+        # how the 2026-08-15 `agent_quality` failure rode out under
+        # `status: "OK"` for two weeks. A no-op on a payload whose
+        # sub-results all passed.
+        from stage_substatus import enforce_worst_substatus
+
+        enforce_worst_substatus(result, stage="ChallengerShadow", logger=logger)
 
         return result
     finally:
@@ -459,6 +568,10 @@ def _run(event, context):
     # `produced_by` — which is what the registry could not be given while this
     # was reachable only as a side effect of something else.
     if event.get("mode") == "self_test":
+        # Captured at entry to this branch, before `_maybe_emit_self_test`
+        # writes anything — an artifact older than this is a leftover from a
+        # previous cycle, not this run's output (config-I7214).
+        _self_test_started = datetime.datetime.now(datetime.UTC)
         run_date = _resolve_self_test_date(event)
         # `dry_run` mirrors the RunScope convention already used in this graph
         # (config-I7620): the Friday-PM shell run exercises the full path and
@@ -485,7 +598,18 @@ def _run(event, context):
         # carried in the artifact, the console row and the logs. The SF state is
         # non-blocking for the same reason — a verdict stage that dies must not
         # kill the stages that do not depend on it.
-        return {"status": "OK", "mode": "self_test", "date": run_date}
+        return {
+            "status": "OK", "mode": "self_test", "date": run_date,
+            # alpha-engine-config-I10194 §2 / I10172: `ResearchSelfTest` was
+            # the 7th NEVER-INSTRUMENTED stage. This branch returned here
+            # directly and never reached the `assert_stage_coverage` block in
+            # `_run_challengers_only` — so a declared, entered SF state
+            # recorded no verdict at all, which the sweep reads as `absent`:
+            # indistinguishable from a stage that never ran. A §2.3a
+            # CORRECTNESS verdict whose absence must never read as a pass had
+            # its own absence unreadable too.
+            **_assert_self_test_coverage(event, _self_test_started),
+        }
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)

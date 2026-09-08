@@ -60,7 +60,46 @@ def test_self_test_mode_reaches_the_emitter():
          patch.object(mod, "_resolve_self_test_date", return_value="2026-08-14"):
         out = mod._run({"mode": "self_test", "date": "2026-08-15"}, None)
     emit.assert_called_once_with(datetime.date(2026, 8, 14))
-    assert out == {"status": "OK", "mode": "self_test", "date": "2026-08-14"}
+    assert {k: out[k] for k in ("status", "mode", "date")} == {
+        "status": "OK", "mode": "self_test", "date": "2026-08-14",
+    }
+    # alpha-engine-config-I10194 §2: this branch returned directly and never
+    # reached the assertion block, so `ResearchSelfTest` — a declared,
+    # ENTERED SF state — recorded no coverage verdict at all and read as
+    # `absent`, indistinguishable from a stage that never ran. The verdict
+    # must ride out of this branch on every return, degraded-to-UNMEASURED
+    # included (krepis is absent in this test process, by design).
+    assert out["stage_coverage"]["stage"] == "ResearchSelfTest"
+    # The partition key is the RAW event date ($.run_date, the trading day),
+    # not `_resolve_self_test_date`'s normalized value — normalizing here
+    # would re-split the partition alpha-engine-config-I10171 closed.
+    assert out["stage_coverage"]["run_date_source"].endswith("event.date")
+
+
+def test_self_test_coverage_keys_on_the_sf_threaded_run_date():
+    """`event["run_date"]` wins over the calendar-ish `date` field
+    (alpha-engine-config-I10171)."""
+    mod = _import_handler()
+    captured = {}
+
+    def _capture(event, window_start):
+        from stage_coverage_run_date import resolve_stage_run_date
+        captured["run_date"], captured["prov"] = resolve_stage_run_date(
+            event, stage="ResearchSelfTest", fallback=event.get("date"),
+            fallback_source="event.date",
+        )
+        return {"stage_coverage": {"stage": "ResearchSelfTest"}}
+
+    with patch.object(mod, "_ensure_init"), \
+         patch.object(mod, "_maybe_emit_self_test"), \
+         patch.object(mod, "_resolve_self_test_date", return_value="2026-09-04"), \
+         patch.object(mod, "_assert_self_test_coverage", _capture):
+        mod._run(
+            {"mode": "self_test", "date": "2026-09-05", "run_date": "2026-09-04"},
+            None,
+        )
+    assert captured["run_date"] == "2026-09-04"
+    assert captured["prov"]["run_date_source"] == "event.run_date"
 
 
 def test_self_test_mode_returns_before_the_weekly_graph():

@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+from stage_substatus import StageSubResultError
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HANDLER_PATH = _REPO_ROOT / "lambda" / "eval_rolling_mean_handler.py"
 
@@ -202,17 +204,23 @@ class TestStageSurvivesASecondaryStall:
                 ),
                 patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
                 patch("scripts.build_agent_quality.build_agent_quality", side_effect=_stall),
+                pytest.raises(StageSubResultError) as excinfo,
             ):
-                result = handler_mod.handler({}, _FakeContext(600.0))
+                handler_mod.handler({}, _FakeContext(600.0))
             elapsed = time.monotonic() - started
         finally:
             released.set()
 
-        # The primary deliverable is intact and the stage is NOT degraded.
-        assert result["status"] == "OK"
-        assert result["summary"]["datapoints_emitted"] == 12
-        # The stalled block is recorded, not silently skipped.
-        assert result["agent_quality"]["status"] == "TIMEOUT"
+        # alpha-engine-config-I10198 / sf-pipeline-policy §2.3b: this used to
+        # assert `result["status"] == "OK"` — "the stage is NOT degraded". An
+        # abandoned block is WORK THIS CYCLE LOST, and a stage reporting a
+        # clean pass over it is the shape that cost two entire weeks of
+        # agent-quality scoring on 2026-08-15 and 2026-08-22. The bound is
+        # still doing its job (the elapsed assertion below is the regression
+        # this test exists for); what changes is that the loss now reaches
+        # `MarkEvalRollingMeanDegraded` instead of being a field nobody reads.
+        assert "agent_quality" in str(excinfo.value)
+        assert "TIMEOUT" in str(excinfo.value)
         assert [a["producer"] for a in alerts] == ["agent_quality"]
         # And the stage returned on its OWN budget, not the stall's.
         assert elapsed < _STALL_S / 2, (
