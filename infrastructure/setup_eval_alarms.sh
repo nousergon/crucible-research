@@ -119,8 +119,17 @@ aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regressi
 # Re-putting with changed configuration RESETS alarm state to
 # INSUFFICIENT_DATA, so this deploy also un-latches the 8.8-day ALARM and
 # lets the next evaluation produce a real transition.
+# alpha-engine-config-I10167 (Brian ruling 2026-09-08) - the SCALE the
+# breach is judged on changed: the charts now run on the raw weekly
+# `agent_quality_score` rather than its 4-week rolling mean. The alarm
+# THRESHOLD is unaffected (`>= 1` combo currently out of control means
+# the same thing on either scale), but the description is, because an
+# operator reading it has to know what series produced the breach.
+# Measured over the same 20 live combos, 2026-09-08: 3 combos out of
+# control on the old scale -> 1 on the new, and 14 combos with a latest
+# |z| > 3 -> 6, all six of them UPWARD (observability, never alarmed).
 echo "[setup_eval_alarms] put alpha-engine-eval-control-breach (${BREACH_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
+aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Charted on the RAW WEEKLY agent_quality_score, with limits scaled by the number of reviews behind each week (alpha-engine-config-I10167, Brian ruling 2026-09-08) - NOT the 4-week rolling mean, whose overlapping windows deflated sigma 2-5x and put 13 of 20 combos beyond 3 sigma. Combos the chart cannot judge are counted on agent_quality_score_control_unmeasurable_count, never folded into this zero. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
 
 # ── Control-band ABSENCE deadman (alpha-engine-config-I8118, I10166) ──────
 # SILENT, not breaching. `control_bands.py` emits the breach count on EVERY
