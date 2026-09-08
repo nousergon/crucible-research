@@ -270,7 +270,44 @@ def effective_capture_ceiling_date(anchor_date: str) -> str:
     return str(ceiling)
 
 
-def compute_judge_window_dates(anchor_date: str, lookback_days: int) -> list[str]:
+MAX_JUDGE_CATCHUP_TRADING_DAYS = 25
+"""Hard ceiling on how far back a catch-up window may reach (~5 weekly
+cycles). It bounds the corpus so a long outage cannot turn one run into an
+unbounded backfill; a gap deeper than this is an incident for a human, and
+``agent_quality_score_weekly_review_floor_breach_count`` says so on its own
+(alpha-engine-config-I10169)."""
+
+
+def latest_indexed_capture_date(
+    s3: Any, *, bucket: str, manifest_prefix: str = "decision_artifacts/_eval_by_capture/",
+) -> str | None:
+    """The newest capture date that has an ``_eval_by_capture`` manifest,
+    i.e. the newest date whose captures are known to have been judged.
+
+    One delimited LIST. Returns None when the index is empty — in which
+    case the caller keeps its fixed lookback rather than backfilling from
+    the beginning of time.
+    """
+    paginator = s3.get_paginator("list_objects_v2")
+    newest: str | None = None
+    for page in paginator.paginate(
+        Bucket=bucket, Prefix=manifest_prefix, Delimiter="/",
+    ):
+        for cp in page.get("CommonPrefixes", []) or []:
+            seg = cp["Prefix"][len(manifest_prefix):].rstrip("/")
+            if len(seg) == 10 and seg[4] == "-" and seg[7] == "-":
+                if newest is None or seg > newest:
+                    newest = seg
+    return newest
+
+
+def compute_judge_window_dates(
+    anchor_date: str,
+    lookback_days: int,
+    *,
+    resume_from: str | None = None,
+    max_catchup_days: int = MAX_JUDGE_CATCHUP_TRADING_DAYS,
+) -> list[str]:
     """The full set of capture-partition dates safe to judge in one batch
     anchored on ``anchor_date`` (I9331) — the write-settled ceiling plus
     the ``lookback_days`` trading days before it (newest first).
@@ -292,7 +329,47 @@ def compute_judge_window_dates(anchor_date: str, lookback_days: int) -> list[str
     and ``load_already_judged_keys`` makes the overlap idempotent.
     """
     ceiling = effective_capture_ceiling_date(anchor_date)
-    return [ceiling] + expand_lookback_dates(ceiling, lookback_days)
+    window = [ceiling] + expand_lookback_dates(ceiling, lookback_days)
+
+    # ── Catch-up (alpha-engine-config-I10169) ─────────────────────────
+    # A fixed lookback assumes the previous cycle ran. Measured
+    # 2026-09-08, that assumption fails routinely: the weekly SF's
+    # scheduled Saturday firing failed on 2026-08-15 and 2026-08-22 and
+    # the operator reruns that recovered it were launched with
+    # ``skip_eval_judge: true`` (all six on 08-15, all three on 08-22),
+    # so the run that finally SUCCEEDED never judged anything. Zero eval
+    # artifacts exist for either date, and the CloudWatch weeks starting
+    # 2026-08-12 and 2026-08-19 are empty for EVERY combo — a fortnight
+    # in which the control charts kept reporting IN_CONTROL against a
+    # two-week-old point.
+    #
+    # A fixed 6-trading-day lookback cannot recover that: the following
+    # Saturday's window reaches back roughly eight calendar days, and the
+    # skipped week's captures are older than that. They were not deferred,
+    # they were LOST.
+    #
+    # So the window resumes from what has actually been judged rather than
+    # from a constant. ``resume_from`` is the newest capture date carrying
+    # an ``_eval_by_capture`` manifest (``latest_indexed_capture_date``);
+    # when it is older than the fixed window, the window is extended back
+    # to it, capped at ``max_catchup_days`` trading days total. The
+    # already-judged dedup in ``build_batch_plan`` makes the overlap free,
+    # so the corpus this produces is exactly "captures written since the
+    # last successful judge run" — bounded, and never empty because a
+    # cycle was skipped.
+    if resume_from:
+        oldest = min(window)
+        while (
+            oldest > resume_from
+            and len(window) < max_catchup_days
+        ):
+            extra = expand_lookback_dates(oldest, 1)
+            if not extra:
+                break
+            oldest = extra[0]
+            window.append(oldest)
+
+    return sorted(set(window), reverse=True)
 
 
 def _build_capture_prefix(date: str) -> str:
@@ -714,34 +791,45 @@ def build_batch_plan(
     # re-enumerates partitions that earlier batches partially judged
     # (e.g. weekend thinktank runs writing into Friday's partition after
     # Saturday's batch ran). Skip anything an ACTUAL eval already scored.
+    #
+    # UNCONDITIONAL since alpha-engine-config-I10169. It used to be gated
+    # on ``len(all_dates) > 1``, on the reasoning that a single-date plan
+    # cannot overlap an earlier one. It can: nine judge runs between
+    # 2026-07-26 15:10Z and 2026-07-27 03:29Z graded 2698 artifacts
+    # covering 321 distinct (agent, run_id, judge_model) triples — 8.4x
+    # re-judging — and seven runs on 2026-08-30/31 graded 876 covering
+    # 142, 6.17x. Each duplicate emitted a full set of
+    # ``agent_quality_score`` datapoints; that is what put 2408 reviews in
+    # the CloudWatch week of 2026-07-22 for a combo whose neighbouring
+    # weeks carry a dozen. The gate cost nothing to remove: a missing
+    # manifest yields an empty set and the plan is unchanged.
     skipped_already_judged = 0
-    if len(all_dates) > 1:
-        judged_keys = load_already_judged_keys(s3, dates=all_dates, bucket=bucket)
-        if judged_keys:
-            before = len(capture_keys)
-            capture_keys = [k for k in capture_keys if k not in judged_keys]
-            skipped_already_judged = before - len(capture_keys)
-            if skipped_already_judged:
-                logger.info(
-                    "[batch_plan] skipped %d already-judged captures (dedup)",
-                    skipped_already_judged,
-                )
-        # Anomaly guard: dedup returned zero skips despite a multi-date
-        # lookback with actual captures. On a retry (the 2nd+ batch plan
-        # for the same corpus), this means the _eval_by_capture manifests
-        # are missing or stale — the exact failure mode from config#4776
-        # (index not written since 2026-07-17 → 295-artifact corpus
-        # re-judged ~10 times). On a first run, zero skips is normal.
-        # The warning gives operators diagnostic breadcrumbs in CW Logs
-        # without falsely alarming (the caller decides what's a retry).
-        if skipped_already_judged == 0 and capture_keys:
-            logger.warning(
-                "[batch_plan] already-judged dedup returned zero skips for "
-                "%d capture keys across %d dates — the _eval_by_capture "
-                "manifests may be stale or missing (expected on the first "
-                "run; anomalous on a retry of a previously-judged corpus)",
-                len(capture_keys), len(all_dates),
+    judged_keys = load_already_judged_keys(s3, dates=all_dates, bucket=bucket)
+    if judged_keys:
+        before = len(capture_keys)
+        capture_keys = [k for k in capture_keys if k not in judged_keys]
+        skipped_already_judged = before - len(capture_keys)
+        if skipped_already_judged:
+            logger.info(
+                "[batch_plan] skipped %d already-judged captures (dedup)",
+                skipped_already_judged,
             )
+    # Anomaly guard: dedup returned zero skips despite a multi-date
+    # lookback with actual captures. On a retry (the 2nd+ batch plan
+    # for the same corpus), this means the _eval_by_capture manifests
+    # are missing or stale — the exact failure mode from config#4776
+    # (index not written since 2026-07-17 → 295-artifact corpus
+    # re-judged ~10 times). On a first run, zero skips is normal.
+    # The warning gives operators diagnostic breadcrumbs in CW Logs
+    # without falsely alarming (the caller decides what's a retry).
+    if skipped_already_judged == 0 and capture_keys:
+        logger.warning(
+            "[batch_plan] already-judged dedup returned zero skips for "
+            "%d capture keys across %d dates — the _eval_by_capture "
+            "manifests may be stale or missing (expected on the first "
+            "run; anomalous on a retry of a previously-judged corpus)",
+            len(capture_keys), len(all_dates),
+        )
     requests: list[dict[str, Any]] = []
     plan_entries: list[dict[str, Any]] = []
     client_side_skips: list[dict[str, Any]] = []

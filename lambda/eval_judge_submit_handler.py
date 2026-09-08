@@ -202,10 +202,52 @@ def _run(event, context):
     # inside next week's unchanged 6-day lookback (see that function's
     # docstring), and `load_already_judged_keys` dedups the overlap.
     lookback = int(event.get("capture_lookback_days") or 0)
+    judge_window_resume_from: str | None = None
     if lookback > 0:
-        from evals.orchestrator import compute_judge_window_dates
+        import boto3 as _boto3
 
-        computed = compute_judge_window_dates(date, lookback)
+        from evals.orchestrator import (
+            compute_judge_window_dates,
+            latest_indexed_capture_date,
+        )
+
+        # alpha-engine-config-I10169: resume from what was actually judged,
+        # not from a constant. The weekly SF's scheduled Saturday firing
+        # failed on 2026-08-15 and 2026-08-22 and every operator rerun that
+        # recovered it carried `skip_eval_judge: true`, so the runs that
+        # SUCCEEDED judged nothing — zero eval artifacts on either date, and
+        # the CloudWatch weeks of 2026-08-12 and 2026-08-19 empty for all 20
+        # combos. A fixed 6-trading-day lookback cannot reach a week that
+        # was skipped; those captures were lost, not deferred. Reading the
+        # newest indexed capture date makes the window self-healing and the
+        # weekly review count a function of work done rather than of which
+        # cycles happened to run.
+        #
+        # `refuse, don't guess` (I10169): an unreadable index leaves
+        # `resume_from` None, which keeps the previous fixed-lookback
+        # behaviour. It is logged at ERROR because losing the catch-up is
+        # exactly the silent condition this replaced.
+        try:
+            judge_window_resume_from = latest_indexed_capture_date(
+                _boto3.client("s3"), bucket=bucket,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[eval_judge_submit_handler] could not read the "
+                "_eval_by_capture index — falling back to the fixed "
+                "%d-trading-day lookback; a skipped cycle will NOT be "
+                "caught up this run (alpha-engine-config-I10169): %s",
+                lookback, exc,
+            )
+        computed = compute_judge_window_dates(
+            date, lookback, resume_from=judge_window_resume_from,
+        )
+        if judge_window_resume_from:
+            logger.info(
+                "[eval_judge_submit_handler] judge window resumes from "
+                "last indexed capture date %s — %d partition(s): %s",
+                judge_window_resume_from, len(computed), computed,
+            )
         extra_dates = sorted(set(computed) | set(extra_dates or []), reverse=True)
 
     logger.info(
@@ -276,6 +318,11 @@ def _run(event, context):
             # every surface reading this result — never collapse it into
             # a clean-looking `capture_keys_total`.
             "capture_partition_counts": plan["capture_partition_counts"],
+            # I10169: which cycle the window resumed from, and how many
+            # captures the dedup removed. Together these say whether this
+            # run judged new work or re-judged old work.
+            "judge_window_resume_from": judge_window_resume_from,
+            "skipped_already_judged": plan["skipped_already_judged"],
             "empty_trading_day_partitions": plan["empty_trading_day_partitions"],
         },
     }

@@ -219,11 +219,23 @@ def _build_metric_data_queries(
     namespace: str,
     metric_name: str,
     period_seconds: int,
+    sumsq_metric_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """One GetMetricData query per combo. The query Id is the combo
     index — used to map results back to dimensions on the response side.
     CloudWatch caps queries at 500 per call; ``_get_metric_data_all``
     chunks + paginates so the matrix can grow past 500 combos safely.
+
+    ``sumsq_metric_name`` (optional) adds a THIRD query per combo,
+    ``s{idx}``, taking ``Sum`` of the squared-score companion stream. With
+    ``n{idx}`` (SampleCount) and ``m{idx}`` (Average) that is the
+    sufficient statistic for the within-week review SD, which CloudWatch
+    cannot report directly (alpha-engine-config-I10186). It is opt-in
+    rather than always-on because only ``control_bands`` needs it, and
+    because query count is the scarce resource here: 3 per combo puts the
+    500-query chunk boundary at 166 combos instead of 250. ``_get_metric_
+    data_all`` merges results by Id, so a combo's queries straddling a
+    chunk boundary is harmless.
     """
     queries: list[dict[str, Any]] = []
     for idx, dims in enumerate(combos):
@@ -243,6 +255,20 @@ def _build_metric_data_queries(
             "MetricStat": {"Metric": metric, "Period": period_seconds, "Stat": "SampleCount"},
             "ReturnData": True,
         })
+        if sumsq_metric_name:
+            queries.append({
+                "Id": f"s{idx}",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": namespace,
+                        "MetricName": sumsq_metric_name,
+                        "Dimensions": dims,
+                    },
+                    "Period": period_seconds,
+                    "Stat": "Sum",
+                },
+                "ReturnData": True,
+            })
     return queries
 
 

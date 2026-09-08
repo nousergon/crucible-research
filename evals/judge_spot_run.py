@@ -278,6 +278,71 @@ def _run(argv: list[str] | None = None) -> int:
         remaining_s=None,
     )
 
+    # ── The dedup index, written where the grading happened ───────────
+    # `_eval_by_capture/{capture_date}/manifest.json` is the ONLY index
+    # `orchestrator.load_already_judged_keys` reads to decide what has
+    # already been scored. Nothing else writes it.
+    #
+    # `lambda/eval_judge_process_handler.py` used to build it here, with a
+    # comment naming config#4776 as the incident that put it at this exact
+    # point in the flow. That Lambda was DELETED on 2026-08-29 (5e13fe95,
+    # "retire the Poll and Process Lambdas", alpha-engine-config-I9329) and
+    # this module replaced it — without the manifest build. Measured
+    # 2026-09-08 (alpha-engine-config-I10169):
+    #
+    #   * the last manifest ever written indexes capture date 2026-08-11,
+    #     generated 2026-08-13T16:59Z — the last process-Lambda run;
+    #   * the first judge runs after the migration, 2026-08-30 19:18Z
+    #     through 2026-08-31 01:21Z, graded 876 artifacts covering only
+    #     142 distinct (agent, run_id, judge_model) triples — **6.17x
+    #     re-judging of one corpus**, because the index each run needed
+    #     was no longer being written by the run before it;
+    #   * every one of those duplicate gradings emitted a full set of
+    #     `agent_quality_score` datapoints, which is what took the
+    #     2026-08-26 CloudWatch week to 769 reviews for a combo whose
+    #     neighbouring weeks carry 12.
+    #
+    # So this is not bookkeeping. It is the thing that makes weekly judged
+    # volume a function of how much work happened rather than of how many
+    # times the pipeline was retried.
+    #
+    # It runs BEFORE `enforce_coverage` deliberately: a run that graded
+    # only part of the corpus still persisted what it graded, and those
+    # artifacts must be indexed or the next run re-judges them. The
+    # exception is recorded on the run record and logged at ERROR — never
+    # swallowed silently — but it does not replace the coverage verdict as
+    # the stage's outcome.
+    manifest_capture_dates: list[str] = []
+    manifest_error: str | None = None
+    try:
+        import boto3
+
+        from evals.eval_manifest import build_manifests
+
+        written = build_manifests(
+            s3_client=boto3.client("s3"),
+            bucket=args.bucket,
+        )
+        manifest_capture_dates = sorted(written)
+        logger.info(
+            "[judge_spot_run] _eval_by_capture manifests rebuilt for %d "
+            "capture date(s): %s",
+            len(manifest_capture_dates), manifest_capture_dates,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # (a) failure mode swallowed: the dedup index is not refreshed, so
+        #     the NEXT judge run re-judges this run's corpus and inflates
+        #     the week's review count. (b) the primary deliverable — the
+        #     graded eval artifacts — is already persisted and unaffected.
+        #     (c) recorded on the run record below and at ERROR here.
+        manifest_error = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "[judge_spot_run] _eval_by_capture manifest build FAILED — the "
+            "next judge run will re-judge this corpus and inflate its "
+            "weekly review count (alpha-engine-config-I10169): %s",
+            manifest_error,
+        )
+
     from evals.judge_coverage import assess_coverage
 
     verdict = assess_coverage(summary)
@@ -303,6 +368,10 @@ def _run(argv: list[str] | None = None) -> int:
         # The transport rung is reported here too, and separately from the
         # coverage verdict, so the two are never read as one number.
         "degraded_transport": summary.get("degraded_transport"),
+        # The dedup index this run refreshed. Absent or short here means the
+        # next run re-judges this corpus (alpha-engine-config-I10169).
+        "manifest_capture_dates": manifest_capture_dates,
+        "manifest_error": manifest_error,
         "summary": {
             k: v for k, v in summary.items()
             # `persisted_keys` and `ungraded_entries` can both be corpus-sized;
