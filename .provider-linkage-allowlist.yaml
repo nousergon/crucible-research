@@ -294,3 +294,35 @@ entries:
       a live env-var read. Baseline sweep for alpha-engine-config-I9302.
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
+
+  # -- `dist` class, enforcement flip (alpha-engine-config-I10225) --
+
+  - path: requirements.txt
+    pattern: "anthropic:dist"
+    reason: >-
+      `anthropic~=0.120` is the transitive SDK floor `langchain-anthropic~=1.6`
+      requires -- ChatAnthropic wraps `anthropic.Anthropic`. No live
+      `anthropic.Anthropic(...)` construction exists anywhere in this repo
+      (measured, and independently confirmed by this file's own pre-existing
+      sdk_client allowlist entries for graph/llm_cost_tracker.py and
+      agents/sector_teams/sector_team.py, both docstring-only). Brian's
+      2026-08-29 ruling retired direct Anthropic-API billing
+      (evals/judge_batch_transport.py's docstring); this floor remains only
+      because langchain-anthropic declares it as a hard dependency, not
+      because anything here calls it directly.
+    expires: "2026-12-07"
+    tracking: alpha-engine-config-I10225
+  - path: requirements.txt
+    pattern: "openai:dist"
+    reason: >-
+      `openai>=3.5.0` -- the OpenAI-compatible wire client for thinktank/
+      (config#1579) and the transitive floor `langchain-openai~=1.6` requires
+      (ChatOpenAI wraps `openai.OpenAI`). agents/langchain_utils.py's
+      make_agent_llm binds ChatOpenAI to `spec.base_url`/`spec.api_key`
+      resolved by krepis.router.resolve_group_spec -- already established as
+      the sanctioned router-bound OpenAI-wire transport in this file's
+      pre-existing `agents/langchain_utils.py openai:sdk_client` entry. This
+      `dist` finding is the same pattern one layer down (the package the
+      wrapper needs installed), not a new call site.
+    expires: "2026-12-07"
+    tracking: alpha-engine-config-I10225
