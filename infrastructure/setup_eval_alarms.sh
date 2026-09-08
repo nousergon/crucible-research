@@ -96,16 +96,43 @@ aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regressi
 #    to OK. Measured: this alarm went ALARM at 2026-08-30 13:19 PDT on a
 #    breach that had already reversed, then received no datapoint for the
 #    next 5.6 days, and sat red for 8.8 days indistinguishable from a
-#    dead producer. `breaching` renders "we did not evaluate the control
-#    bands this week" as a problem, which is what it is
-#    (`principles.md` §2.7: no data is never rendered as green). Verified
-#    non-flapping on the sibling floor alarm, which has run
-#    604800/breaching since 2026-08-29 with two state transitions total.
+#    dead producer.
+#
+#    `breaching` is NOT the answer here, and the difference from the floor
+#    alarm above is the whole point. This is a CEILING alarm (`>= 1`), so
+#    a breaching policy would give one latched state two meanings — "a
+#    combo went out of control" and "the control bands were never
+#    evaluated" — and an operator reading the alarm surface could not tell
+#    which held. `alpha-engine-config-I8118` forbids exactly that, and
+#    `nous-ergon-ops/tests/test_cloudwatch_absence_is_not_a_breach.py`
+#    enforces it. The floor alarm is a LessThan* alarm, where absence and
+#    breach both mean "not proven good", so `breaching` is correct there.
+#
+#    So the pair is split, the same way I8118 split the Director's:
+#    this alarm carries `notBreaching` and owns the BREACH condition, and
+#    `alpha-engine-eval-control-bands-no-datapoint` below owns ABSENCE —
+#    `SampleCount < 1` over 7 consecutive daily periods, `breaching`.
+#    Codified in
+#    `nous-ergon-ops/infrastructure/cloudwatch/alarms/` and declared
+#    `armed_alarms` in `nousergon-data/infrastructure/automation_pause.json`.
 #
 # Re-putting with changed configuration RESETS alarm state to
 # INSUFFICIENT_DATA, so this deploy also un-latches the 8.8-day ALARM and
 # lets the next evaluation produce a real transition.
 echo "[setup_eval_alarms] put alpha-engine-eval-control-breach (${BREACH_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
+aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
+
+# ── Control-band ABSENCE deadman (alpha-engine-config-I8118, I10166) ──────
+# SILENT, not breaching. `control_bands.py` emits the breach count on EVERY
+# run including the healthy zero, so seven consecutive empty days means the
+# weekly EvalRollingMean stage did not execute, died before
+# compute_and_emit_control_bands, or the emission is broken — never "no combo
+# breached". SampleCount, not the value: a value statistic makes "emitted 0"
+# and "emitted nothing" the same number again, one layer down. Daily periods
+# with DatapointsToAlarm=7 put ~1 day of grace past the largest gap measured
+# on this stream (6 days, 2026-08-30 -> 2026-09-05); a window equal to the
+# emission interval has none.
+echo "[setup_eval_alarms] put alpha-engine-eval-control-bands-no-datapoint (${BREACH_METRIC})"
+aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-bands-no-datapoint" --alarm-description "SILENT, not breaching. AlphaEngine/Eval agent_quality_score_control_breach_count produced no datapoint on ANY of the last 7 days. Emitter is the WEEKLY EvalRollingMean stage of ne-weekly-freshness-pipeline; evals/control_bands.py publishes on every run including the healthy zero. Split from alpha-engine-eval-control-breach, which owns the BREACH condition (alpha-engine-config-I8118, I10166)." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic SampleCount --period 86400 --evaluation-periods 7 --datapoints-to-alarm 7 --threshold 1 --comparison-operator LessThanThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
 
 echo "[setup_eval_alarms] done — both eval alarms converged."
