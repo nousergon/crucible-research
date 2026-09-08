@@ -20,11 +20,19 @@ def _dims(agent: str, criterion: str, judge: str = "claude-haiku-4-5") -> list[d
     ]
 
 
-def _make_cw(combos: list[list[dict]], series_by_idx: dict[int, list[float]]):
+def _make_cw(
+    combos: list[list[dict]],
+    series_by_idx: dict[int, list[float]],
+    reviews: dict[int, list[int]] | None = None,
+):
     """MagicMock CloudWatch backed by combos + per-combo weekly series.
 
     Synthesizes weekly Timestamps (descending, as CloudWatch returns
-    them) so the control-band extractor's zip+sort path is exercised.
+    them) so the control-band extractor's zip+sort path is exercised,
+    and the paired ``n{idx}`` SampleCount result the raw-weekly chart
+    reads its review counts from (alpha-engine-config-I10167). Review
+    counts default well above ``MIN_REVIEWS_PER_WEEK`` so a test that
+    says nothing about volume is not silently gated by it.
     """
     cw = MagicMock()
     paginator = MagicMock()
@@ -49,6 +57,12 @@ def _make_cw(combos: list[list[dict]], series_by_idx: dict[int, list[float]]):
             "Id": f"m{idx}",
             "Timestamps": list(reversed(ts)),
             "Values": list(reversed(vals)),
+        })
+        ns = (reviews or {}).get(idx) or [1000] * n
+        results.append({
+            "Id": f"n{idx}",
+            "Timestamps": list(reversed(ts)),
+            "Values": [float(x) for x in reversed(ns)],
         })
     cw.get_metric_data.return_value = {"MetricDataResults": results}
     return cw
@@ -100,7 +114,7 @@ class TestTabularCusum:
 
 class TestEvaluateSeries:
     def test_insufficient_history(self):
-        r = cb.evaluate_series([4.5, 4.4, 4.6], min_history=8)
+        r = cb.evaluate_series(_obs([4.5, 4.4, 4.6]), min_history=8)
         assert r.status == cb.STATUS_INSUFFICIENT_HISTORY
         assert r.n_points == 3
         assert r.latest == 4.6
@@ -108,7 +122,7 @@ class TestEvaluateSeries:
 
     def test_stable_series_in_control(self):
         series = [4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 4.5]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.status == cb.STATUS_IN_CONTROL
         assert r.sigma > 0
         assert not r.shewhart_low
@@ -116,35 +130,33 @@ class TestEvaluateSeries:
 
     def test_sudden_drop_is_shewhart_low(self):
         series = [4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 3.0]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.status == cb.STATUS_OUT_OF_CONTROL
         assert r.shewhart_low is True
         assert r.latest_z is not None and r.latest_z < 0
         assert any("shewhart_low" in reason for reason in r.reasons)
 
-    def test_zero_variance_baseline_is_insufficient_variance(self):
-        # config#2385 failure mode 1: a combo graded a constant baseline
-        # has sigma 0 → no scale to judge a deviation. It must NOT flag
-        # OUT_OF_CONTROL on any non-identical next score (the spurious
-        # breach the alarm first fired on). Honest N/A instead; the
-        # flat-floor alarm backstops absolute-low.
+    def test_zero_process_variance_baseline_is_a_tiny_but_real_scale(self):
+        # config#2385 failure mode 1 was: a combo graded a CONSTANT
+        # baseline had sigma-hat 0, so any non-identical next score
+        # looked like an infinite-sigma breach, and the module answered
+        # with INSUFFICIENT_VARIANCE — an honest N/A, but a hole: a
+        # genuine collapse from a flat baseline was unjudgeable.
+        #
+        # On the raw weekly scale (alpha-engine-config-I10167) that hole
+        # closes without reopening the false positive. A week's mean has
+        # a KNOWN sampling variance sigma_w^2/n even when the process
+        # variance is zero, so there is always a scale, and it is the
+        # right one. A 0.1 wobble on 400 reviews is still in control;
+        # `test_a_flat_baseline_is_no_longer_a_variance_hole` covers the
+        # collapse case.
         series = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 4.9]
-        r = cb.evaluate_series(series, min_history=8)
-        assert r.status == cb.STATUS_INSUFFICIENT_VARIANCE
-        assert r.sigma == 0.0
-        assert r.latest_z is None          # undefined at sigma 0, not a crash
-        assert r.shewhart_low is False     # never breaches
+        r = cb.evaluate_series(_obs(series, reviews=400), min_history=8)
+        assert r.sigma_b == 0.0
+        assert r.sigma == pytest.approx(0.05)
+        assert r.status == cb.STATUS_IN_CONTROL
+        assert r.shewhart_low is False
         assert r.cusum_low is False
-        assert any("insufficient_variance" in reason for reason in r.reasons)
-
-    def test_zero_variance_baseline_large_drop_still_not_flagged(self):
-        # Even a large drop from a flat baseline stays INSUFFICIENT_VARIANCE
-        # — there is genuinely no variance scale, and the separate
-        # flat-floor alarm (< 3.0) is the backstop for absolute-low.
-        series = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 3.0]
-        r = cb.evaluate_series(series, min_history=8)
-        assert r.status == cb.STATUS_INSUFFICIENT_VARIANCE
-        assert r.status != cb.STATUS_OUT_OF_CONTROL
 
     def test_transient_early_baseline_dip_does_not_self_reference_breach(self):
         # config#2385 failure mode 2: a transient dip in the EARLY baseline
@@ -154,21 +166,21 @@ class TestEvaluateSeries:
         # full-series CUSUM produced. The dip lives in the Phase-I
         # baseline; CUSUM only walks the Phase-II monitoring window.
         series = [4.5, 3.6, 4.5, 4.5, 4.5, 4.6, 4.6, 4.7, 4.8]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.status == cb.STATUS_IN_CONTROL
         assert r.cusum_low is False        # not re-tested against baseline
         assert r.shewhart_low is False     # latest is above center
 
     def test_sustained_downtrend_out_of_control(self):
         series = [4.6, 4.5, 4.5, 4.4, 4.0, 3.8, 3.6, 3.5, 3.4]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.status == cb.STATUS_OUT_OF_CONTROL
         assert r.cusum_low is True
 
     def test_upward_shift_not_alarmed(self):
         # Scores rising is observability, not a regression.
         series = [4.0, 4.0, 4.1, 4.0, 4.1, 4.0, 4.1, 4.9]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.status == cb.STATUS_IN_CONTROL
         assert r.shewhart_high is True
         assert r.shewhart_low is False
@@ -349,7 +361,7 @@ class TestCusumCurrencyGate:
     def test_recovered_excursion_is_not_out_of_control(self):
         # Baseline ~3.92 (flat), then a deep dip, then full recovery.
         series = [3.933, 3.909, 3.936, 3.885, 3.645, 3.675, 3.687, 4.002]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.latest_z is not None and r.latest_z > 0, (
             "precondition: the latest point sits above the baseline center"
         )
@@ -365,7 +377,7 @@ class TestCusumCurrencyGate:
         # Same excursion, but the latest point is still below center:
         # detection must NOT be blunted.
         series = [3.933, 3.909, 3.936, 3.885, 3.645, 3.675, 3.687, 3.660]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.latest_z is not None and r.latest_z < 0
         assert r.cusum_low is True
         assert r.status == cb.STATUS_OUT_OF_CONTROL
@@ -374,7 +386,7 @@ class TestCusumCurrencyGate:
         # latest < LCL implies latest < center, so a Shewhart breach is
         # current by construction and alarms regardless of the CUSUM.
         series = [4.0, 4.05, 3.95, 4.0, 4.05, 3.95, 4.0, 2.0]
-        r = cb.evaluate_series(series, min_history=8)
+        r = cb.evaluate_series(_obs(series), min_history=8)
         assert r.shewhart_low is True
         assert r.status == cb.STATUS_OUT_OF_CONTROL
 
@@ -405,13 +417,13 @@ class TestOpenWeeklyBucketIsDropped:
         # has not closed.
         vals = {0: [4.0, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 9.9]}
         got = self._results(vals, datetime(2026, 6, 6, tzinfo=_UTC))
-        assert 9.9 not in got[0]
+        assert 9.9 not in [o.value for o in got[0]]
         assert len(got[0]) == 7
 
     def test_closed_bucket_retained(self):
         vals = {0: [4.0, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 9.9]}
         got = self._results(vals, datetime(2026, 6, 9, tzinfo=_UTC))
-        assert got[0][-1] == 9.9
+        assert got[0][-1].value == 9.9
         assert len(got[0]) == 8
 
     def test_partial_bucket_cannot_produce_a_breach(self):
@@ -427,3 +439,233 @@ class TestOpenWeeklyBucketIsDropped:
         )
         assert out["breach_count"] == 0
         s3.put_object.assert_not_called()
+
+
+# ── alpha-engine-config-I10167 — the RAW WEEKLY scale ─────────────────────
+#
+# Brian ruled 2026-09-08: chart the raw weekly `agent_quality_score`
+# series, not the 4-week rolling mean. The option NOT taken was leaving
+# the rolling-mean scale and accepting its sensitivity.
+#
+# Every test below was verified failing against the pre-ruling module.
+
+
+def _obs(values, reviews=1000, start_week=0, skip=()):
+    """Build a weekly-observation series, oldest first.
+
+    ``reviews`` is an int (applied to every week) or a per-week list.
+    ``skip`` names 0-based positions whose week slot is SKIPPED, i.e. the
+    calendar week exists but carries no observation — a real gap.
+    """
+    out = []
+    week = start_week
+    for i, v in enumerate(values):
+        if i in skip:
+            week += 1
+        n = reviews[i] if isinstance(reviews, list) else reviews
+        out.append(cb.WeeklyObservation(week_index=week, value=v, reviews=n))
+        week += 1
+    return out
+
+
+class TestWeeklyObservationScale:
+    """The chart input is one week's mean and the n behind it."""
+
+    def test_evaluate_series_takes_weekly_observations(self):
+        r = cb.evaluate_series(_obs([4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 4.5]))
+        assert r.status == cb.STATUS_IN_CONTROL
+        assert r.reviews_latest == 1000
+
+    def test_the_source_metric_is_the_raw_weekly_score(self):
+        # Not `agent_quality_score_4w_mean`: consecutive 4-week means
+        # share ~75% of their reviews, which deflates the moving-range
+        # sigma 2-5x (measured 0.028-0.155 vs 0.173-0.441).
+        assert cb.SOURCE_METRIC_NAME == "agent_quality_score"
+
+
+class TestVarianceScalesWithReviewCount:
+    """A 2-review week and a 2408-review week are not the same
+    observation. Var(week mean) = sigma_b^2 + sigma_w^2 / n."""
+
+    def test_the_same_drop_is_less_significant_on_fewer_reviews(self):
+        base = [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0]
+        many = cb.evaluate_series(_obs(base + [3.6], reviews=[400] * 8))
+        few = cb.evaluate_series(_obs(base + [3.6], reviews=[400] * 7 + [6]))
+        assert abs(many.latest_z) > abs(few.latest_z)
+        assert many.sigma < few.sigma
+
+    def test_observation_sigma_never_falls_below_the_sampling_floor(self):
+        s = cb.observation_sigma(sigma_b=0.0, reviews=25, review_sd=1.0)
+        assert s == pytest.approx(0.2)
+
+    def test_process_sigma_removes_the_sampling_component(self):
+        # A baseline whose whole moving range is explained by sampling
+        # noise has NO demonstrated process variation.
+        obs = _obs([4.0, 3.7, 4.3, 3.8], reviews=[4, 4, 4, 4])
+        sigma_b = cb.process_sigma(obs)
+        assert sigma_b == 0.0
+
+    def test_a_flat_baseline_is_no_longer_a_variance_hole(self):
+        # Pre-ruling a constant baseline returned INSUFFICIENT_VARIANCE
+        # (sigma 0, no scale). The sampling term supplies a real scale,
+        # so the chart can now judge a drop from a flat baseline.
+        obs = _obs([5.0] * 7 + [3.0], reviews=400)
+        r = cb.evaluate_series(obs)
+        assert r.status == cb.STATUS_OUT_OF_CONTROL
+        assert r.sigma_b == 0.0
+        assert r.sigma > 0
+
+
+class TestMinimumReviewsAdmission:
+    """A week below MIN_REVIEWS_PER_WEEK is not an observation of the
+    process. It is recorded, never silently dropped."""
+
+    def test_a_low_n_week_is_excluded_and_counted(self):
+        obs = _obs(
+            [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0, 4.0, 4.1],
+            reviews=[400, 400, 2, 400, 400, 400, 400, 400, 400],
+        )
+        r = cb.evaluate_series(obs)
+        assert r.unmeasurable_weeks == 1
+        assert r.n_points == 8          # admitted weeks only
+
+    def test_a_low_n_week_can_never_produce_a_breach(self):
+        # A 2-review week scoring the rubric minimum is sampling noise,
+        # not a regression.
+        obs = _obs(
+            [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0, 4.0, 1.0],
+            reviews=[400] * 8 + [2],
+        )
+        r = cb.evaluate_series(obs)
+        assert r.status != cb.STATUS_OUT_OF_CONTROL
+        assert r.unmeasurable_weeks == 1
+
+    def test_the_gate_is_derived_from_the_rubric_resolution(self):
+        # sigma_w / sqrt(n) <= 0.5 rubric points at the MEASURED
+        # sigma_w = 1.0 gives n >= 4.
+        assert cb.MIN_REVIEWS_PER_WEEK == 4
+        assert cb.REVIEW_SCORE_SD == 1.0
+
+    def test_too_few_admitted_weeks_is_insufficient_history(self):
+        obs = _obs(
+            [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0, 4.0],
+            reviews=[2, 2, 2, 400, 400, 400, 400, 400],
+        )
+        r = cb.evaluate_series(obs)
+        assert r.status == cb.STATUS_INSUFFICIENT_HISTORY
+        assert r.unmeasurable_weeks == 3
+
+
+class TestGapsAreNotClosedOver:
+    """A missing week is an unobserved week, not a shorter interval."""
+
+    def test_moving_range_skips_pairs_spanning_a_gap(self):
+        # Same four values; in the second series a whole week is missing
+        # between points 1 and 2, so that pair is not a moving range.
+        contiguous = _obs([4.0, 4.2, 3.0, 3.2], reviews=100000)
+        gapped = _obs([4.0, 4.2, 3.0, 3.2], reviews=100000, skip=(2,))
+        assert cb.process_sigma(gapped) < cb.process_sigma(contiguous)
+
+    def test_a_gap_does_not_reset_the_cusum(self):
+        # Drift evidence is about the process, not about whether we
+        # happened to look. A producer hiccup must not erase it.
+        vals = [4.5, 4.5, 4.5, 4.5, 4.5, 3.9, 3.9, 3.9, 3.9]
+        r = cb.evaluate_series(_obs(vals, reviews=400, skip=(7,)))
+        assert r.cusum_low is True
+        assert r.missing_weeks == 1
+
+    def test_a_trailing_gap_is_stale_not_in_control(self):
+        # The chart's newest observation is two complete weeks old: the
+        # process has gone unmeasured and that is never reported green.
+        obs = _obs([4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 4.5], reviews=400)
+        r = cb.evaluate_series(obs, latest_complete_week=obs[-1].week_index + 2)
+        assert r.status == cb.STATUS_STALE
+        assert r.status != cb.STATUS_IN_CONTROL
+
+    def test_one_week_of_slippage_is_within_grace(self):
+        obs = _obs([4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 4.5], reviews=400)
+        r = cb.evaluate_series(obs, latest_complete_week=obs[-1].week_index + 1)
+        assert r.status == cb.STATUS_IN_CONTROL
+
+
+class TestCenterIsNotReviewWeighted:
+    """alpha-engine-config-I10169: a review-weighted centre tracks the
+    volume mix. Each WEEK is one observation of the process."""
+
+    def test_one_huge_week_does_not_dominate_the_centre(self):
+        obs = _obs(
+            [3.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0],
+            reviews=[2408, 100, 100, 100, 100, 100, 100, 100],
+        )
+        r = cb.evaluate_series(obs)
+        # Unweighted over the 4 baseline weeks: (3+4+4+4)/4 = 3.75.
+        assert r.center == pytest.approx(3.75)
+
+
+class TestUnmeasurableIsPublished:
+    """principles.md 2.7 — a combo the chart cannot judge is counted on
+    its own stream, never folded into the healthy zero."""
+
+    def test_unmeasurable_count_emitted_every_run(self):
+        combos = [_dims("alpha", "c1"), _dims("beta", "c1")]
+        series = {
+            0: [4.5, 4.6, 4.4, 4.5, 4.6, 4.4, 4.5, 4.6],   # chartable
+            1: [4.5, 4.4, 4.6],                             # insufficient
+        }
+        cw = _make_cw(combos, series)
+        s3 = MagicMock()
+        out = cb.compute_and_emit_control_bands(
+            end_time=datetime(2026, 6, 9, tzinfo=_UTC),
+            cloudwatch_client=cw, s3_client=s3,
+        )
+        emitted = [
+            md for call in cw.put_metric_data.call_args_list
+            for md in call.kwargs["MetricData"]
+        ]
+        unm = [
+            m for m in emitted
+            if m["MetricName"] == cb.UNMEASURABLE_COUNT_METRIC_NAME
+        ]
+        assert len(unm) == 1
+        assert unm[0]["Value"] == 1.0
+        assert out["combos_unmeasurable"] == 1
+
+    def test_sample_counts_are_read_from_the_paired_query(self):
+        combos = [_dims("alpha", "c1")]
+        cw = _make_cw(combos, {0: [4.0, 4.1]}, reviews={0: [7, 9]})
+        got = cb._weekly_series_by_combo(
+            cw.get_metric_data.return_value["MetricDataResults"],
+            combos,
+            end_time=datetime(2026, 6, 9, tzinfo=_UTC),
+        )
+        assert [o.reviews for o in got[0]] == [7, 9]
+
+
+class TestLiveSeries20260908:
+    """Replayed against the live raw weekly series, measured 2026-09-08."""
+
+    def test_the_false_positive_that_latched_the_alarm_stays_in_control(self):
+        # thinktank_thesis/context_integration/claude-sonnet-4-6.
+        vals = [3.93, 3.86, 3.33, 4.53, 3.58, 3.79, 4.46, 4.58, 4.53]
+        ns = [15, 7, 6, 17, 277, 38, 13, 12, 72]
+        r = cb.evaluate_series(_obs(vals, reviews=ns, skip=(7,)))
+        assert r.status != cb.STATUS_OUT_OF_CONTROL
+
+    def test_grounding_in_inputs_haiku_still_breaches(self):
+        # thinktank_theme/grounding_in_inputs/claude-haiku-4-5 — a real
+        # sustained decline carried by a 189-review week at z = -4.8.
+        vals = [3.75, 3.75, 4.16, 4.18, 4.29, 4.00, 3.61, 3.33]
+        ns = [12, 24, 234, 98, 59, 12, 189, 12]
+        r = cb.evaluate_series(_obs(vals, reviews=ns, skip=(6,)))
+        assert r.status == cb.STATUS_OUT_OF_CONTROL
+        assert r.cusum_low is True
+
+    def test_churn_discipline_haiku_is_no_longer_out_of_control(self):
+        # Old scale: z = -3.06 (sigma-hat 0.155, a smoothing artifact).
+        # Raw weekly: its own week-to-week sigma is 0.30 and the drop is
+        # 0.6 -> under 2 sigma. The old answer was wrong.
+        vals = [3.83, 3.54, 4.27, 4.13, 4.58, 4.67, 3.68, 3.33]
+        ns = [12, 24, 234, 98, 59, 12, 189, 12]
+        r = cb.evaluate_series(_obs(vals, reviews=ns, skip=(6,)))
+        assert r.status == cb.STATUS_IN_CONTROL
+        assert abs(r.latest_z) < 3.0
