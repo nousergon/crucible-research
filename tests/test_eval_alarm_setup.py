@@ -1,23 +1,51 @@
-"""Lock the eval-alarm setup script against producer-metric drift (L4578e).
+"""Lock the retired eval-alarm setup script against producer-metric drift
+and against re-arming imperative alarm authorship (L4578e, alpha-engine-config-I10182).
 
-If a producer renames its metric constant, the alarm in
-infrastructure/setup_eval_alarms.sh silently stops covering it. This
-test fails the build when the script's metric names diverge from the
-constants the producers actually emit.
+`infrastructure/setup_eval_alarms.sh` used to call `aws cloudwatch
+put-metric-alarm` directly, alongside `nous-ergon-ops` codifying the SAME
+three alarms as JSON and applying them on merge — two independent authorship
+paths, whichever repo merged last silently won (alpha-engine-config-I10182).
+The script is now a pointer stub: it creates nothing, and this module's job
+changed with it.
+
+Two things survive the retirement:
+
+1. **The metric-name guard.** If a producer renames its metric constant, the
+   alarm nous-ergon-ops codified silently stops covering it — that was always
+   this file's reason to exist, and the check does not require a live
+   `put-metric-alarm` command line to make it: the stub documents the exact
+   metric name each codified alarm watches, and the test below fails if the
+   producer constant and the documented name diverge. (This module
+   deliberately does not shallow-clone the PRIVATE nous-ergon-ops repo to
+   compare against the live JSON — a public repo's CI holding a credential
+   for a private repo is a bigger surface than this guard needs, and
+   nous-ergon-ops's own `test_cloudwatch_absence_is_not_a_breach.py` /
+   `check-drift.py` already enforce the JSON tree's correctness on that
+   side.)
+2. **The imperative-authorship guard.** `put-metric-alarm` must never
+   reappear in this script, or deploy.yml must never call it again — the
+   fleet-wide backstop for every OTHER repo doing this is
+   `nous-ergon-ops/infrastructure/cloudwatch/check_no_foreign_alarm_authors.py`
+   (alpha-engine-config-I10182), but this repo still gets its own local
+   guard, same shape as `nousergon-data`'s and `crucible-dashboard`'s.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from evals.control_bands import BREACH_COUNT_METRIC_NAME
 from evals.rolling_mean import DERIVED_FLOOR_METRIC_NAME
 
-_SCRIPT = (
-    Path(__file__).resolve().parent.parent
-    / "infrastructure"
-    / "setup_eval_alarms.sh"
-)
+_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPT = _ROOT / "infrastructure" / "setup_eval_alarms.sh"
+_DEPLOY_WORKFLOW = _ROOT / ".github" / "workflows" / "deploy.yml"
+
+#: Built from parts so this file's OWN prose (which discusses the verb at
+#: length) never trips the mutator check below on itself — same technique
+#: nous-ergon-ops's fleet-wide guard uses for the identical reason.
+_MUTATOR = "put-metric-" + "alarm"
 
 
 def _script_text() -> str:
@@ -30,225 +58,81 @@ def test_setup_script_exists():
 
 def test_control_breach_metric_name_matches_producer():
     assert BREACH_COUNT_METRIC_NAME in _script_text(), (
-        f"setup_eval_alarms.sh does not reference the control-breach "
-        f"metric {BREACH_COUNT_METRIC_NAME!r} — the alarm is orphaned "
-        f"from its producer (evals/control_bands.py). Update the script."
+        f"setup_eval_alarms.sh no longer documents the control-breach metric "
+        f"{BREACH_COUNT_METRIC_NAME!r} — the codified nous-ergon-ops alarm is "
+        f"orphaned from its producer (evals/control_bands.py). Update the "
+        f"pointer stub's documented metric name alongside the codified JSON."
     )
 
 
 def test_floor_metric_name_matches_producer():
     assert DERIVED_FLOOR_METRIC_NAME in _script_text(), (
-        f"setup_eval_alarms.sh does not reference the quality-floor "
-        f"metric {DERIVED_FLOOR_METRIC_NAME!r} — the alarm is orphaned "
-        f"from its producer (evals/rolling_mean.py). Update the script."
+        f"setup_eval_alarms.sh no longer documents the quality-floor metric "
+        f"{DERIVED_FLOOR_METRIC_NAME!r} — the codified nous-ergon-ops alarm "
+        f"is orphaned from its producer (evals/rolling_mean.py). Update the "
+        f"pointer stub's documented metric name alongside the codified JSON."
     )
 
 
-def test_alarms_use_the_shared_sns_topic():
+def test_alarm_names_are_still_documented():
     text = _script_text()
-    assert "alpha-engine-alerts" in text
     assert "alpha-engine-eval-control-breach" in text
     assert "alpha-engine-eval-quality-regression" in text
+    assert "alpha-engine-eval-control-bands-no-datapoint" in text
 
 
-# ── alpha-engine-config-I9321 ────────────────────────────────────────────
+# ── alpha-engine-config-I10182 — the retirement itself ──────────────────────
 
 
-def _floor_alarm_command() -> str:
-    """The single `put-metric-alarm` line declaring the quality-floor alarm."""
-    for line in _script_text().splitlines():
-        if "alpha-engine-eval-quality-regression" in line and line.startswith("aws "):
-            return line
-    raise AssertionError(
-        "no `aws cloudwatch put-metric-alarm` line for "
-        "alpha-engine-eval-quality-regression found in the setup script"
+def test_setup_script_is_a_pointer_not_an_applier():
+    """The retired script must still exist, and must still say where to go.
+
+    Deleting it outright was the alternative. Keeping it as a pointer is
+    deliberate, same as crucible-dashboard's install-host-alarms.sh
+    (alpha-engine-config-I8035): a stale muscle-memory invocation should be a
+    no-op that tells you where the definitions went, not `command not found`.
+    """
+    body = _script_text()
+    assert "no longer creates alarms" in body
+    assert "nous-ergon-ops/infrastructure/cloudwatch/alarms" in body
+    assert "apply.py --prefix alpha-engine-eval-" in body, (
+        "the stub must name the exact command an operator runs to apply a "
+        "change immediately, or the pointer only says 'not here'"
     )
 
 
-def test_floor_alarm_treats_missing_data_as_breaching():
-    """A floor that stops publishing must not read as healthy.
+def test_setup_script_contains_no_imperative_alarm_call():
+    """The class this whole retirement exists to close.
 
-    Measured 2026-08-29: the alarm was created `--treat-missing-data ignore`,
-    which RETAINS the last state when data stops. `AlphaEngine/Eval/
-    agent_quality_score` then went to zero live streams and the floor stopped
-    publishing after 2026-08-20 — and the alarm simply held the state it
-    already had. `ignore` makes a blind alarm and a breaching alarm
-    indistinguishable on every surface (`principles.md` §2.7).
+    A comment mentioning the verb is fine — an executable line calling it is
+    the defect. Mirrors nous-ergon-ops's own tokenize/regex-based guards:
+    a non-comment line matching the verb is a finding, a `#`-prefixed one is
+    not.
     """
-    cmd = _floor_alarm_command()
-    assert "--treat-missing-data breaching" in cmd
-    assert "--treat-missing-data ignore" not in cmd
-
-
-def test_floor_alarm_period_matches_the_weekly_emission_cadence():
-    """The period and the missing-data policy have to move together.
-
-    The floor is emitted once per weekly Step Function run, but the alarm was
-    created with `--period 86400`. Six of every seven evaluation windows were
-    therefore empty by construction — harmless under `ignore`, but under
-    `breaching` it would flap the alarm every single week on a metric that is
-    behaving perfectly, and a detector that cries wolf weekly gets muted.
-    """
-    cmd = _floor_alarm_command()
-    assert "--period 604800" in cmd
-    assert "--period 86400" not in cmd
-
-
-def test_alarm_reconcile_runs_on_deploy():
-    """The script must have a caller (`pull-request-policy.md` §4.2 form 1).
-
-    Grepped 2026-08-29: `setup_eval_alarms.sh` had been infra-as-code since
-    the L4578e arc and NOTHING had ever invoked it, in any repo. Its two alarm
-    declarations were live AWS state that happened to match a file, with no
-    mechanism holding them together — so an edit to this script changed
-    nothing until a human remembered to run it, which is the same
-    merged-but-not-deployed class the workflow's own comments describe twice.
-
-    Without this wiring the I9321 alarm change would be a "run this after
-    merging" instruction, which a PR body may not carry.
-    """
-    workflow = (
-        Path(__file__).resolve().parent.parent
-        / ".github" / "workflows" / "deploy.yml"
-    ).read_text(encoding="utf-8")
-    assert "infrastructure/setup_eval_alarms.sh" in workflow
-
-
-# ── alpha-engine-config-I10166 ───────────────────────────────────────────
-#
-# The same two defects I9321 fixed on the floor alarm above were left in
-# place on the control-breach alarm thirty lines below it in the same
-# script, under a comment claiming it was "matching the floor alarm's
-# cadence" — a sentence already false when written. These tests hold the
-# pair together so the next fix cannot land on one alarm only.
-
-
-def _control_breach_alarm_command() -> str:
-    """The single `put-metric-alarm` line declaring the control-breach alarm."""
-    for line in _script_text().splitlines():
-        if "alpha-engine-eval-control-breach" in line and line.startswith("aws "):
-            return line
-    raise AssertionError(
-        "no `aws cloudwatch put-metric-alarm` line for "
-        "alpha-engine-eval-control-breach found in the setup script"
+    hits = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(_script_text().splitlines(), 1)
+        if not line.strip().startswith("#") and _MUTATOR in line
+    ]
+    assert not hits, (
+        "setup_eval_alarms.sh calls the CloudWatch alarm-creation verb "
+        "again:\n  " + "\n  ".join(hits) + "\n\nSince alpha-engine-config-"
+        "I10182 this script creates nothing — the definitions and applier "
+        "live in the PRIVATE nous-ergon-ops repo."
     )
 
 
-def _control_bands_deadman_command() -> str:
-    """The `put-metric-alarm` line declaring the absence deadman."""
-    for line in _script_text().splitlines():
-        if (
-            "alpha-engine-eval-control-bands-no-datapoint" in line
-            and line.startswith("aws ")
-        ):
-            return line
-    raise AssertionError(
-        "no `aws cloudwatch put-metric-alarm` line for "
-        "alpha-engine-eval-control-bands-no-datapoint found in the setup "
-        "script — the ceiling alarm carries notBreaching, so nothing owns "
-        "the absence of the control-band evaluation (alpha-engine-config-I8118)"
-    )
-
-
-def test_control_breach_alarm_does_not_treat_missing_data_as_ignore():
-    """`ignore` holds the last state FOREVER when the producer stops.
-
-    Measured 2026-09-08: the alarm entered ALARM at 2026-08-30 13:19 PDT,
-    then received no datapoint at all for the next 5.6 days and sat red
-    for 8.8 days — indistinguishable, on every surface, from a producer
-    that had died. `ignore` is strictly worse than `notBreaching` here:
-    `notBreaching` at least resolves absence to OK, while `ignore` can
-    latch either state, green OR red, indefinitely. `principles.md` §2.7.
-    """
-    cmd = _control_breach_alarm_command()
-    assert "--treat-missing-data ignore" not in cmd
-    assert "--treat-missing-data notBreaching" in cmd
-
-
-def test_the_ceiling_alarm_does_not_also_own_absence():
-    """`alpha-engine-config-I8118`: one latched state, one meaning.
-
-    This alarm's comparison is an UPPER bound (`>= 1`), so it fires on a
-    condition its metric REPORTS. `breaching` here would make the same
-    latched state mean both "a combo went out of control" and "the
-    control bands were never evaluated", and an operator reading the
-    alarm surface alone could not tell which held. The floor alarm above
-    is a `LessThan*` alarm, where absence and breach both mean "not
-    proven good" — which is why `breaching` is right there and wrong
-    here. `nous-ergon-ops/tests/test_cloudwatch_absence_is_not_a_breach.py`
-    enforces the same rule on the codified JSON.
-    """
-    cmd = _control_breach_alarm_command()
-    assert "--comparison-operator GreaterThanOrEqualToThreshold" in cmd
-    assert "--treat-missing-data breaching" not in cmd
-
-
-def test_absence_is_owned_by_a_deadman_on_the_same_emitter():
-    """The other half of the I8118 split — either alone is a defect.
-
-    Setting the ceiling alarm to `notBreaching` without this would delete
-    the absence detector entirely, which `principles.md` §2.7 forbids
-    just as firmly as latching red on silence.
-    """
-    cmd = _control_bands_deadman_command()
-    assert "--treat-missing-data breaching" in cmd
-    assert "--comparison-operator LessThanThreshold" in cmd
-    assert "--statistic SampleCount" in cmd, (
-        "the presence probe must count datapoints, not read their value — "
-        "a value statistic makes 'emitted 0' and 'emitted nothing' the "
-        "same number again, one layer down"
-    )
-    assert BREACH_COUNT_METRIC_NAME in cmd, (
-        "a deadman on a DIFFERENT emitter proves nothing about this one"
-    )
-
-
-def test_the_deadman_gives_the_weekly_emitter_grace():
-    """A window equal to the emission interval has no margin.
-
-    The largest gap measured on this stream is 6 days (2026-08-30 to
-    2026-09-05), so 7 daily periods with `DatapointsToAlarm` equal to
-    `EvaluationPeriods` leaves ~1 day of grace and requires a full run of
-    empty days before it pages.
-    """
-    cmd = _control_bands_deadman_command()
-    assert "--period 86400" in cmd
-    assert "--evaluation-periods 7" in cmd
-    assert "--datapoints-to-alarm 7" in cmd
-
-
-def test_control_breach_alarm_period_matches_the_weekly_emission_cadence():
-    """A 1-day period on a producer that runs once a week.
-
-    `agent_quality_score_control_breach_count` is emitted by the weekly
-    `EvalRollingMean` state: measured 25 emissions between 2026-07-30 and
-    2026-09-05, six of them on 2026-08-30 alone and six-day gaps
-    elsewhere. Six of every seven daily windows are empty by
-    construction, so `--period 86400` cannot carry `breaching` — the
-    period and the missing-data policy move together, exactly as they did
-    for the floor alarm (I9321). Every COMPLETE week since 2026-07-27
-    carries at least one datapoint, so 604800 is the window the producer
-    actually fills.
-    """
-    cmd = _control_breach_alarm_command()
-    assert "--period 604800" in cmd
-    assert "--period 86400" not in cmd
-
-
-def test_both_eval_alarms_agree_on_absence_policy():
-    """Class fix, not an instance fix.
-
-    The two eval alarms share one producer Lambda and one cadence. A
-    future edit that moves one off `breaching`/604800 without the other
-    re-creates the split this test was written for.
-    """
-    floor = _floor_alarm_command()
-    breach = _control_breach_alarm_command()
-    for cmd in (floor, breach):
-        assert "--period 604800" in cmd
-    # The floor is a LessThan* alarm: absence and breach both mean "not
-    # proven good", so it owns absence itself. The breach alarm is a
-    # ceiling and hands absence to its deadman (I8118).
-    assert "--treat-missing-data breaching" in floor
-    assert "--treat-missing-data notBreaching" in breach
-    assert "--treat-missing-data breaching" in _control_bands_deadman_command()
+def test_deploy_workflow_no_longer_runs_the_alarm_reconcile():
+    """The other half of the retirement — a step that still called this
+    script would still author alarms even with the script itself as a
+    no-op-until-changed pointer, and a future edit to the stub could re-arm
+    it silently if nothing here caught the caller too."""
+    wf = _DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+    _comment = re.compile(r"^\s*#")
+    for n, line in enumerate(wf.splitlines(), 1):
+        if _comment.match(line):
+            continue
+        assert "setup_eval_alarms.sh" not in line, (
+            f"deploy.yml:{n} still invokes the retired alarm script: "
+            f"{line.strip()}"
+        )
