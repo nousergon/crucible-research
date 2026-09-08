@@ -166,28 +166,25 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_rolling_mean
 
-      # Eval-quality ALARM reconcile (alpha-engine-config-I9321).
+      # ALARM AUTHORSHIP LIVES IN nous-ergon-ops, NOT HERE
+      # (alpha-engine-config-I10182, completing the config-I7339 ownership
+      # ruling).
       #
-      # `setup_eval_alarms.sh` has been infra-as-code since the L4578e arc and
-      # nothing has ever invoked it. Grepped 2026-08-29: zero callers in any
-      # repo. So the two alarms it declares have been live AWS state that
-      # happened to match a script, with no mechanism keeping them matched —
-      # the same merged-but-not-deployed class the rolling-mean step below was
-      # added to close, one layer up.
+      # A step used to sit here running `infrastructure/setup_eval_alarms.sh`
+      # on every push (added for alpha-engine-config-I9321, itself closing a
+      # merged-but-not-deployed gap). All three eval alarms it declared are
+      # ALSO codified in nous-ergon-ops/infrastructure/cloudwatch/alarms/ and
+      # applied by that repo's cloudwatch-alarm-apply-on-merge.yml — two
+      # appliers, one resource, whichever ran last silently won. Found while
+      # fixing alpha-engine-config-I10166: the control-breach alarm's period
+      # and missing-data policy had to be edited in lockstep by hand across
+      # two repos in two PRs, with nothing that would have failed had they
+      # disagreed.
       #
-      # It runs AFTER the rolling-mean deploy on purpose: the alarms watch
-      # metrics that Lambda emits, so reconciling them against a function that
-      # has not shipped yet would arm a detector for a producer that does not
-      # exist. put-metric-alarm is an upsert, so this is idempotent and a
-      # no-op on every deploy that does not change the declaration.
-      #
-      # This step is also what makes the I9321 alarm change deployable by the
-      # merge button alone (`pull-request-policy.md` §4.2 form 1: automated ON
-      # merge, from code committed in the repo) rather than an operator
-      # instruction in a PR body.
-      - name: Reconcile eval-quality CloudWatch alarms
-        working-directory: alpha-engine-research
-        run: bash infrastructure/setup_eval_alarms.sh
+      # infrastructure/setup_eval_alarms.sh is now a pointer stub (exits 0,
+      # creates nothing) — see that file for where the definitions live and
+      # the exact command to apply a change immediately rather than waiting
+      # for the next nous-ergon-ops merge.
 
       # Cross-week rationale clustering Lambda — same image-share as
       # eval-judge, different CMD entrypoint. Created lazily on first

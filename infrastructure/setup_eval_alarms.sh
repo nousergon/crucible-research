@@ -1,147 +1,49 @@
 #!/usr/bin/env bash
+# setup_eval_alarms.sh — RETIRED as an alarm-creation path.
 #
-# Idempotent CloudWatch alarm setup for the eval-quality observability
-# surface (AlphaEngine/Eval namespace). Re-runnable: put-metric-alarm is
-# an upsert, so running this repeatedly converges to the declared state
-# and never duplicates.
+# alpha-engine-config-I10182, completing the config-I7339 ownership ruling: an
+# alarm is an account resource (infrastructure-ownership-policy.md §2), and
+# this repo is PUBLIC while the alarm definitions and their applier live in
+# the PRIVATE nous-ergon-ops repo. This script's `put-metric-alarm` calls are
+# gone — tests/test_eval_alarm_setup.py fails the build if they come back.
 #
-# Why this exists (L4578e-alarm):
-#   * The control-bands metric (agent_quality_score_control_breach_count,
-#     emitted by evals/control_bands.py, L4578(e)) had NO alarm — the
-#     drift detection was dark, emitting a metric nothing paged on.
-#   * Auditing that gap surfaced a second one: the existing rolling-mean
-#     floor alarm (alpha-engine-eval-quality-regression) was created
-#     out-of-band and never codified — deploy.sh deferred it ("lands in
-#     PR 4c") and it lived only as live AWS state. This script brings
-#     BOTH under infra-as-code so neither drifts or gets lost.
+# WHY IT HAD TO STOP, not merely why it moved. `nous-ergon-ops/infrastructure/
+# cloudwatch/alarms/` already codified all three eval alarms and applied them
+# on merge via cloudwatch-alarm-apply-on-merge.yml — this script duplicated
+# that authorship on every deploy.yml push to this repo. Two appliers, one
+# resource: the live alarm was whichever ran last, and nothing anywhere would
+# have failed if the two declarations disagreed. Found while fixing
+# alpha-engine-config-I10166: the eval-control-breach alarm's period and
+# missing-data policy had to be edited in lockstep by hand, across two repos,
+# in two PRs.
 #
-# The metric names below MUST match the producer constants
-# (evals/control_bands.py BREACH_COUNT_METRIC_NAME, evals/rolling_mean.py
-# DERIVED_FLOOR_METRIC_NAME). tests/test_eval_alarm_setup.py locks that.
+# Every alarm this script used to create is codified as a JSON file:
 #
-# Usage:
-#   bash infrastructure/setup_eval_alarms.sh
-#   SNS_TOPIC_ARN=arn:aws:sns:...:my-topic bash infrastructure/setup_eval_alarms.sh
+#   nous-ergon-ops/infrastructure/cloudwatch/alarms/
+#     alpha-engine-eval-quality-regression.json         (MetricName agent_quality_score_4w_mean_min)
+#     alpha-engine-eval-control-breach.json              (MetricName agent_quality_score_control_breach_count)
+#     alpha-engine-eval-control-bands-no-datapoint.json  (MetricName agent_quality_score_control_breach_count)
+#
+# To change one, edit that file in nous-ergon-ops and open a PR there — never
+# edit this script and run it. To apply immediately rather than waiting for
+# the next merge touching that file, an operator with nous-ergon-ops checked
+# out runs:
+#
+#   infrastructure/cloudwatch/apply.py --prefix alpha-engine-eval-
+#
+# THE METRIC-NAME CONTRACT IS NOT LOST. `tests/test_eval_alarm_setup.py`
+# still fails the build if either producer constant below stops matching what
+# the alarms above watch — the exact reason this script existed in the first
+# place, without needing a live command line to check it against:
+#
+#   evals/control_bands.py::BREACH_COUNT_METRIC_NAME  = "agent_quality_score_control_breach_count"
+#   evals/rolling_mean.py::DERIVED_FLOOR_METRIC_NAME   = "agent_quality_score_4w_mean_min"
+#
+# This file is a pointer, not a stub with hidden behavior: it does nothing and
+# exits 0 so a stale muscle-memory invocation is a no-op, not a failure.
 
 set -euo pipefail
-
-SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts}"
-NAMESPACE="AlphaEngine/Eval"
-
-FLOOR_METRIC="agent_quality_score_4w_mean_min"
-BREACH_METRIC="agent_quality_score_control_breach_count"
-
-echo "[setup_eval_alarms] SNS=${SNS_TOPIC_ARN} namespace=${NAMESPACE}"
-
-# ── Rolling-mean quality-floor alarm (ROADMAP §1634) ──────────────────────
-# Fires when the MIN across all (agent,criterion,judge) 4-week means drops
-# below 3.0 — an absolute-quality floor. Mirrors the live alarm exactly so
-# this re-put is a no-op against existing state.
-echo "[setup_eval_alarms] put alpha-engine-eval-quality-regression (${FLOOR_METRIC})"
-# alpha-engine-config-I9321 — two corrections, both measured 2026-08-29.
-#
-# 1. `--period 86400` on a metric emitted ONCE A WEEK. Six of every seven
-#    evaluation windows were empty by construction, which is why the period
-#    and the missing-data policy have to change together: `breaching` on a
-#    daily period would flap the alarm every week on a metric behaving
-#    perfectly. 604800 matches what `EvalRollingMean` actually publishes.
-#
-# 2. `--treat-missing-data ignore` retains the LAST state when data stops.
-#    The floor last published 2026-08-20; `AlphaEngine/Eval/agent_quality_score`
-#    has zero live streams, so the floor is not being computed at all — and
-#    `ignore` made a blind alarm indistinguishable from a breaching one on
-#    every surface. `breaching` renders "we did not measure quality this week"
-#    as a problem, which is what it is (`principles.md` §2.7: no data is never
-#    rendered as green). The producer-side half of the same fix makes
-#    `EvalRollingMean` FAIL rather than publish nothing quietly.
-#
-# Note on why Brian was never notified, which is a THIRD thing and not fixed
-# by either line above: the floor has been below 3.0 in every datapoint since
-# 2026-04-30 (measured: 1.0 -> 2.0 -> 2.006, never once >= 3.0). CloudWatch
-# notifies on a TRANSITION, so this alarm paged once, on 2026-05-07, and
-# structurally could not page again. A threshold alarm on a permanently
-# breached level is a red light, not a pager. The change-detector that DOES
-# transition is `alpha-engine-eval-control-breach` below, which moved 0->2 on
-# 2026-08-27 and is the live channel for "this agent got worse".
-#
-# Re-putting with changed configuration RESETS alarm state to
-# INSUFFICIENT_DATA, so this deploy also un-latches the 114-day-old ALARM and
-# lets the next evaluation produce a real transition.
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-quality-regression" --alarm-description "Eval quality floor: min 4-week-mean agent_quality_score < 3.0 (rolling_mean.py). Missing data is BREACHING (alpha-engine-config-I9321): an unpublished floor means quality went unmeasured, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${FLOOR_METRIC}" --statistic Minimum --period 604800 --evaluation-periods 1 --threshold 3.0 --comparison-operator LessThanThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
-
-# ── Control-band breach alarm (L4578e) ────────────────────────────────────
-# Fires when >= 1 combo is OUT_OF_CONTROL (a downward Shewhart or CUSUM
-# breach) on the weekly control-band run. Catches drift/steps the flat
-# floor misses. The metric is emitted every run (incl. 0), so the stream
-# stays alive and the alarm sits OK rather than INSUFFICIENT_DATA between
-# breaches.
-#
-# alpha-engine-config-I10166 — both corrections measured 2026-09-08, and
-# both are the SAME two defects I9321 fixed on the floor alarm thirty
-# lines above. This alarm kept `--period 86400 --treat-missing-data
-# ignore`, justified in the old comment as "matching the floor alarm's
-# cadence" — a sentence already false when it was written, because the
-# floor had just moved to 604800/breaching in the same commit.
-#
-# 1. `--period 86400` on a producer that runs weekly. Measured: 25
-#    emissions between 2026-07-30 and 2026-09-05, six of them on
-#    2026-08-30, and six-day gaps elsewhere — six of every seven daily
-#    windows are empty by construction, which is precisely why the period
-#    and the missing-data policy have to change together. Every COMPLETE
-#    week since 2026-07-27 carries at least one datapoint, so 604800 is
-#    the window the producer actually fills.
-#
-# 2. `--treat-missing-data ignore` HOLDS THE LAST STATE FOREVER when data
-#    stops — strictly worse than `notBreaching`, which at least resolves
-#    to OK. Measured: this alarm went ALARM at 2026-08-30 13:19 PDT on a
-#    breach that had already reversed, then received no datapoint for the
-#    next 5.6 days, and sat red for 8.8 days indistinguishable from a
-#    dead producer.
-#
-#    `breaching` is NOT the answer here, and the difference from the floor
-#    alarm above is the whole point. This is a CEILING alarm (`>= 1`), so
-#    a breaching policy would give one latched state two meanings — "a
-#    combo went out of control" and "the control bands were never
-#    evaluated" — and an operator reading the alarm surface could not tell
-#    which held. `alpha-engine-config-I8118` forbids exactly that, and
-#    `nous-ergon-ops/tests/test_cloudwatch_absence_is_not_a_breach.py`
-#    enforces it. The floor alarm is a LessThan* alarm, where absence and
-#    breach both mean "not proven good", so `breaching` is correct there.
-#
-#    So the pair is split, the same way I8118 split the Director's:
-#    this alarm carries `notBreaching` and owns the BREACH condition, and
-#    `alpha-engine-eval-control-bands-no-datapoint` below owns ABSENCE —
-#    `SampleCount < 1` over 7 consecutive daily periods, `breaching`.
-#    Codified in
-#    `nous-ergon-ops/infrastructure/cloudwatch/alarms/` and declared
-#    `armed_alarms` in `nousergon-data/infrastructure/automation_pause.json`.
-#
-# Re-putting with changed configuration RESETS alarm state to
-# INSUFFICIENT_DATA, so this deploy also un-latches the 8.8-day ALARM and
-# lets the next evaluation produce a real transition.
-# alpha-engine-config-I10167 (Brian ruling 2026-09-08) - the SCALE the
-# breach is judged on changed: the charts now run on the raw weekly
-# `agent_quality_score` rather than its 4-week rolling mean. The alarm
-# THRESHOLD is unaffected (`>= 1` combo currently out of control means
-# the same thing on either scale), but the description is, because an
-# operator reading it has to know what series produced the breach.
-# Measured over the same 20 live combos, 2026-09-08: 3 combos out of
-# control on the old scale -> 1 on the new, and 14 combos with a latest
-# |z| > 3 -> 6, all six of them UPWARD (observability, never alarmed).
-echo "[setup_eval_alarms] put alpha-engine-eval-control-breach (${BREACH_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-breach" --alarm-description "Eval control bands (L4578e): >=1 (agent,criterion,judge) combo CURRENTLY OUT_OF_CONTROL (downward Shewhart/CUSUM breach) in evals/control_bands.py. Charted on the RAW WEEKLY agent_quality_score, with limits scaled by the number of reviews behind each week (alpha-engine-config-I10167, Brian ruling 2026-09-08) - NOT the 4-week rolling mean, whose overlapping windows deflated sigma 2-5x and put 13 of 20 combos beyond 3 sigma. Combos the chart cannot judge are counted on agent_quality_score_control_unmeasurable_count, never folded into this zero. Missing data is BREACHING (alpha-engine-config-I10166): an unpublished breach count means the control bands went unevaluated this week, which is never reported as healthy." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic Maximum --period 604800 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
-
-# ── Control-band ABSENCE deadman (alpha-engine-config-I8118, I10166) ──────
-# SILENT, not breaching. `control_bands.py` emits the breach count on EVERY
-# run including the healthy zero, so seven consecutive empty days means the
-# weekly EvalRollingMean stage did not execute, died before
-# compute_and_emit_control_bands, or the emission is broken — never "no combo
-# breached". SampleCount, not the value: a value statistic makes "emitted 0"
-# and "emitted nothing" the same number again, one layer down. Daily periods
-# with DatapointsToAlarm=7 put ~1 day of grace past the largest gap measured
-# on this stream (6 days, 2026-08-30 -> 2026-09-05); a window equal to the
-# emission interval has none.
-echo "[setup_eval_alarms] put alpha-engine-eval-control-bands-no-datapoint (${BREACH_METRIC})"
-aws cloudwatch put-metric-alarm --alarm-name "alpha-engine-eval-control-bands-no-datapoint" --alarm-description "SILENT, not breaching. AlphaEngine/Eval agent_quality_score_control_breach_count produced no datapoint on ANY of the last 7 days. Emitter is the WEEKLY EvalRollingMean stage of ne-weekly-freshness-pipeline; evals/control_bands.py publishes on every run including the healthy zero. Split from alpha-engine-eval-control-breach, which owns the BREACH condition (alpha-engine-config-I8118, I10166)." --namespace "${NAMESPACE}" --metric-name "${BREACH_METRIC}" --statistic SampleCount --period 86400 --evaluation-periods 7 --datapoints-to-alarm 7 --threshold 1 --comparison-operator LessThanThreshold --treat-missing-data breaching --alarm-actions "${SNS_TOPIC_ARN}" --ok-actions "${SNS_TOPIC_ARN}"
-
-echo "[setup_eval_alarms] done — both eval alarms converged."
+echo "setup_eval_alarms.sh no longer creates alarms (alpha-engine-config-I10182)."
+echo "Edit nous-ergon-ops/infrastructure/cloudwatch/alarms/alpha-engine-eval-*.json instead."
+echo "To apply immediately: nous-ergon-ops/infrastructure/cloudwatch/apply.py --prefix alpha-engine-eval-"
+exit 0
