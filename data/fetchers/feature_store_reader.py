@@ -469,6 +469,10 @@ def _read_latest_features_s3() -> dict[str, dict] | None:
         return result
 
     except Exception as e:
+        # (a) feature-store S3 read/parse failed. (c) not recorded elsewhere
+        # — deliberate carve-out (alpha-engine-config-I10226):
+        # expected-absence-with-fallback (caller treats ``None`` as "no
+        # feature store this run" and degrades to its other inputs).
         logger.debug("Feature store read failed (non-blocking): %s", e)
         return None
 
@@ -556,6 +560,11 @@ def _read_latest_factor_loadings_s3(
         try:
             obj = s3.get_object(Bucket=_BUCKET, Key=key)
         except Exception as e:
+            # (a) factor-loading parquet absent/unreadable at the latest
+            # snapshot date. (c) not recorded elsewhere — deliberate
+            # carve-out (alpha-engine-config-I10226): expected-absence
+            # probe with a defined fallback (caller treats ``None`` as "no
+            # factor loadings this run").
             logger.debug("Factor-loading parquet not present at %s: %s", key, e)
             return None
 
@@ -591,6 +600,10 @@ def _read_latest_factor_loadings_s3(
         return result or None
 
     except Exception as e:
+        # (a) factor-loading read/parse failed for a reason not caught by
+        # the inner try above (e.g. list_objects_v2 itself, or parquet
+        # decode). (c) not recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): expected-absence-with-fallback.
         logger.debug("Factor-loading read failed (non-blocking): %s", e)
         return None
 
@@ -662,5 +675,11 @@ def read_latest_daily_closes() -> dict[str, float] | None:
         return result if result else None
 
     except Exception as e:
+        # (a) daily-closes staging parquet read/parse failed. (c) not
+        # recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): expected-absence-with-fallback,
+        # matches the docstring's own "hard-cutover with no fallback per
+        # feedback_no_silent_fails" — the caller degrades to its other
+        # price sources rather than crashing on a transient S3 read.
         logger.debug("Daily closes read failed (non-blocking): %s", e)
         return None

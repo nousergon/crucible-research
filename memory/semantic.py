@@ -94,7 +94,15 @@ Respond ONLY with JSON: {{"observation": "...", "sector": "...", "related_ticker
                 )
                 n_created += 1
         except Exception as e:
-            logger.debug("[semantic_extractor] team %s extraction failed: %s", team_id, e)
+            # (a) LLM semantic-memory extraction for this sector team
+            # failed (API error, malformed JSON completion). (c) recorded
+            # at WARNING: raising is architecturally unsafe here — this
+            # runs inside a per-team loop and a single extraction failure
+            # must not abort the other teams' memories — but the summary
+            # `logger.info` below only fires when `n_created > 0`, so a
+            # total failure across every team would otherwise be
+            # completely invisible (alpha-engine-config-I10226).
+            logger.warning("[semantic_extractor] team %s extraction failed: %s", team_id, e)
 
     # 2. Extract from macro report (1 memory)
     if n_created < MAX_SEMANTIC_EXTRACTIONS and macro_report and len(macro_report) > 100:
@@ -118,7 +126,12 @@ Respond ONLY with JSON: {{"observation": "...", "sector": null}}"""
                 )
                 n_created += 1
         except Exception as e:
-            logger.debug("[semantic_extractor] macro extraction failed: %s", e)
+            # (a) LLM semantic-memory extraction from the macro report
+            # failed. (c) recorded at WARNING, same reasoning as the
+            # sector-team site above: a silent failure here is invisible
+            # whenever every extraction in the run fails
+            # (alpha-engine-config-I10226).
+            logger.warning("[semantic_extractor] macro extraction failed: %s", e)
 
     # 3. Extract cross-sector observation from IC decisions (1 memory)
     if n_created < MAX_SEMANTIC_EXTRACTIONS and ic_decisions:
@@ -151,7 +164,11 @@ Respond ONLY with JSON: {{"observation": "...", "related_tickers": [...]}}"""
                     )
                     n_created += 1
             except Exception as e:
-                logger.debug("[semantic_extractor] CIO extraction failed: %s", e)
+                # (a) LLM semantic-memory extraction of the cross-sector
+                # IC-decision observation failed. (c) recorded at WARNING,
+                # same reasoning as the two extraction sites above
+                # (alpha-engine-config-I10226).
+                logger.warning("[semantic_extractor] CIO extraction failed: %s", e)
 
     if n_created:
         logger.info("[semantic_extractor] created %d semantic memories", n_created)

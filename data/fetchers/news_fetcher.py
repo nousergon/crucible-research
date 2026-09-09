@@ -51,6 +51,11 @@ def _fetch_article_excerpt(url: str, max_chars: int = 500) -> str:
         text = " ".join(p.get_text(separator=" ", strip=True) for p in paragraphs)
         return text[:max_chars].strip()
     except Exception as e:
+        # (a) article-body HTTP fetch/parse failed for this one URL.
+        # (c) not recorded elsewhere — deliberate transport carve-out
+        # (alpha-engine-config-I10226): same class as the executor
+        # Telegram-transport swallows; caller degrades to an empty
+        # excerpt for this one article rather than failing the batch.
         logger.debug("Article excerpt fetch failed for %s: %s", url, e)
         return ""
 
@@ -106,6 +111,12 @@ def fetch_yahoo_news(
                 "article_hash": _article_hash(headline, source),
             })
         except Exception as e:
+            # (a) one RSS/feed entry failed to parse for this ticker.
+            # (c) not recorded elsewhere — deliberate carve-out
+            # (alpha-engine-config-I10226): expected malformed-item
+            # robustness within a multi-entry feed loop, same class as the
+            # feature-store expected-absence carve-outs; the rest of the
+            # feed's entries are unaffected.
             logger.debug("Skipping news entry for %s: %s", ticker, e)
             continue
 
