@@ -34,8 +34,11 @@ from scoring.leaderboard_producers import (
 from scoring.leaderboard_scoring import SpecDay, SpecHistory
 from scoring.universe_membership import (
     ATTRACTIVENESS_FEED_TOP_N,
+    CADENCE_WEEKLY,
+    DEFAULT_CUT_REFRESH_CADENCE,
     TECH_SCORE_CUT_PREFIX,
     build_universe_membership,
+    cut_refresh_cadence,
     momentum_path_tech_scores,
     tech_scores_from_eval_log,
 )
@@ -340,3 +343,38 @@ def test_contract_document_exists_and_names_every_live_spec():
         assert name in text, f"SCANNER_CONTRACT.md does not describe arm {name!r}"
     for name in EXPECTED_BASES:
         assert name in text, f"SCANNER_CONTRACT.md does not describe cut {name!r}"
+
+
+# ── §Cadence: the artifact's producing cadence is declared, not implied ──────
+#
+# Contract source of truth: `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml
+# :: scanner_candidates_json` — `cadence: saturday_sf`, `produced_by:
+# [{pipeline: ne-weekly-freshness-pipeline, stage: Scanner}]` (`I7847`, citing
+# `nousergon-data-PR1464` merged 2026-08-20T18:25:51Z / `alpha-engine-config-I7811`
+# — Brian ruling 2026-08-20, reversing the 2026-08-04 `I6494` ruling that had
+# briefly put a second `Scanner` stage on the weekday preopen SF). Kept in sync
+# by convention with that cross-repo file, same as
+# `test_signals_producer_contract.py`'s `PIPELINE_CONTRACT.yaml` boundary — a
+# drift-proof cross-repo read is a filed follow-up, not yet built.
+#
+# alpha-engine-config-I10067 / I10146: a downstream consumer (crucible-predictor
+# PR607, merged 2026-09-06) was built assuming `candidates/{today}/candidates.json`
+# exists on every trading day. It does not — S3 shows daily Mon-Fri writes only
+# through 2026-08-21 (the now-removed weekday `Scanner` stage), then only the
+# weekly (Thu/Fri/Sat) date through 2026-09-04. `#743` / `alpha-engine-config-I6666`
+# (2026-08-27) armed the matching `weekly` default so the cadence is a declared
+# setting rather than "however often the Lambda happens to run". This repo's own
+# SCANNER_CONTRACT.md described the pre-I7811 world as current until this change
+# (corrected 2026-09-09) — this test is what keeps that section from silently
+# drifting out of step with the code again, the same failure mode I7808/I7809
+# fixed for the rest of the contract.
+def test_candidates_artifact_cadence_is_weekly_not_daily():
+    assert DEFAULT_CUT_REFRESH_CADENCE == CADENCE_WEEKLY
+    assert cut_refresh_cadence() == CADENCE_WEEKLY
+
+
+def test_contract_document_declares_the_live_weekly_cadence():
+    text = CONTRACT.read_text()
+    assert "runs weekly. This is LIVE" in text
+    assert "alpha-engine-config-I7811" in text
+    assert "alpha-engine-config-I6666" in text

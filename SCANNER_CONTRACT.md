@@ -182,16 +182,48 @@ cadence change below.
 
 ### Cadence
 
-**Target: the scanner runs weekly** (Brian, 2026-08-20), one run producing the
-week's cuts. Today it runs every weekday — a `Scanner` stage in both
-`step_function.json` (weekly) and `step_function_daily.json` (weekday preopen) —
-and `SCANNER_CUT_REFRESH_CADENCE` is unset, so the cut re-derives daily.
+**The scanner runs weekly. This is LIVE, not a target** (corrected 2026-09-09 —
+was: "Today it runs every weekday" / "Closing that gap is step 3 of
+`alpha-engine-config-I7823`"; that language described the state before Brian's
+`alpha-engine-config-I7811` ruling shipped and went stale once it did).
 
-Closing that gap is step 3 of `alpha-engine-config-I7823`, and the order is
-load-bearing: every consumer keyed on `{today}` fails loud the first morning the
-scanner does not run. This document's step 1 — the feed resolving from
-`universe_membership/latest.json` rather than a dated artifact — is what makes
-the weekly cadence shippable at all.
+Both halves of `alpha-engine-config-I7823`'s three-step merge order landed:
+
+1. **`nousergon-data/infrastructure/step_function_daily.json`** no longer has a
+   `Scanner` stage. It was removed by `nousergon-data-PR1464` (merged
+   2026-08-20T18:25:51Z, `alpha-engine-config-I7811` — Brian ruling 2026-08-20:
+   *"the scanner should be running weekly ... on a weekly basis"*), which
+   reversed the 2026-08-04 `I6494` ruling that had put it there. Verified live
+   2026-09-09: the state's own removal comment names I7811; `candidates/` /
+   `universe_membership/` objects in S3 stop appearing on non-Thu/Fri/Sat
+   calendar dates from 2026-08-22 onward, matching the ruling's effective date
+   (the Mon/Tue/Wed writes visible through 2026-08-21 were the removed daily
+   invocation, not manual reruns). `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml
+   :: scanner_candidates_json` declares `cadence: saturday_sf`,
+   `produced_by: [{pipeline: ne-weekly-freshness-pipeline, stage: Scanner}]`,
+   citing the same PR under `I7847` — that row is this artifact's
+   cross-repo-normative cadence declaration; this section restates it rather
+   than owning it.
+2. **`SCANNER_CUT_REFRESH_CADENCE` is armed, not unset.**
+   `DEFAULT_CUT_REFRESH_CADENCE` moved from `daily` to `weekly` in `#743`
+   (`alpha-engine-config-I6666`, Brian ruling 2026-08-27), specifically because
+   I7811's removal had made the cadence weekly "in PRACTICE, but only because
+   the Lambda happens to be invoked once a week" — an emergent property, not a
+   declared one. `cut_refresh_cadence()` now returns `weekly` with no override
+   set; `tests/test_universe_membership.py::test_default_cadence_is_weekly` and
+   `::test_repeat_invocation_inside_one_week_does_not_recut` pin it.
+
+The remaining consumer-side risk is exactly what I7823's merge-order note warned
+about: **a reader keyed on `{today}` rather than on the latest cut fails loud
+the first morning the scanner does not run.** `candidates.json` is written
+under `candidates/{run_date}/candidates.json` — a dated key — precisely so a
+missed weekly run stays visible as a missing artifact rather than silently
+serving a stale one (`I6651`). A consumer that assumes a fresh
+`candidates/{today}/candidates.json` exists on every trading day is assuming
+the cadence this section used to (wrongly) describe;
+`test_candidates_artifact_cadence_is_weekly_not_daily` below pins the producer
+side of that contract so the next accidental daily re-add is a red test, not a
+silent redrift.
 
 ## 2. Every cut emitted, and what its `basis` means
 
