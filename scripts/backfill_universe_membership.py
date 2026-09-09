@@ -101,6 +101,11 @@ def _exists(s3, key: str) -> bool:
         s3.head_object(Bucket=_BUCKET, Key=key)
         return True
     except Exception as exc:  # noqa: BLE001 — absent (404) is expected
+        # (a) head_object failed (typically a 404 — the object is absent).
+        # (c) not recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): the docstring above already states
+        # absence is the normal case here; the caller uses the boolean
+        # return, not this log line, to decide whether to write.
         logger.debug("head_object(%s): %s", key, exc)
         return False
 

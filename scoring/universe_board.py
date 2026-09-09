@@ -1004,6 +1004,11 @@ def _read_factor_profiles(run_date: str, bucket: str | None, s3_client: Any) -> 
             obj = s3.get_object(Bucket=b, Key=key)
             return json.loads(obj["Body"].read())
         except Exception as e:
+            # (a) one candidate factor-profile S3 key unreadable.
+            # (c) not recorded elsewhere per-key — deliberate carve-out
+            # (alpha-engine-config-I10226): expected-absence-with-fallback,
+            # walks to the next candidate key; the `logger.warning` below
+            # covers the case where every candidate is exhausted.
             logger.debug("[universe_board] factor profile key %s unreadable: %s", key, e)
             continue
     logger.warning("[universe_board] no factor profiles readable for %s — pillars will be null", run_date)

@@ -280,6 +280,12 @@ def fetch_analyst_consensus(ticker: str, current_price: float | None = None) -> 
                 })
             result["earnings_surprises"] = surprises
     except Exception as e:
+        # (a) FMP earnings-surprises fetch/parse failed for this one ticker.
+        # (c) not recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): expected-absence-with-fallback, same
+        # class as the executor connection-teardown carve-outs. `result`
+        # already carries every other field fetched before this block, so
+        # the caller gets a partial result rather than nothing.
         logger.debug("FMP earnings surprises failed for %s: %s", ticker, e)
 
     return result

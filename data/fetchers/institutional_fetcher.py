@@ -131,6 +131,11 @@ def _analyze_ticker_13f(
                         n_accumulating += 1
                         total_new_shares += int(current_value - prev_value)
     except Exception as e:
+        # (a) 13F holdings comparison failed for this one ticker.
+        # (c) not recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): expected-absence-with-fallback —
+        # falls back to the neutral empty result rather than aborting the
+        # ticker.
         logger.debug("13F comparison failed for %s: %s", ticker, e)
         # Fall back to just checking if we found institutional filings
         return _empty_result()

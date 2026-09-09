@@ -411,6 +411,12 @@ def _serialize_output_message(response: Any) -> tuple[dict | None, str | None]:
             if message is not None:
                 message_dict = message_to_dict(message)
     except Exception as e:  # noqa: BLE001 — best-effort serialization
+        # (a) response-message serialization to a JSON-safe dict/text
+        # failed. (c) not recorded elsewhere — deliberate carve-out
+        # (alpha-engine-config-I10226): this is auxiliary logging
+        # enrichment, not the cost/token accounting itself (computed
+        # separately from ``response.usage_metadata``); the docstring
+        # above already states "the caller logs and records what it has".
         logger.debug("Best-effort message serialization failed: %s", e)
     return message_dict, text
 

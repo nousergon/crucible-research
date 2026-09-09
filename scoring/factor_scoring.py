@@ -716,11 +716,14 @@ def _resolve_group_snapshot(
         try:
             obj = s3.get_object(Bucket=bucket, Key=key)
         except Exception as exc:  # noqa: BLE001
-            # EXPECTED, not swallowed: weekday partitions carry `technical`
-            # and no `fundamental`, so resolution walks back past them. The
-            # search is still bounded — exhausting every candidate raises
-            # below, and resolving something too old raises on staleness, so
-            # neither a missing group nor an ancient one can pass silently.
+            # (a) a candidate factor-group parquet is absent at this date.
+            # (c) not recorded elsewhere — deliberate carve-out
+            # (alpha-engine-config-I10226): EXPECTED, not swallowed:
+            # weekday partitions carry `technical` and no `fundamental`, so
+            # resolution walks back past them. The search is still bounded
+            # — exhausting every candidate raises below, and resolving
+            # something too old raises on staleness, so neither a missing
+            # group nor an ancient one can pass silently.
             logger.debug("factor group %r absent at %s (%s)", group, resolved, exc)
             continue
         df = pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
