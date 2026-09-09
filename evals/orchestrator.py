@@ -433,6 +433,12 @@ def load_already_judged_keys(
         try:
             raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         except Exception as e:  # noqa: BLE001 — absent manifest = nothing judged yet
+            # (a) eval-dedup manifest S3 read failed for this date.
+            # (c) not recorded elsewhere — deliberate carve-out
+            # (alpha-engine-config-I10226): the docstring above already
+            # documents the failure mode as harmless (a duplicate eval,
+            # never a silent skip), matching the expected-absence-with-
+            # fallback class.
             logger.debug("[batch_plan] no eval manifest at %s: %s", key, e)
             continue
         try:

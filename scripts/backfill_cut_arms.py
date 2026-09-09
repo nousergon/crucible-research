@@ -111,6 +111,11 @@ def _get_json(s3, key: str) -> dict | None:
     try:
         return json.loads(s3.get_object(Bucket=_BUCKET, Key=key)["Body"].read())
     except Exception as exc:  # noqa: BLE001 — absence is a reported outcome, not a crash
+        # (a) S3 object absent/unreadable at this key. (c) not recorded
+        # elsewhere — deliberate carve-out (alpha-engine-config-I10226):
+        # ``backfill_date`` below turns a ``None`` return into an explicit
+        # recorded ``status``/``reason`` on the outcome record, never a
+        # silent skip.
         logger.debug("get_object(%s): %s", key, exc)
         return None
 

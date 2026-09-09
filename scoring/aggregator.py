@@ -85,6 +85,12 @@ def _load_weights_from_s3() -> dict | None:
                 with open(_WEIGHTS_CACHE_PATH, "w") as f:
                     json.dump(weights, f, indent=2)
             except Exception as e:
+                # (a) local scoring-weights cache write failed. (c) not
+                # recorded elsewhere — deliberate carve-out
+                # (alpha-engine-config-I10226): this is a best-effort local
+                # fault-tolerance cache, not the authoritative weights
+                # source (S3, just read above) — `weights` is returned
+                # either way.
                 logger.debug("Could not write scoring weights cache: %s", e)
             return weights
     except ClientError as e:
@@ -105,7 +111,15 @@ def _load_weights_from_s3() -> dict | None:
                 )
                 return weights
     except Exception as e2:
-        logger.debug("Could not read local scoring weights cache: %s", e2)
+        # (a) the local scoring-weights cache exists but failed to read
+        # (corrupt JSON, permission error) — distinct from the normal
+        # first-run "file absent" path handled by the `os.path.exists`
+        # check above, which never reaches this except. (c) recorded at
+        # WARNING here: both the S3 source and the local fallback have now
+        # failed, so `_get_weights` is about to fall through to the static
+        # `universe.yaml` default — that degradation should be visible,
+        # not silent (alpha-engine-config-I10226).
+        logger.warning("Could not read local scoring weights cache — falling back to static defaults: %s", e2)
 
     return None
 

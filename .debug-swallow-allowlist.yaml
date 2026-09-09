@@ -1,0 +1,181 @@
+# .debug-swallow-allowlist.yaml -- baseline for
+# tests/test_no_debug_only_swallows.py (alpha-engine-config-I10226).
+#
+# The class this guards: an `except Exception` whose body only records the
+# failure at logger.debug(...) or discards it as a bare `pass` -- invisible
+# on any entrypoint whose root logger runs at INFO. Lifted detector:
+# nousergon_lib.testing.debug_swallow_guard (nousergon-lib-PR398), following
+# the crucible-executor precedent (alpha-engine-config-I10031,
+# crucible-executor-PR547) and .provider-linkage-allowlist.yaml
+# (alpha-engine-config-I9295): a lib-level scanner, a per-repo allowlist.
+#
+# A new site with no entry fails the build. An entry whose `expires` has
+# passed fails loudly -- re-justify or remove, never silently
+# re-grandfather. An entry that no longer matches anything ALSO fails, so
+# the allowance cannot quietly widen after the site it covered is gone or
+# fixed.
+#
+# `path` + `line` identify the `except` line itself (the line the guard's
+# AST walk reports). Every entry requires a `reason` naming (a) the failure
+# mode swallowed and (c) the concrete recording surface (or the explicit
+# "no recording surface -- carve-out" for a transport/teardown/expected-
+# absence-with-fallback swallow the fleet rule's own carve-out clause
+# covers), per `~/Development/CLAUDE.md` "Fail loud and fast." Every site
+# also carries a matching inline `# (a) ... (c) ...` comment in the source.
+#
+# Sweep of alpha-engine-config-I10226: the AST detector found 19 live sites
+# in this repo (vs. the issue's crude grep count of 22). Of those 19: 4 were
+# upgraded to `logger.warning` (memory/semantic.py:96,120,153 and
+# scoring/aggregator.py's local-cache-read exhaustion site) because raising
+# was architecturally unsafe (a per-item loop; a last-resort fallback) but
+# silent total failure was otherwise invisible -- those 4 no longer match
+# the AST shape and so carry no allowlist entry. 0 sites were producer/
+# writer/audit surfaces (this repo's signals.json / DecisionArtifact writes
+# do not swallow at debug/pass), so 0 were raised. The remaining 15 are
+# transport / expected-absence-with-fallback / documented in-band-
+# propagation carve-outs, listed below.
+
+schema_version: 1
+entries:
+  # ── External-API per-item transport/expected-absence (data/fetchers/) ────
+  - path: data/fetchers/analyst_fetcher.py
+    line: 282
+    reason: >-
+      FMP earnings-surprises fetch/parse failed for one ticker. No
+      recording surface -- expected-absence-with-fallback; the result
+      dict already carries every other field fetched before this block.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/feature_store_reader.py
+    line: 471
+    reason: >-
+      Feature-store S3 read/parse failed. No recording surface --
+      expected-absence-with-fallback; caller treats None as "no feature
+      store this run."
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/feature_store_reader.py
+    line: 562
+    reason: >-
+      Factor-loading parquet absent/unreadable at the latest snapshot
+      date. No recording surface -- expected-absence probe with a
+      defined fallback.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/feature_store_reader.py
+    line: 602
+    reason: >-
+      Factor-loading read/parse failed outside the inner try (e.g.
+      list_objects_v2 or parquet decode). No recording surface --
+      expected-absence-with-fallback.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/feature_store_reader.py
+    line: 677
+    reason: >-
+      Daily-closes staging parquet read/parse failed. No recording
+      surface -- expected-absence-with-fallback; caller degrades to its
+      other price sources.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/institutional_fetcher.py
+    line: 133
+    reason: >-
+      13F holdings comparison failed for one ticker. No recording
+      surface -- expected-absence-with-fallback, falls back to the
+      neutral empty result.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/news_fetcher.py
+    line: 53
+    reason: >-
+      Article-body HTTP fetch/parse failed for one URL. No recording
+      surface -- transport carve-out, same class as the executor
+      Telegram-transport swallows.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: data/fetchers/news_fetcher.py
+    line: 113
+    reason: >-
+      One RSS/feed entry failed to parse for a ticker. No recording
+      surface -- expected malformed-item robustness within a multi-entry
+      feed loop.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  # ── Expected-absence probes with a defined fallback (evals/, scoring/) ───
+  - path: evals/orchestrator.py
+    line: 435
+    reason: >-
+      Eval-dedup manifest S3 read failed for one date. No recording
+      surface -- the docstring documents the failure mode as harmless (a
+      duplicate eval, never a silent skip).
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: scoring/factor_scoring.py
+    line: 718
+    reason: >-
+      Candidate factor-group parquet absent at this date -- EXPECTED,
+      not swallowed: weekday partitions carry `technical` and no
+      `fundamental`. No recording surface -- the search is bounded
+      (exhaustion raises, staleness raises).
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: scoring/universe_board.py
+    line: 1006
+    reason: >-
+      One candidate factor-profile S3 key unreadable, walks to the next
+      candidate. No recording surface per-key -- the function's own
+      logger.warning covers total exhaustion of every candidate key.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: scoring/aggregator.py
+    line: 87
+    reason: >-
+      Local scoring-weights cache write failed. No recording surface --
+      best-effort local fault-tolerance cache, not the authoritative
+      weights source (S3, already read); weights are returned either
+      way.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  # ── Best-effort auxiliary serialization (graph/) ──────────────────────────
+  - path: graph/llm_cost_tracker.py
+    line: 413
+    reason: >-
+      Response-message serialization to a JSON-safe dict/text failed. No
+      recording surface -- auxiliary logging enrichment, not the cost/
+      token accounting itself (computed separately from
+      response.usage_metadata).
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  # ── One-off backfill scripts, absence-as-reported-outcome (scripts/) ─────
+  - path: scripts/backfill_cut_arms.py
+    line: 113
+    reason: >-
+      S3 object absent/unreadable at this key. No recording surface --
+      backfill_date() turns a None return into an explicit recorded
+      status/reason on the outcome record, never a silent skip.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
+
+  - path: scripts/backfill_universe_membership.py
+    line: 103
+    reason: >-
+      head_object failed (typically a 404 -- object absent). No
+      recording surface -- absence is the normal case here; the caller
+      uses the boolean return, not this log line, to decide whether to
+      write.
+    expires: "2027-03-08"
+    tracking: alpha-engine-config-I10226
