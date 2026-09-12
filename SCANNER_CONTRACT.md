@@ -240,8 +240,15 @@ holds it to that.
 | `scanner_champion_60` | 60 | `scanner_champion_rank` | the scanner slot's champion ARM, verbatim from `candidates.json::scanner_tickers` | **nothing** — a candidate-generation experiment, scored on the scanner leaderboard |
 | `tech_score_top_60` | 60 | `tech_score_rank` | the head of `tech_score_ranks`, over `scan_path == "momentum"` rows (§2a) | the sector teams whenever it holds the champion pointer (§1) |
 | `scanner_top_20` | 20 | `tech_score_rank_within_cut` | top 20 by `tech_score` **of the champion's 60** | nothing live — churn diagnostics |
-| `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | nothing — observe-only arm |
-| `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | nothing — observe-only arm |
+| `attractiveness_momzero_top_{20,60}` | 20/60 | `attractiveness_rank_momzero` | `momzero_attractiveness_for_run` | the sector teams whenever it holds the champion pointer (§1) |
+| `attractiveness_mom121_top_{20,60}` | 20/60 | `attractiveness_rank_mom121` | `challenger_attractiveness_for_run` | the sector teams whenever it holds the champion pointer (§1) |
+| `attractiveness_hard3_top_60` | 60 | `attractiveness_rank_hard3` | `hard3_attractiveness_for_run` | the sector teams whenever it holds the champion pointer (§1) |
+
+**`momzero`, `mom121` and `hard3` are PROMOTABLE, not observe-only**, since
+Brian's 2026-08-29 ruling (`alpha-engine-config-I9272`) made every scored arm
+promotion-eligible — corrected here (this row previously said "nothing —
+observe-only arm" for all three, which stopped being true at that ruling and
+was never updated).
 
 **The name is `scanner_champion_60` as of `alpha-engine-config-I7818`.** It was
 `scanner_gate_baseline_60` before that — a name that predates the 2026-07-22
@@ -263,18 +270,29 @@ It answers "which 20 of the champion's 60 does `tech_score` like best?", not
 
 ### 2a. One full-universe rank table per promotable basis
 
-`alpha-engine-config-I7843`. A consumer resolves its rank ceiling in the basis
+`alpha-engine-config-I7843` (tech basis), extended to every promotable basis by
+`alpha-engine-config-I10546`. A consumer resolves its rank ceiling in the basis
 of whichever arm is **champion** — so every promotable arm needs a table wide
-enough to answer it, or the arm is unpromotable in practice. Until this landed,
-the only `tech_score` table emitted was `scanner_ranks` (60 names, ranked
-*within* the champion's cut), so a `tech_score_top_60` champion could not say who
-was rank 150 and `rank_table_for_cut()` refused rather than substituting the
-attractiveness table.
+enough to answer it, or the arm is unpromotable in practice. Until I7843, the
+only `tech_score` table emitted was `scanner_ranks` (60 names, ranked *within*
+the champion's cut), so a `tech_score_top_60` champion could not say who was
+rank 150 and `rank_table_for_cut()` refused rather than substituting the
+attractiveness table. I7843 fixed that for the tech basis only; the three
+weight-vector / re-composed-pillar bases (`mom121`, `momzero`, `hard3`) kept
+computing a full-universe table to slice their top-N cuts and DISCARDING it, so
+`promotion_ineligibility_from_rank_tables` recorded all three
+`rank_table_missing` on every live cycle — measured on
+`config/apply_audit/scanner_cut_champion/2026-09-11.json`, which excluded all
+four non-champion arms on that reason. Brian's ruling 2026-09-12: *"i don't see
+the point of this. all challengers should be promotable."*
 
 | basis | field | ranks over | width (2026-08-20) |
 |---|---|---|---|
 | `attractiveness_rank` | `ranks` | the scanned universe with a rankable score | 902 |
 | `tech_score_rank` | `tech_score_ranks` | scanned rows the momentum path admitted (`scan_path == "momentum"`) | 818 |
+| `attractiveness_rank_mom121` | `mom121_ranks` | every name with a rankable score in the mom121 shadow factor profile | population-dependent — absent entirely when that shadow snapshot is unavailable |
+| `attractiveness_rank_momzero` | `momzero_ranks` | every name with a rankable score under the momzero weight vector, over the SAME champion factor-profile population as `attractiveness_rank` | same as `attractiveness_rank` |
+| `attractiveness_rank_hard3` | `hard3_ranks` | every name with a rankable score under the hard3 weight vector, over the SAME champion factor-profile population as `attractiveness_rank` | same as `attractiveness_rank` |
 
 `rank_tables` is the **index**: `basis -> {field, rank_key, score_key, size,
 population, serves_rank_ceiling, eligibility}`. A consumer resolves the field
@@ -282,10 +300,21 @@ from the artifact, not from a constant on its own side — adding a basis is the
 a producer-side change with no matching edit in every reader, the same reason
 `funnel.advances_to` is declared here. The tech table is legitimately narrower
 than the universe (that gate is the incumbent rule's own), so its `size` is
-declared rather than left for a consumer to discover by being refused.
+declared rather than left for a consumer to discover by being refused. The
+three variant tables' `rank_key`/`score_key` reuse the generic
+`attractiveness_rank` / `attractiveness_score` names — the same convention the
+champion's own `ranks` table uses — because the FIELD already disambiguates
+which arm's table is being read.
 
 `scanner_ranks` is unchanged and still emitted: the two tables answer two
 questions, and collapsing them would answer one with the other.
+
+A variant arm absent this cycle (no shadow profiles, no factor read) is a
+recorded MISS, not a producer defect — its cut and rank table are simply not
+emitted, and `promotion_ineligibility_from_rank_tables` does not name it
+(absence and ineligibility are different facts: an absent arm cannot be
+promoted to because it does not exist this cycle; an ineligible arm exists but
+lacks a table).
 
 ### 2b. The ranked population is the SCANNED universe
 

@@ -35,8 +35,8 @@ from scoring.cut_promotion import (
     HOLD_REASON_CODES,
     LIVE_REASON_CODES,
     MIN_VETO_HORIZON_DAYS,
-    REASON_CHAMPION_LEADS,
     REASON_LEDGER_MISSING,
+    REASON_NO_SUPPORTED_LEAD,
     REASON_PROMOTED,
     RETIRED_V1_REASON_CODES,
     CutPromotionError,
@@ -220,13 +220,25 @@ class TestDecide:
         assert d.reason_code == REASON_LEDGER_MISSING
 
     def test_a_mature_126d_board_cannot_block_promotion(self):
+        """`blocking` is DERIVED from whether the mature horizon's own leader
+        disagrees with whatever the arena actually decided — it is not a fixed
+        archival constant, and it changed value under
+        `ARENA_CONFIG.promote_evidence="point"` (alpha-engine-config-I10546):
+        this scenario's 10-week, large, unambiguous lead now clears
+        `promote_min_weeks=2` under point evidence and PROMOTES to the same
+        arm the mature 126d board already leads on, so the two no longer
+        disagree and `blocking` is False. What must hold regardless of
+        evidence mode is the property in the test's name: the board's role
+        stays `reported_only` and never overrides `reason_code`.
+        """
         d = _run_decision(
             board=_board(h126_mature=True),
             ledger_rows=_ledger(champ_net=0.0, chal_net=0.05, n_weeks=10),
         )
         assert d.corroborating is not None
         assert d.corroborating["role"] == "reported_only"
-        assert d.corroborating["blocking"] is True  # retained for archive comparability
+        leader_126d = d.corroborating["horizons"]["126"]["leader"]
+        assert d.corroborating["blocking"] == (d.champion != leader_126d)
         if d.decision == "promote":
             assert d.reason_code == REASON_PROMOTED
 
@@ -245,13 +257,33 @@ class TestDecide:
         assert d.arena["benchmark"] == "population"
         assert d.arena["cycle_key"] == ARENA_CYCLE_DATED_KEY.format(date=DATE)
 
+    def test_a_held_arena_result_never_renders_champion_already_leads(self):
+        """alpha-engine-config-I10541. The champion LOSES its only pairwise
+        comparison (0 wins) on a window shorter than `promote_min_weeks=2`, so
+        the pointer cannot move and the arena status is `held`. The record
+        must say "no supported lead", never "champion already leads" — that
+        slug claims the incumbent won a real comparison, and it did not win
+        any.
+
+        Measured against the live 2026-09-11 record this exact shape came from:
+        `attractiveness_top_60` 0 wins / 4 losses, `champion_already_leads`.
+        """
+        d = _run_decision(ledger_rows=_ledger(champ_net=0.0, chal_net=0.002, n_weeks=1))
+        assert d.decision == "hold"
+        assert d.arms[CHAMP].pairwise_wins == 0
+        assert d.reason_code == REASON_NO_SUPPORTED_LEAD
+        assert d.reason_code != "champion_already_leads"
+        doc = d.to_document()
+        assert doc["reason_code"] == REASON_NO_SUPPORTED_LEAD
+        assert "champion_already_leads" not in json.dumps(doc)
+
 
 class TestSchema:
-    def test_v4_document_validates(self):
+    def test_v5_document_validates(self):
         d = _run_decision(board=_board())
         doc = d.to_document(leaderboard_key=f"research/cuts_leaderboard/{DATE}.json")
         jsonschema.validate(doc, _schema())
-        assert doc["schema_version"] == 4
+        assert doc["schema_version"] == 5
         assert "hysteresis" not in doc
         assert "decision_earliest_on" not in doc
         assert "arena" in doc
@@ -259,7 +291,8 @@ class TestSchema:
     def test_retired_reason_codes_are_disjoint_from_live(self):
         assert not set(LIVE_REASON_CODES) & set(RETIRED_V1_REASON_CODES)
         assert "no_promotable_challenger" in RETIRED_V1_REASON_CODES
-        assert REASON_CHAMPION_LEADS in HOLD_REASON_CODES
+        assert "champion_already_leads" in RETIRED_V1_REASON_CODES
+        assert REASON_NO_SUPPORTED_LEAD in HOLD_REASON_CODES
 
 
 class TestReconcile:

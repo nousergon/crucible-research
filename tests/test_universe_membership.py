@@ -37,6 +37,10 @@ from scoring.universe_membership import (  # noqa: E402
     CHAMPION_CUT,
     FEED_CUT_NAME,
     FUNNEL_CONSUMER_THINKTANK,
+    HARD3_RANKS_FIELD,
+    MIN_PROMOTABLE_RANK_COVERAGE,
+    MOM121_RANKS_FIELD,
+    MOMZERO_RANKS_FIELD,
     PREDICTOR_UNIVERSE_CUT,
     PROMOTABLE_CUTS,
     SCHEMA_VERSION,
@@ -975,6 +979,115 @@ def test_an_artifact_written_before_rank_tables_still_resolves():
     ranks, basis = rank_table_for_cut(m, FEED_CUT_NAME, minimum_coverage=50)
     assert basis == "attractiveness_rank"
     assert len(ranks) == 100
+
+
+def _variant_attractiveness(n: int = 100, rotate: int = 37) -> dict[str, float]:
+    """``n`` synthetic names over the SAME ticker convention as
+    :func:`_attractiveness`, but with a rotated score assignment so a variant
+    arm's top-N cut is never identical to the champion's — which would trip
+    ``assert_cut_invariants``' vacuous-challenger guard
+    (champion-challenger-policy.md §4: an arm that resolves to the same names
+    as the champion did not apply its declared change)."""
+    return {f"T{i:03d}": float(100 - ((i + rotate) % n)) for i in range(n)}
+
+
+# ── 9a. Every promotable challenger is actually promotable (alpha-engine-config-I10546) ─
+#
+# I7843 fixed this class for the tech_score_rank basis only. The three
+# weight-vector / re-composed-pillar arms (mom121, momzero, hard3) computed a
+# full-universe rank table to slice their top-N cuts and then DISCARDED it, so
+# `promotion_ineligibility_from_rank_tables` recorded all three `rank_table_missing`
+# on every live cycle (`scanner_cut_champion/2026-09-11.json`). Brian's ruling
+# 2026-09-12: "i don't see the point of this. all challengers should be
+# promotable."
+
+
+def test_every_promotable_cut_basis_has_a_full_universe_rank_table_all_variants():
+    """The producer-side closes-when of alpha-engine-config-I10546: with all
+    three variant attractiveness inputs supplied, every PROMOTABLE_CUTS basis
+    has a full-universe table and no promotable arm is ineligible for it."""
+    m = _membership(
+        gate_eligible_tech_scores=_gate_eligible(),
+        challenger_attractiveness=_variant_attractiveness(rotate=37),
+        momzero_attractiveness=_variant_attractiveness(rotate=53),
+        hard3_attractiveness=_variant_attractiveness(rotate=71),
+    )
+    emitted = [c for c in PROMOTABLE_CUTS if c in m["cuts"]]
+    assert set(emitted) == set(PROMOTABLE_CUTS), (
+        "expected every promotable cut to be emitted once all three variant "
+        f"attractiveness inputs are supplied; missing "
+        f"{sorted(set(PROMOTABLE_CUTS) - set(emitted))}"
+    )
+    for cut_name in emitted:
+        basis = m["cuts"][cut_name]["basis"]
+        assert basis in m["rank_tables"], (
+            f"promotable cut {cut_name!r} (basis {basis!r}) has no full-universe "
+            f"rank table (has: {sorted(m['rank_tables'])}) — alpha-engine-config-I10546"
+        )
+    ineligible = promotion_ineligibility_from_rank_tables(m)
+    assert ineligible == {}, ineligible
+
+
+def test_rank_table_for_cut_resolves_every_variant_cut():
+    m = _membership(
+        challenger_attractiveness=_variant_attractiveness(rotate=37),
+        momzero_attractiveness=_variant_attractiveness(rotate=53),
+        hard3_attractiveness=_variant_attractiveness(rotate=71),
+    )
+    for cut_name in PROMOTABLE_CUTS:
+        if cut_name not in m["cuts"]:
+            continue
+        ranks, basis = rank_table_for_cut(m, cut_name, minimum_coverage=MIN_PROMOTABLE_RANK_COVERAGE)
+        assert ranks, f"{cut_name!r} resolved an empty rank table"
+        assert basis == m["cuts"][cut_name]["basis"]
+
+
+def test_variant_rank_tables_are_kept_not_discarded_after_the_top_n_slice():
+    """Before I10546 these full tables were computed (to build the top-N cut)
+    and then thrown away. They must now be retained on the artifact."""
+    m = _membership(
+        challenger_attractiveness=_variant_attractiveness(120, rotate=37),
+        momzero_attractiveness=_variant_attractiveness(130, rotate=53),
+        hard3_attractiveness=_variant_attractiveness(140, rotate=71),
+    )
+    assert len(m[MOM121_RANKS_FIELD]) == 120
+    assert len(m[MOMZERO_RANKS_FIELD]) == 130
+    assert len(m[HARD3_RANKS_FIELD]) == 140
+    for field in (MOM121_RANKS_FIELD, MOMZERO_RANKS_FIELD, HARD3_RANKS_FIELD):
+        entry = next(iter(m[field].values()))
+        assert set(entry) == {"attractiveness_rank", "attractiveness_score"}
+
+
+def test_variant_bases_are_registered_in_rank_tables_index():
+    m = _membership(
+        challenger_attractiveness=_variant_attractiveness(rotate=37),
+        momzero_attractiveness=_variant_attractiveness(rotate=53),
+        hard3_attractiveness=_variant_attractiveness(rotate=71),
+    )
+    for basis, field in (
+        ("attractiveness_rank_mom121", MOM121_RANKS_FIELD),
+        ("attractiveness_rank_momzero", MOMZERO_RANKS_FIELD),
+        ("attractiveness_rank_hard3", HARD3_RANKS_FIELD),
+    ):
+        assert basis in m["rank_tables"], sorted(m["rank_tables"])
+        assert m["rank_tables"][basis]["field"] == field
+        assert m["rank_tables"][basis]["size"] == len(m[field])
+
+
+def test_a_variant_arm_absent_this_cycle_is_a_recorded_miss_not_a_defect():
+    """The absent-is-a-miss rule (module docstring on the emission blocks): a
+    variant arm's shadow profiles being unavailable must not raise, and the
+    OTHER two variants' promotability must be unaffected."""
+    m = _membership(
+        gate_eligible_tech_scores=_gate_eligible(),
+        momzero_attractiveness=_variant_attractiveness(rotate=53),
+        hard3_attractiveness=_variant_attractiveness(rotate=71),
+    )  # challenger_attractiveness omitted
+    assert MOM121_RANKS_FIELD not in m
+    assert not any(c.startswith("attractiveness_mom121_top_") for c in m["cuts"])
+    ineligible = promotion_ineligibility_from_rank_tables(m)
+    assert "attractiveness_momzero_top_60" not in ineligible
+    assert "attractiveness_hard3_top_60" not in ineligible
 
 
 # ── 10. Population parity with the universe board (alpha-engine-config-I7844) ─
