@@ -213,6 +213,19 @@ ARENA_CONFIG = ArenaConfig(
     # statistic can be formed; the confidence sequence is what refuses to
     # promote on it (§5.0).
     min_paired_dates=1,
+    # Brian's ruling 2026-09-12 (alpha-engine-config-I10546), for THIS slot
+    # only: "we will keep promoting any losing challenger on a weekly basis so
+    # we aren't losing anything" / "agreed we should have at least 2 weeks of
+    # data to promote a challenger, 1 is too few." This REPLACES, for
+    # universe_cut, the anytime-valid-sequence support requirement
+    # (champion-challenger-policy.md §5.0) and the 4-week `promote_min_weeks`
+    # default (Brian's earlier ruling, 2026-09-01): the pointer moves to the
+    # eligible challenger with the largest positive mean_diff on its common
+    # window once that window reaches 2 paired weeks, ties/none -> hold. The
+    # confidence-sequence bound is still computed and emitted on the record —
+    # it just no longer gates the promotion for this slot.
+    promote_min_weeks=2,
+    promote_evidence="point",
 )
 
 # ── The arms ─────────────────────────────────────────────────────────────────

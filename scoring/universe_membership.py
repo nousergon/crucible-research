@@ -859,9 +859,29 @@ in the tech_score universe?" and "how did the incumbent order the cut it was
 actually given?" — and collapsing them would silently answer one with the other.
 """
 
+MOM121_RANKS_FIELD = "mom121_ranks"
+MOMZERO_RANKS_FIELD = "momzero_ranks"
+HARD3_RANKS_FIELD = "hard3_ranks"
+"""Top-level fields holding the FULL-UNIVERSE rank table for each weight-vector
+/ re-composed-pillar variant arm (alpha-engine-config-I10546).
+
+Until this landed, ``_rank_table(challenger_attractiveness)`` /
+``_rank_table(momzero_attractiveness)`` / ``_rank_table(hard3_attractiveness)``
+were computed to slice each arm's top-N cut and then DISCARDED — the same shape
+``tech_score_ranks`` fixed for the tech basis at I7843, left unfixed for these
+three. Brian's ruling 2026-09-12 (I10546): *"i don't see the point of this. all
+challengers should be promotable."* A promotable arm with no full-universe
+table in its own basis is unpromotable in practice
+(:func:`promotion_ineligibility_from_rank_tables`), which is exactly what this
+morning's ``scanner_cut_champion/2026-09-11.json`` recorded for all three.
+"""
+
 _RANK_TABLE_BY_BASIS: dict[str, tuple[str, str, str]] = {
     "attractiveness_rank": ("ranks", "attractiveness_rank", "attractiveness_score"),
     "tech_score_rank": (TECH_SCORE_RANKS_FIELD, "tech_score_rank", "tech_score"),
+    "attractiveness_rank_mom121": (MOM121_RANKS_FIELD, "attractiveness_rank", "attractiveness_score"),
+    "attractiveness_rank_momzero": (MOMZERO_RANKS_FIELD, "attractiveness_rank", "attractiveness_score"),
+    "attractiveness_rank_hard3": (HARD3_RANKS_FIELD, "attractiveness_rank", "attractiveness_score"),
 }
 """``basis`` -> (membership field holding a FULL-UNIVERSE rank table, rank key, score key).
 
@@ -879,6 +899,13 @@ mean the champion pointer names one arm while the consumer ranks by another
 (alpha-engine-config-I7808). The producer now emits the full table, so the
 refusal is no longer the right answer for this basis; :func:`rank_table_for_cut`
 still refuses for any basis that has none.
+
+The three ``attractiveness_rank_*`` entries were likewise ABSENT until
+alpha-engine-config-I10546: each variant arm's rank/score keys reuse the
+generic ``attractiveness_rank`` / ``attractiveness_score`` names — the same
+convention the champion's own ``ranks`` table uses — because the FIELD already
+disambiguates which arm's table is being read; there is no basis-qualified key
+name to invent.
 """
 
 MIN_PROMOTABLE_RANK_COVERAGE = 200
@@ -971,6 +998,22 @@ _RANK_TABLE_ELIGIBILITY: dict[str, str] = {
         "volatility ceiling). Legitimately narrower than the universe — ranking "
         "a name the incumbent rule rejected would invent an ordering it never "
         "expressed."
+    ),
+    "attractiveness_rank_mom121": (
+        "every name with a rankable score in the mom121 shadow factor profile "
+        "(factors/profiles_shadow/mom121/{run_date}/by_ticker.json), the "
+        "12-1-month re-composed momentum pillar's own population — absent "
+        "entirely when that shadow snapshot is unavailable (alpha-engine-config-I10546)."
+    ),
+    "attractiveness_rank_momzero": (
+        "every name with a rankable score under the momzero weight vector, "
+        "over the SAME champion factor-profile population as ``attractiveness_rank`` "
+        "— only the momentum pillar's weight differs (alpha-engine-config-I10546)."
+    ),
+    "attractiveness_rank_hard3": (
+        "every name with a rankable score under the hard3 weight vector, over "
+        "the SAME champion factor-profile population as ``attractiveness_rank`` "
+        "— only which pillars are zeroed differs (alpha-engine-config-I10546)."
     ),
 }
 """Human-readable eligibility statement per basis, emitted with each table.
@@ -1446,10 +1489,15 @@ def assert_rank_tables_cover_promotable_cuts(membership: dict, run_date: str) ->
     #
     # * the SERVING cut having no rank table is a live defect. Its consumer
     #   resolves a rank ceiling in that basis THIS morning, so the run is red.
-    # * a NON-SERVING promotable arm having no table is not. Two of this slot's
-    #   arms (`attractiveness_momzero_top_60`, `attractiveness_mom121_top_60`)
-    #   publish no rank table BY DESIGN — their membership carries no order to
-    #   correlate — so raising on them would red every Scanner run whose
+    # * a NON-SERVING promotable arm having no table is not, and is still not
+    #   raised on here even though every promotable basis now HAS a full-
+    #   universe table registered (alpha-engine-config-I10546 fixed the class
+    #   I7843 fixed only for the tech basis: `attractiveness_rank_mom121`,
+    #   `_momzero`, `_hard3` each carry a table in `_RANK_TABLE_BY_BASIS`).
+    #   A cycle can still legitimately lack one of these tables when its
+    #   underlying arm's attractiveness scores were unavailable that run (an
+    #   absent arm is a recorded miss, not a producer defect) — raising on a
+    #   non-serving arm's absence would red every Scanner run whose
     #   load-bearing output, the predictor's universe, is fine. That is the
     #   trade ARCHITECTURE §140 already refused for observe-only arms; making
     #   an arm promotable must not silently re-take it.
@@ -1953,6 +2001,15 @@ def build_universe_membership(
     # to champion scores would enter the leaderboard as a challenger that is
     # actually the champion — the §4 vacuity case, and it would read as a
     # legitimate tie forever.
+    # The full tables are KEPT for the artifact's ``rank_tables`` index, not
+    # discarded after the top-N slice (alpha-engine-config-I10546) — the same
+    # fix I7843 made for the tech basis, applied to the other three promotable
+    # bases. A promotable arm with no full-universe table in its own basis is
+    # unpromotable in practice: see MOM121_RANKS_FIELD's docstring.
+    challenger_ranks: dict[str, dict] = {}
+    momzero_ranks: dict[str, dict] = {}
+    hard3_ranks: dict[str, dict] = {}
+
     if challenger_attractiveness:
         challenger_ranks = _rank_table(challenger_attractiveness)
         for n in _CHALLENGER_CUT_NS:
@@ -2054,6 +2111,12 @@ def build_universe_membership(
         membership["scanner_ranks"] = scanner_ranks
     if tech_score_ranks:
         membership[TECH_SCORE_RANKS_FIELD] = tech_score_ranks
+    if challenger_ranks:
+        membership[MOM121_RANKS_FIELD] = challenger_ranks
+    if momzero_ranks:
+        membership[MOMZERO_RANKS_FIELD] = momzero_ranks
+    if hard3_ranks:
+        membership[HARD3_RANKS_FIELD] = hard3_ranks
     # The basis -> full-universe-table INDEX, declared in the artifact rather
     # than left in a constant on the consumer side (alpha-engine-config-I7843).
     # A consumer resolving its serving arm's rank ceiling asks this block which

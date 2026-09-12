@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/nousergon/crucible-research/contracts/scanner_cut_champion.schema.json",
-  "title": "universe-cut champion serving pointer + apply-audit record (v4)",
+  "title": "universe-cut champion serving pointer + apply-audit record (v5)",
   "description": "FROZEN contract for the universe-cut slot's SERVING POINTER. ONE document shape written to THREE keys by crucible-research/scoring/cut_promotion.py::run_cut_promotion on EVERY weekly evaluation, whatever the outcome: config/scanner_cut_champion.json (the live pointer, read by scoring/universe_membership.py::live_cut_champion / resolve_feed_cut), config/apply_audit/scanner_cut_champion/{date}.json (immutable, dated) and config/apply_audit/scanner_cut_champion/latest.json (its mirror). SINCE v4 (alpha-engine-config-I9317) THIS IS NOT WHERE THE DECISION IS TAKEN. The decision is taken by nousergon_lib.arena.engine.run_cycle -- the fleet's single implementation of champion-challenger-policy.md sections 3-6 -- and its full record, with every ladder rung, every pairwise verdict and the confidence-sequence bound behind the pointer, is the arena_cycle artifact at arena/universe_cut/{date}.json. This document transcribes that decision onto the key the serving path reads, and the `arena` block names the cycle it came from. A pointer that does not name its cycle is a claim with no evidence attached.",
   "type": "object",
   "required": [
@@ -30,8 +30,8 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 4,
-      "description": "v3 -> v4 on the alpha-engine-config-I9317 arena wiring. NOT additive: the required `hysteresis` and `decision_earliest_on` blocks are GONE because the mechanisms they described are abolished (champion-challenger-policy.md section 5.0 removes minimum-evidence floors fleetwide, section 5.2 removes the promotion margin and the cooldown -- Brian's rulings 2026-08-29). A required `arena` block was added. A v3 reader handed a v4 record would find no `hysteresis` block and read a promotion as though a 0.0002/week margin had been cleared, when no margin was applied at all. v2 -> v3 on I9272/I9284; v1 -> v2 on the I8261 cutover."
+      "const": 5,
+      "description": "v4 -> v5 on the alpha-engine-config-I10541 reason-code fix: `champion_already_leads` is RETIRED. It was being transcribed from the arena engine's `held` status, whose actual meaning ('no challenger's lead is supported by the anytime-valid sequence') cannot be honestly distinguished, given the engine's PointerDecision.status enum, from 'the incumbent actually won a real paired comparison' -- the definition this slug carried. Measured 2026-09-12: a `held` record with the incumbent at 0 wins / 4 losses carried `champion_already_leads`, telling a reader the opposite of the ledger. `held` now maps to the new slug `no_supported_challenger_lead`. A v4 reader handed a v5 record would find `champion_already_leads` absent from the enum and could no longer confuse a evidence-absent hold with an incumbent win. v3 -> v4 on the alpha-engine-config-I9317 arena wiring. NOT additive: the required `hysteresis` and `decision_earliest_on` blocks are GONE because the mechanisms they described are abolished (champion-challenger-policy.md section 5.0 removes minimum-evidence floors fleetwide, section 5.2 removes the promotion margin and the cooldown -- Brian's rulings 2026-08-29). A required `arena` block was added. v2 -> v3 on I9272/I9284; v1 -> v2 on the I8261 cutover."
     },
     "producer": {
       "const": "crucible-research/scoring/cut_promotion.py"
@@ -73,13 +73,13 @@
     "reason_code": {
       "enum": [
         "promoted",
-        "champion_already_leads",
+        "no_supported_challenger_lead",
         "weekly_ledger_missing",
         "arena_unmeasurable",
         "arena_unservable",
         "arena_bootstrap"
       ],
-      "description": "Machine-readable outcome, a TRANSCRIPTION of the arena engine's own pointer status (nousergon_lib.arena.engine.PointerDecision.status) plus the one condition that precedes a cycle. 'promoted' is the only value permitted alongside decision='promote' except 'arena_bootstrap', which moves the pointer on a slot that had no eligible incumbent to hold (section 9.1). 'weekly_ledger_missing' means the ledger object does not exist -- an absent store, distinct from a slot that produced no comparison. 'arena_unmeasurable' means no challenger shares a usable window with the incumbent; it ALARMS (section 11: unmeasurable is a first-class status carrying a reason, not a quiet hold). 'arena_unservable' means no arm passed its section 5.3 serving preconditions and is a hard failure of the slot. RETIRED at v4 and never to be re-minted for another condition: insufficient_weeks (the section 5.0-abolished evidence floor), margin_not_met and cooldown_active (the section 5.2-abolished hysteresis), corroborating_horizon_disagrees (a second decision basis on a forward horizon), weekly_ledger_arm_missing (a slot-wide hold on one arm's absence), board_defective (a hold on the corruption of an artifact the decision does not read) and no_promotable_challenger (the 2026-08-21/28 defect itself, now structurally unreachable)."
+      "description": "Machine-readable outcome, a TRANSCRIPTION of the arena engine's own pointer status (nousergon_lib.arena.engine.PointerDecision.status) plus the one condition that precedes a cycle. 'promoted' is the only value permitted alongside decision='promote' except 'arena_bootstrap', which moves the pointer on a slot that had no eligible incumbent to hold (section 9.1). 'no_supported_challenger_lead' (SINCE v5, alpha-engine-config-I10541) transcribes the engine's 'held' status verbatim -- no challenger's lead is supported by the anytime-valid sequence. It is a claim about the ABSENCE of supported evidence, true whether the incumbent is ahead, behind, or tied on the point estimate; it must never be read as 'the incumbent won'. 'weekly_ledger_missing' means the ledger object does not exist -- an absent store, distinct from a slot that produced no comparison. 'arena_unmeasurable' means no challenger shares a usable window with the incumbent; it ALARMS (section 11: unmeasurable is a first-class status carrying a reason, not a quiet hold). 'arena_unservable' means no arm passed its section 5.3 serving preconditions and is a hard failure of the slot. RETIRED at v5 and never to be re-minted for another condition: champion_already_leads (claimed 'a real paired comparison happened and the incumbent won it', which the engine's held status cannot actually distinguish from no support at all -- alpha-engine-config-I10541). RETIRED at v4 and never to be re-minted: insufficient_weeks (the section 5.0-abolished evidence floor), margin_not_met and cooldown_active (the section 5.2-abolished hysteresis), corroborating_horizon_disagrees (a second decision basis on a forward horizon), weekly_ledger_arm_missing (a slot-wide hold on one arm's absence), board_defective (a hold on the corruption of an artifact the decision does not read) and no_promotable_challenger (the 2026-08-21/28 defect itself, now structurally unreachable)."
     },
     "decision_metric": {
       "const": "weekly_population_relative_net_log_return",
@@ -435,7 +435,7 @@
         "config",
         "retirements"
       ],
-      "description": "WHERE the decision was actually taken and under what parameters. Required, not optional: this document is deliberately the smaller of the two artifacts now, and a pointer that does not name the cycle it was transcribed from cannot be reconciled against it. `config` carries the ArenaConfig the cycle ran under -- alpha, diff_clip, cap, grace_weeks, min_active_arms, retired_trailing_cycles, retire_evidence -- which champion-challenger-policy.md section 10 requires every slot to name in its registry. `cycle_key` is the authoritative arena_cycle artifact; `retirements` is every verdict INCLUDING the non-retirements and their reasons, because a retirement list containing only retirements cannot be audited (section 6.1).",
+      "description": "WHERE the decision was actually taken and under what parameters. Required, not optional: this document is deliberately the smaller of the two artifacts now, and a pointer that does not name the cycle it was transcribed from cannot be reconciled against it. `config` carries the ArenaConfig the cycle ran under -- alpha, diff_clip, cap, grace_weeks, min_active_arms, retired_trailing_cycles, retire_evidence, promote_min_weeks, promote_evidence -- which champion-challenger-policy.md section 10 requires every slot to name in its registry. `cycle_key` is the authoritative arena_cycle artifact; `retirements` is every verdict INCLUDING the non-retirements and their reasons, because a retirement list containing only retirements cannot be audited (section 6.1).",
       "properties": {
         "slot": {
           "const": "universe_cut"
@@ -508,7 +508,9 @@
             "grace_weeks",
             "min_active_arms",
             "retired_trailing_cycles",
-            "retire_evidence"
+            "retire_evidence",
+            "promote_min_weeks",
+            "promote_evidence"
           ],
           "properties": {
             "alpha": {
@@ -548,6 +550,18 @@
                 "point",
                 "anytime_valid"
               ]
+            },
+            "promote_min_weeks": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "alpha-engine-config-I10546. Minimum paired weeks a comparison's common window must reach before it can win the pointer. Brian's ruling 2026-09-12 sets this slot's value to 2 (was an unenforced field before nousergon-lib-PR404; the v3/v4 hysteresis floor this replaced was 5 weeks under a different mechanism)."
+            },
+            "promote_evidence": {
+              "enum": [
+                "point",
+                "anytime_valid"
+              ],
+              "description": "alpha-engine-config-I10546. 'point' promotes the eligible challenger with the largest positive mean_diff on its common window once it reaches promote_min_weeks paired weeks (ties/none -> hold); the confidence-sequence bound is still computed and reported but does not gate. 'anytime_valid' requires the confidence sequence's lower bound to exclude zero, per champion-challenger-policy.md section 5.0. This slot runs 'point' by Brian's ruling 2026-09-12 -- a deliberate per-slot deviation, recorded as a delta in champion-challenger-policy.md section 5.2(B)."
             }
           }
         },

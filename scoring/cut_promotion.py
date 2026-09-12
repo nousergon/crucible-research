@@ -150,8 +150,32 @@ from scoring.weekly_ledger import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
-"""v3 → v4 on the alpha-engine-config-I9317 arena wiring.
+SCHEMA_VERSION = 5
+"""v4 → v5 on the alpha-engine-config-I10541 reason-code fix.
+
+``champion_already_leads`` is RETIRED. Its definition ("a real paired
+comparison happened and the incumbent won it") was being transcribed from the
+arena engine's ``held`` status, whose own meaning is "no challenger's lead is
+supported by the anytime-valid sequence" — a claim about the absence of
+evidence, not a claim that the incumbent won. Measured 2026-09-12: a `held`
+record with the incumbent at 0 pairwise wins / 4 losses carried
+``champion_already_leads`` (`scanner_cut_champion/2026-09-11.json`), telling a
+reader the champion led when it was measurably trailing on an immature sample
+— the exact misread this module's docstring says the engine exists to
+prevent. The engine's ``PointerDecision.status`` enum (``decided``, ``held``,
+``unmeasurable``, ``unservable``, ``bootstrap``) has no status meaning "the
+incumbent was compared and won" distinctly from "nothing was supported", so
+the honest fix is a new slug — :data:`REASON_NO_SUPPORTED_LEAD` — for
+``held``, and retiring ``champion_already_leads`` rather than re-minting it
+for a condition the engine cannot actually produce.
+
+A v4 reader handed a v5 record would find ``champion_already_leads`` absent
+from ``LIVE_REASON_CODES`` and could no longer confuse it with an incumbent
+win — which is the point of the bump: a renamed/re-scoped slug is a schema
+version, per this module's own "never reuse a slug for a different condition"
+rule.
+
+v3 → v4 on the alpha-engine-config-I9317 arena wiring.
 
 Not additive. Three required v3 blocks are GONE because the mechanisms they
 described are abolished (champion-challenger-policy.md §5.0 and §5.2):
@@ -219,14 +243,14 @@ MIN_VETO_HORIZON_DAYS = 126
 # that stop a cycle from being run at all. Minting a slug here that the engine
 # cannot produce is how the two decision surfaces drift.
 REASON_PROMOTED = "promoted"
-REASON_CHAMPION_LEADS = "champion_already_leads"
+REASON_NO_SUPPORTED_LEAD = "no_supported_challenger_lead"
 REASON_LEDGER_MISSING = "weekly_ledger_missing"
 REASON_ARENA_UNMEASURABLE = "arena_unmeasurable"
 REASON_ARENA_UNSERVABLE = "arena_unservable"
 REASON_ARENA_BOOTSTRAP = "arena_bootstrap"
 
 HOLD_REASON_CODES: tuple[str, ...] = (
-    REASON_CHAMPION_LEADS,
+    REASON_NO_SUPPORTED_LEAD,
     REASON_LEDGER_MISSING,
     REASON_ARENA_UNMEASURABLE,
     REASON_ARENA_UNSERVABLE,
@@ -246,19 +270,36 @@ and it is not ``promoted`` either, because nothing was beaten to get there."""
 #: ``PointerDecision.status``; an unmapped status RAISES rather than defaulting,
 #: because a status the engine grew and this module silently folded into "hold"
 #: is a decision surface quietly losing resolution.
+#:
+#: ``held`` maps to :data:`REASON_NO_SUPPORTED_LEAD`, NOT to a slug claiming the
+#: incumbent won (alpha-engine-config-I10541). The engine's own reason for
+#: ``held`` is "no challenger's lead is supported by the anytime-valid
+#: sequence" — a statement about missing evidence, true whether the incumbent
+#: is ahead, behind, or tied on the point estimate. Measured 2026-09-12: a
+#: ``held`` record with the incumbent at 0 wins / 4 losses previously carried
+#: ``champion_already_leads``, telling a reader the opposite of the ledger.
 ARENA_STATUS_TO_REASON: dict[str, str] = {
     "decided": REASON_PROMOTED,
-    "held": REASON_CHAMPION_LEADS,
+    "held": REASON_NO_SUPPORTED_LEAD,
     "unmeasurable": REASON_ARENA_UNMEASURABLE,
     "unservable": REASON_ARENA_UNSERVABLE,
     "bootstrap": REASON_ARENA_BOOTSTRAP,
 }
 
 # Retired with the mechanisms they described. Kept as a NAMED set, not deleted
-# outright, so a reader of an archived v1/v2/v3 record can resolve a slug this
-# module no longer emits, and so a future author cannot re-mint one of these
-# strings for a different condition. Asserted disjoint from the live set at
-# import.
+# outright, so a reader of an archived v1/v2/v3/v4 record can resolve a slug
+# this module no longer emits, and so a future author cannot re-mint one of
+# these strings for a different condition. Asserted disjoint from the live set
+# at import.
+#
+# The v5 retirement is alpha-engine-config-I10541: `champion_already_leads`
+# was being transcribed from the arena engine's `held` status, whose own
+# meaning ("no challenger's lead is supported") cannot honestly be
+# distinguished, given the engine's current `PointerDecision.status` enum,
+# from "the incumbent actually won a real paired comparison" — the definition
+# this slug carried. Never re-mint it: an archived v4-and-earlier record
+# carrying it must still be read as "arena held, reason unresolved" rather
+# than as a genuine incumbent win.
 #
 # The v3 retirements are the substance of alpha-engine-config-I9317:
 # `insufficient_weeks` was the §5.0-abolished evidence floor, `margin_not_met`
@@ -287,6 +328,8 @@ RETIRED_REASON_CODES: tuple[str, ...] = (
     "corroborating_horizon_disagrees",
     "weekly_ledger_arm_missing",
     "no_promotable_challenger",
+    # v5, retired at the I10541 fix
+    "champion_already_leads",
 )
 
 RETIRED_V1_REASON_CODES = RETIRED_REASON_CODES
@@ -1271,6 +1314,13 @@ def decide_cut_champion(
             "min_active_arms": slot.arena_config.min_active_arms,
             "retired_trailing_cycles": slot.arena_config.retired_trailing_cycles,
             "retire_evidence": slot.arena_config.retire_evidence,
+            # alpha-engine-config-I10546: which PROMOTION evidence bar this
+            # cycle ran under, and its minimum-weeks floor. Read directly from
+            # the slot's ArenaConfig rather than restated, so the record and
+            # the engine that decided it can never disagree about which mode
+            # was live.
+            "promote_min_weeks": slot.arena_config.promote_min_weeks,
+            "promote_evidence": slot.arena_config.promote_evidence,
         },
         "retirements": [v.to_dict() for v in cycle.retirements],
         "note": (
