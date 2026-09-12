@@ -179,6 +179,24 @@ source .venv/bin/activate
 pip install --quiet --upgrade pip || fail "pip upgrade failed"
 pip install --quiet -r requirements.txt || fail "requirements install failed"
 
+# ── DLP preflight gate (krepis-PR211, alpha-engine-config-I10370) ───────────
+# The gitleaks install above closes half the fail-closed gap; this closes
+# the other half. Without it, a missing/misconfigured scanner is discovered
+# for the first time on the box's FIRST LLM call — deep into the daily run,
+# after prompts have already been cloned and the run has already started —
+# the exact "ThinktankLLMError ... failing closed" this issue was filed
+# from. `python -m krepis.session_dlp preflight` is run here as a BOOT GATE
+# instead: it exits non-zero and names the missing half (binary vs config)
+# if the scanner is not ready, and this line fails the boot loudly rather
+# than deferring the discovery. Fail-closed stays either way — the point of
+# the gitleaks install above is that this gate now actually PASSES on a
+# healthy box instead of firing on every single boot.
+# KREPIS_DLP_DISABLED=1 is deliberately never read here — preflight()
+# reports a disabled control as NOT ready (see I10370's gotcha: that env var
+# would "fix" this by turning off the fleet's only DLP control in silence).
+log "running DLP preflight gate"
+python -m krepis.session_dlp preflight || fail "DLP preflight failed (gitleaks binary/config not ready) — refusing to start the run (fail-closed)"
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 export AWS_DEFAULT_REGION="$REGION"
 export ALPHA_ENGINE_EXPERIMENT_ID
