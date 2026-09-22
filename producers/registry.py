@@ -103,6 +103,49 @@ class ProducerSpec:
     # below now REFUSES that combination at import, so the defect cannot recur
     # silently: it becomes an ImportError with the reason in it.
     score_source: str = "shadow"
+    # ── The arm's RECIPE, declared (alpha-engine-config-I11393) ──────────
+    #
+    # champion-challenger-policy.md §3.1: an arm's identity is permanently
+    # bound to one spec. These three fields are the parts of that spec which
+    # were previously left implicit — and every one of them was measured
+    # drifting underneath a running arm.
+    #
+    # `width` — the number of ENTER picks the arm emits, every cycle. NOT a
+    # slot-wide constant: the research slot deliberately carries arms at
+    # different widths (attractiveness_60 vs attractiveness_20 on the SAME
+    # ranking is the "what does depth cost?" experiment), which is why the
+    # slot sets per_arm_width=True and grades on the information ratio rather
+    # than a raw mean. What is forbidden is an UNDECLARED width, and a width
+    # that changes without the arm becoming a new arm. Measured 2026-09-22:
+    # no_agent_quant emitted 25 picks in early August, 17-18 late August and
+    # 40 on 09-18, while §4.1's ladder compared its own rungs across all of
+    # those dates as though they were one series.
+    #
+    # `prefilter_cut` — the cut the arm draws from, named LITERALLY and
+    # resolved by scoring.universe_membership.resolve_pinned_cut, never
+    # through the live champion pointer. Measured 2026-09-18: the universe_cut
+    # pointer moved between two cuts sharing 0 of 60 names and replaced the
+    # thinktank_coverage arm's entire input population without changing its
+    # spec hash.
+    #
+    # `stateful` — whether the arm carries prior state forward. A slot may not
+    # silently mix stateful position books with stateless rankings: a book's
+    # realized alpha embeds turnover and retention decisions, which belong to
+    # the S slot, and an arm that holds winners longer beats a weekly
+    # re-ranker without having selected better once (alpha-engine-config-I11390).
+    # Measured: no_agent_quant turned over TWO names in five weeks while its
+    # own cut replaced 45 of 60 on a single cycle.
+    #
+    # All three are None-by-default so every pre-existing spec still
+    # constructs; `_assert_recipe_declared` below refuses at import any arm
+    # that is REGISTERED TO A SLOT without declaring them.
+    width: int | None = None
+    prefilter_cut: str | None = None
+    stateful: bool | None = None
+    # Which champion/challenger slot this arm competes in, or None for a spec
+    # that predates the slot model and is retired. Declared rather than
+    # inferred: the slot decides which assertions bind.
+    slot: str | None = None
 
 
 RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
@@ -474,6 +517,129 @@ def _assert_score_source_can_carry_output() -> None:
 
 
 _assert_score_source_can_carry_output()
+
+
+RESEARCH_SLOT = "research"
+"""The single champion/challenger slot deciding which names reach the
+predictor (Brian's ruling 2026-09-22, alpha-engine-config-I11393).
+
+It replaces the scanner_spec / universe_cut / producer split. Those were three
+independently-promoting pointers over successive stages of ONE pipeline, which
+optimised each link separately and measured the composition — the objective —
+nowhere. Worse, a promotion in one of them silently redefined the input
+population of arms in another, which §3.1 forbids by construction.
+
+Arms of this slot are END-TO-END recipes: a pinned pre-filter, a ranking key,
+and a declared output width."""
+
+PINNED_RESEARCH_PREFILTER = "attractiveness_top_60"
+"""The one pre-filter every research arm draws from, named literally.
+
+Pinned, not resolved through ``live_cut_champion`` — see
+``scoring.universe_membership.resolve_pinned_cut`` for the measured defect that
+makes this mandatory. A different pre-filter is tested by REGISTERING AN ARM,
+never by a pointer moving underneath the arms already running."""
+
+
+def _assert_recipe_declared() -> None:
+    """Refuse, at import, any slot-registered arm whose recipe is incomplete.
+
+    §3.1 makes an arm an immutable recipe. An arm that does not DECLARE its
+    width, its pre-filter and whether it carries state does not have a recipe —
+    it has whatever the pipeline happened to hand it that week, and all three
+    were measured drifting underneath running arms (see the field comments on
+    :class:`ProducerSpec`).
+
+    Checked at import rather than alerted per cycle, and raising rather than
+    warning, for the same reason as
+    :func:`_assert_score_source_can_carry_output`: an arm whose recipe is
+    undeclared cannot produce a comparable measurement at all, and §7.2's
+    dominant bug class is a record asserting something that never happened. A
+    registry that cannot describe its own arms must not load.
+
+    Retired arms are exempt: they predate the slot model, their record is
+    retained permanently (§6.3), and back-filling a recipe onto a dead arm
+    would be inventing history.
+    """
+    for spec in RESEARCH_PRODUCERS.values():
+        if spec.kind == "retired" or spec.slot is None:
+            continue
+        missing = [
+            name for name, value in (
+                ("width", spec.width),
+                ("prefilter_cut", spec.prefilter_cut),
+                ("stateful", spec.stateful),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"producer {spec.name!r} is registered to slot {spec.slot!r} but "
+                f"declares no {', '.join(missing)}. champion-challenger-policy.md "
+                "§3.1: an arm is an immutable RECIPE, and an undeclared width / "
+                "pre-filter / statefulness is not part of one — each was measured "
+                "drifting underneath a running arm "
+                "(alpha-engine-config-I11393, -I11390)."
+            )
+        if spec.width is not None and spec.width <= 0:
+            raise ValueError(
+                f"producer {spec.name!r} declares width={spec.width!r}; an arm "
+                "emits a positive number of picks or it is not an arm"
+            )
+        if spec.slot == RESEARCH_SLOT and spec.prefilter_cut != PINNED_RESEARCH_PREFILTER:
+            raise ValueError(
+                f"producer {spec.name!r} declares prefilter_cut="
+                f"{spec.prefilter_cut!r}, but every {RESEARCH_SLOT!r} arm draws "
+                f"from the one pinned pre-filter {PINNED_RESEARCH_PREFILTER!r}. "
+                "Arms in a slot must differ in the thing under test — the ranking "
+                "and the width — not in the population they drew from, or no "
+                "comparison between them means anything "
+                "(champion-challenger-policy.md §4)."
+            )
+        if spec.slot == RESEARCH_SLOT and spec.stateful:
+            raise ValueError(
+                f"producer {spec.name!r} is a STATEFUL arm registered to the "
+                f"{RESEARCH_SLOT!r} slot. A position book's realized alpha embeds "
+                "turnover and retention decisions, which are the S slot's "
+                "question: an arm that holds winners longer beats a weekly "
+                "re-ranker without having selected better once "
+                "(alpha-engine-config-I11390). Register it against S, not here."
+            )
+
+
+def _assert_research_slot_widths_are_declared_not_shared() -> None:
+    """The research slot's widths MAY differ — and must be declared.
+
+    This is not a count-matching assertion and must never become one.
+    §4's count-matching rule binds when the RANKING is under test; this slot
+    deliberately runs ``attractiveness_60`` against ``attractiveness_20`` on the
+    identical ranking, which is the "what does depth cost?" experiment and is
+    only legible because the widths differ. The slot prices the resulting
+    concentration through its ``information_ratio`` primary metric rather than
+    by forcing every arm to one width — see
+    ``scoring.leaderboard_scoring.information_ratio_stats``.
+
+    What IS asserted: at least two distinct widths exist among live research
+    arms. A slot that has quietly converged on a single width has lost the
+    experiment this design exists to run, and would be silently better served
+    by the simpler count-matched arrangement it replaced.
+    """
+    widths = {
+        spec.width for spec in RESEARCH_PRODUCERS.values()
+        if spec.slot == RESEARCH_SLOT and spec.kind != "retired" and spec.width
+    }
+    if widths and len(widths) < 2:
+        raise ValueError(
+            f"every live {RESEARCH_SLOT!r} arm emits {widths.pop()} picks. The "
+            "slot's whole reason for per-arm widths and an information-ratio "
+            "primary is that width is a thing under test; with one width it is "
+            "not, and the count-matched arrangement this replaced was simpler "
+            "(alpha-engine-config-I11393)."
+        )
+
+
+_assert_recipe_declared()
+_assert_research_slot_widths_are_declared_not_shared()
 
 
 def score_source_for(name: str) -> str:

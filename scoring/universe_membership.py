@@ -1195,6 +1195,79 @@ def resolve_funnel_cut(
     return tickers, ranks, provenance
 
 
+def resolve_pinned_cut(
+    cut_name: str,
+    *,
+    bucket: str | None = None,
+    s3_client: Any = None,
+    membership: dict | None = None,
+    minimum_rank_coverage: int | None = None,
+) -> tuple[list[str], dict[str, int], dict]:
+    """``(cut_tickers, {ticker: rank}, provenance)`` for a cut named LITERALLY.
+
+    The pointer-free sibling of :func:`resolve_funnel_cut`, and the resolver
+    every ``research``-slot arm uses (Brian's ruling 2026-09-22,
+    alpha-engine-config-I11393).
+
+    **Why a second resolver rather than a flag on the first.** ``resolve_funnel_cut``
+    answers "which cut is SERVING this consumer's slot today", and routes a
+    promotable declared cut through :func:`live_cut_champion`. That is correct
+    for a funnel consumer. It is wrong for a champion/challenger ARM, because
+    §3.1 makes an arm an immutable RECIPE and "whatever cut won this week" is
+    not one.
+
+    Measured 2026-09-18: the ``universe_cut`` pointer moved from
+    ``attractiveness_top_60`` to ``tech_score_top_60`` — two cuts whose
+    intersection was **0 of 60 names** — and every consumer resolving through
+    the pointer silently had its entire input population replaced. The
+    ``thinktank_coverage`` arm's spec hash did not change; its coverage fell
+    from 60/60 to 9/60 in one cycle and its arena series recorded the whole
+    swap as one continuous line.
+
+    So an arm names its pre-filter and gets exactly that, every cycle, forever.
+    A different pre-filter is tested by REGISTERING AN ARM — never by a pointer
+    moving underneath the arms already running.
+
+    Raises :class:`UniverseMembershipError` on every ambiguity, exactly as
+    ``resolve_funnel_cut`` does: an empty or defaulted window is
+    indistinguishable from "the scanner selected nobody", and a pinned cut that
+    has gone missing from the artifact is a producer-side change an arm must
+    never paper over.
+    """
+    doc = membership if membership is not None else read_latest_membership(bucket=bucket, s3_client=s3_client)
+    if not doc:
+        raise UniverseMembershipError(
+            f"no universe_membership/latest.json — the pinned cut {cut_name!r} "
+            "resolves from the membership artifact and cannot fall back to the "
+            "raw universe"
+        )
+    cuts = doc.get("cuts") or {}
+    cut = cuts.get(cut_name) or {}
+    tickers = list(cut.get("tickers") or [])
+    if not tickers:
+        raise UniverseMembershipError(
+            f"universe_membership/latest.json (run_date={doc.get('run_date')}) "
+            f"carries no tickers under the PINNED cut {cut_name!r} "
+            f"(emitted cuts: {sorted(cuts)}). An arm's pre-filter is part of its "
+            "immutable recipe — refusing to substitute another cut or an empty "
+            "window (alpha-engine-config-I11393)."
+        )
+    ranks, basis = rank_table_for_cut(doc, cut_name, minimum_coverage=minimum_rank_coverage)
+    provenance = {
+        "cut": cut_name,
+        "pinned": True,
+        "basis": basis,
+        "size": len(tickers),
+        "declared_size": cut.get("size"),
+        "run_date": doc.get("run_date"),
+        "cut_effective_date": doc.get("cut_effective_date"),
+        "cut_refresh_cadence": doc.get("cut_refresh_cadence"),
+        "rank_table_size": len(ranks),
+        "schema_version": doc.get("schema_version"),
+    }
+    return tickers, ranks, provenance
+
+
 def read_latest_membership(*, bucket: str | None = None, s3_client: Any = None) -> dict | None:
     """The current ``universe_membership/latest.json``, or ``None`` if absent.
 
