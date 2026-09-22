@@ -128,6 +128,23 @@ CHAMPION_TOP_N_DEFAULT = 10
 CHAMPION_SCORE_FLOOR = 60.0
 CHAMPION_SCORE_CEILING = 95.0
 
+# The minimum fraction of a filling arm's CUT that must resolve to a row in
+# its ranking artifact before the resulting pool is trusted
+# (alpha-engine-config-I11396). A `predictor_universe_cut` (e.g.
+# `attractiveness_top_20`) and `predictor/predictions_research_free/{date}.json`
+# are both drawn from the SAME scanner-candidate population by construction —
+# the cut names a sub-slice of the scanner's S&P900 sweep, and the
+# research-free artifact scores that same sweep's candidate pool daily — so a
+# healthy join should be near-total. 0.8 is set well above the level the
+# pre-fix mis-wiring actually produced (1/20 = 5%, measured on
+# 2026-08-03/2026-08-04 against `predictor/predictions/{date}.json`'s
+# thesis-coverage-scoped ~25 names) while still tolerating an ordinary handful
+# of misses — a name delisted mid-week, a late data pull — without paging on
+# noise. Below it, the cut and the artifact are populations that do not
+# describe the same universe, which is exactly the defect this guard exists
+# to catch before it silently produces a pool of one for weeks.
+MIN_CUT_JOIN_FRACTION = 0.8
+
 ARCHITECTURE_VERSION = "filling_arm_shadow_v1"
 
 
@@ -329,11 +346,31 @@ def load_predictor_cut_pool(
 
     The members of whichever cut ``universe_membership/{date}`` names in its own
     ``predictor_universe_cut`` field, scored by the predictor's own
-    ``predicted_alpha`` from ``predictor/predictions/{date}.json``.
+    ``predicted_alpha`` from ``predictor/predictions_research_free/{date}.json``
+    — the SAME artifact :func:`load_research_free_pool` reads, so the two
+    filling arms differ ONLY in cut width, which is the whole point of the
+    pair (alpha-engine-config-I11396).
+
+    This deliberately does NOT read ``predictor/predictions/{date}.json``
+    (``PREDICTIONS_KEY``) any more. That artifact's universe is the ~25
+    thesis-covered tickers (``crucible-predictor/inference/stages/
+    load_universe.py``, ``target_size=25``), not the scanner candidate pool a
+    scanner-swept cut is drawn from — intersecting a 20-name scanner cut
+    against a 25-name thesis-coverage population is near-empty by
+    construction and was measured to collapse to a single shared ticker
+    (``{CRUS}``) on 2026-08-03/2026-08-04. ``PREDICTIONS_KEY`` stays correct
+    for anything needing the live, thesis-coverage-scoped predictions (the
+    executor); it is simply the wrong artifact for a scanner-cut-based
+    filling arm.
 
     The cut NAME is never hardcoded (§7.5): when crucible-research moves
     ``PREDICTOR_UNIVERSE_CUT`` this arm follows it with no edit here, exactly as
     the executor's ``_resolve_predictor_cut_pool`` does.
+
+    RAISES via :data:`MIN_CUT_JOIN_FRACTION` when the cut and the ranking
+    artifact turn out to be near-disjoint populations — the join is this
+    arm's whole premise, and a silent partial join is how this arm ran for
+    weeks scoring a pool of one.
     """
     membership = _get_json(s3, bucket, MEMBERSHIP_KEY.format(date=run_date))
     if not membership:
@@ -352,11 +389,13 @@ def load_predictor_cut_pool(
             f"cut {cut_name!r} in universe_membership/{run_date} carries no tickers"
         )
 
-    preds_doc = _get_json(s3, bucket, PREDICTIONS_KEY.format(date=run_date))
+    preds_key = PREDICTIONS_RESEARCH_FREE_KEY.format(date=run_date)
+    preds_doc = _get_json(s3, bucket, preds_key)
     if not preds_doc:
         raise FillingShadowError(
-            f"no predictor/predictions/{run_date}.json — this arm's ranking IS "
-            "the predictor's output, so there is nothing to rank without it"
+            f"no s3://{bucket}/{preds_key} — this arm's ranking IS the "
+            "predictor's research-free output, so there is nothing to rank "
+            "without it"
         )
     preds = _predictions_by_ticker(preds_doc)
 
@@ -370,8 +409,21 @@ def load_predictor_cut_pool(
     if not rows:
         raise FillingShadowError(
             f"none of the {len(pool)} name(s) in cut {cut_name!r} carries a usable "
-            f"predicted_alpha in predictor/predictions/{run_date}.json — refusing "
+            f"predicted_alpha in s3://{bucket}/{preds_key} — refusing "
             "to synthesize zero candidates while reporting a healthy arm"
+        )
+
+    join_fraction = len(rows) / len(pool)
+    if join_fraction < MIN_CUT_JOIN_FRACTION:
+        raise FillingShadowError(
+            f"cut {cut_name!r} ({len(pool)} ticker(s)) and ranking artifact "
+            f"s3://{bucket}/{preds_key} ({len(preds)} ticker(s)) are near-disjoint: "
+            f"only {len(rows)}/{len(pool)} ({join_fraction:.0%}) of the cut's "
+            f"tickers carry a predicted_alpha there — below the "
+            f"{MIN_CUT_JOIN_FRACTION:.0%} minimum join fraction. The join IS this "
+            "arm's whole premise; a cut and its ranking artifact drawn from "
+            "different populations must fail loud, not silently synthesize a "
+            "short pool (alpha-engine-config-I11396)."
         )
     if len(rows) < len(pool):
         logger.warning(
