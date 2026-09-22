@@ -140,6 +140,34 @@ class TestTheSlotFloor:
     def test_the_genesis_register_clears_the_floor(self):
         ra.assert_slot_floor(ra.bootstrap_register())
 
+    def test_a_cycle_dated_before_the_arms_existed_is_refused(self):
+        """MEASURED 2026-09-22, by writing one. A cycle run for 2026-09-18 —
+        four days before any arm of this slot was created — passed a floor
+        checked with `as_of=None` (five arms live TODAY) and then decided on
+        `active_arms: 0`, emitting `unservable` with champion `None`. It
+        rendered as an ordinary red verdict rather than as the impossible input
+        it was, and the standing detector read it as the slot refusing to
+        serve.
+
+        A slot cannot decide anything on a day none of its arms existed."""
+        board = _board([_row(n, None) for n in ra.ARM_CREATED_ON])
+        with pytest.raises(ra.SlotFloorBreached, match="as of 2026-09-18"):
+            ra.run_arena_cycle(
+                board=board, champion_before=None, decided_on="2026-09-18",
+                register=ra.bootstrap_register(),
+            )
+
+    def test_the_floor_is_point_in_time_not_present_tense(self):
+        """The two counts that slipped past each other: the register's
+        present-tense `active_arms()` and the count the ENGINE computes for the
+        cycle's own date."""
+        register = ra.bootstrap_register()
+        assert len(register.active_arms()) == 5
+        assert len(register.active_arms("2026-09-18")) == 0
+        ra.assert_slot_floor(register)  # present tense: fine
+        with pytest.raises(ra.SlotFloorBreached):
+            ra.assert_slot_floor(register, as_of="2026-09-18")
+
     def test_a_register_below_the_floor_raises_rather_than_rendering_dull(self):
         """The 2026-08-21/28 defect by name: a decision loop that produced zero
         comparisons and rendered it as a routine hold, for two cycles."""
