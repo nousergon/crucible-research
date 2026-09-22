@@ -6,13 +6,20 @@ construction, the same ticker SETS as the cuts-board arms `attractiveness_top_60
 and `attractiveness_top_20`, which hold 22 and 13 scored dates with their
 per-date `topn_alpha_vs_population` series retained. Do they inherit them?
 
-DECIDED: NO. The full comparison is in `producers/registry.py::NO_HISTORY_IMPORT`'s
-docstring; the short form is that the scoring formula is shared but the
-provenance is not — the cuts loader collapses held decisions onto one
-`cut_effective_date` while a research arm writes one shadow per run date, and
-`attractiveness_20`'s rank order comes from a LATEST pointer
-(`scanner/universe/latest.json`) whose historical state is unrecoverable, so its
-past picks cannot be verified at all.
+DECIDED: YES, both inherit (reversed 2026-09-22 — see -I11422). The first
+answer was no, on three reasons of which two did not survive checking: the
+held-decision collapsing is a RECONCILIATION task rather than a blocker (and is
+-I8269's fix, so it makes the series more correct), and the claimed
+`promote_min_weeks` head start does not exist at all — `_age_eligible` reads the
+PAIRED window, so 22 dates against an arm with 0 gives a window of ZERO.
+
+The one real objection — that `attractiveness_20`'s live code ranks from
+`scanner/universe/latest.json`, whose past state is unrecoverable — is answered
+by WHERE the import reads from. `supersedes_cut` reads the DATED
+`universe_membership/{date}/membership.json`, so it imports what the cut
+actually WAS on each date rather than reconstructing what the arm would have
+picked. §3.1's "a fact to be CHECKED, never assumed" is satisfied by
+construction.
 
 What this file pins is not the decision but its VISIBILITY: an arm's empty
 ladder must be a declared fact. Before this guard, adding a research arm with no
@@ -49,10 +56,18 @@ from producers.registry import (
 class TestEveryArmDeclaresItsProvenance:
     def test_every_live_arm_either_inherits_or_states_why_not(self):
         for spec in research_slot_producers():
-            assert bool(spec.supersedes) ^ (spec.name in NO_HISTORY_IMPORT), (
-                f"{spec.name} must declare exactly one of `supersedes` or a "
-                f"NO_HISTORY_IMPORT entry — never both, never neither"
+            inherits = bool(spec.supersedes) or bool(spec.supersedes_cut)
+            assert inherits ^ (spec.name in NO_HISTORY_IMPORT), (
+                f"{spec.name} must declare exactly one of an inheritance "
+                f"(`supersedes` or `supersedes_cut`) or a NO_HISTORY_IMPORT "
+                f"entry — never both, never neither"
             )
+
+    def test_an_arm_never_declares_both_kinds_of_inheritance(self):
+        """One predecessor, one surface. Two would merge two records into one
+        ladder with nothing saying which date came from where."""
+        for spec in research_slot_producers():
+            assert not (spec.supersedes and spec.supersedes_cut), spec.name
 
     def test_exactly_one_arm_inherits_and_it_is_the_think_tank(self):
         """The one verified same-surface inheritance (`crucible-research-PR820`),
@@ -62,12 +77,14 @@ class TestEveryArmDeclaresItsProvenance:
         }
         assert inheriting == {"thinktank_20": "thinktank_coverage"}
 
-    def test_the_two_funnel_arms_do_not_inherit_the_cuts_board(self):
-        """The decision itself. `attractiveness_60`/`_20` start at zero dates,
-        alongside their siblings, rather than at 22 and 13."""
+    def test_the_two_funnel_arms_inherit_the_cuts_board(self):
+        """The decision itself, reversed. The scanner cuts WERE running the
+        whole time — 22 and 13 scored dates on `universe_membership/{date}/`.
+        Only the single-surface `supersedes` kept them out."""
+        assert RESEARCH_PRODUCERS["attractiveness_60"].supersedes_cut == "attractiveness_top_60"
+        assert RESEARCH_PRODUCERS["attractiveness_20"].supersedes_cut == "attractiveness_top_20"
         for name in ("attractiveness_60", "attractiveness_20"):
-            assert RESEARCH_PRODUCERS[name].supersedes is None
-            assert name in NO_HISTORY_IMPORT
+            assert name not in NO_HISTORY_IMPORT
 
     def test_each_rationale_names_a_concrete_reason(self):
         """A rationale that says only "not applicable" is an absence wearing a
@@ -98,10 +115,10 @@ class TestTheGuardActuallyBinds:
         """An arm that inherits AND claims no history is a register that
         contradicts itself; the guard must not let either half stand."""
         spec = dataclasses.replace(
-            RESEARCH_PRODUCERS["attractiveness_60"], supersedes="thinktank_coverage"
+            RESEARCH_PRODUCERS["tech_score_20"], supersedes="thinktank_coverage"
         )
-        monkeypatch.setitem(RESEARCH_PRODUCERS, "attractiveness_60", spec)
-        with pytest.raises(ValueError, match="attractiveness_60"):
+        monkeypatch.setitem(RESEARCH_PRODUCERS, "tech_score_20", spec)
+        with pytest.raises(ValueError, match="tech_score_20"):
             _assert_history_provenance_declared()
 
 
@@ -109,17 +126,18 @@ class TestStartingHistoryIsPinned:
     """Deliverable 4 of I11422: a future change cannot silently grant or remove
     a head start."""
 
-    EXPECTED_INHERITED_SOURCE: dict[str, str | None] = {
-        "attractiveness_60": None,
-        "attractiveness_20": None,
-        "tech_score_20": None,
-        "predictor_from_60": None,
-        "thinktank_20": "thinktank_coverage",
+    EXPECTED_INHERITED_SOURCE: dict[str, tuple[str | None, str | None]] = {
+        # (supersedes, supersedes_cut)
+        "attractiveness_60": (None, "attractiveness_top_60"),
+        "attractiveness_20": (None, "attractiveness_top_20"),
+        "tech_score_20": (None, None),
+        "predictor_from_60": (None, None),
+        "thinktank_20": ("thinktank_coverage", None),
     }
 
     def test_the_inherited_source_of_every_arm_is_exactly_this(self):
         got = {
-            s.name: s.supersedes
+            s.name: (s.supersedes, s.supersedes_cut)
             for s in RESEARCH_PRODUCERS.values()
             if s.slot == RESEARCH_SLOT and s.kind != "retired"
         }

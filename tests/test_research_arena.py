@@ -403,10 +403,16 @@ class TestTheArtifact:
         doc = ra.cycle_document(
             cycle, counts=counts, register=register, board_present=True,
         )
+        # Reversed 2026-09-22 (alpha-engine-config-I11422): the two funnel arms
+        # inherit the cuts board's record through `supersedes_cut`, so only the
+        # two with no precedent on ANY surface remain.
         assert doc["history"]["inherited"] == {"thinktank_20": "thinktank_coverage"}
+        assert doc["history"]["inherited_cut"] == {
+            "attractiveness_60": "attractiveness_top_60",
+            "attractiveness_20": "attractiveness_top_20",
+        }
         assert set(doc["history"]["no_history_import"]) == {
-            "attractiveness_60", "attractiveness_20", "tech_score_20",
-            "predictor_from_60",
+            "tech_score_20", "predictor_from_60",
         }
 
     def test_the_slot_floor_is_on_the_artifact_never_absent(self):

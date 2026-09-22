@@ -1234,6 +1234,62 @@ def _picks_by_date(
     return out
 
 
+
+def _cut_picks_by_date(
+    s3: Any, bucket: str, cut_name: str, dates: Sequence[str],
+) -> dict[str, SpecDay]:
+    """``{date: SpecDay}`` for one MEMBERSHIP cut — the cross-surface read
+    (alpha-engine-config-I11422).
+
+    WHY THIS EXISTS. ``ProducerSpec.supersedes`` reads
+    ``signals_shadow/{arm}/`` and nothing else, so an arm whose predecessor
+    published somewhere else inherited nothing. That is the only reason
+    ``thinktank_20`` carried history on the research slot's first cycle and
+    ``attractiveness_60`` did not: Think Tank's predecessor happened to write
+    to the SAME prefix as its successor. The scanner cuts were running the
+    whole time — 22 and 13 scored dates — on ``universe_membership/{date}/``.
+
+    It reads the DATED artifact, which is what makes the inheritance
+    verifiable rather than reconstructed: the arm's live code ranks from
+    ``scanner/universe/latest.json``, whose past state is unrecoverable, but
+    the membership artifact recorded what the cut actually WAS on each date.
+    So this imports history rather than re-deriving it, and §3.1's "a fact to
+    be CHECKED, never assumed" is satisfied by construction.
+
+    ONE CUT, ONE OBSERVATION — the same ``cut_effective_date`` collapsing
+    ``_load_cut_specs`` applies (alpha-engine-config-I8269). A cut held across
+    five prefixes is one decision and must contribute one observation, or the
+    inherited evidence is overstated by the hold length.
+
+    Rank order comes from the dated ``ranks.attractiveness_rank`` table, never
+    from the cut's own ``tickers`` list, which is alphabetical (set semantics).
+    """
+    out: dict[str, SpecDay] = {}
+    first_date_for: dict[str, str] = {}
+    for d in sorted(dates):
+        doc = _get_json(s3, bucket, _MEMBERSHIP.format(date=d)) or {}
+        tickers = ((doc.get("cuts") or {}).get(cut_name) or {}).get("tickers")
+        if not tickers:
+            continue
+        effective = doc.get("cut_effective_date")
+        if not (isinstance(effective, str) and len(effective) == 10):
+            # Pre-field artifact: its own run date IS the effective date. NOT a
+            # shared sentinel — a None key would collapse the whole pre-field
+            # history into one cohort date (alpha-engine-config-I7631).
+            effective = d
+        prior = first_date_for.get(effective)
+        if prior is not None and set(tickers) == set(out[prior].ranked):
+            continue  # the same cut, a later prefix: one decision, one observation
+        first_date_for.setdefault(effective, d)
+        ranked, rank_ordered = _rank_order(
+            # The same table `_load_cut_specs` ranks these two cuts from:
+            # `ranks.attractiveness_rank`, dated, in this artifact.
+            list(tickers), doc.get("ranks") or {}, "attractiveness_rank",
+        )
+        out[d] = SpecDay(ranked=ranked, rank_ordered=rank_ordered)
+    return out
+
+
 def _load_producer_specs(
     s3: Any,
     bucket: str,
@@ -1266,6 +1322,16 @@ def _load_producer_specs(
         challenger_producers,
         retired_producers,
     )
+
+    # The membership cohort, enumerated ONCE and only when an arm actually
+    # inherits from it — the listing is a full prefix walk and every arm that
+    # does not declare `supersedes_cut` would pay for it.
+    membership_dates: list[str] = []
+    if any(spec.supersedes_cut for spec in challenger_producers()):
+        membership_dates = [
+            d for d in _cohort_dates(s3, bucket, "universe_membership/", depth=0)
+            if len(d) == 10 and d[4] == "-"
+        ]
 
     champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
@@ -1327,6 +1393,17 @@ def _load_producer_specs(
             ineligible_reason=spec.ineligible_reason,
         )
         own = _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
+        if spec.supersedes_cut:
+            # The CROSS-SURFACE inheritance (alpha-engine-config-I11422): this
+            # arm continues a membership CUT's record, not another producer
+            # shadow's. Same `setdefault` rule as `supersedes` below — the
+            # successor's own picks win every date collision, so an
+            # inheritance can fill a gap the live arm never produced and can
+            # never overwrite something it measured.
+            for date_str, day in _cut_picks_by_date(
+                s3, bucket, spec.supersedes_cut, membership_dates,
+            ).items():
+                own.setdefault(date_str, day)
         if spec.supersedes:
             # Inherit the predecessor's cohort dates (alpha-engine-config-I11393).
             # The successor's OWN picks always win a date collision —
@@ -2740,6 +2817,19 @@ def build_producer_leaderboard(
         horizons = _resolve_horizons(horizons_days, horizon_days, slot.horizons_days)
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
         champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
+        # An INHERITED date is a cohort date of this board even though no arm
+        # wrote a shadow under it (alpha-engine-config-I11422). Without this
+        # union the realized-return join would not cover it and the imported
+        # history would load correctly and then score zero dates — present in
+        # `by_date`, absent from every horizon, and silent about why.
+        dates = sorted(
+            set(dates).union(
+                d
+                for arm in (champion, *challengers)
+                if arm is not None
+                for d in arm.by_date
+            )
+        )
         # Vacuity guard compares champion against LIVE challengers only — a
         # retired-but-in-window arm (config-I6427) is historical evidence,
         # never a promotion-eligible competitor, so its membership colliding
