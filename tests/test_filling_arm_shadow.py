@@ -484,6 +484,111 @@ def test_a_ticker_outside_the_constituents_map_is_still_refused_by_the_guard():
         assert_promotable(payload, surface="test")
 
 
+# ── alpha-engine-config-I11396: the cut and its ranking artifact must share a
+# population, and a near-disjoint join must RAISE ─────────────────────────────
+#
+# Measured: `scanner_top20_predictor`'s cut (`attractiveness_top_20`, 20
+# scanner-swept names) was ranked against `predictor/predictions/{date}.json`,
+# whose universe is the ~25 thesis-covered tickers
+# (crucible-predictor/inference/stages/load_universe.py, target_size=25) — a
+# DIFFERENT population from the scanner candidate pool the cut is drawn from.
+# On 2026-08-03/2026-08-04 the intersection was exactly {CRUS}: pool_size=1
+# out of a 20-name cut. `load_research_free_pool` was already reading the
+# correct population (`predictor/predictions_research_free/{date}.json`,
+# 76-78 names measured on 08-03/04/07); `load_predictor_cut_pool` now reads
+# the SAME artifact so the two arms differ only in cut width.
+
+
+def test_load_predictor_cut_pool_reads_the_research_free_artifact_not_predictions():
+    """The repoint. Before this fix the loader read
+    `predictor/predictions/{date}.json` (`PREDICTIONS_KEY`); it must now read
+    `predictor/predictions_research_free/{date}.json`
+    (`PREDICTIONS_RESEARCH_FREE_KEY`) — the same artifact
+    `load_research_free_pool` reads for `scanner_predictor_direct`."""
+    from producers.filling_arms import load_predictor_cut_pool
+
+    docs = {
+        "universe_membership/2026-09-04/membership.json": {
+            "predictor_universe_cut": "attractiveness_top_20",
+            "cuts": {"attractiveness_top_20": {"tickers": [f"T{i:03d}" for i in range(20)]}},
+        },
+        # Deliberately NOT under predictor/predictions/ — if the loader still
+        # reads the old key this document is invisible to it and the call
+        # raises "no s3://.../predictor/predictions_research_free/...".
+        "predictor/predictions_research_free/2026-09-04.json": {
+            "predictions": [
+                {"ticker": f"T{i:03d}", "predicted_alpha": 0.5 - i * 0.01} for i in range(20)
+            ],
+        },
+    }
+    s3 = _FakeS3(docs)
+    ranked, pool_source = load_predictor_cut_pool(s3, "b", "2026-09-04")
+    assert len(ranked) == 20
+    assert pool_source == "predictor_cut:attractiveness_top_20"
+    assert not any(k.startswith("predictor/predictions/") for k in s3.reads), (
+        f"the loader still reads the thesis-coverage-scoped predictions artifact: "
+        f"{[k for k in s3.reads if k.startswith('predictor/predictions/')]}"
+    )
+
+
+def test_load_predictor_cut_pool_raises_on_a_near_disjoint_join():
+    """The join-fraction guard, exercised directly against the EXACT
+    historical shape: a 20-name cut, a ranking artifact carrying only 1 of
+    those 20 tickers (the measured {CRUS}-only 2026-08-03/04 case). Before
+    this fix nothing raised here — the loader logged a WARNING and happily
+    returned a pool of 1, which is the defect this guard exists to close.
+    RAISES rather than silently synthesizing a short pool (fleet rule: no
+    silent swallow in a producer)."""
+    from producers.filling_arms import FillingShadowError, load_predictor_cut_pool
+
+    cut = [f"T{i:03d}" for i in range(20)]
+    docs = {
+        "universe_membership/2026-09-04/membership.json": {
+            "predictor_universe_cut": "attractiveness_top_20",
+            "cuts": {"attractiveness_top_20": {"tickers": cut}},
+        },
+        # Only ONE of the 20 cut tickers appears in the ranking artifact —
+        # 1/20 = 5%, the measured pre-fix join fraction.
+        "predictor/predictions_research_free/2026-09-04.json": {
+            "predictions": [{"ticker": "T000", "predicted_alpha": 0.5}],
+        },
+    }
+    s3 = _FakeS3(docs)
+    with pytest.raises(FillingShadowError, match=r"near-disjoint"):
+        load_predictor_cut_pool(s3, "b", "2026-09-04")
+    # the message names the cut, the artifact, both population sizes and the
+    # measured fraction, per the fleet no-silent-swallow rule
+    try:
+        load_predictor_cut_pool(s3, "b", "2026-09-04")
+    except FillingShadowError as e:
+        msg = str(e)
+        assert "attractiveness_top_20" in msg
+        assert "predictor/predictions_research_free/2026-09-04.json" in msg
+        assert "20 ticker(s)" in msg  # cut size
+        assert "1 ticker(s)" in msg  # artifact population size
+        assert "5%" in msg  # measured fraction
+
+
+def test_load_predictor_cut_pool_passes_on_a_well_joined_cut():
+    """The other half: a cut that IS mostly present in the ranking artifact
+    (18/20 = 90%, above the 80% floor) must not raise — the guard fires on
+    the disjoint-population defect, not on an ordinary handful of misses."""
+    from producers.filling_arms import load_predictor_cut_pool
+
+    cut = [f"T{i:03d}" for i in range(20)]
+    preds = [{"ticker": f"T{i:03d}", "predicted_alpha": 0.5 - i * 0.01} for i in range(18)]
+    docs = {
+        "universe_membership/2026-09-04/membership.json": {
+            "predictor_universe_cut": "attractiveness_top_20",
+            "cuts": {"attractiveness_top_20": {"tickers": cut}},
+        },
+        "predictor/predictions_research_free/2026-09-04.json": {"predictions": preds},
+    }
+    s3 = _FakeS3(docs)
+    ranked, _ = load_predictor_cut_pool(s3, "b", "2026-09-04")
+    assert len(ranked) == 18
+
+
 def test_build_filling_shadow_resolves_sectors_from_the_constituents_source(monkeypatch):
     import producers.filling_arms as fa
     docs = {
@@ -491,7 +596,7 @@ def test_build_filling_shadow_resolves_sectors_from_the_constituents_source(monk
             "predictor_universe_cut": "attractiveness_top_20",
             "cuts": {"attractiveness_top_20": {"tickers": [f"T{i:03d}" for i in range(20)]}},
         },
-        "predictor/predictions/2026-09-04.json": {
+        "predictor/predictions_research_free/2026-09-04.json": {
             "predictions": [{"ticker": f"T{i:03d}", "predicted_alpha": 0.5 - i * 0.01} for i in range(20)],
         },
     }
