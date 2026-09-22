@@ -762,7 +762,9 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
 
         sel = store.get_json("thinktank/challenger_selection/latest.json")
         assert sel["schema_version"] == 2  # config#2678 bump — see thinktank/__init__.py
-        assert sel["arm"] == "thinktank_coverage"
+        # The artifact must self-report the arm whose shadow prefix it is
+        # written under (§7.5). Both moved together on 2026-09-22.
+        assert sel["arm"] == "thinktank_20"
         assert sel["mode"] == "daily"
         assert sel["run_id"] == manifest.run_id
         assert sel["trading_day"] == manifest.trading_day

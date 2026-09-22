@@ -216,7 +216,15 @@ class ChallengerSelection(_Artifact):
     this module never hard-fails on staleness (Brian, 2026-07-14, config#1580).
     """
 
-    arm: Literal["thinktank_coverage"] = "thinktank_coverage"
+    # §7.5 — provenance true by construction. This MUST name the arm whose
+    # shadow prefix the selection is written under
+    # (thinktank.CHALLENGER_SHADOW_SIGNALS_KEY_TMPL). Moved with it from
+    # "thinktank_coverage" on 2026-09-22: thinktank_20 is a NEW arm, not a
+    # rename (alpha-engine-config-I11393), and an artifact that self-reports a
+    # producer it is not written under is the exact defect the policy names —
+    # every prediction row was annotated watchlist_source: "scanner_candidate"
+    # for weeks after that champion moved, because the literal went stale.
+    arm: Literal["thinktank_20"] = "thinktank_20"
     trading_day: str
     calendar_date: str
     run_id: str
