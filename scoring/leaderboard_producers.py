@@ -1355,6 +1355,24 @@ def _load_producer_specs(
     for spec in retired_producers(as_of=as_of):
         if spec.name in inherited_by_live:
             continue
+        # The LIVE POINTER'S arm is scored ONCE, as the champion row, whatever
+        # kind its register row carries. An arm can be both: the pointer has
+        # named `scanner_predictor_direct` since 2026-07-13 and its register
+        # row was retired on 2026-09-22, at which moment §3's trailing window
+        # opened and it began to be emitted a second time — as champion AND as
+        # a retired row. Measured live on 2026-09-22: the producer board went
+        # `unmeasurable` with `duplicate_arm_rows: scanner_predictor_directx2`
+        # on every horizon, and would have stayed that way until the pointer
+        # moved or the window closed on 2026-11-17.
+        #
+        # The champion row wins because it is the arm that is SERVING: it is
+        # read from the source the pointer's arm actually publishes to, and a
+        # promotion consumer filtering on kind would otherwise find the serving
+        # arm tagged "retired". The same skip already existed for the
+        # CHALLENGER loop above, for the same reason, and its absence here was
+        # simply the case nobody had reached yet.
+        if spec.name == champ_name:
+            continue
         hist = SpecHistory(
             name=spec.name,
             kind="retired",
