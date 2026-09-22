@@ -165,6 +165,22 @@ class ProducerSpec:
     # narrow §4's cross-arm intersection against a phantom competitor that is
     # really this arm's own past.
     supersedes: str | None = None
+    # The membership CUT whose record this arm continues — the cross-surface
+    # half of the same idea (alpha-engine-config-I11422).
+    #
+    # `supersedes` above reads `signals_shadow/{name}/` and nothing else, so an
+    # arm whose predecessor published elsewhere inherited NOTHING. That is the
+    # only reason `thinktank_20` carried history on the research slot's first
+    # cycle and `attractiveness_60` did not: Think Tank's predecessor happened
+    # to write to the same prefix as its successor. The scanner cuts were
+    # running the whole time, with 22 and 13 scored dates, on
+    # `universe_membership/{date}/`.
+    #
+    # Read from the DATED membership artifact, which is what makes it an
+    # IMPORT rather than a reconstruction: the arm's live code ranks from
+    # `scanner/universe/latest.json`, whose past state is unrecoverable, while
+    # the membership artifact recorded what the cut actually was on each date.
+    supersedes_cut: str | None = None
     # Which champion/challenger slot this arm competes in, or None for a spec
     # that predates the slot model and is retired. Declared rather than
     # inferred: the slot decides which assertions bind.
@@ -399,6 +415,10 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         prefilter_cut=PINNED_RESEARCH_PREFILTER,
         width=60,
         stateful=False,
+        # 22 scored dates (2026-05-29..2026-08-19). The 60-wide slice takes the
+        # WHOLE cut, so the ticker set is identical by construction and no
+        # ordering question arises.
+        supersedes_cut="attractiveness_top_60",
     ),
     "attractiveness_20": ProducerSpec(
         name="attractiveness_20",
@@ -413,6 +433,11 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         prefilter_cut=PINNED_RESEARCH_PREFILTER,
         width=20,
         stateful=False,
+        # 13 scored dates (2026-07-29..2026-08-19), read from the same DATED
+        # `ranks.attractiveness_rank` table the cut itself was formed from — so
+        # the imported top-20 IS what the cut held on each date, not a
+        # reconstruction of what this arm would have picked.
+        supersedes_cut="attractiveness_top_20",
     ),
     "tech_score_20": ProducerSpec(
         name="tech_score_20",
@@ -819,43 +844,19 @@ def _assert_research_slot_widths_are_declared_not_shared() -> None:
 
 
 NO_HISTORY_IMPORT: dict[str, str] = {
-    "attractiveness_60": (
-        "The cuts board holds 22 scored dates (2026-05-29..2026-08-19) for the "
-        "cut `attractiveness_top_60`, which is this arm's identical ticker SET "
-        "on every date. They are NOT imported. Two facts decide it, both "
-        "measured 2026-09-22: (1) the cuts loader collapses a HELD decision "
-        "onto one `cut_effective_date` while a research arm writes one shadow "
-        "per calendar run date, so the two series are not keyed on the same "
-        "thing and a straight copy would silently re-date the evidence; (2) an "
-        "import would clear `promote_min_weeks: 2` on the slot's FIRST cycle "
-        "while tech_score_20, predictor_from_60 and thinktank_20 sit at zero — "
-        "deciding a pointer among arms whose windows differ by 22 dates, which "
-        "is the §4 asymmetry the slot exists to remove."
-    ),
-    "attractiveness_20": (
-        "Everything above, plus one more that is decisive on its own: this "
-        "arm's ranking is read from `scanner/universe/latest.json` — a LATEST "
-        "pointer — so which 20 names it would have held on a past date cannot "
-        "be reconstructed from its own recipe at all. The cuts board ranked "
-        "`attractiveness_top_20` from the DATED `ranks` table in "
-        "`universe_membership/{date}`. The 60-wide pair is order-independent "
-        "(the whole set is taken either way); at width 20 the order IS the "
-        "arm, and the two orders come from different artifacts. Inheriting a "
-        "series whose picks cannot be verified is the non-immutable-recipe "
-        "defect §3.1 forbids — the same one that retired thinktank_coverage."
-    ),
     "tech_score_20": (
-        "No precedent at any width or on any surface: `tech_score` was only "
-        "ever cut at 60, never at 20, and no board scored this ranking at this "
-        "width. There is nothing to import and nothing was manufactured."
+        "No precedent at any width or on any surface. `tech_score_top_60` is "
+        "registered on the cuts board and has ZERO scored dates (measured "
+        "2026-09-22), and it is 60-wide besides — a different recipe under "
+        "§3.1. There is nothing to import and nothing was manufactured."
     ),
     "predictor_from_60": (
         "The retired predictor arms drew from a DIFFERENT pool at width 10 "
         "(alpha-engine-config-I11396: `scanner_top20_predictor` ranked a "
         "scanner cut against the ~25-name thesis-coverage universe, reaching a "
-        "pool of ONE on 2026-08-03 and 2026-08-04). Their series measures the "
-        "mis-wiring, not this recipe, so inheriting it would import a defect as "
-        "evidence — see -I11423."
+        "pool of ONE on two dates). Their series measures the mis-wiring, not "
+        "this recipe, so inheriting it would import a defect as evidence — "
+        "see -I11423, which marks those dates unusable."
     ),
 }
 """Live research arms that start with NO inherited history, and WHY.
@@ -898,7 +899,8 @@ def _assert_history_provenance_declared() -> None:
     undeclared = sorted(
         spec.name for spec in RESEARCH_PRODUCERS.values()
         if spec.slot == RESEARCH_SLOT and spec.kind != "retired"
-        and not spec.supersedes and spec.name not in NO_HISTORY_IMPORT
+        and not spec.supersedes and not spec.supersedes_cut
+        and spec.name not in NO_HISTORY_IMPORT
     )
     if undeclared:
         raise ValueError(
@@ -913,6 +915,7 @@ def _assert_history_provenance_declared() -> None:
         if name not in RESEARCH_PRODUCERS
         or RESEARCH_PRODUCERS[name].slot != RESEARCH_SLOT
         or RESEARCH_PRODUCERS[name].supersedes
+        or RESEARCH_PRODUCERS[name].supersedes_cut
     )
     if stale:
         raise ValueError(

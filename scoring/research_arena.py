@@ -787,6 +787,15 @@ def cycle_document(
             for arm, spec in RESEARCH_PRODUCERS.items()
             if spec.slot == ARENA_SLOT and spec.supersedes
         },
+        # The CROSS-SURFACE inheritances, named separately because they come
+        # from a different artifact family (`universe_membership/{date}/`) and
+        # a reader tracing a ladder back needs to know which one to open
+        # (alpha-engine-config-I11422).
+        "inherited_cut": {
+            arm: spec.supersedes_cut
+            for arm, spec in RESEARCH_PRODUCERS.items()
+            if spec.slot == ARENA_SLOT and spec.supersedes_cut
+        },
         "no_history_import": sorted(NO_HISTORY_IMPORT),
         "detail": (
             "an arm with no inherited history states WHY in "

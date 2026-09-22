@@ -295,6 +295,19 @@ class _FakeS3:
             raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
         return {"Body": _Body(self.docs[Key])}
 
+    def get_paginator(self, _op):
+        """`_load_producer_specs` enumerates `universe_membership/` to resolve
+        the cross-surface history import (alpha-engine-config-I11422). This
+        fake holds no membership artifacts, so an EMPTY listing is the honest
+        answer — and it keeps these tests about what they are about, which is
+        which PREFIX FAMILY the champion and challengers are read from."""
+        return _EmptyPaginator()
+
+
+class _EmptyPaginator:
+    def paginate(self, **_kw):
+        return iter([{"Contents": []}])
+
 
 class _Body:
     def __init__(self, doc):
