@@ -361,7 +361,10 @@ def bootstrap_register() -> ArmRegister:
 
 
 def assert_slot_floor(
-    register: ArmRegister, *, config: ArenaConfig = ARENA_CONFIG
+    register: ArmRegister,
+    *,
+    config: ArenaConfig = ARENA_CONFIG,
+    as_of: str | None = None,
 ) -> None:
     """Raise when the slot holds fewer active arms than a comparison needs.
 
@@ -370,16 +373,28 @@ def assert_slot_floor(
     guards — a decision loop that produced zero comparisons and rendered it as
     a routine hold — ran for two cycles on the universe_cut slot before anyone
     noticed.
+
+    ``as_of`` makes the count POINT-IN-TIME, and passing the cycle's own date
+    is what makes this check bind on the thing the engine will actually see.
+    MEASURED 2026-09-22: a cycle run for 2026-09-18 — four days before any arm
+    of this slot was created — passed a floor checked with ``as_of=None`` (five
+    arms live TODAY) and then decided on ``active_arms: 0``, emitting
+    ``unservable`` with champion ``None``. A cycle dated before its arms
+    existed is a fabrication, and it rendered as an ordinary red verdict rather
+    than as the impossible input it was.
     """
-    active = register.active_arms()
+    active = register.active_arms(as_of)
     if len(active) < config.min_active_arms:
+        when = f" as of {as_of}" if as_of else ""
         raise SlotFloorBreached(
-            f"the {ARENA_SLOT!r} slot holds {len(active)} active arm(s), below "
-            f"min_active_arms={config.min_active_arms}: "
+            f"the {ARENA_SLOT!r} slot holds {len(active)} active arm(s){when}, "
+            f"below min_active_arms={config.min_active_arms}: "
             f"{sorted(arm_name_from_id(a) for a in active)}. A slot below the "
             "floor produces too few comparisons to decide anything, and a "
             "decision loop that cannot decide renders as a routine hold "
-            "(alpha-engine-config-I9317)."
+            "(alpha-engine-config-I9317). If this names a date before the arms "
+            "were registered, the cycle itself is the error: a slot cannot "
+            "decide anything on a day none of its arms existed."
         )
 
 
@@ -649,6 +664,11 @@ def run_arena_cycle(
     this call must start passing statuses; §3 treats an unasserted fit as a
     failed one.
     """
+    # The floor, AS OF this cycle's own date. Checked here and not only in
+    # `load_register` because the register's present-tense count and the count
+    # the ENGINE sees for a past date are different numbers — see
+    # `assert_slot_floor`'s docstring for the cycle that slipped between them.
+    assert_slot_floor(register, config=config, as_of=decided_on)
     ids = derived_arm_ids(as_of=decided_on)
     series, counts = series_from_board(board, arm_ids=ids, horizon_days=horizon_days)
     # The register is the authority on which arms are scored — a retired arm
