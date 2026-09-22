@@ -17,8 +17,27 @@ Each test below fails if one leg of that contract is removed:
   * the producer stops declaring ``funnel.advances_to.thinktank_coverage_window``
   * the declaration names a cut that is not emitted
   * the rank table stops covering what the consumer's configured ceiling needs
-  * the consumer stops following the champion pointer
   * the consumer starts reading the board's ranking again (source-level guard)
+  * the consumer starts following the champion POINTER again
+
+AMENDED 2026-09-22 (Brian's ruling, alpha-engine-config-I11393). This file used
+to assert the opposite of that last leg: that the window FOLLOWED the champion
+pointer, per the 2026-08-20 ruling (I7823). It does not any more, and the
+reversal is the point.
+
+Think Tank is an ARM of the ``research`` slot, and §3.1 makes an arm an
+immutable RECIPE — "whatever cut won this week" is not one. Measured
+2026-09-18: the ``universe_cut`` pointer moved from ``attractiveness_top_60``
+to ``tech_score_top_60``, two cuts whose intersection was **0 of 60 names**.
+This window's entire population was replaced, coverage fell 60/60 -> 9/60 in a
+single cycle, the arm produced no leaderboard evidence for days, and its spec
+hash never changed, so its arena series recorded the swap as one continuous
+line.
+
+The window is now PINNED to ``producers.registry.PINNED_RESEARCH_PREFILTER``
+and resolved by ``scoring.universe_membership.resolve_pinned_cut``. A different
+pre-filter is tested by REGISTERING AN ARM, never by a pointer moving
+underneath the arms already running.
 """
 
 from __future__ import annotations
@@ -36,6 +55,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from producers.registry import PINNED_RESEARCH_PREFILTER  # noqa: E402
 from scoring.universe_membership import (  # noqa: E402
     CUT_CHAMPION_POINTER_KEY,
     FUNNEL_CONSUMER_THINKTANK,
@@ -176,21 +196,49 @@ def test_window_is_the_cut_the_artifact_declares():
     assert set(window.tickers) == {f"T{i:04d}" for i in range(60)}
 
 
-def test_window_follows_the_declaration_when_the_producer_moves_it():
-    """A hardcoded ``attractiveness_top_60`` on the consumer would pass every
-    other test in this file and fail only here."""
+def test_the_declaration_no_longer_steers_the_window():
+    """The producer moving ``funnel.advances_to`` must NOT move this arm.
+
+    Inverted from its pre-I11393 form, which asserted the window followed the
+    declaration. An arm's pre-filter is part of its immutable recipe; a
+    producer-side edit that silently re-pointed it is precisely the class of
+    change §3.1 exists to refuse. The declaration still governs non-arm funnel
+    consumers through ``resolve_funnel_cut`` — it just no longer reaches here.
+    """
     board = _board()
-    m = _membership(board, window_cut="attractiveness_top_25", size=25)
+    m = _membership(board)
+    # The pinned cut stays emitted; only the DECLARATION is re-pointed, which
+    # is exactly the producer-side edit that used to move this arm.
+    m["cuts"]["attractiveness_top_25"] = {
+        "basis": "attractiveness_rank",
+        "size": 25,
+        "tickers": sorted(t["ticker"] for t in board["stocks"][:25]),
+        "source": "test",
+    }
+    m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK] = "attractiveness_top_25"
     window = load_feed_window(_store(m), minimum_rank_coverage=200)
-    assert window.cut == "attractiveness_top_25"
-    assert window.size == 25
+    assert window.cut == PINNED_RESEARCH_PREFILTER
+    assert window.size == 60
 
 
-def test_missing_declaration_fails_loud_rather_than_defaulting():
+def test_a_missing_declaration_no_longer_breaks_a_pinned_arm():
+    """The arm names its own cut, so the funnel declaration is not its input."""
     m = _membership(_board())
     del m["funnel"]["advances_to"][FUNNEL_CONSUMER_THINKTANK]
-    with pytest.raises(UniverseMembershipError, match=FUNNEL_CONSUMER_THINKTANK):
-        load_feed_window(_store(m))
+    window = load_feed_window(_store(m), minimum_rank_coverage=200)
+    assert window.cut == PINNED_RESEARCH_PREFILTER
+
+
+def test_the_pinned_cut_vanishing_from_the_artifact_fails_loud():
+    """The replacement failure mode. A pinned cut the producer stopped
+    emitting is a producer-side change an arm must never paper over by
+    substituting another cut or an empty window."""
+    m = _membership(_board())
+    m["cuts"].pop(PINNED_RESEARCH_PREFILTER)
+    with pytest.raises(UniverseMembershipError) as exc:
+        load_feed_window(_store(m), minimum_rank_coverage=200)
+    assert PINNED_RESEARCH_PREFILTER in str(exc.value)
+    assert "I11393" in str(exc.value)
 
 
 def test_a_declaration_naming_a_missing_cut_fails_loud():
@@ -208,28 +256,30 @@ def test_a_missing_membership_artifact_fails_loud_with_no_board_fallback():
 # ── The window follows the CHAMPION pointer ──────────────────────────────────
 
 
-def test_the_window_follows_the_champion_pointer_not_the_static_declaration():
-    """Brian's ruling 2026-08-20 (alpha-engine-config-I7823): the arms of the
-    count-matched slot are promoted weekly and the consumers of that slot read
-    whichever is champion. The declaration states the ARRANGEMENT; the pointer
-    states which arm serves it.
+def test_the_window_does_not_follow_the_champion_pointer():
+    """THE regression this file now exists for (alpha-engine-config-I11393).
 
-    `PROMOTABLE_CUTS` is patched to include the tech-basis arm: this test is
-    about what the WINDOW does once an arm holds the pointer, not about which
-    arms may hold it. `tech_score_top_60` became observe-only on 2026-08-21
-    (alpha-engine-config-I8060), and the separate refusal test below is what
-    pins that.
+    Replays the live 2026-09-18 event: the pointer moves to a cut sharing ZERO
+    names with the pinned one. Pre-I11393 the window followed it and the arm's
+    entire population was replaced mid-series. It must now be inert.
     """
     board = _board()
     m = _with_tech_basis_champion(_membership(board), board)
+    pinned = load_feed_window(_store(m), minimum_rank_coverage=200)
     with patch(
         "scoring.universe_membership.PROMOTABLE_CUTS",
         ("attractiveness_top_60", "tech_score_top_60"),
     ):
-        window = load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
-    assert window.cut == "tech_score_top_60"
-    assert window.provenance["declared_cut"] == "attractiveness_top_60"
-    assert window.provenance["basis"] == "tech_score_rank"
+        moved = load_feed_window(
+            _store(m, champion="tech_score_top_60"), minimum_rank_coverage=200
+        )
+    assert moved.cut == PINNED_RESEARCH_PREFILTER == pinned.cut
+    assert moved.basis == pinned.basis == "attractiveness_rank"
+    assert moved.tickers == pinned.tickers, (
+        "a universe_cut promotion must not change one single name this arm "
+        "researches — on 2026-09-18 it changed all 60"
+    )
+    assert moved.provenance["pinned"] is True
 
 
 def test_a_tech_basis_champion_is_ranked_in_its_own_basis():
@@ -251,46 +301,32 @@ def test_a_tech_basis_champion_is_ranked_in_its_own_basis():
     assert ranks[tickers[60]] == len(tickers)
 
 
-def test_a_tech_basis_champion_with_no_full_table_still_refuses():
-    """The refusal survives the fix: a cut whose basis has no table is refused,
-    never quietly resolved out of the attractiveness table."""
+def test_a_pinned_cut_whose_basis_has_no_table_still_refuses():
+    """The refusal survives the pinning: a cut whose ranking basis has no table
+    is refused, never quietly resolved out of a different basis' table."""
     board = _board()
-    m = _with_tech_basis_champion(_membership(board), board)
-    m.pop("tech_score_ranks")
-    m.pop("rank_tables")
-    with patch(
-        "scoring.universe_membership.PROMOTABLE_CUTS",
-        ("attractiveness_top_60", "tech_score_top_60"),
-    ), pytest.raises(UniverseMembershipError, match="I7843"):
-        load_feed_window(_store(m, champion="tech_score_top_60"), minimum_rank_coverage=200)
+    m = _membership(board)
+    m.pop("ranks", None)
+    m.pop("rank_tables", None)
+    with pytest.raises(UniverseMembershipError):
+        load_feed_window(_store(m), minimum_rank_coverage=200)
 
 
-def test_an_unregistered_arm_cannot_hold_the_window_even_if_the_pointer_names_it():
-    """The consumer-side half of alpha-engine-config-I8060, rescoped by I9272.
+def test_an_arbitrary_pointer_value_cannot_reach_this_window_at_all():
+    """Stronger than the guard it replaces.
 
-    A pointer naming an arm outside `PROMOTABLE_CUTS` is refused by
-    `live_cut_champion` before the window is ever built — the refusal does not
-    depend on the promotion engine, the board, or this module being correct.
-
-    `tech_score_top_60` is no longer such an arm (Brian's ruling 2026-08-29
-    makes every scored arm promotable), so the property is asserted against a
-    name that is genuinely outside the register. That is the only case this
-    guard was ever load-bearing for: a value nobody validated.
+    The old test asserted that an unregistered pointer value was REFUSED —
+    which still left the pointer as an input to this window, one validation
+    away from steering it. It is no longer an input at all, so a garbage value
+    is not refused, it is irrelevant. That is the difference between a
+    validated arbitrary-cut-selection primitive and no primitive.
     """
-    board = _board()
-    m = _with_tech_basis_champion(_membership(board), board)
-    with pytest.raises(UniverseMembershipError) as exc:
-        load_feed_window(
-            _store(m, champion="some_cut_nobody_registered_60"), minimum_rank_coverage=200
-        )
-    assert "some_cut_nobody_registered_60" in str(exc.value)
-    assert "attractiveness_top_60" in str(exc.value)
-
-
-def test_an_unvalidated_champion_pointer_is_refused():
     m = _membership(_board())
-    with pytest.raises(UniverseMembershipError, match="Refusing to resolve"):
-        load_feed_window(_store(m, champion="whatever_i_wrote"))
+    expected = load_feed_window(_store(m), minimum_rank_coverage=200)
+    for nonsense in ("some_cut_nobody_registered_60", "whatever_i_wrote", ""):
+        window = load_feed_window(_store(m, champion=nonsense), minimum_rank_coverage=200)
+        assert window.cut == expected.cut
+        assert window.tickers == expected.tickers
 
 
 # ── Rank-table coverage ──────────────────────────────────────────────────────

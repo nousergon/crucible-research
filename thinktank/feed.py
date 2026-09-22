@@ -46,10 +46,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from producers.registry import PINNED_RESEARCH_PREFILTER
 from scoring.universe_membership import (
-    FUNNEL_CONSUMER_THINKTANK,
     UniverseMembershipError,
-    resolve_funnel_cut,
+    resolve_pinned_cut,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,20 +157,26 @@ def load_feed_window(
     nobody", and re-deriving the ranking locally is precisely the defect this
     module removes.
     """
-    tickers, ranks, provenance = resolve_funnel_cut(
-        FUNNEL_CONSUMER_THINKTANK,
+    # PINNED, not pointer-resolved (alpha-engine-config-I11393). Think Tank is
+    # an ARM of the research slot, and §3.1 makes an arm an immutable recipe —
+    # "whatever cut won this week" is not one. Measured 2026-09-18: the
+    # universe_cut pointer moved between two cuts sharing 0 of 60 names, this
+    # window's entire population was replaced, coverage fell 60/60 -> 9/60 in
+    # one cycle, and the arm's spec hash never changed. A different pre-filter
+    # is tested by registering an arm, not by a pointer moving under this one.
+    tickers, ranks, provenance = resolve_pinned_cut(
+        PINNED_RESEARCH_PREFILTER,
         bucket=store.bucket,
         s3_client=store.s3,
         minimum_rank_coverage=minimum_rank_coverage,
     )
     window = build_feed_window(tickers, ranks, provenance)
     logger.info(
-        "[thinktank] coverage window: %d names from cut %r (declared %r, basis %r) "
+        "[thinktank] coverage window: %d names from PINNED cut %r (basis %r) "
         "of universe_membership run_date=%s cut_effective_date=%s; rank table "
         "covers %d names",
         window.size,
         window.cut,
-        provenance.get("declared_cut"),
         window.basis,
         provenance.get("run_date"),
         provenance.get("cut_effective_date"),
