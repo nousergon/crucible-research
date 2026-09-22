@@ -351,11 +351,11 @@ class TestNoCohortArmsAreRoutedOnceOnTheSurveillanceTier:
         PRE-FIX: RED — nothing routes this class anywhere; the digest is never
         called."""
         panel, entries = _panel_and_entries()
-        # Only ONE of the three registered producer challengers writes.
+        # Only ONE of the five registered research-slot challengers writes.
         _seed_all_slots(s3, entries, shadow_entries=[])
         for d in entries:
             _put_json(
-                s3, f"signals_shadow/no_agent_quant/{d}/signals.json",
+                s3, f"signals_shadow/attractiveness_20/{d}/signals.json",
                 {"signals": {t: {"signal": "ENTER", "score": s}
                              for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
             )
@@ -369,7 +369,7 @@ class TestNoCohortArmsAreRoutedOnceOnTheSurveillanceTier:
             "group, not one per member and not one per horizon"
         )
         findings = digest.call_args.args[0]
-        assert {"single_agent_quant", "thinktank_coverage"} <= {
+        assert {"attractiveness_60", "tech_score_20"} <= {
             f.split("'")[1] for f in findings
         }, "a group notification that omits its member list has traded spam for uselessness"
         assert page.call_count == 0, (

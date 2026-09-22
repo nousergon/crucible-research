@@ -783,7 +783,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
 
         dated = store.get_json(f"thinktank/challenger_selection/{manifest.trading_day}.json")
         assert dated == sel
-        assert store.get_json(f"signals_shadow/thinktank_coverage/{manifest.trading_day}/signals.json") is None
+        assert store.get_json(f"signals_shadow/thinktank_20/{manifest.trading_day}/signals.json") is None
 
         # RUN 2 — gap_fill_only shores up T3-T7 (the whole remaining gap)
         backend.ratings.update({"T3": 95, "T4": 50, "T5": 85, "T6": 40, "T7": 70})
@@ -819,7 +819,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
             40,
         ]
         # conforming shadow view written on the completing run itself
-        assert store.get_json(f"signals_shadow/thinktank_coverage/{manifest2.trading_day}/signals.json") is not None
+        assert store.get_json(f"signals_shadow/thinktank_20/{manifest2.trading_day}/signals.json") is not None
 
         # RUN 3 — gap_fill_only no-op: still fully covered → complete stays
         # True, shadow refreshed.
@@ -841,7 +841,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
             "T6",
         ]
 
-        shadow = store.get_json(f"signals_shadow/thinktank_coverage/{manifest3.trading_day}/signals.json")
+        shadow = store.get_json(f"signals_shadow/thinktank_20/{manifest3.trading_day}/signals.json")
         assert shadow is not None
         assert shadow["date"] == manifest3.trading_day
         assert shadow["run_date"] == manifest3.calendar_date
@@ -932,7 +932,7 @@ def test_challenger_selection_truncates_to_top_n_by_rating():
 
         # incomplete coverage (uncovered_count=3) → conforming shadow NOT written
         assert selection.coverage_complete is False
-        assert store.get_json("signals_shadow/thinktank_coverage/2026-07-14/signals.json") is None
+        assert store.get_json("signals_shadow/thinktank_20/2026-07-14/signals.json") is None
 
 
 def test_challenger_selection_shadow_signals_conforming_shape():
@@ -984,7 +984,7 @@ def test_challenger_selection_shadow_signals_conforming_shape():
         )
         assert selection.coverage_complete is True
 
-        shadow = store.get_json("signals_shadow/thinktank_coverage/2026-07-14/signals.json")
+        shadow = store.get_json("signals_shadow/thinktank_20/2026-07-14/signals.json")
         assert shadow is not None
         assert shadow["date"] == "2026-07-14"
         assert shadow["run_date"] == "2026-07-14"

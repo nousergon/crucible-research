@@ -22,24 +22,24 @@ from producers.registry import (
 )
 
 
-def test_thinktank_coverage_is_a_registered_challenger():
+def test_thinktank_20_is_a_registered_challenger():
     """Without this the leaderboard has no spec for the arm and never scores it
     — the state config-I5195 was filed against."""
-    spec = RESEARCH_PRODUCERS.get("thinktank_coverage")
+    spec = RESEARCH_PRODUCERS.get("thinktank_20")
     assert spec is not None
     assert spec.kind == "challenger"
 
 
-def test_thinktank_coverage_is_scored():
+def test_thinktank_20_is_scored():
     """challenger_producers() is the SCORING set — the leaderboard reads each
     arm's shadow from S3 and does not care who wrote it."""
-    assert "thinktank_coverage" in [s.name for s in challenger_producers()]
+    assert "thinktank_20" in [s.name for s in challenger_producers()]
 
 
-def test_thinktank_coverage_is_not_built_by_the_weekly_run():
+def test_thinktank_20_is_not_built_by_the_weekly_run():
     """Its shadow is written by the Think Tank's own daily run. If the weekly
     producer pass tried to build it, every run would go red."""
-    assert "thinktank_coverage" not in [s.name for s in buildable_challenger_producers()]
+    assert "thinktank_20" not in [s.name for s in buildable_challenger_producers()]
 
 
 def test_every_buildable_challenger_actually_has_a_build():
@@ -62,8 +62,8 @@ def test_the_shadow_prefix_matches_what_the_think_tank_writes():
 
     scoring.leaderboard_producers reads
     ``signals_shadow/{producer}/{date}/signals.json`` keyed on spec.name, and
-    the Think Tank writes ``signals_shadow/thinktank_coverage/{date}/``. A
+    the Think Tank writes ``signals_shadow/thinktank_20/{date}/``. A
     rename on either side silently yields an arm that scores zero cohorts
     forever, which is indistinguishable from an arm that is merely new.
     """
-    assert RESEARCH_PRODUCERS["thinktank_coverage"].name == "thinktank_coverage"
+    assert RESEARCH_PRODUCERS["thinktank_20"].name == "thinktank_20"
