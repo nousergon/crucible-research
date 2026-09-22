@@ -130,31 +130,42 @@ entries:
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
-  # ── preflight.py — a KNOWN, tracked, out-of-scope defect (I9302 item 2):
-  # the weekly Lambda's preflight still hard-gates on ANTHROPIC_API_KEY, a
-  # credential its runtime no longer reads post-router-migration (I7005).
-  # Real and live, not prose — allowlisted with a short fuse rather than
-  # fixed here because this session's file scope named only scripts/
-  # measure_cache_prefixes.py, thinktank/, and the guard workflow/allowlist.
+  # ── preflight.py — the defect these two entries were opened for is FIXED.
+  # They carried a deliberately short fuse (2026-09-12) so the live defect
+  # would resurface rather than sit behind a long allowlist; it resurfaced on
+  # 2026-09-17, by which time the fix had already landed and only the
+  # allowlist still described the old world. Both remaining hits are PROSE
+  # naming the pattern that was REMOVED — verified 2026-09-22:
+  #   preflight.py:23   — "It used to be ``check_env_vars(...)``", in the
+  #                       docstring explaining why the weekly gate is router
+  #                       reachability rather than a vendor credential.
+  #   tests/…:30,48     — the same history in a docstring, plus an assertion
+  #                       that the credential is NOT among the checked vars:
+  #                       `assert not any("ANTHROPIC_API_KEY" in c.args …)`.
+  # A test that asserts a pattern's ABSENCE necessarily contains the literal.
+  # Re-dated to the standard prose expiry, same as every sibling entry below,
+  # because what is allowlisted now is documentation of a completed migration
+  # (Brian's 2026-08-29 ruling retiring direct Anthropic; the router migration
+  # is alpha-engine-config-I7005).
   - path: preflight.py
     pattern: anthropic:env_key
     reason: >-
-      KNOWN live defect, not prose: the weekly-mode preflight hard-requires
-      ANTHROPIC_API_KEY (preflight.py::run, "weekly" mode) though
-      agents/langchain_utils.py::make_agent_llm migrated to
-      krepis.router.resolve_group_spec under alpha-engine-config-I7005 and no
-      longer reads it — filed as alpha-engine-config-I9302 item 2. Out of
-      this session's file scope (only scripts/measure_cache_prefixes.py,
-      thinktank/, and the guard workflow/allowlist were in scope).
-    expires: "2026-09-12"
+      Docstring prose naming the credential check that WAS REMOVED — the
+      weekly gate is now router reachability (krepis env contract + both model
+      classes resolving), not a vendor credential. Verified 2026-09-22: the
+      only occurrence is the past-tense explanation at preflight.py:23; no
+      live read exists. alpha-engine-config-I9302 item 2, now closed by the
+      fix this entry used to hold open.
+    expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
   - path: tests/test_preflight.py
     pattern: anthropic:env_key
     reason: >-
-      Asserts the CURRENT (defective) preflight behaviour named above — will
-      need updating alongside preflight.py's fix. Same tracking, same
-      out-of-scope reason.
-    expires: "2026-09-12"
+      The guard test asserting the credential is ABSENT from the weekly
+      preflight's checked vars — `assert not any("ANTHROPIC_API_KEY" in
+      c.args for c in env.call_args_list)`. A test that asserts a pattern's
+      absence must name the pattern. Not a live read.
+    expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
   - path: producers/single_agent.py
