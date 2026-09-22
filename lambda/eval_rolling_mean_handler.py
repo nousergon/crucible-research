@@ -489,16 +489,22 @@ def _run(event, context):
     # Recorded as a `producer_leaderboard` field per [[feedback_no_silent_fails]].
     # Cohort-gated: ships n_dates=0 + null metrics until forward cohorts mature
     # (full closure of #1221/#1223 = the OBSERVATION_REGISTRY cohort gate).
+    # Built BEFORE the try, because the research arena cycle below reuses all
+    # four. Constructed inside it, a failure there would leave them unbound and
+    # the arena block would raise NameError — reporting a spurious ERROR for
+    # its neighbour's fault.
+    import boto3
+    from nousergon_lib.dates import now_dual
+
+    bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+    dual = now_dual()
+    s3c = boto3.client("s3")
+    lb: dict | None = None
+
     producer_leaderboard: dict
     try:
-        import boto3
-        from nousergon_lib.dates import now_dual
-
         from scoring.leaderboard_producers import build_producer_leaderboard
 
-        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
-        dual = now_dual()
-        s3c = boto3.client("s3")
         lb = run_bounded(
             lambda: build_producer_leaderboard(s3c, bucket, dual.trading_day),
             name="producer_leaderboard",
@@ -533,6 +539,64 @@ def _run(event, context):
             exc=exc,
         )
 
+    # The RESEARCH slot's own decision cycle (alpha-engine-config-I11403,
+    # phase 4 of -I11393). Hung off the board that was just built rather than
+    # rebuilding it: one read, and the cycle is decided on exactly the numbers
+    # the artifact published, which is what makes the record reconstructable.
+    #
+    # champion-challenger-policy.md §11: every slot emits one arena_cycle per
+    # cycle, WHATEVER the outcome — a slot that emits nothing is not healthy,
+    # it is unobserved. So this runs even when the board is unmeasurable; the
+    # cycle then says so, which is the point.
+    #
+    # It does NOT move the serving pointer — see scoring/research_arena.py's
+    # module docstring and alpha-engine-config-I11438.
+    research_arena: dict
+    try:
+        from scoring.research_arena import run_research_arena
+
+        arena = run_bounded(
+            lambda: run_research_arena(
+                s3c,
+                bucket,
+                dual.trading_day,
+                board=(lb.get("leaderboard") if isinstance(lb, dict) else None),
+                board_key=(lb.get("key") if isinstance(lb, dict) else None),
+            ),
+            name="research_arena",
+            ceiling_s=_CEILING_PRODUCER_LEADERBOARD_S,
+            budget=_budget,
+        )
+        decision = (arena.get("cycle") or {}).get("decision") or {}
+        research_arena = {
+            "status": arena.get("status"),
+            "key": arena.get("key"),
+            "decision": decision.get("status"),
+            "champion": decision.get("champion"),
+            "moved": decision.get("moved"),
+        }
+        logger.info(
+            "[eval_rolling_mean_handler] research_arena status=%s key=%s "
+            "decision=%s champion=%s moved=%s",
+            research_arena["status"], research_arena["key"],
+            research_arena["decision"], research_arena["champion"],
+            research_arena["moved"],
+        )
+    except (BlockTimeout, NoBudget) as exc:
+        research_arena = _shortfall(
+            "research_arena", "the research slot's arena decision cycle", exc,
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary path, same contract as its siblings
+        logger.error(
+            "[eval_rolling_mean_handler] research_arena FAILED: %s", exc, exc_info=True,
+        )
+        research_arena = {"status": "ERROR", "error": str(exc)}
+        _emit_producer_failure_alert(
+            producer="research_arena",
+            artifact="arena/research/{date}.json",
+            exc=exc,
+        )
+
     result = {
         "status": status,
         "summary": summary,
@@ -540,6 +604,7 @@ def _run(event, context):
         "control_bands": control_bands,
         "agent_quality": agent_quality,
         "producer_leaderboard": producer_leaderboard,
+        "research_arena": research_arena,
     }
 
     # Stage-coverage self-assertion (config-I7214, sf-pipeline-policy.md
