@@ -586,11 +586,15 @@ class TestProducerLeaderboardProducer:
         for d in [f"2026-07-{d:02d}" for d in range(1, 25)]:
             panel.put(d, {"A": 110, "B": 102, "SPY": 105})
 
+        # `top_n` is NOT passed. Since alpha-engine-config-I11425 this board is
+        # scored under the slot its arms declare, and the `research` slot sets
+        # `per_arm_width=True` — each arm is scored at the width in its register
+        # row, so a caller-supplied `top_n` is inert here and passing one would
+        # read as a width this board does not use.
         res = build_producer_leaderboard(
             s3,
             _BUCKET,
             "2026-06-27",
-            top_n=1,
             closes_panel_loader=panel.loader(),
         )
         assert res["status"] == "ok"
@@ -600,8 +604,11 @@ class TestProducerLeaderboardProducer:
         assert "attractiveness_20" in names
         row = names["attractiveness_20"]
         assert row["topn_alpha_vs_champion"] is None
-        # top-1 pick is A (score 90): realized 0.10 vs SPY's realized 0.05.
-        assert row["topn_alpha_vs_benchmark"]["mean"] == pytest.approx(0.05)
+        # attractiveness_20 declares width 20, so BOTH picks are held (it has
+        # only 2): mean realized (0.10 + 0.02)/2 = 0.06 vs SPY's 0.05.
+        # Previously this read 0.05, the top-1 figure — the same numbers under a
+        # truncation the arm's recipe never asked for.
+        assert row["topn_alpha_vs_benchmark"]["mean"] == pytest.approx(0.01)
         assert row["realized_rank_ic"]["mean"] == pytest.approx(1.0)
 
     def test_fail_soft_never_raises_and_alerts_loud(self, s3, monkeypatch):

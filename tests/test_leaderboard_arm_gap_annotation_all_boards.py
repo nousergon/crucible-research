@@ -142,17 +142,26 @@ def test_every_board_names_the_arms_it_scored_nothing_for(s3, builder, leaderboa
             f"{leaderboard_id} block {block['horizon_days']}d does not name the arms "
             "that contributed nothing to its n_dates"
         )
-        assert block["arms_total"] == len(block["specs"])
+        # `arms_total` counts the arms CONSIDERED at this horizon, which is not
+        # always the number of rows: on a `per_arm_width` board an arm that
+        # emitted nothing and declares no width gets no row at all
+        # (alpha-engine-config-I11425). Counting rows alone would let such an
+        # arm vanish from the board entirely, and would allow
+        # `len(arms_unmeasured) > arms_total` — principles §7: a component
+        # emitting nothing is UNOBSERVED, never absent.
+        rowless = [n for n in block["arms_no_cohort"] if n not in {r["name"] for r in block["specs"]}]
+        assert block["arms_total"] == len(block["specs"]) + len(rowless)
         # every challenger scored nothing here, and the block must say so
         insufficient = sorted(
             row["name"] for row in block["specs"] if row.get("confidence") == "insufficient"
         )
-        assert block["arms_unmeasured"] == insufficient
+        assert block["arms_unmeasured"] == sorted(set(insufficient) | set(rowless))
         # An arm that emitted NO cohort dates at all is a distinct,
         # horizon-independent state and is named separately: it is unscored at
         # every horizon for one reason, not three.
         assert "arms_no_cohort" in block
         assert set(block["arms_no_cohort"]) <= set(block["arms_unmeasured"])
+        assert len(block["arms_unmeasured"]) <= block["arms_total"]
 
 
 def test_the_scanner_boards_21d_block_is_not_reported_measured_in_silence(s3):
