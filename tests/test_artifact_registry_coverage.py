@@ -203,6 +203,15 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # against that repo's private-docs on 2026-08-20, and opening a fourth
     # against work in flight is what the engagement protocol forbids.
     "scoring/cut_arena.py": 2,  # universe-cut arena_cycle dated + latest (alpha-engine-config-I9317)
+    # The RESEARCH slot's arena cycle (alpha-engine-config-I11403). 2 PUT sites:
+    # the loop over the dated key + its latest.json mirror, and the register.
+    # `arena/research/latest.json` is REGISTERED in
+    # alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml as
+    # `arena_research_cycle_latest`; the dated sibling deliberately is not, for
+    # the reason `arena_model_verdict_latest` gives there — a dated key is the
+    # cycle's trading day, not the label a weekday exercise run substitutes,
+    # so a dated row would page on a correct run.
+    "scoring/research_arena.py": 2,
     "scoring/cut_promotion.py": 1,
     # Scanner-SPEC promotion decision (alpha-engine-config-I9273). 1 PUT site
     # (the loop over the dated audit key, the latest.json mirror and the live
