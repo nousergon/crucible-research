@@ -818,8 +818,114 @@ def _assert_research_slot_widths_are_declared_not_shared() -> None:
         )
 
 
+NO_HISTORY_IMPORT: dict[str, str] = {
+    "attractiveness_60": (
+        "The cuts board holds 22 scored dates (2026-05-29..2026-08-19) for the "
+        "cut `attractiveness_top_60`, which is this arm's identical ticker SET "
+        "on every date. They are NOT imported. Two facts decide it, both "
+        "measured 2026-09-22: (1) the cuts loader collapses a HELD decision "
+        "onto one `cut_effective_date` while a research arm writes one shadow "
+        "per calendar run date, so the two series are not keyed on the same "
+        "thing and a straight copy would silently re-date the evidence; (2) an "
+        "import would clear `promote_min_weeks: 2` on the slot's FIRST cycle "
+        "while tech_score_20, predictor_from_60 and thinktank_20 sit at zero — "
+        "deciding a pointer among arms whose windows differ by 22 dates, which "
+        "is the §4 asymmetry the slot exists to remove."
+    ),
+    "attractiveness_20": (
+        "Everything above, plus one more that is decisive on its own: this "
+        "arm's ranking is read from `scanner/universe/latest.json` — a LATEST "
+        "pointer — so which 20 names it would have held on a past date cannot "
+        "be reconstructed from its own recipe at all. The cuts board ranked "
+        "`attractiveness_top_20` from the DATED `ranks` table in "
+        "`universe_membership/{date}`. The 60-wide pair is order-independent "
+        "(the whole set is taken either way); at width 20 the order IS the "
+        "arm, and the two orders come from different artifacts. Inheriting a "
+        "series whose picks cannot be verified is the non-immutable-recipe "
+        "defect §3.1 forbids — the same one that retired thinktank_coverage."
+    ),
+    "tech_score_20": (
+        "No precedent at any width or on any surface: `tech_score` was only "
+        "ever cut at 60, never at 20, and no board scored this ranking at this "
+        "width. There is nothing to import and nothing was manufactured."
+    ),
+    "predictor_from_60": (
+        "The retired predictor arms drew from a DIFFERENT pool at width 10 "
+        "(alpha-engine-config-I11396: `scanner_top20_predictor` ranked a "
+        "scanner cut against the ~25-name thesis-coverage universe, reaching a "
+        "pool of ONE on 2026-08-03 and 2026-08-04). Their series measures the "
+        "mis-wiring, not this recipe, so inheriting it would import a defect as "
+        "evidence — see -I11423."
+    ),
+}
+"""Live research arms that start with NO inherited history, and WHY.
+
+alpha-engine-config-I11422. `supersedes` records an inheritance; this records
+the opposite decision, so that a zero-date arm is a STATED fact rather than an
+unexplained gap. §7.2: an unmeasurable result must fail loud — and "this arm
+has no history, and here is the reason" is the loud version of a blank column.
+
+THE COMPARISON THIS RESTS ON (cuts slot vs research slot, measured 2026-09-22).
+The scoring FORMULA is shared: both boards reach `topn_alpha_vs_population`
+through one `score_leaderboard._row`, over the same population definition
+(equal-weight mean of the full closes panel, benchmark excluded), the same
+realized-return join, the same 21/126/252 horizons and the same evidence floor.
+`information_ratio` is already computed on every cuts row from exactly the
+per-date series an import would reuse, so no recomputation would be needed.
+
+What differs is not the formula but the PROVENANCE — cohort-date discovery
+(`universe_membership/` depth 0 with held-decision collapsing, versus
+`signals_shadow/` depth 1 with none) and the artifact each arm's rank order is
+read from. That is enough: a metric computed identically over differently-keyed
+dates from differently-sourced rankings is not the same measurement, and §2's
+rule that slots are separate axes is what makes "the sets match" insufficient.
+
+The safe outcome is the one taken: these two arms start at zero alongside their
+siblings, and the reason is written down rather than inferred."""
+
+
+def _assert_history_provenance_declared() -> None:
+    """Every live research arm states where its history comes from — or that it
+    has none, and why (alpha-engine-config-I11422).
+
+    An arm may declare `supersedes` (it inherits) or appear in
+    `NO_HISTORY_IMPORT` (it does not, for a stated reason). Neither is a
+    silent zero, and a future arm cannot be added with an unexplained empty
+    ladder — nor can an inheritance be granted or withdrawn without the
+    register saying so. That is the whole content of principles §7: the absence
+    of a number is itself a thing that must be legible on the surface.
+    """
+    undeclared = sorted(
+        spec.name for spec in RESEARCH_PRODUCERS.values()
+        if spec.slot == RESEARCH_SLOT and spec.kind != "retired"
+        and not spec.supersedes and spec.name not in NO_HISTORY_IMPORT
+    )
+    if undeclared:
+        raise ValueError(
+            f"live {RESEARCH_SLOT!r} arm(s) {undeclared} declare neither "
+            "`supersedes` nor an entry in NO_HISTORY_IMPORT. An arm starting at "
+            "zero dates is a DECISION and must be stated: a blank ladder that "
+            "nobody wrote down is indistinguishable from an inheritance that "
+            "silently failed (alpha-engine-config-I11422)."
+        )
+    stale = sorted(
+        name for name in NO_HISTORY_IMPORT
+        if name not in RESEARCH_PRODUCERS
+        or RESEARCH_PRODUCERS[name].slot != RESEARCH_SLOT
+        or RESEARCH_PRODUCERS[name].supersedes
+    )
+    if stale:
+        raise ValueError(
+            f"NO_HISTORY_IMPORT names {stale}, which are not live "
+            f"{RESEARCH_SLOT!r} arms without an inheritance. A rationale that "
+            "has outlived its arm reads as a current decision and is worse than "
+            "none."
+        )
+
+
 _assert_recipe_declared()
 _assert_research_slot_widths_are_declared_not_shared()
+_assert_history_provenance_declared()
 
 
 def score_source_for(name: str) -> str:
