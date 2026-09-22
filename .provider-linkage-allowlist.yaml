@@ -168,15 +168,6 @@ entries:
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
-  - path: producers/single_agent.py
-    pattern: openrouter:base_url
-    reason: >-
-      Docstring prose (per the pre-existing .openrouter-allowlist.yaml entry,
-      alpha-engine-config-I7864) — not a live call site. Baseline sweep for
-      alpha-engine-config-I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
   - path: scripts/live_validate_openrouter_judge.py
     pattern: openai:sdk_client
     reason: >-
@@ -285,15 +276,6 @@ entries:
     reason: >-
       Same data literal, same guard test, different secret name. Baseline
       sweep for alpha-engine-config-I9302.
-    expires: "2026-11-28"
-    tracking: alpha-engine-config-I9302
-
-  - path: tests/test_single_agent_producer.py
-    pattern: openrouter:env_key
-    reason: >-
-      Test asserting producers/single_agent.py binds no OPENROUTER_API_KEY —
-      per the pre-existing .openrouter-allowlist.yaml precedent, alpha-
-      engine-config-I7864. Baseline sweep for alpha-engine-config-I9302.
     expires: "2026-11-28"
     tracking: alpha-engine-config-I9302
 
