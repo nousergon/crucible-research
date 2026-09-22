@@ -146,6 +146,25 @@ class ProducerSpec:
     width: int | None = None
     prefilter_cut: str | None = None
     stateful: bool | None = None
+    # The arm this one REPLACES, whose cohort history it inherits
+    # (alpha-engine-config-I11393, Brian's ruling 2026-09-22).
+    #
+    # §3.1 makes an arm an immutable recipe, so a successor may inherit its
+    # predecessor's dates ONLY where the two recipes were identical on those
+    # dates — a fact to be CHECKED, never assumed from a rename. Verified date
+    # by date for the one arm declaring it today: thinktank_coverage wrote
+    # shadows on 20 dates (2026-07-16 .. 2026-09-17) and the serving cut was
+    # attractiveness_top_60 — the now-PINNED cut — on every one of them. The
+    # universe_cut pointer moved on 2026-09-18 and the arm wrote NO shadow
+    # after 09-17, because coverage collapsed and it correctly withheld, so the
+    # divergence never reached an artifact.
+    #
+    # Declaring this also SUPPRESSES the predecessor's own retired-arm row (see
+    # scoring/leaderboard_producers.py::_load_producer_specs): the two are one
+    # series, and scoring both would enter the same cohort dates twice and
+    # narrow §4's cross-arm intersection against a phantom competitor that is
+    # really this arm's own past.
+    supersedes: str | None = None
     # Which champion/challenger slot this arm competes in, or None for a spec
     # that predates the slot model and is retired. Declared rather than
     # inferred: the slot decides which assertions bind.
@@ -442,6 +461,7 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         prefilter_cut=PINNED_RESEARCH_PREFILTER,
         width=20,
         stateful=False,
+        supersedes="thinktank_coverage",
     ),
 }
 
