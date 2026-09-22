@@ -453,6 +453,11 @@ _ADDITIVE_SINCE_CAPTURE = (
     # Listed here rather than re-pinning the literals, so a change to any 21d
     # value still fails this lock.
     "information_ratio",
+    # alpha-engine-config-I11424 — where the arm's picks were drawn from, and
+    # at what selection ratio. Purely additive and purely observational: it is
+    # read off the shadow's own `arm_pool` block and no metric is derived from
+    # it, so every protected number above is untouched.
+    "pool_provenance",
 )
 
 # Additive keys at the TOP level of the leaderboard dict, same rule. This is the
