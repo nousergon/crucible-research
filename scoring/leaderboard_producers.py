@@ -1180,12 +1180,35 @@ def _load_producer_specs(
             promotion_eligible=spec.promotion_eligible,
             ineligible_reason=spec.ineligible_reason,
         )
-        hist.by_date.update(
-            _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
-        )
+        own = _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
+        if spec.supersedes:
+            # Inherit the predecessor's cohort dates (alpha-engine-config-I11393).
+            # The successor's OWN picks always win a date collision —
+            # ``setdefault`` only fills dates this arm did not produce — so an
+            # inheritance can never overwrite something the live arm measured.
+            inherited = _picks_by_date(
+                s3, bucket, spec.supersedes, dates,
+                score_source_for(spec.supersedes),
+            )
+            for date_str, day in inherited.items():
+                own.setdefault(date_str, day)
+        hist.by_date.update(own)
         challengers.append(hist)
 
+    # A predecessor whose series a LIVE arm has inherited is NOT scored again as
+    # its own retired row. The two are one continuous series: emitting both
+    # would enter the same cohort dates twice, inflate the arm count, and narrow
+    # §4's cross-arm intersection against a "competitor" that is really this
+    # arm's own past. §3's trailing-window scoring exists so "we retired the
+    # wrong one" stays detectable — a question that does not arise for an arm
+    # whose record continues under its successor.
+    inherited_by_live = {
+        spec.supersedes for spec in challenger_producers() if spec.supersedes
+    }
+
     for spec in retired_producers(as_of=as_of):
+        if spec.name in inherited_by_live:
+            continue
         hist = SpecHistory(
             name=spec.name,
             kind="retired",
