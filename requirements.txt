@@ -142,7 +142,17 @@ pydantic~=2.13
 # merged) added ArenaConfig.promote_evidence and made decide_pointer enforce
 # promote_min_weeks, both consumed by scoring/cut_arena.py::ARENA_CONFIG.
 # Verified via `gh api repos/nousergon/nousergon-lib/git/refs/tags/v0.124.119`.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.119
+# v0.124.119 -> v0.124.153: alpha-engine-config-I11403 (nousergon-lib-PR444,
+# merged 2026-09-22) added ArenaConfig.promote_statistic and the
+# PairedWindow information-ratio fields. scoring/research_arena.py declares
+# promote_statistic=STATISTIC_INFORMATION_RATIO, so this bump is the change
+# and not an incidental dependency refresh: without it the module does not
+# import. NOT v0.124.152: the merge-time autobump commit for that tag landed
+# BEFORE PR444's squash, so v0.124.152 carries the version number without the
+# code — `pip install ...@v0.124.152` reports 0.124.152 and still raises
+# ImportError on STATISTIC_INFORMATION_RATIO. Measured, then verified with
+# `git merge-base --is-ancestor <PR444 sha> v0.124.153`.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.153
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,

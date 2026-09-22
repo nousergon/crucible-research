@@ -94,6 +94,33 @@ class TestHandler:
             yield
 
     @pytest.fixture(autouse=True)
+    def _stub_research_arena(self):
+        """Same rationale as the leaderboard stub above, for the research
+        slot's arena cycle (alpha-engine-config-I11403).
+
+        It reads the arm register from S3 and writes three keys, so an
+        unstubbed call reaches real AWS from the test process and is denied —
+        and since -I10198 the handler's status is DERIVED from its
+        sub-results, so that denial correctly fails the whole stage rather
+        than being swallowed. That is the guard working; these are
+        handler-WIRING tests and must not execute the cycle for real.
+
+        The dedicated test below overrides this.
+        """
+        with patch(
+            "scoring.research_arena.run_research_arena",
+            return_value={
+                "status": "ok",
+                "key": "arena/research/2026-09-22.json",
+                "cycle": {"decision": {
+                    "status": "held", "champion": "research:attractiveness_60:x",
+                    "moved": False,
+                }},
+            },
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
     def _stub_control_bands_and_agent_quality(self):
         """Same rationale as the two stubs above, for the two side paths that
         never had one (alpha-engine-config-I10198).
@@ -302,6 +329,21 @@ class TestHandler:
         assert "S3 list failed" in str(excinfo.value)
 
     # ── producer leaderboard wiring (config#1223 B4 / #1221 shared scorer) ────
+    def test_research_arena_surfaced_in_result(self, handler_mod):
+        """§11: every slot emits a cycle, and the stage's own result must SAY
+        it did — a cycle written where the handler reports nothing about it is
+        the observability half of the same gap."""
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
+        ):
+            result = handler_mod.handler({}, context=None)
+        arena = result["research_arena"]
+        assert arena["status"] == "ok"
+        assert arena["key"] == "arena/research/2026-09-22.json"
+        assert arena["decision"] == "held"
+        assert arena["moved"] is False
+
     def test_producer_leaderboard_surfaced_in_result(self, handler_mod):
         # The producer champion/challenger leaderboard scorer now runs here as a
         # fail-soft post-step; its status + key + cohort count ride in the result.

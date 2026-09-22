@@ -683,6 +683,21 @@ class TestEvalRollingMeanCoverage:
                 "scoring.leaderboard_producers.build_producer_leaderboard",
                 return_value={"status": "ok", "key": None, "leaderboard": {"n_dates": 0}},
             ),
+            # The research slot's arena cycle reads the arm register from S3
+            # and writes three keys, so an unstubbed call reaches real AWS from
+            # the test process — and since alpha-engine-config-I10198 the
+            # stage's status is DERIVED from its sub-results, so that denial
+            # correctly fails this test rather than being swallowed
+            # (alpha-engine-config-I11403).
+            patch(
+                "scoring.research_arena.run_research_arena",
+                return_value={
+                    "status": "ok", "key": None,
+                    "cycle": {"decision": {
+                        "status": "held", "champion": None, "moved": False,
+                    }},
+                },
+            ),
             patch(
                 "evals.control_bands.compute_and_emit_control_bands",
                 return_value={

@@ -1,0 +1,87 @@
+[
+  {
+    "arm_id": "research:attractiveness_20:04e40f9c11ec",
+    "date": "2026-09-22",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "research:attractiveness_20:04e40f9c11ec",
+      "bootstrap": false,
+      "control": false,
+      "created_date": "2026-09-22",
+      "name": "attractiveness_20",
+      "notes": "registered by alpha-engine-config-I11393; starts with no inherited history \u2014 see producers.registry.NO_HISTORY_IMPORT for why",
+      "slot": "research",
+      "spec_hash": "04e40f9c11ec",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "research:attractiveness_60:7431e0bedaf9",
+    "date": "2026-09-22",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "research:attractiveness_60:7431e0bedaf9",
+      "bootstrap": false,
+      "control": false,
+      "created_date": "2026-09-22",
+      "name": "attractiveness_60",
+      "notes": "registered by alpha-engine-config-I11393; starts with no inherited history \u2014 see producers.registry.NO_HISTORY_IMPORT for why",
+      "slot": "research",
+      "spec_hash": "7431e0bedaf9",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "research:predictor_from_60:d814f39c13a7",
+    "date": "2026-09-22",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "research:predictor_from_60:d814f39c13a7",
+      "bootstrap": false,
+      "control": false,
+      "created_date": "2026-09-22",
+      "name": "predictor_from_60",
+      "notes": "registered by alpha-engine-config-I11393; starts with no inherited history \u2014 see producers.registry.NO_HISTORY_IMPORT for why",
+      "slot": "research",
+      "spec_hash": "d814f39c13a7",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "research:tech_score_20:29e05a7cd582",
+    "date": "2026-09-22",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "research:tech_score_20:29e05a7cd582",
+      "bootstrap": false,
+      "control": false,
+      "created_date": "2026-09-22",
+      "name": "tech_score_20",
+      "notes": "registered by alpha-engine-config-I11393; starts with no inherited history \u2014 see producers.registry.NO_HISTORY_IMPORT for why",
+      "slot": "research",
+      "spec_hash": "29e05a7cd582",
+      "supersedes": null
+    }
+  },
+  {
+    "arm_id": "research:thinktank_20:4357c9126a05",
+    "date": "2026-09-22",
+    "kind": "registered",
+    "reason": "",
+    "record": {
+      "arm_id": "research:thinktank_20:4357c9126a05",
+      "bootstrap": false,
+      "control": false,
+      "created_date": "2026-09-22",
+      "name": "thinktank_20",
+      "notes": "registered by alpha-engine-config-I11393; continues thinktank_coverage",
+      "slot": "research",
+      "spec_hash": "4357c9126a05",
+      "supersedes": null
+    }
+  }
+]
