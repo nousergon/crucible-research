@@ -32,8 +32,12 @@ from producers.filling_arms import (
     run_scanner_predictor_direct_producer,
     run_scanner_top20_predictor_producer,
 )
-from producers.no_agent import run_no_agent_producer
-from producers.single_agent import run_single_agent_producer
+from producers.research_arms import (
+    run_attractiveness_20,
+    run_attractiveness_60,
+    run_predictor_from_60,
+    run_tech_score_20,
+)
 
 # champion-challenger-policy.md §3: "A retired arm is scored for a trailing
 # window (default: 8 cycles past retired_date), so 'we retired the wrong
@@ -148,6 +152,28 @@ class ProducerSpec:
     slot: str | None = None
 
 
+RESEARCH_SLOT = "research"
+"""The single champion/challenger slot deciding which names reach the
+predictor (Brian's ruling 2026-09-22, alpha-engine-config-I11393).
+
+It replaces the scanner_spec / universe_cut / producer split. Those were three
+independently-promoting pointers over successive stages of ONE pipeline, which
+optimised each link separately and measured the composition — the objective —
+nowhere. Worse, a promotion in one of them silently redefined the input
+population of arms in another, which §3.1 forbids by construction.
+
+Arms of this slot are END-TO-END recipes: a pinned pre-filter, a ranking key,
+and a declared output width."""
+
+PINNED_RESEARCH_PREFILTER = "attractiveness_top_60"
+"""The one pre-filter every research arm draws from, named literally.
+
+Pinned, not resolved through ``live_cut_champion`` — see
+``scoring.universe_membership.resolve_pinned_cut`` for the measured defect that
+makes this mandatory. A different pre-filter is tested by REGISTERING AN ARM,
+never by a pointer moving underneath the arms already running."""
+
+
 RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
     "agentic_sector_teams": ProducerSpec(
         name="agentic_sector_teams",
@@ -195,24 +221,48 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
     ),
     "no_agent_quant": ProducerSpec(
         name="no_agent_quant",
-        kind="challenger",
+        kind="retired",
         version="v1",
         description="pure-quant floor: scanner candidates scored by the technical "
         "composite, deterministic top-N ENTER gate, no LLM (config#1221)",
-        build=run_no_agent_producer,
+        # build=None: §6.3 deletes bespoke arm code with no other consumer, and
+        # producers/no_agent.py had exactly one. The register row and the score
+        # history are RETAINED permanently — they are the record that makes the
+        # retirement reviewable.
+        build=None,
+            retired_date="2026-09-22",
+        retired_modules=("producers/no_agent.py",),
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-09-22 under Brian's research-slot ruling "
+            "(alpha-engine-config-I11393): a STATEFUL position book, not a selection rule — it carries prior_theses, emits HOLD, and turned over two names in five weeks while its own cut replaced 45 of 60 on one cycle, so its realized alpha embedded retention decisions belonging to the S slot (-I11390). Its LLM-qual experiment also returned its answer: 80.6% overlap with single_agent_quant, a strict subset on 11 of 12 dates (-I11389). "
+            "Scored for the §3 trailing window as historical evidence; §6 makes "
+            "reinstatement an operator decision."
+        ),
     ),
     "single_agent_quant": ProducerSpec(
         name="single_agent_quant",
-        kind="challenger",
+        kind="retired",
         version="v1",
         description="single-agent: ONE Sonnet call assesses qual for all scanner "
         "candidates; deterministic quant + composite; no multi-agent fan-out, no "
         "macro/CIO (config#1223 / M3 baseline)",
-        build=run_single_agent_producer,
+        # build=None — see no_agent_quant above; producers/single_agent.py is
+        # deleted for the same reason.
+        build=None,
+            retired_date="2026-09-22",
+        retired_modules=("producers/single_agent.py",),
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-09-22 under Brian's research-slot ruling "
+            "(alpha-engine-config-I11393): the same stateful book as no_agent_quant plus one LLM qual pass that added names, removed none, and changed nothing measurable (+0.88% vs +0.95% topn_alpha_vs_population) — a negative result, recorded in EXPERIMENTS.md (-I11389, -I11390). "
+            "Scored for the §3 trailing window as historical evidence; §6 makes "
+            "reinstatement an operator decision."
+        ),
     ),
     "scanner_predictor_direct": ProducerSpec(
         name="scanner_predictor_direct",
-        kind="challenger",
+        kind="retired",
         version="v1",
         description="scanner top-~60 candidates passed straight to the "
         "predictor, its top-N by predicted_alpha taken as the arm's picks. "
@@ -236,10 +286,19 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         # executor-side capture would go dark on the incumbent the moment the
         # pointer moved. See producers/filling_arms.py for the full rationale.
         build=run_scanner_predictor_direct_producer,
+            retired_date="2026-09-22",
+        retired_modules=(),
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-09-22 under Brian's research-slot ruling "
+            "(alpha-engine-config-I11393): superseded by predictor_from_60, which asks the same question from the PINNED pre-filter at a declared width. Its module, producers/filling_arms.py, is NOT deleted — producers/research_arms.py consumes its payload builder and pool helpers, so §6.3's consumers test keeps it. "
+            "Scored for the §3 trailing window as historical evidence; §6 makes "
+            "reinstatement an operator decision."
+        ),
     ),
     "scanner_top20_predictor": ProducerSpec(
         name="scanner_top20_predictor",
-        kind="challenger",
+        kind="retired",
         version="v1",
         description="scanner top-20 (not top-60) passed directly to the "
         "predictor — the arm Brian's 2026-08-27 ruling names. Registered here "
@@ -251,10 +310,19 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         # hid the champion's silence. It now builds its own shadow through the
         # same one writer, so it is on the shared basis like everything else.
         build=run_scanner_top20_predictor_producer,
+            retired_date="2026-09-22",
+        retired_modules=(),
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-09-22 under Brian's research-slot ruling "
+            "(alpha-engine-config-I11393): its funnel-width question is now carried directly by the attractiveness_60 / attractiveness_20 pair, on ONE ranking — and it spent its whole life ranking a scanner cut against a 25-name thesis-coverage artifact (-I11396). Shares filling_arms.py, so no module is deleted. "
+            "Scored for the §3 trailing window as historical evidence; §6 makes "
+            "reinstatement an operator decision."
+        ),
     ),
     "thinktank_coverage": ProducerSpec(
         name="thinktank_coverage",
-        kind="challenger",
+        kind="retired",
         version="v1",
         description="Think Tank coverage arm: per-ticker qualitative theses "
         "(thesis + pillar/moat tiers) ranked by the Think Tank's own rating, "
@@ -273,8 +341,122 @@ RESEARCH_PRODUCERS: dict[str, ProducerSpec] = {
         # blocker cleared 2026-07-29 when config-I5208 moved the run to EC2
         # spot (ARCHITECTURE §47) and it resumed writing the shadow view.
         build=None,
+            retired_date="2026-09-22",
+        retired_modules=(),
+        promotion_eligible=False,
+        ineligible_reason=(
+            "retired 2026-09-22 under Brian's research-slot ruling "
+            "(alpha-engine-config-I11393): superseded by thinktank_20. Its recipe was not immutable: the coverage window resolved through the universe_cut champion pointer and was replaced wholesale on 2026-09-18 (0 of 60 names shared), so its series is not continuous with the pinned arm's. Its writer, thinktank/challenger_selection.py, is live and now writes the new arm's prefix. "
+            "Scored for the §3 trailing window as historical evidence; §6 makes "
+            "reinstatement an operator decision."
+        ),
+    ),
+    # ── The `research` slot (alpha-engine-config-I11393 / -I11398) ────────
+    #
+    # Five arms, one pinned pre-filter, DIFFERING declared widths. See
+    # producers/research_arms.py for why the widths differ and why that is not
+    # §4's breadth confound, and scoring/leaderboard_scoring.py's
+    # information_ratio_stats for the statistic that makes it legitimate.
+    #
+    # The weekly SF needs no change to produce exactly these: its
+    # ChallengerShadow state invokes the runner with mode=challengers_only, and
+    # producers/runner.py iterates buildable_challenger_producers(). The arm
+    # set is decided HERE. Enumerating arms in the ASL instead would create a
+    # second hand-maintained list, which is the alpha-engine-config-I9277
+    # defect (crucible-backtester's VALID_CHAMPIONS silently omitting the only
+    # two arms with enough evidence to win).
+    "attractiveness_60": ProducerSpec(
+        name="attractiveness_60",
+        kind="challenger",
+        version="v1",
+        description="BASELINE: the pinned attractiveness_top_60, ranked by the "
+        "scanner's own attractiveness_score, taken whole. Every other arm in "
+        "the slot must beat 'just take the names the scanner already ranked' "
+        "to justify its cost — §9.2's 'we never checked' closed by "
+        "construction. Paired with attractiveness_20 it is also the "
+        "what-does-depth-cost experiment, on one ranking.",
+        build=run_attractiveness_60,
+        slot=RESEARCH_SLOT,
+        prefilter_cut=PINNED_RESEARCH_PREFILTER,
+        width=60,
+        stateful=False,
+    ),
+    "attractiveness_20": ProducerSpec(
+        name="attractiveness_20",
+        kind="challenger",
+        version="v1",
+        description="The pinned attractiveness_top_60 ranked by "
+        "attractiveness_score, cut to 20. Identical recipe to "
+        "attractiveness_60 except its width, which is the point: the two "
+        "isolate depth from ranking.",
+        build=run_attractiveness_20,
+        slot=RESEARCH_SLOT,
+        prefilter_cut=PINNED_RESEARCH_PREFILTER,
+        width=20,
+        stateful=False,
+    ),
+    "tech_score_20": ProducerSpec(
+        name="tech_score_20",
+        kind="challenger",
+        version="v1",
+        description="The pinned attractiveness_top_60 RE-RANKED by tech_score "
+        "— does pure technical beat the multi-pillar blend on the same names? "
+        "Same input and width as attractiveness_20, so the pair differs in "
+        "ranking alone.",
+        build=run_tech_score_20,
+        slot=RESEARCH_SLOT,
+        prefilter_cut=PINNED_RESEARCH_PREFILTER,
+        width=20,
+        stateful=False,
+    ),
+    "predictor_from_60": ProducerSpec(
+        name="predictor_from_60",
+        kind="challenger",
+        version="v1",
+        description="The pinned attractiveness_top_60 re-ranked by the "
+        "predictor's research-free predicted_alpha — does a learned model beat "
+        "any heuristic ranking? Reads predictions_research_free (scanner-pool "
+        "population), never predictions/{date}.json (the ~25-name "
+        "thesis-coverage universe) — alpha-engine-config-I11396.",
+        build=run_predictor_from_60,
+        slot=RESEARCH_SLOT,
+        prefilter_cut=PINNED_RESEARCH_PREFILTER,
+        width=20,
+        stateful=False,
+    ),
+    "thinktank_20": ProducerSpec(
+        name="thinktank_20",
+        kind="challenger",
+        version="v1",
+        description="The pinned attractiveness_top_60 ranked by Think Tank's "
+        "own thesis rating — does qualitative underwriting add alpha over any "
+        "quant ranking? Supersedes thinktank_coverage, whose recipe was not "
+        "immutable: its window followed the universe_cut pointer and was "
+        "wholly replaced on 2026-09-18.",
+        # build=None ON PURPOSE — written by the Think Tank's own daily run
+        # (thinktank/challenger_selection.py), not synthesised in the weekly
+        # producer pass. producers.runner skips specs without a build;
+        # scoring.leaderboard_producers scores them all.
+        build=None,
+        slot=RESEARCH_SLOT,
+        prefilter_cut=PINNED_RESEARCH_PREFILTER,
+        width=20,
+        stateful=False,
     ),
 }
+
+
+def research_slot_producers() -> list[ProducerSpec]:
+    """Every LIVE arm of the research slot — the set the weekly SF produces.
+
+    Brian, 2026-09-22: "in the weekly sfs i want to see those arms, and only
+    those arms, competing for the champion position." This function is where
+    that is true, and ``tests/test_research_slot.py`` asserts the set.
+    """
+    return [
+        spec for spec in RESEARCH_PRODUCERS.values()
+        if spec.slot == RESEARCH_SLOT and spec.kind != "retired"
+    ]
 
 
 def challenger_producers() -> list[ProducerSpec]:
@@ -517,28 +699,6 @@ def _assert_score_source_can_carry_output() -> None:
 
 
 _assert_score_source_can_carry_output()
-
-
-RESEARCH_SLOT = "research"
-"""The single champion/challenger slot deciding which names reach the
-predictor (Brian's ruling 2026-09-22, alpha-engine-config-I11393).
-
-It replaces the scanner_spec / universe_cut / producer split. Those were three
-independently-promoting pointers over successive stages of ONE pipeline, which
-optimised each link separately and measured the composition — the objective —
-nowhere. Worse, a promotion in one of them silently redefined the input
-population of arms in another, which §3.1 forbids by construction.
-
-Arms of this slot are END-TO-END recipes: a pinned pre-filter, a ranking key,
-and a declared output width."""
-
-PINNED_RESEARCH_PREFILTER = "attractiveness_top_60"
-"""The one pre-filter every research arm draws from, named literally.
-
-Pinned, not resolved through ``live_cut_champion`` — see
-``scoring.universe_membership.resolve_pinned_cut`` for the measured defect that
-makes this mandatory. A different pre-filter is tested by REGISTERING AN ARM,
-never by a pointer moving underneath the arms already running."""
 
 
 def _assert_recipe_declared() -> None:

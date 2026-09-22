@@ -36,17 +36,31 @@ from scoring.leaderboard_scoring import (
     score_leaderboard,
 )
 
-FILLING_ARMS = ("scanner_predictor_direct", "scanner_top20_predictor")
+# ``scanner_predictor_direct`` / ``scanner_top20_predictor`` (the original
+# I9307 subject) retired 2026-09-22, superseded by the research slot's own
+# board/predictor-ranked arms (alpha-engine-config-I11393). Their successors
+# carry the same obligation this file locks down: an arm must build its own
+# comparable shadow rather than being scored from somewhere else — every
+# arm here except ``thinktank_20``, whose shadow is written by the Think
+# Tank's own daily run, the same legitimate build=None split
+# ``thinktank_coverage`` used (see producers/research_arms.py).
+FILLING_ARMS = (
+    "attractiveness_60",
+    "attractiveness_20",
+    "tech_score_20",
+    "predictor_from_60",
+)
 
 
 # ── 1. The arms now build a comparable artifact, unconditionally ─────────────
 
 
 def test_every_filling_arm_builds_its_own_shadow():
-    """RED before the fix: both arms carried ``build=None``, so
+    """RED before the fix: the original two arms carried ``build=None``, so
     ``producers.runner`` skipped them and no ``signals_shadow/`` prefix ever
     existed for either. The champion was therefore scored from an artifact its
-    picks are not in."""
+    picks are not in. Their research-slot successors must not regress the
+    same property."""
     buildable = {spec.name for spec in buildable_challenger_producers()}
     for arm in FILLING_ARMS:
         assert arm in RESEARCH_PRODUCERS, f"{arm} is not registered"
@@ -71,15 +85,23 @@ def test_no_arm_is_scored_from_the_empty_by_contract_live_artifact():
 def test_registry_refuses_an_arm_scored_from_a_source_that_cannot_carry_it():
     """The structural guard, exercised directly: declaring ``signals_live`` on a
     live arm while the live producer is empty-by-contract must RAISE at
-    registry-validation time, not produce a thin row for seven weeks."""
+    registry-validation time, not produce a thin row for seven weeks.
+
+    ``no_agent_quant`` (the original I9307 regression's subject) is retired as
+    of 2026-09-22, and the guard deliberately skips retired rows — a retired
+    arm's declared score_source is historical record, not a live hazard. The
+    guard is exercised against ``attractiveness_20``, a LIVE research-slot arm
+    (alpha-engine-config-I11393), so the check still proves the guard fires on
+    the case that matters: a live arm, not a retired one.
+    """
     import dataclasses
 
     from producers import registry as reg
 
     original = dict(reg.RESEARCH_PRODUCERS)
     try:
-        reg.RESEARCH_PRODUCERS["no_agent_quant"] = dataclasses.replace(
-            original["no_agent_quant"], score_source=SCORE_SOURCE_SIGNALS_LIVE,
+        reg.RESEARCH_PRODUCERS["attractiveness_20"] = dataclasses.replace(
+            original["attractiveness_20"], score_source=SCORE_SOURCE_SIGNALS_LIVE,
         )
         with pytest.raises(ValueError, match="EMPTY-BY-CONTRACT"):
             reg._assert_score_source_can_carry_output()

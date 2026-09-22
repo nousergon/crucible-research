@@ -188,7 +188,7 @@ class TestRetiredArmProducerLeaderboardScoring:
         # all), which would mask what this test is actually checking.
         _put_json(
             s3,
-            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            f"signals_shadow/attractiveness_20/{entry}/signals.json",
             {"signals": {"A": {"signal": "ENTER", "score": 60}, "B": {"signal": "ENTER", "score": 88}}},
         )
 
@@ -215,7 +215,7 @@ class TestRetiredArmProducerLeaderboardScoring:
         panel = _seed_retired_arm_shadow(s3, entry)
         _put_json(
             s3,
-            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            f"signals_shadow/attractiveness_20/{entry}/signals.json",
             {"signals": {"A": {"signal": "ENTER", "score": 60}, "B": {"signal": "ENTER", "score": 88}}},
         )
 
@@ -229,5 +229,5 @@ class TestRetiredArmProducerLeaderboardScoring:
         assert res["status"] == "ok"
         got = res["leaderboard"]
         names = {s["name"]: s for s in got["specs"]}
-        assert names["no_agent_quant"]["kind"] == "challenger"
+        assert names["attractiveness_20"]["kind"] == "challenger"
         assert names[_RETIRED_ARM]["kind"] == "retired"

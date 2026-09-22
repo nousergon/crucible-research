@@ -530,7 +530,7 @@ class TestProducerLeaderboardProducer:
         )
         _put_json(
             s3,
-            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            f"signals_shadow/attractiveness_20/{entry}/signals.json",
             {
                 "signals": {
                     "B": {"signal": "ENTER", "score": 88},
@@ -555,7 +555,7 @@ class TestProducerLeaderboardProducer:
         assert got["leaderboard_id"] == "producer"
         assert got["champion"] == "standin_champion"
         names = {s["name"]: s for s in got["specs"]}
-        assert "no_agent_quant" in names
+        assert "attractiveness_20" in names
         # champion ranks A>B and A outperforms → IC = 1.0.
         assert names["standin_champion"]["realized_rank_ic"]["mean"] == pytest.approx(1.0)
 
@@ -574,7 +574,7 @@ class TestProducerLeaderboardProducer:
         entry = "2026-06-01"
         _put_json(
             s3,
-            f"signals_shadow/no_agent_quant/{entry}/signals.json",
+            f"signals_shadow/attractiveness_20/{entry}/signals.json",
             {
                 "signals": {
                     "A": {"signal": "ENTER", "score": 90},
@@ -597,8 +597,8 @@ class TestProducerLeaderboardProducer:
         got = json.loads(s3.get_object(Bucket=_BUCKET, Key=res["key"])["Body"].read())
         assert got["champion"] is None
         names = {s["name"]: s for s in got["specs"]}
-        assert "no_agent_quant" in names
-        row = names["no_agent_quant"]
+        assert "attractiveness_20" in names
+        row = names["attractiveness_20"]
         assert row["topn_alpha_vs_champion"] is None
         # top-1 pick is A (score 90): realized 0.10 vs SPY's realized 0.05.
         assert row["topn_alpha_vs_benchmark"]["mean"] == pytest.approx(0.05)

@@ -42,8 +42,8 @@ from scripts.run_experiment import (
 )
 
 _BUCKET = "alpha-engine-research"
-_CHAMPION = "scanner_predictor_direct"
-_ARM_UNDER_TEST = "no_agent_quant"
+_CHAMPION = "attractiveness_60"
+_ARM_UNDER_TEST = "attractiveness_20"
 _AS_OF = "2026-08-17"
 
 
@@ -202,7 +202,7 @@ class TestWritePosture:
         """``build=None`` means the arm writes its own shadow on its own
         cadence (e.g. ``thinktank_coverage``). Calling it would raise
         TypeError deep inside; refuse it at the boundary with the reason."""
-        spec = types.SimpleNamespace(name="thinktank_coverage", build=None)
+        spec = types.SimpleNamespace(name="thinktank_20", build=None)
         with pytest.raises(ExperimentError, match="build=None"):
             produce_arm(spec, types.SimpleNamespace(bucket=_BUCKET, s3=s3), _AS_OF, write=True)
 
@@ -281,7 +281,7 @@ class TestBoardIntersectionIsAllArms:
         assert _ARM_UNDER_TEST not in block["arms_with_no_cohort"], (
             "the arm under test DID score at this horizon"
         )
-        assert "single_agent_quant" in block["arms_with_no_cohort"]
+        assert "tech_score_20" in block["arms_with_no_cohort"]
 
     def test_the_rendering_names_the_arms_that_emptied_the_intersection(self, s3):
         panel, entries = _matured_panel()
@@ -294,7 +294,7 @@ class TestBoardIntersectionIsAllArms:
         )
         assert "pairwise vs champ" in out
         assert COMPARISON_NO_COMMON_COHORT in out
-        assert "single_agent_quant" in out, "the culprit arm is named in the rendering"
+        assert "tech_score_20" in out, "the culprit arm is named in the rendering"
 
     def test_the_cohort_this_grades_would_fail_the_weekly_completeness_gate(self, s3):
         """The counterpart assertion, so the test above cannot silently stop
@@ -316,7 +316,7 @@ class TestBoardIntersectionIsAllArms:
 
         specs = [
             types.SimpleNamespace(name=n, build=_boom)
-            for n in (_ARM_UNDER_TEST, "single_agent_quant")
+            for n in (_ARM_UNDER_TEST, "tech_score_20")
         ]
         orig = runner_mod.buildable_challenger_producers
         runner_mod.buildable_challenger_producers = lambda: specs
