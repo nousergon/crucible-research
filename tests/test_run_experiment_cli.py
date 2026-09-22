@@ -31,7 +31,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from scoring.leaderboard_scoring import COMPARISON_NO_COMMON_COHORT
+from scoring.leaderboard_scoring import COMPARISON_WIDTH_MISMATCH
 from scripts.run_experiment import (
     ExperimentError,
     build_parser,
@@ -272,7 +272,15 @@ class TestBoardIntersectionIsAllArms:
         )
         row = {h["horizon_days"]: h["row"] for h in verdict["horizons"]}[21]
         assert row["topn_alpha_vs_champion"] is None
-        assert row["comparison_status"] == COMPARISON_NO_COMMON_COHORT
+        # `width_mismatch`, not `no_common_cohort`, since I11425 routed this
+        # board to the `research` slot: the champion (attractiveness_60) and the
+        # arm under test (attractiveness_20) are the DEPTH pair and differ in
+        # declared width by construction, so a paired figure would measure
+        # breadth rather than the rule and is refused for that reason first.
+        # BOTH conditions hold here; the row reports the blocking one. What this
+        # test is actually about — the armless arm being NAMED — is asserted
+        # below and is unchanged.
+        assert row["comparison_status"] == COMPARISON_WIDTH_MISMATCH
         block = {h["horizon_days"]: h for h in verdict["horizons"]}[21]
         assert block["arms_with_no_cohort"], (
             "the arms that emptied the intersection must be NAMED on the "
@@ -293,7 +301,7 @@ class TestBoardIntersectionIsAllArms:
             )
         )
         assert "pairwise vs champ" in out
-        assert COMPARISON_NO_COMMON_COHORT in out
+        assert COMPARISON_WIDTH_MISMATCH in out
         assert "tech_score_20" in out, "the culprit arm is named in the rendering"
 
     def test_the_cohort_this_grades_would_fail_the_weekly_completeness_gate(self, s3):

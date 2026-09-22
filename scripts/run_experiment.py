@@ -35,7 +35,8 @@ So a single-arm verdict needs no cohort faking and none is done here.
 
 THE VERDICT IS RENDERED, NOT INVENTED. Every number printed is read off the
 leaderboard artifact the weekly run writes. The evidence floor shown is the
-slot's own ``min_dates_for_inference`` (``LEADERBOARD_SLOTS["producer"]``) and
+slot's own ``min_dates_for_inference`` — resolved from the arms being scored
+(``_resolve_board_slot``), not from a literal in this module — and
 the per-row ``confidence`` / ``measurability`` the scorer already computes —
 this script declares no significance rule of its own.
 
@@ -86,16 +87,16 @@ from producers.registry import RESEARCH_PRODUCERS  # noqa: E402
 from scoring.leaderboard_producers import (  # noqa: E402
     _cohort_dates,
     _load_producer_specs,
+    _resolve_board_slot,
     _resolve_horizons,
     _resolve_realized_returns_by_horizon,
     build_producer_leaderboard,
     median_cohort_spacing_days,
 )
 from scoring.leaderboard_scoring import (  # noqa: E402
-    COMPARISON_NO_COMMON_COHORT,
+    COMPARISON_WIDTH_MISMATCH,
     overlap_lags_for,
     paired_alpha_vs_champion,
-    slot_spec,
     strict_cohort_intersection,
 )
 
@@ -104,7 +105,13 @@ logger = logging.getLogger("run_experiment")
 
 DEFAULT_BUCKET = os.environ.get("S3_BUCKET", "alpha-engine-research")
 SHADOW_KEY = "signals_shadow/{arm}/{date}/signals.json"
-SLOT_ID = "producer"
+
+# The slot is RESOLVED, never named here. This module held its own
+# ``SLOT_ID = "producer"`` literal — the second copy of the hardcoding
+# alpha-engine-config-I11425 measured on the board itself, and the one that
+# would have kept printing "SLOT producer" on a correctly re-routed board.
+# A verification surface carrying its own independent answer verifies nothing
+# (engagement-protocol-policy.md §5: the fix survives the class).
 
 
 class ExperimentError(RuntimeError):
@@ -215,7 +222,8 @@ def grade_arm(
             f"{res.get('leaderboard', {}).get('unmeasurable_reason') or res.get('error') or res}"
         )
     board = res["leaderboard"]
-    floor = board.get("min_dates_for_inference", slot_spec(SLOT_ID).min_dates_for_inference)
+    slot = _resolve_board_slot()
+    floor = board.get("min_dates_for_inference", slot.min_dates_for_inference)
 
     horizons = []
     for block in board.get("horizons") or []:
@@ -259,7 +267,10 @@ def grade_arm(
         "board_status": status,
         "board_key": res.get("key"),
         "min_dates_for_inference": floor,
-        "primary_metric": slot_spec(SLOT_ID).primary_metric,
+        # Read off the BOARD first: it records the contract it was actually
+        # scored under, which is the fact this command exists to surface.
+        "slot": board.get("slot") or slot.slot_id,
+        "primary_metric": board.get("primary_metric") or slot.primary_metric,
         "horizons": horizons,
         "pairwise_vs_champion": pairwise_vs_champion(
             s3, bucket, arm, date_str, top_n=top_n, closes_panel_loader=closes_panel_loader
@@ -313,7 +324,7 @@ def pairwise_vs_champion(
     (``leaderboard_producers._PANEL_CACHE``), so this pass adds no second
     ArcticDB read.
     """
-    slot = slot_spec(SLOT_ID)
+    slot = _resolve_board_slot()
     horizons = _resolve_horizons(None, slot.horizons_days[0], slot.horizons_days)
     dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
     champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
@@ -376,9 +387,9 @@ def render_verdict(verdict: dict) -> str:
         f"  ARM        {verdict['arm']}",
         f"  AS OF      {verdict['date']}",
         f"  CHAMPION   {verdict['champion'] or '(none registered — champion-free metrics only)'}",
-        f"  SLOT       producer   primary metric: {verdict['primary_metric']}",
+        f"  SLOT       {verdict['slot']}   primary metric: {verdict['primary_metric']}",
         f"  EVIDENCE   floor = {floor} scored cohort dates "
-        f"(LEADERBOARD_SLOTS['producer'].min_dates_for_inference)",
+        f"(LEADERBOARD_SLOTS[{verdict['slot']!r}].min_dates_for_inference)",
         f"  BOARD      {verdict['board_status']}"
         + (f"  -> {verdict['board_key']}" if verdict.get("board_key") else "  (not written — no --write)"),
         "=" * 78,
@@ -421,8 +432,22 @@ def render_verdict(verdict: dict) -> str:
             )
         if not row.get("promotion_eligible", True):
             lines.append(f"     NOT promotion-eligible: {row.get('ineligible_reason')}")
+        if row.get("comparison_status") == COMPARISON_WIDTH_MISMATCH:
+            lines += [
+                "     NOTE the board's cross-arm figure is NULL at "
+                "`width_mismatch`: this arm and the champion",
+                "          declare different widths, and a paired difference "
+                "across widths measures breadth",
+                "          rather than the selection rule "
+                "(champion-challenger-policy.md §4).",
+            ]
         starved = [a for a in h.get("arms_with_no_cohort") or [] if a != row.get("name")]
-        if starved and row.get("comparison_status") == COMPARISON_NO_COMMON_COHORT:
+        # Named whatever BLOCKED the board figure. Gating this note on
+        # `no_common_cohort` alone hid the culprit arms the moment a width
+        # mismatch became the first blocking reason — the diagnostic vanished
+        # exactly where the board had two problems instead of one
+        # (alpha-engine-config-I11425).
+        if starved and row.get("topn_alpha_vs_champion") is None:
             lines += [
                 "     NOTE the board's cross-arm figure is narrowed to the dates "
                 "EVERY registered arm scored.",

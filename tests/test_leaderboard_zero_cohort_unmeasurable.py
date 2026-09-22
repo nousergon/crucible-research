@@ -97,8 +97,19 @@ def test_a_measurable_leaderboard_still_reports_ok():
         "specs": [{"name": "a"}],
         "horizons": [{"horizon_days": 21, "status": "ok", "reason": None, "n_dates": 3, "specs": [{"name": "a"}]}],
     }
+    # ONE arm, explicitly. The board is scored under the `research` slot's
+    # `per_arm_width=True` (alpha-engine-config-I11425), so each arm gets its
+    # own `score_multi_horizon` pass — and a stub returning the same single row
+    # for every pass would emit that row once per arm and trip the
+    # duplicate-rows guard, failing this test for a reason that has nothing to
+    # do with what it asserts.
+    from scoring.leaderboard_scoring import SpecDay, SpecHistory
+
+    arm = SpecHistory(name="a", kind="challenger")
+    arm.by_date["2026-07-02"] = SpecDay(ranked=["T1", "T2"])
     with (
         patch("scoring.leaderboard_producers._cohort_dates", return_value=["2026-07-02"]),
+        patch("scoring.leaderboard_producers._load_producer_specs", return_value=(None, [arm])),
         patch("scoring.leaderboard_producers._resolve_realized_returns_by_horizon", return_value=({21: {"2026-07-02": {}}}, {}, {})),
         patch("scoring.leaderboard_producers.score_multi_horizon", return_value=scored),
         patch("scoring.leaderboard_producers._get_json", return_value=None),
