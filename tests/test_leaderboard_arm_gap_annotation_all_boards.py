@@ -100,7 +100,7 @@ def _seed(client, entries: list[str]) -> None:
         )
         _put_json(
             client,
-            f"signals_shadow/no_agent_quant/{d}/signals.json",
+            f"signals_shadow/attractiveness_20/{d}/signals.json",
             {"signals": {t: {"signal": "ENTER", "score": s} for t, s in [("C", 0.9), ("B", 0.5), ("A", 0.1)]}},
         )
         # scanner slot: live candidates + exactly one shadow challenger

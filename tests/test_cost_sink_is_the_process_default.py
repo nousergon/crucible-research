@@ -89,20 +89,6 @@ def test_the_exemption_list_still_describes_reality():
         )
 
 
-def test_single_agent_lets_the_client_resolve_the_sink():
-    """The exact callsite that failed watch-rerun-2026-08-16-1."""
-    tree = ast.parse((_REPO_ROOT / "producers" / "single_agent.py").read_text())
-    constructions = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        and n.func.id == "S3JsonlCostSink"
-    ]
-    assert not constructions, (
-        "single_agent constructs a private sink again — flush_default_sink() "
-        "cannot see it and single-agent-quant returns to emitting nothing"
-    )
-
-
 def test_judge_returns_the_env_resolved_default():
     src = (_REPO_ROOT / "evals" / "judge.py").read_text()
     assert "default_sink_from_env" in src, (

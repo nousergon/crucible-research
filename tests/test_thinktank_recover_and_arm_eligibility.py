@@ -101,25 +101,22 @@ def test_a_brand_new_name_is_still_covered_on_first_thesis():
 
 def test_every_live_arm_is_promotion_eligible():
     """Brian's ruling 2026-08-29, verbatim: 'for the research arm, we should
-    make all arms promote eligible, including think tank.'"""
+    make all arms promote eligible, including think tank.' The five arms
+    Brian's 2026-09-22 research-slot ruling (alpha-engine-config-I11393)
+    registered are the live set now; the arms named in the original I9277
+    fixture (no_agent_quant, single_agent_quant, thinktank_coverage,
+    scanner_predictor_direct, scanner_top20_predictor) all retired on
+    2026-09-22 and are asserted ineligible in test_retired_arms_are_ineligible
+    below."""
     eligible = {p.name for p in promotion_eligible_producers()}
     for name in (
-        "no_agent_quant",
-        "single_agent_quant",
-        "thinktank_coverage",
-        "scanner_predictor_direct",
-        "scanner_top20_predictor",
+        "attractiveness_60",
+        "attractiveness_20",
+        "tech_score_20",
+        "predictor_from_60",
+        "thinktank_20",
     ):
         assert name in eligible, f"{name} must be promotion-eligible (I9277)"
-
-
-def test_the_two_arms_with_evidence_are_eligible():
-    """The specific defect: `no_agent_quant` and `single_agent_quant` were the
-    ONLY arms with `confidence: ok` on the 2026-08-28 board, and were the only
-    two that could not win — because neither was typed into crucible
-    -backtester's VALID_CHAMPIONS tuple."""
-    eligible = {p.name for p in promotion_eligible_producers()}
-    assert {"no_agent_quant", "single_agent_quant"} <= eligible
 
 
 def test_every_registered_arm_has_a_recorded_eligibility_verdict():

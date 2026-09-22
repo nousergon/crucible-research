@@ -54,7 +54,20 @@ CHALLENGER_SELECTION_LATEST_KEY = "thinktank/challenger_selection/latest.json"
 # design, mirroring every other challenger producer's shadow key. Written
 # ONLY when coverage_complete (see challenger_selection.py); not registered
 # in producers/registry.py yet (registration tracked separately).
-CHALLENGER_SHADOW_SIGNALS_KEY_TMPL = "signals_shadow/thinktank_coverage/{trading_day}/signals.json"
+CHALLENGER_SHADOW_SIGNALS_KEY_TMPL = "signals_shadow/thinktank_20/{trading_day}/signals.json"
+"""The arm's leaderboard shadow. The prefix IS the arm name the producer
+"""
+"""leaderboard joins on, so it moves with the arm.
+
+Was ``signals_shadow/thinktank_coverage/`` until 2026-09-22. ``thinktank_20``
+is a NEW arm, not a rename: §3.1 makes an arm an immutable RECIPE, and this
+one's recipe changed materially — its coverage window was resolved through the
+universe_cut champion pointer and is now PINNED to attractiveness_top_60
+(alpha-engine-config-I11393). The old prefix and its 20 cohort dates are
+retained permanently as the retired arm's record (§6.3); they are not migrated,
+because a series measured on a population that was replaced wholesale on
+2026-09-18 is not continuous with one measured on a pinned population, and
+concatenating them would assert a continuity that does not exist."""
 MANIFEST_KEY_TMPL = "thinktank/runs/{trading_day}/manifest_{run_id}.json"
 COSTS_KEY_TMPL = "thinktank/costs/{month}.json"
 # Bounded-parallel gap_fill fan-out (config#3072): one checkpoint object per
