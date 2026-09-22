@@ -796,9 +796,19 @@ def _annotate_arm_measurement_gaps(
             row["name"] for row in block["specs"]
             if row.get("confidence") == CONFIDENCE_INSUFFICIENT
         })
-        block["arms_total"] = len(block["specs"])
-        block["arms_unmeasured"] = unmeasured
-        block["arms_no_cohort"] = [n for n in no_cohort if n in unmeasured]
+        # An arm that produced NOTHING may have no row on this block at all —
+        # a ``per_arm_width`` board skips an arm with no declared width and no
+        # picks, so it is absent from ``specs`` rather than present-and-
+        # insufficient. Deriving the unmeasured set from the rows alone then
+        # makes the arm vanish from the board entirely, which is the one
+        # rendering principles §7 forbids: a component emitting nothing is not
+        # healthy, it is UNOBSERVED, and "no data" is never rendered as green.
+        # So the no-cohort arms are unioned in explicitly and counted in
+        # ``arms_total``, whether or not the scorer gave them a row.
+        rowless = [n for n in no_cohort if n not in {r["name"] for r in block["specs"]}]
+        block["arms_total"] = len(block["specs"]) + len(rowless)
+        block["arms_unmeasured"] = sorted(set(unmeasured) | set(rowless))
+        block["arms_no_cohort"] = list(no_cohort)
         for name in unmeasured:
             arm = by_name.get(name)
             arm_dates = sorted(arm.by_date) if arm is not None else []
@@ -2085,6 +2095,171 @@ def _rank_order(
     return sorted(tickers, key=lambda t: (ranks[t], t)), True
 
 
+def _score_arms_at_own_widths(
+    arms: list[SpecHistory],
+    widths: dict[str, int],
+    realized_by_horizon: Any,
+    *,
+    horizons: list[int],
+    slot: Any,
+    horizon_notes: Any,
+    population_by_horizon: Any,
+    dates: list[str],
+) -> dict | None:
+    """Score every arm at its OWN declared width and merge the rows onto one
+    board. Returns ``None`` when no arm had a usable width — the CALLER writes
+    that verdict, because this helper never touches S3.
+
+    This is the ``per_arm_width=True`` scoring path, shared by every slot whose
+    registry row sets that flag (``LEADERBOARD_SLOTS[...].per_arm_width``). It
+    was the ``cuts`` board's inline body until alpha-engine-config-I11425: the
+    ``research`` slot declares the same flag, and re-implementing the loop for
+    it would have made a second copy of a block whose whole content is §4
+    count-matching mechanics (engagement-protocol-policy.md §5 — a fix survives
+    the class, not the instance).
+
+    ``widths`` is keyed by arm name. An arm absent from it, or mapped to a
+    non-positive width, is SKIPPED rather than scored at some default: a width
+    is a declared property of the recipe, and inventing one would make the
+    board's breadth a fact nobody wrote down.
+    """
+    # Each arm is scored in its OWN single-arm pass at its OWN width, then
+    # the rows are merged. score_multi_horizon takes one `top_n` for the
+    # whole call, so a single call could not give three arms three widths
+    # without silently truncating two of them.
+    # The overlap denominator, measured from the cohort calendar rather
+    # than assumed from the declared weekly cadence (alpha-engine-config
+    # -I8263). Every horizon block derives its own Bartlett lag from this.
+    #
+    # Measured per HORIZON from the dates that horizon actually scored, not
+    # once from the whole enumerated prefix list. On 2026-08-21 the two
+    # differ by 5x: the enumerated cohort runs daily through August (median
+    # gap 1 session) while the 21-session horizon had matured only on the 8
+    # WEEKLY dates from May-July (median gap 5). Asking for
+    # ceil(21/1)-1 = 20 lags on 8 observations makes the HAC estimator
+    # truncate to n-1 and return a number carrying almost no independent
+    # information — an SE built on the wrong dependence structure, which is
+    # the defect I8263 exists to remove rather than to relocate. The
+    # whole-cohort spacing stays as the fallback for a horizon whose scored
+    # set is too thin to estimate a spacing from.
+    spacing = median_cohort_spacing_days(dates)
+    spacing_by_horizon = {
+        h: (
+            median_cohort_spacing_days(sorted({
+                d for arm in arms for d in arm.by_date
+                if (realized_by_horizon.get(h) or {}).get(d)
+            }))
+            or spacing
+        )
+        for h in horizons
+    }
+    champion_arm_obj = next((a for a in arms if a.kind == "champion"), None)
+
+    merged: dict | None = None
+    for arm in arms:
+        width = widths.get(arm.name) or 0
+        if width <= 0:
+            continue
+        # The champion arm is handed in as the champion for its OWN pass, so
+        # the board's top-level `champion` names the arm actually serving.
+        # A leaderboard whose champion field is null, for a slot that has
+        # one, is a broken leaderboard (§3) — and this board is the input
+        # `cut_promotion` reads. The funnel stages have no champion and
+        # every one of them still passes `None`.
+        is_champion = arm.kind == "champion"
+        scored = score_multi_horizon(
+            arm if is_champion else None,
+            [] if is_champion else [arm],
+            realized_by_horizon,
+            top_n=width, horizons_days=horizons,
+            min_dates_for_inference=slot.min_dates_for_inference,
+            horizon_notes=horizon_notes,
+            population_by_horizon=population_by_horizon,
+            cohort_spacing_days=spacing,
+            cohort_spacing_by_horizon=spacing_by_horizon,
+        )
+        for block in scored.get("horizons", []):
+            for row in block.get("specs", []):
+                row["top_n"] = width
+        # The PAIRED difference vs the champion (I8263) is NOT computed
+        # here. The single-arm pass structure hands every challenger
+        # `champion=None`, so `score_leaderboard` skips it — but computing
+        # it per pass would compute it over the PAIR's shared dates, which
+        # is not the block's cohort intersection once a third arm exists
+        # (alpha-engine-config-I9274). It is applied ONCE below, after the
+        # merge, where every arm on the block is finally in scope and the
+        # intersection can be taken over all of them.
+        if merged is None:
+            merged = scored
+            continue
+        # Merge into the per-horizon BLOCKS only. The top-level spread is
+        # rebuilt from the primary block once, below: extending both
+        # surfaces here is what put every arm after the first into the
+        # 21-day block twice (alpha-engine-config-I7631).
+        by_h = {b["horizon_days"]: b for b in merged.get("horizons", [])}
+        for block in scored.get("horizons", []):
+            target = by_h.get(block["horizon_days"])
+            if target is not None:
+                target["specs"].extend(block.get("specs", []))
+
+    if merged is None:
+        # Every arm had a width of zero or less. The CALLER decides what that
+        # means for its board and writes the verdict — this helper never
+        # touches S3, so it stays usable from any slot.
+        return None
+    # Continuity (champion-challenger-policy.md §3): the top level carries
+    # the primary horizon's rows. Same row dicts, distinct list.
+    primary_block = merged["horizons"][0]
+    merged["specs"] = list(primary_block["specs"])
+    # `n_dates` per block is the count of cohort dates ANY arm scored at
+    # that horizon. Scoring one arm per pass makes the first arm's count
+    # the whole board's, which understates a board whose arms have
+    # different histories — and the gate arm's history is 20 dates longer
+    # than the champion cut's.
+    for block in merged["horizons"]:
+        realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
+        block["n_dates"] = len({
+            d for arm in arms for d in arm.by_date if realized_h.get(d)
+        })
+    merged["n_dates"] = primary_block["n_dates"]
+    # Now that every arm's rows are merged onto one block, take the cohort
+    # INTERSECTION over the whole arm set and narrow every cross-arm figure
+    # to it (alpha-engine-config-I9274, champion-challenger-policy.md §4).
+    # This is where `topn_alpha_vs_champion` is produced on this board:
+    # per-arm widths are handed in so the width gate that I8263 established
+    # is applied inside the one helper rather than duplicated here.
+    # Measured 2026-08-28: this board read `n_dates: 11` at 21d while 4 of
+    # its 7 arms scored ZERO dates, and published an 11-date paired figure
+    # for `scanner_champion_60` on a block whose all-arm intersection is 0.
+    for block in merged["horizons"]:
+        apply_cohort_intersection(
+            block,
+            arms,
+            realized_by_horizon.get(block["horizon_days"]) or {},
+            champion=champion_arm_obj,
+            top_n=widths,
+            overlap_lags=block.get("overlap_lags") or 0,
+        )
+    # The top level carries the primary block's rows (same dicts), so its
+    # own cohort fields must be restated from that block rather than left
+    # holding whichever single-arm pass seeded `merged`.
+    for _k in (
+        "cohort_union_dates",
+        "cohort_intersection_dates",
+        "cohort_intersection_first",
+        "cohort_intersection_last",
+    ):
+        merged[_k] = primary_block[_k]
+    # `merged` is seeded from whichever arm happened to be scored first, so its
+    # top-level `champion` is that pass's value. Name the champion from the ARM
+    # SET instead — null only when no arm carries the kind, which is the
+    # funnel-stages-only case and an unreadable pointer (both logged by the
+    # callers). A leaderboard whose champion field is null for a slot that HAS
+    # one is a broken leaderboard (champion-challenger-policy.md §3).
+    merged["champion"] = next((a.name for a in arms if a.kind == "champion"), None)
+    return merged
+
+
 def build_cuts_leaderboard(
     s3: Any,
     bucket: str,
@@ -2179,134 +2354,17 @@ def build_cuts_leaderboard(
                 reason=str(exc), write=write,
             )
 
-        # Each arm is scored in its OWN single-arm pass at its OWN width, then
-        # the rows are merged. score_multi_horizon takes one `top_n` for the
-        # whole call, so a single call could not give three arms three widths
-        # without silently truncating two of them.
-        # The overlap denominator, measured from the cohort calendar rather
-        # than assumed from the declared weekly cadence (alpha-engine-config
-        # -I8263). Every horizon block derives its own Bartlett lag from this.
-        #
-        # Measured per HORIZON from the dates that horizon actually scored, not
-        # once from the whole enumerated prefix list. On 2026-08-21 the two
-        # differ by 5x: the enumerated cohort runs daily through August (median
-        # gap 1 session) while the 21-session horizon had matured only on the 8
-        # WEEKLY dates from May-July (median gap 5). Asking for
-        # ceil(21/1)-1 = 20 lags on 8 observations makes the HAC estimator
-        # truncate to n-1 and return a number carrying almost no independent
-        # information — an SE built on the wrong dependence structure, which is
-        # the defect I8263 exists to remove rather than to relocate. The
-        # whole-cohort spacing stays as the fallback for a horizon whose scored
-        # set is too thin to estimate a spacing from.
-        spacing = median_cohort_spacing_days(dates)
-        spacing_by_horizon = {
-            h: (
-                median_cohort_spacing_days(sorted({
-                    d for arm in arms for d in arm.by_date
-                    if (realized_by_horizon.get(h) or {}).get(d)
-                }))
-                or spacing
-            )
-            for h in horizons
-        }
-        champion_arm_obj = next((a for a in arms if a.kind == "champion"), None)
-
-        merged: dict | None = None
-        for arm in arms:
-            width = widths.get(arm.name) or 0
-            if width <= 0:
-                continue
-            # The champion arm is handed in as the champion for its OWN pass, so
-            # the board's top-level `champion` names the arm actually serving.
-            # A leaderboard whose champion field is null, for a slot that has
-            # one, is a broken leaderboard (§3) — and this board is the input
-            # `cut_promotion` reads. The funnel stages have no champion and
-            # every one of them still passes `None`.
-            is_champion = arm.kind == "champion"
-            scored = score_multi_horizon(
-                arm if is_champion else None,
-                [] if is_champion else [arm],
-                realized_by_horizon,
-                top_n=width, horizons_days=horizons,
-                min_dates_for_inference=slot.min_dates_for_inference,
-                horizon_notes=horizon_notes,
-                population_by_horizon=population_by_horizon,
-                cohort_spacing_days=spacing,
-                cohort_spacing_by_horizon=spacing_by_horizon,
-            )
-            for block in scored.get("horizons", []):
-                for row in block.get("specs", []):
-                    row["top_n"] = width
-            # The PAIRED difference vs the champion (I8263) is NOT computed
-            # here. The single-arm pass structure hands every challenger
-            # `champion=None`, so `score_leaderboard` skips it — but computing
-            # it per pass would compute it over the PAIR's shared dates, which
-            # is not the block's cohort intersection once a third arm exists
-            # (alpha-engine-config-I9274). It is applied ONCE below, after the
-            # merge, where every arm on the block is finally in scope and the
-            # intersection can be taken over all of them.
-            if merged is None:
-                merged = scored
-                continue
-            # Merge into the per-horizon BLOCKS only. The top-level spread is
-            # rebuilt from the primary block once, below: extending both
-            # surfaces here is what put every arm after the first into the
-            # 21-day block twice (alpha-engine-config-I7631).
-            by_h = {b["horizon_days"]: b for b in merged.get("horizons", [])}
-            for block in scored.get("horizons", []):
-                target = by_h.get(block["horizon_days"])
-                if target is not None:
-                    target["specs"].extend(block.get("specs", []))
-
+        merged = _score_arms_at_own_widths(
+            arms, widths, realized_by_horizon,
+            horizons=horizons, slot=slot, horizon_notes=horizon_notes,
+            population_by_horizon=population_by_horizon, dates=dates,
+        )
         if merged is None:
             return _unmeasurable_result(
                 s3, bucket, date_str, leaderboard_id="cuts",
                 output_tmpl=_CUTS_OUTPUT, horizon_days=horizon_days,
                 reason="no cut had a usable width", write=write,
             )
-        # Continuity (champion-challenger-policy.md §3): the top level carries
-        # the primary horizon's rows. Same row dicts, distinct list.
-        primary_block = merged["horizons"][0]
-        merged["specs"] = list(primary_block["specs"])
-        # `n_dates` per block is the count of cohort dates ANY arm scored at
-        # that horizon. Scoring one arm per pass makes the first arm's count
-        # the whole board's, which understates a board whose arms have
-        # different histories — and the gate arm's history is 20 dates longer
-        # than the champion cut's.
-        for block in merged["horizons"]:
-            realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
-            block["n_dates"] = len({
-                d for arm in arms for d in arm.by_date if realized_h.get(d)
-            })
-        merged["n_dates"] = primary_block["n_dates"]
-        # Now that every arm's rows are merged onto one block, take the cohort
-        # INTERSECTION over the whole arm set and narrow every cross-arm figure
-        # to it (alpha-engine-config-I9274, champion-challenger-policy.md §4).
-        # This is where `topn_alpha_vs_champion` is produced on this board:
-        # per-arm widths are handed in so the width gate that I8263 established
-        # is applied inside the one helper rather than duplicated here.
-        # Measured 2026-08-28: this board read `n_dates: 11` at 21d while 4 of
-        # its 7 arms scored ZERO dates, and published an 11-date paired figure
-        # for `scanner_champion_60` on a block whose all-arm intersection is 0.
-        for block in merged["horizons"]:
-            apply_cohort_intersection(
-                block,
-                arms,
-                realized_by_horizon.get(block["horizon_days"]) or {},
-                champion=champion_arm_obj,
-                top_n=widths,
-                overlap_lags=block.get("overlap_lags") or 0,
-            )
-        # The top level carries the primary block's rows (same dicts), so its
-        # own cohort fields must be restated from that block rather than left
-        # holding whichever single-arm pass seeded `merged`.
-        for _k in (
-            "cohort_union_dates",
-            "cohort_intersection_dates",
-            "cohort_intersection_first",
-            "cohort_intersection_last",
-        ):
-            merged[_k] = primary_block[_k]
         _annotate_horizon_maturity("cuts", merged["horizons"], dates, date_str, horizons[0])
         _annotate_arm_measurement_gaps("cuts", merged["horizons"], arms, date_str)
         _annotate_cut_cadence(merged["horizons"], arms, realized_by_horizon)
@@ -2316,11 +2374,6 @@ def build_cuts_leaderboard(
         merged["leaderboard_id"] = "cuts"
         _alert_unmeasurable_arms("cuts", date_str, merged)
         merged["date"] = date_str
-        # `merged` is seeded from whichever arm happened to be scored first, so
-        # its top-level `champion` is that pass's value. Name the champion from
-        # the arm set instead — null only when no arm carries the kind, which is
-        # the funnel-stages-only case and an unreadable pointer (both logged).
-        merged["champion"] = next((a.name for a in arms if a.kind == "champion"), None)
         # The slot-level top_n is meaningless here and must not be read as one.
         merged["top_n"] = None
         merged["per_arm_width"] = True
@@ -2425,6 +2478,79 @@ def _arms_block(
     return arms
 
 
+def _resolve_board_slot() -> Any:
+    """The measurement contract the producer-shadow board is scored under,
+    resolved from the arms it is ACTUALLY scoring (alpha-engine-config-I11425).
+
+    Before this, ``build_producer_leaderboard`` hardcoded ``slot_spec("producer")``.
+    That was correct while every arm was a producer arm and stopped being
+    correct silently: ``crucible-research-PR819`` registered five arms declaring
+    ``slot="research"``, ``-PR814`` registered the ``research`` measurement
+    contract, and nothing connected them — so ``information_ratio`` was computed
+    on every row and ranked on by nothing, the widths were compared unmatched,
+    and the benchmark stayed SPY on a slot whose basis §4 says is the population
+    the arm narrowed. A spec nothing routes to is not a measurement layer, it is
+    a comment.
+
+    THE LIVE ARMS DECIDE. Retired arms (§3's 8-cycle trailing window) carry
+    ``slot=None`` — they predate the field — and are scored under whatever spec
+    the live arms name. That is deliberate and stated rather than falling out of
+    a ``.get()``: a retired row exists to answer "did we retire the wrong one?",
+    a question only askable if it is graded on the same basis as the arms that
+    replaced it. Grading the incumbent and its successors on two different
+    primaries would make the comparison meaningless in exactly the case the
+    trailing window exists for.
+
+    Raises when the LIVE arms disagree: one board cannot serve two measurement
+    contracts, and picking either silently would grade half its rows wrong.
+    """
+    from producers.registry import RESEARCH_PRODUCERS
+
+    slots = {
+        spec.slot for spec in RESEARCH_PRODUCERS.values()
+        if spec.kind == "challenger" and spec.slot
+    }
+    if len(slots) > 1:
+        raise ValueError(
+            f"the producer-shadow board holds live arms from {sorted(slots)} — "
+            f"one board cannot be scored under two slot measurement contracts "
+            f"(champion-challenger-policy.md §2: slots are separate axes and "
+            f"must never be conflated). Split the board or the register."
+        )
+    return slot_spec(slots.pop() if slots else "producer")
+
+
+def _declared_widths(arms: list[SpecHistory]) -> dict[str, int]:
+    """``{arm_name: width}`` for a ``per_arm_width`` board.
+
+    A LIVE arm's width comes from its register row (``ProducerSpec.width``) —
+    the width is part of the recipe, and the arm's own emitted count is an
+    OUTCOME that a short day would quietly shrink.
+
+    A RETIRED arm has no declared width (the field postdates it), so it is
+    scored at its own natural width: the largest pick count it ever emitted.
+    That is honest under ``per_arm_width``, where every row is compared to the
+    population it drew from rather than to another row — nothing is being
+    count-matched, so a retired arm's own breadth is the only breadth that
+    describes what it actually did. An arm with neither a declared width nor a
+    single pick is skipped by the scorer, which is the correct treatment of an
+    arm that produced nothing.
+    """
+    from producers.registry import RESEARCH_PRODUCERS
+
+    widths: dict[str, int] = {}
+    for arm in arms:
+        spec = RESEARCH_PRODUCERS.get(arm.name)
+        declared = getattr(spec, "width", None) if spec else None
+        if declared:
+            widths[arm.name] = int(declared)
+            continue
+        natural = max((len(d.ranked) for d in arm.by_date.values()), default=0)
+        if natural:
+            widths[arm.name] = natural
+    return widths
+
+
 def build_producer_leaderboard(
     s3: Any,
     bucket: str,
@@ -2440,16 +2566,23 @@ def build_producer_leaderboard(
     available cohort dates, write ``research/producer_leaderboard/{date}.json``,
     return ``{"status", "key"?, "leaderboard"?}``.
 
-    ``horizons_days`` defaults to the producer slot's registered horizons
-    (``LEADERBOARD_SLOTS["producer"]``, currently 21/126/252 sessions —
-    alpha-engine-config-I7540). ``horizon_days`` remains the PRIMARY horizon
+    The measurement contract is RESOLVED from the arms being scored
+    (``_resolve_board_slot``), not hardcoded: since the five research arms were
+    registered with ``slot="research"`` this board is scored on
+    ``information_ratio`` at per-arm widths against the population each arm
+    narrowed, rather than on SPY alpha at a shared ``top_n``
+    (alpha-engine-config-I11425).
+
+    ``horizons_days`` defaults to THAT slot's registered horizons (currently
+    21/126/252 sessions for every slot — alpha-engine-config-I7540).
+    ``horizon_days`` remains the PRIMARY horizon
     and the artifact's top-level block, so the existing 21-day series that
     ``crucible-backtester``'s champion-promotion gate reads is continuous
     across this change (champion-challenger-policy.md §3).
 
     OBSERVE-ONLY + FAIL-SOFT: never raises into the caller (the research Lambda)."""
     try:
-        slot = slot_spec("producer")
+        slot = _resolve_board_slot()
         horizons = _resolve_horizons(horizons_days, horizon_days, slot.horizons_days)
         dates = _cohort_dates(s3, bucket, "signals_shadow/", depth=1)
         champion, challengers = _load_producer_specs(s3, bucket, dates, as_of=date_str)
@@ -2511,29 +2644,82 @@ def build_producer_leaderboard(
         # would leave two of three boards publishing iid t-stats over
         # overlapping windows (engagement-protocol-policy.md §5 — the fix
         # survives the class, not the instance).
-        leaderboard = score_multi_horizon(
-            champion,
-            challengers,
-            realized_by_horizon,
-            top_n=top_n,
-            horizons_days=horizons,
-            min_dates_for_inference=slot.min_dates_for_inference,
-            horizon_notes=horizon_notes,
-            population_by_horizon=population_by_horizon,
-            cohort_spacing_days=median_cohort_spacing_days(dates),
-        )
+        all_arms = [a for a in (champion, *challengers) if a is not None]
+        widths = _declared_widths(all_arms) if slot.per_arm_width else {}
+        if slot.per_arm_width and not widths and all_arms:
+            # Arms exist and not one of them has a usable width. That is a
+            # register fault, not an empty cohort, and it must SAY so rather
+            # than render as a thin board (§7.2). The zero-arm case is NOT
+            # routed here: "nothing to score yet" is classified by the
+            # immaturity/overdue logic below, which is the distinction I5195
+            # exists to keep visible.
+            return _unmeasurable_result(
+                s3, bucket, date_str, leaderboard_id="producer",
+                output_tmpl=_PRODUCER_OUTPUT, horizon_days=horizon_days,
+                reason=(
+                    f"no arm on the {slot.slot_id!r} board had a usable width "
+                    f"— each of {sorted(a.name for a in all_arms)} either "
+                    "declares no width in the register and emitted no picks, "
+                    "or declares zero"
+                ),
+                write=write,
+            )
+        if slot.per_arm_width and widths:
+            # The slot carries arms at DIFFERENT widths on purpose
+            # (attractiveness_60 vs attractiveness_20 on one ranking is the
+            # "what does depth cost?" experiment), so each is scored at its own
+            # width against the population it drew from — the same path the
+            # cuts board takes, through the same helper.
+            leaderboard = _score_arms_at_own_widths(
+                all_arms, widths, realized_by_horizon,
+                horizons=horizons, slot=slot, horizon_notes=horizon_notes,
+                population_by_horizon=population_by_horizon, dates=dates,
+            )
+            if leaderboard is None:
+                # Unreachable while `widths` is non-empty — every entry in it is
+                # positive by construction. Raised rather than asserted so it
+                # survives `python -O` and so a future change to `widths`
+                # cannot turn it into an AttributeError twenty lines later.
+                raise RuntimeError(
+                    f"per-arm-width scoring returned no board for "
+                    f"{sorted(widths)} on {date_str} — a positive width per arm "
+                    "cannot produce an empty board"
+                )
+            # The slot-level top_n is meaningless on this board and must not be
+            # read as one — same contract as the cuts board.
+            leaderboard["top_n"] = None
+            leaderboard["per_arm_width"] = True
+            leaderboard["widths"] = widths
+        else:
+            leaderboard = score_multi_horizon(
+                champion,
+                challengers,
+                realized_by_horizon,
+                top_n=top_n,
+                horizons_days=horizons,
+                min_dates_for_inference=slot.min_dates_for_inference,
+                horizon_notes=horizon_notes,
+                population_by_horizon=population_by_horizon,
+                cohort_spacing_days=median_cohort_spacing_days(dates),
+            )
         _annotate_horizon_maturity("producer", leaderboard["horizons"], dates, date_str, horizons[0])
         # `champion` is None on the producer board while RESEARCH_PRODUCERS
         # registers no kind=="champion" entry (config-I2993/I2998), so the arm
         # list is filtered rather than indexed — an absent champion must not
         # take out the per-arm gap annotation for the arms that DO exist.
         _annotate_arm_measurement_gaps(
-            "producer",
-            leaderboard["horizons"],
-            [a for a in (champion, *challengers) if a is not None],
-            date_str,
+            "producer", leaderboard["horizons"], all_arms, date_str,
         )
         leaderboard["leaderboard_id"] = "producer"
+        # The artifact NAMES the contract it was scored under. `leaderboard_id`
+        # stays "producer" — it is the S3 surface `crucible-backtester` reads —
+        # while `slot` and `primary_metric` say which measurement produced these
+        # numbers. Without them a reader cannot tell a board ranked on
+        # information_ratio from one ranked on topn_alpha_vs_benchmark, which is
+        # exactly the ambiguity alpha-engine-config-I11425 measured (principles
+        # §1 transparency: reconstructable from the artifact alone).
+        leaderboard["slot"] = slot.slot_id
+        leaderboard["primary_metric"] = slot.primary_metric
         leaderboard["date"] = date_str
         leaderboard["vacuous_membership_collisions"] = vacuous
         # alpha-engine-config-I9277 — the register, projected. Read by
