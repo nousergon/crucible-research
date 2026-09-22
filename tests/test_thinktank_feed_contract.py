@@ -55,13 +55,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from producers.registry import PINNED_RESEARCH_PREFILTER  # noqa: E402
 from scoring.universe_membership import (  # noqa: E402
     CUT_CHAMPION_POINTER_KEY,
     FUNNEL_CONSUMER_THINKTANK,
     UniverseMembershipError,
     rank_table_for_cut,
 )
-from producers.registry import PINNED_RESEARCH_PREFILTER  # noqa: E402
 from thinktank.feed import (  # noqa: E402
     build_feed_window,
     join_board_rows,
