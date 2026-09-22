@@ -446,6 +446,13 @@ _ADDITIVE_SINCE_CAPTURE = (
     # about the row without touching any protected number.
     "measurability",
     "unmeasurable_reason",
+    # alpha-engine-config-I11393 — the research slot's primary metric. Purely
+    # additive: it is computed from the SAME per-date series that already backs
+    # `topn_alpha_vs_population` (itself listed above), reads it a second way
+    # (mean over dispersion rather than mean), and touches no protected number.
+    # Listed here rather than re-pinning the literals, so a change to any 21d
+    # value still fails this lock.
+    "information_ratio",
 )
 
 # Additive keys at the TOP level of the leaderboard dict, same rule. This is the

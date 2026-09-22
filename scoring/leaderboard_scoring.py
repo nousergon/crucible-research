@@ -286,6 +286,36 @@ LEADERBOARD_SLOTS: dict[str, SlotMeasurementSpec] = {
         min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
         per_arm_width=True,
     ),
+    # The RESEARCH slot (Brian's ruling 2026-09-22, alpha-engine-config-I11393)
+    # — the single slot deciding which names reach the predictor, replacing the
+    # scanner_spec / universe_cut / producer split. Its arms are END-TO-END
+    # recipes (pre-filter + ranking key + declared width), not pipeline stages,
+    # so one pointer decides the thing the loop's objective actually names.
+    #
+    # ``per_arm_width`` is True and that is the POINT, not a concession: the
+    # slot deliberately carries arms at different widths (attractiveness_60 vs
+    # attractiveness_20 on the SAME ranking is the "what does depth cost?"
+    # experiment), which §4's count-matching rule permits because width is the
+    # thing under test here rather than an uncontrolled confound on a ranking
+    # comparison.
+    #
+    # ``primary_metric`` is the information ratio for the reason set out in
+    # :func:`information_ratio_stats`: a raw mean with widths free selects for
+    # concentration rather than skill, because mean alpha per name declines with
+    # depth whenever a ranking carries any signal. The benchmark stays the
+    # population the arm narrowed (never SPY, §4) — IR is computed over the
+    # ``topn_alpha_vs_population`` per-date series, so the benchmark question
+    # and the concentration question are answered by one number each rather
+    # than conflated into one.
+    "research": SlotMeasurementSpec(
+        slot_id="research",
+        primary_metric="information_ratio",
+        horizons_days=LONG_HORIZONS_DAYS,
+        benchmark_ticker="SPY",
+        top_n=0,  # unused; per_arm_width governs
+        min_dates_for_inference=MIN_DATES_FOR_INFERENCE,
+        per_arm_width=True,
+    ),
     "producer": SlotMeasurementSpec(
         slot_id="producer",
         primary_metric="topn_alpha_vs_benchmark",
@@ -584,6 +614,98 @@ def _hac_se(vals: Sequence[float], lags: int) -> float | None:
     except (TypeError, ValueError):
         return None
     return se if math.isfinite(se) and se >= 0.0 else None
+
+
+IR_INSUFFICIENT = "insufficient_dates"
+IR_ZERO_DISPERSION = "zero_dispersion"
+
+
+def information_ratio_stats(
+    per_date: Sequence[float], *, min_dates: int = 2,
+) -> dict | None:
+    """Information ratio of a per-date active-return series: ``mean / sd``.
+
+    **Why this is the research slot's primary metric, and why a mean is not**
+    (Brian's ruling 2026-09-22, alpha-engine-config-I11393).
+
+    ``topn_alpha_vs_population`` is a mean *per name*, so it is width-normalised
+    in that sense and a 10-name arm and a 60-name arm both estimate "how good is
+    the average name this arm picks". That is not the problem. The problem is
+    that **if a ranking carries any skill, mean alpha per name declines with
+    depth** — so an arm taking its top 10 beats an arm taking its top 60 using
+    the IDENTICAL ranking, purely by stopping earlier. Rank arms on a raw mean
+    with widths free and the narrowest arm always wins, in the limit a single
+    name, because the statistic contains no term that prices concentration.
+
+    The information ratio supplies that term. Dividing by the dispersion of the
+    arm's own active return charges a narrow, concentrated arm for the variance
+    its concentration creates; it can still win, but it has to clear its own
+    noise to do it. That is what makes declared, DIFFERING per-arm widths a
+    legitimate thing to compare rather than a confound (the slot sets
+    ``per_arm_width=True``).
+
+    ``realized_rank_ic`` is emitted beside it on every row and is the skill
+    half of the same picture: IR ≈ IC × √breadth, so IC says whether an arm's
+    lead came from ranking better and IR says what that lead is worth once
+    breadth and its variance are priced. Reading either alone re-creates the
+    defect this replaces — IC alone ignores what the arm actually earns, the
+    mean alone ignores what it risked.
+
+    **Deliberately NOT annualised.** The natural move is to scale by
+    ``√(periods per year)``, and it would be wrong here: the cohort is weekly
+    while the horizon is 21 sessions, so consecutive observations overlap by
+    construction (see :func:`overlap_lags_for`) and an annualisation factor
+    assuming independent periods would inflate the ratio by roughly the square
+    root of the overlap. The pointer decision needs a comparable ORDERING across
+    arms measured on one clock, which the per-period ratio already gives. A
+    number that looks like a Sharpe but is not one is worse than an honest
+    unannualised ratio, so the field is named ``information_ratio`` with
+    ``annualised: False`` stated on the block rather than left to be assumed.
+
+    ``sd`` is the sample standard deviation (``n-1``), matching
+    :func:`date_clustered_stats`'s variance convention so the two blocks on one
+    row are computed on the same basis.
+
+    Returns ``None`` for an empty series. Below ``min_dates`` observations, or
+    when the series has zero dispersion, the block is emitted with
+    ``information_ratio: None`` and a ``reason`` — never a substituted or
+    infinite value. An arm whose active return never varied is not an arm with
+    an infinite ratio; it is an arm we cannot yet rate, and the two must not
+    render identically (§7.2).
+    """
+    vals = [float(v) for v in per_date]
+    n = len(vals)
+    if n == 0:
+        return None
+    mean = fmean(vals)
+    if n < max(2, int(min_dates)):
+        return {
+            "information_ratio": None,
+            "mean": round(mean, 6),
+            "sd": None,
+            "n_dates": n,
+            "annualised": False,
+            "reason": IR_INSUFFICIENT,
+        }
+    var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    sd = math.sqrt(var)
+    if not math.isfinite(sd) or sd <= 0.0:
+        return {
+            "information_ratio": None,
+            "mean": round(mean, 6),
+            "sd": round(sd, 6) if math.isfinite(sd) else None,
+            "n_dates": n,
+            "annualised": False,
+            "reason": IR_ZERO_DISPERSION,
+        }
+    return {
+        "information_ratio": round(mean / sd, 4),
+        "mean": round(mean, 6),
+        "sd": round(sd, 6),
+        "n_dates": n,
+        "annualised": False,
+        "reason": None,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1226,6 +1348,16 @@ def score_leaderboard(
                     overlap_lags=overlap_lags,
                 )
             )
+            # Information ratio over the SAME per-date active-return series
+            # the population metric produced — one series, two readings: its
+            # mean (does this arm beat the names it selected from?) and its
+            # mean-over-dispersion (is that lead worth the concentration it
+            # took?). Computed for every slot, primary only where the slot spec
+            # says so, so a slot adopting it later needs no backfill.
+            information_ratio = (
+                information_ratio_stats(list(alpha_vs_population_by_date.values()))
+                if alpha_vs_population_by_date else None
+            )
             dates_scored = sorted(d for d in spec.by_date if realized.get(d))
             n_scored = len(dates_scored)
             # The SAME metric, restricted to the dates every promotion-eligible
@@ -1255,6 +1387,7 @@ def score_leaderboard(
                 "topn_alpha_vs_benchmark": alpha_vs_benchmark,
                 "topn_alpha_vs_population": alpha_vs_population,
                 "topn_alpha_vs_population_by_date": alpha_vs_population_by_date,
+                "information_ratio": information_ratio,
                 "n_dates_scored": n_scored,
                 # alpha-engine-config-I9277/I9279 — the cohort itself, not just
                 # its size. Two arms reporting n_dates_scored: 6 over disjoint
