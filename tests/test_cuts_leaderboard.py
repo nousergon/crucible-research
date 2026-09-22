@@ -927,8 +927,13 @@ def test_degraded_input_is_flagged_per_arm_and_per_date(mixed_built):
     block = lb["horizons"][0]
     rows = {r["name"]: r for r in block["specs"]}
 
-    straddling = rows[FEED_CUT_NAME]["degraded_input"]
-    assert straddling is not None
+    # A LIST since alpha-engine-config-I11423: an arm can carry more than one
+    # input defect, and the previous single-dict shape structurally forbade the
+    # second one. Here exactly one applies.
+    findings = rows[FEED_CUT_NAME]["degraded_input"]
+    assert findings is not None
+    assert [f["reason"] for f in findings] == ["degenerate_fundamentals"]
+    straddling = findings[0]
     assert straddling["dates"] == IN_WINDOW
     assert straddling["n_dates"] == 2
     assert straddling["n_dates_scored"] == 4

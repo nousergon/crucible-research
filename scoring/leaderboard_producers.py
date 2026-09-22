@@ -836,13 +836,67 @@ def _annotate_arm_measurement_gaps(
             )
 
 
+#: The pool-source prefix of the MIS-WIRED predictor join
+#: (alpha-engine-config-I11396). ``scanner_top20_predictor`` ranked a scanner
+#: cut against ``predictor/predictions/{date}.json``, whose universe is the ~25
+#: actively thesis-covered tickers — not the scanner population it drew from.
+_MIS_WIRED_PREDICTOR_POOL_PREFIX = "predictor_cut:"
+
+
+def _mis_wired_predictor_dates(arm: SpecHistory, scored: Sequence[str]) -> list[str]:
+    """The scored dates this arm ranked through the mis-wired predictor join.
+
+    Derived from the arm's OWN artifacts (``arm_pool.pool_source``), never from
+    a hand-kept date list. A date list would have to be maintained in step with
+    a set of S3 objects by hand, which is the defect class that put one role in
+    an IAM Resource list while five were declared. The condition IS the pool
+    source, so that is what is tested.
+    """
+    return [
+        d for d in scored
+        if (
+            (day := arm.by_date.get(d)) is not None
+            and (day.pool_source or "").startswith(_MIS_WIRED_PREDICTOR_POOL_PREFIX)
+        )
+    ]
+
+
+def _degraded_finding(
+    reason: str,
+    bad: Sequence[str],
+    scored: Sequence[str],
+    issue: str,
+    **extra: Any,
+) -> dict:
+    """One input-quality finding for one arm.
+
+    The affected FRACTION is always carried: "3 of 8 dates" and "8 of 8" are
+    different verdicts about the same board, and a promotion consumer must be
+    able to refuse, discount OR accept a row on the evidence rather than on a
+    flag's mere presence.
+    """
+    return {
+        "reason": reason,
+        "dates": list(bad),
+        "n_dates": len(bad),
+        "n_dates_scored": len(scored),
+        "fraction_of_scored": round(len(bad) / len(scored), 4) if scored else None,
+        "issue": issue,
+        **extra,
+    }
+
+
 def _annotate_degraded_inputs(
     blocks: list[dict],
     arms: list[SpecHistory],
     realized_by_horizon: Mapping[int, Mapping[str, Any]],
 ) -> dict:
-    """Flag, PER ARM and PER DATE, the cohort dates an arm was ranked on a
-    known-degenerate fundamentals cross-section (alpha-engine-config-I8255 d2).
+    """Flag, PER ARM and PER DATE, every known defect in the INPUTS an arm was
+    ranked on. Two reasons today; the field is a LIST because an arm can carry
+    more than one and the previous single-dict shape structurally forbade the
+    second (alpha-engine-config-I11423).
+
+    REASON 1 — ``degenerate_fundamentals`` (alpha-engine-config-I8255 d2).
 
     Measured 2026-08-24: five vendor fundamental fields (``fcf_yield``,
     ``gross_margin``, ``roe``, ``revenue_growth_3y``, ``eps_growth_3y``) were
@@ -866,6 +920,30 @@ def _annotate_degraded_inputs(
     discount, or accept a row on the evidence rather than on the flag's mere
     presence.
 
+    REASON 2 — ``mis_wired_predictor_pool`` (alpha-engine-config-I11396/I11423).
+    ``scanner_top20_predictor`` ranked a 20-name scanner cut against
+    ``predictor/predictions/{date}.json``, whose universe is the ~25 actively
+    thesis-covered tickers rather than the population the cut came from. The
+    measured consequences are on the artifacts themselves: ``pool_size: 1`` on
+    two early-August dates, and ZERO shared picks with
+    ``scanner_predictor_direct`` on 7 of its 8 later dates. The dates are
+    deliberately NOT restated here — see the issue. A second copy of a date set
+    in this module is the defect `test_the_degenerate_window_is_consumed_not_
+    restated` exists to prevent, and this reason does not need one: the
+    condition is read off each day's own ``pool_source``.
+
+    The arm is retired, and §3 still scores a retired arm for a trailing window
+    of 8 cycles — so this history is READ, not inert, and a record produced by a
+    mis-wired pool cannot answer the question a retired arm's record exists to
+    answer. RE-RUNNING the backfill was the preferred remedy and is NOT
+    POSSIBLE: measured 2026-09-22, the fixed loader's required input
+    (``predictor/predictions_research_free/{date}.json``) exists on S3 only from
+    2026-09-14, so ~90% of the affected arm-dates have no input to replay, and
+    even 2026-09-18 does not reproduce its stored result (only 4 of 20 cut names
+    overlap that day's file now). So the dates are MARKED rather than repaired —
+    and marked loudly, because a record that quietly spans two wirings is worse
+    than a shorter honest one.
+
     Returns the board-level summary block; annotates the rows in place.
     """
     from scoring.universe_board import (
@@ -874,7 +952,8 @@ def _annotate_degraded_inputs(
     )
 
     by_name = {a.name: a for a in arms}
-    affected: set[str] = set()
+    degenerate: set[str] = set()
+    mis_wired: set[str] = set()
     for block in blocks:
         realized_h = realized_by_horizon.get(block["horizon_days"]) or {}
         for row in block["specs"]:
@@ -883,28 +962,56 @@ def _annotate_degraded_inputs(
                 d for d in (arm.by_date if arm is not None else ())
                 if realized_h.get(d)
             )
+            findings: list[dict] = []
+
             bad = [d for d in scored if is_degenerate_fundamentals_run_date(d)]
-            if not bad:
-                # Explicit null, not a missing key: "checked, clean" and "never
-                # checked" must never render identically (§7.2).
-                row["degraded_input"] = None
-                continue
-            affected.add(row["name"])
-            row["degraded_input"] = {
-                "reason": "degenerate_fundamentals",
-                "window": list(DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW),
-                "dates": bad,
-                "n_dates": len(bad),
-                "n_dates_scored": len(scored),
-                "fraction_of_scored": round(len(bad) / len(scored), 4) if scored else None,
-                "issue": "alpha-engine-config-I8255",
-            }
+            if bad:
+                degenerate.add(row["name"])
+                findings.append(_degraded_finding(
+                    "degenerate_fundamentals", bad, scored,
+                    "alpha-engine-config-I8255",
+                    window=list(DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW),
+                ))
+
+            wired = _mis_wired_predictor_dates(arm, scored) if arm is not None else []
+            if wired:
+                mis_wired.add(row["name"])
+                findings.append(_degraded_finding(
+                    "mis_wired_predictor_pool", wired, scored,
+                    "alpha-engine-config-I11396",
+                    remedy="marked_unusable",
+                    remedy_reason=(
+                        "re-backfill impossible: the fixed loader reads "
+                        "predictor/predictions_research_free/{date}.json, whose "
+                        "retention on S3 starts well after the affected window "
+                        "(measured 2026-09-22) — most affected dates have no "
+                        "input left to replay, and the one date that can be "
+                        "executed does not reproduce its stored result. See "
+                        "alpha-engine-config-I11423 for the measured table."
+                    ),
+                    tracker="alpha-engine-config-I11423",
+                ))
+
+            # Explicit null, not a missing key: "checked, clean" and "never
+            # checked" must never render identically (§7.2).
+            row["degraded_input"] = findings or None
     return {
         "degenerate_fundamentals": {
             "window": list(DEGENERATE_FUNDAMENTALS_RUN_DATE_WINDOW),
-            "arms_affected": sorted(affected),
+            "arms_affected": sorted(degenerate),
             "detail": "per-arm, per-date — see each row's `degraded_input`",
             "issue": "alpha-engine-config-I8255",
+        },
+        "mis_wired_predictor_pool": {
+            "pool_source_prefix": _MIS_WIRED_PREDICTOR_POOL_PREFIX,
+            "arms_affected": sorted(mis_wired),
+            "detail": (
+                "these dates ranked a scanner cut against the ~25-name "
+                "thesis-coverage universe; not repairable, see the row's "
+                "`remedy_reason`"
+            ),
+            "issue": "alpha-engine-config-I11396",
+            "tracker": "alpha-engine-config-I11423",
         },
     }
 
@@ -1014,7 +1121,36 @@ def _enter_ranked_and_scores(signals_doc: dict) -> SpecDay:
         if isinstance(v, dict) and v.get("signal") == "ENTER" and v.get("score") is not None
     ]
     rows.sort(key=lambda r: r[1], reverse=True)
-    return SpecDay(ranked=[t for t, _ in rows], scores=dict(rows))
+    # The arm's own declaration of what it ranked FROM
+    # (producers/filling_arms.py::build_shadow_payload,
+    # producers/research_arms.py). Read here so it travels with the picks —
+    # SpecDay is frozen and provenance is a property of the read, so it cannot
+    # be back-filled onto an already-constructed row
+    # (alpha-engine-config-I11424).
+    pool = signals_doc.get("arm_pool")
+    pool = pool if isinstance(pool, dict) else {}
+    # `pool_size` is the POOL, never len(population): conflating the two is
+    # what made a retired arm's selection ratio unrecoverable from its own
+    # artifact (alpha-engine-config-I11390). Only the declared key is read.
+    return SpecDay(
+        ranked=[t for t, _ in rows],
+        scores=dict(rows),
+        pool_source=_str_or_none(pool.get("pool_source")),
+        pool_size=_int_or_none(pool.get("pool_size")),
+        n_selected=_int_or_none(pool.get("n_selected")),
+    )
+
+
+def _str_or_none(v: Any) -> str | None:
+    return v if isinstance(v, str) and v else None
+
+
+def _int_or_none(v: Any) -> int | None:
+    """An int, or None. A malformed pool field must not take out the read: the
+    picks are the measurement and the provenance is observability on top of it,
+    so a bad value degrades to "not recorded" rather than losing the day. The
+    loss is visible — the row's `pool_provenance` shows the other dates."""
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def _resolve_champion_name(s3: Any, bucket: str) -> str | None:
@@ -2709,6 +2845,14 @@ def build_producer_leaderboard(
         # take out the per-arm gap annotation for the arms that DO exist.
         _annotate_arm_measurement_gaps(
             "producer", leaderboard["horizons"], all_arms, date_str,
+        )
+        # The INPUT-QUALITY check ran on the cuts board alone until
+        # alpha-engine-config-I11423 — so a defect in what an arm was ranked ON
+        # was visible on one board and invisible on the other, which is the
+        # instance-not-class failure engagement-protocol-policy.md §5 forbids.
+        # It is also the board that holds the two mis-wired predictor arms.
+        leaderboard["input_quality"] = _annotate_degraded_inputs(
+            leaderboard["horizons"], all_arms, realized_by_horizon,
         )
         leaderboard["leaderboard_id"] = "producer"
         # The artifact NAMES the contract it was scored under. `leaderboard_id`

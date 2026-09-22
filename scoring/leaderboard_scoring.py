@@ -344,6 +344,50 @@ def slot_spec(slot_id: str) -> SlotMeasurementSpec:
         ) from None
 
 
+
+def pool_provenance_for(spec: SpecHistory, dates_scored: Sequence[str]) -> dict | None:
+    """Where an arm's picks came from, projected onto its leaderboard row
+    (alpha-engine-config-I11424). ``None`` when no scored day recorded a pool.
+
+    §4's vacuity guard asks whether two arms' PICKS collide. Nothing asked
+    whether their POOLS differ — the upstream question, and the one that makes a
+    collision meaningful or meaningless. `alpha-engine-config-I11396` is that
+    gap going unnoticed: two arms ranked from near-disjoint predictor
+    populations for weeks, one collapsing to a pool of ONE on two dates, and the
+    board rendered both as ordinary rows. The evidence that cracked it was
+    ``arm_pool.pool_source`` read off S3 by hand.
+
+    Where an arm's dates DISAGREE on the pool, every distinct source is listed
+    and ``pool_source`` is None rather than silently taking the last one: a
+    changed pool mid-window is the finding, not a detail to be flattened.
+    """
+    days = [spec.by_date[d] for d in dates_scored if d in spec.by_date]
+    sources = sorted({d.pool_source for d in days if d.pool_source})
+    sizes = [d.pool_size for d in days if d.pool_size is not None]
+    selected = [d.n_selected for d in days if d.n_selected is not None]
+    if not sources and not sizes and not selected:
+        return None
+    # The MINIMUM pool, not the mean: a pool that collapsed to one name on two
+    # dates out of thirty is the fact worth surfacing, and an average hides it.
+    pool_min = min(sizes) if sizes else None
+    return {
+        "pool_source": sources[0] if len(sources) == 1 else None,
+        "pool_sources": sources,
+        "pool_source_changed": len(sources) > 1,
+        "pool_size_min": pool_min,
+        "pool_size_max": max(sizes) if sizes else None,
+        "n_selected_max": max(selected) if selected else None,
+        # What fraction of the candidates the arm kept, at its widest pool.
+        # 1.0 means the arm's "selection" selected nothing — its pool WAS its
+        # pick list, the state that made a retired arm's selection ratio
+        # unrecoverable from its own artifact (alpha-engine-config-I11390).
+        "selection_ratio": (
+            round(max(selected) / max(sizes), 4)
+            if selected and sizes and max(sizes) else None
+        ),
+    }
+
+
 def confidence_for(n_dates_scored: int | None, min_dates_for_inference: int) -> str:
     """How much evidence stands behind a spec row (alpha-engine-config-I7542).
 
@@ -735,6 +779,22 @@ class SpecDay:
     ranked: list[str]
     scores: dict[str, float] | None = None
     rank_ordered: bool = True
+    # Where this day's picks were drawn FROM (alpha-engine-config-I11424).
+    # ``pool_source`` is the string the shadow's ``arm_pool`` block already
+    # records (e.g. ``pinned_cut:attractiveness_top_60:tech_score``);
+    # ``pool_size`` is the candidate count the arm ranked and ``n_selected``
+    # what it kept, so the SELECTION RATIO is legible — an arm that picked 20
+    # of 60 and one that picked 20 of 20 are doing different things and both
+    # render as "20 picks" without it.
+    #
+    # Carried at CONSTRUCTION because this class is frozen and provenance is a
+    # property of the read, exactly as ``unmeasurable_reason`` is on
+    # ``SpecHistory``. Defaults are None: a loader with no pool block (every
+    # scanner and cuts day) leaves them alone, and None reads as "this surface
+    # does not record it", never as zero.
+    pool_source: str | None = None
+    pool_size: int | None = None
+    n_selected: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1409,6 +1469,10 @@ def score_leaderboard(
                 # `unmeasurable` is a defect that does not.
                 "measurability": measurability,
                 "unmeasurable_reason": unmeasurable_reason,
+                # alpha-engine-config-I11424 — the comparison surface carries
+                # the fact the comparison depends on. Observability only: no
+                # metric value is derived from it.
+                "pool_provenance": pool_provenance_for(spec, dates_scored),
             }
         except Exception as exc:  # noqa: BLE001 — observe artifact, per-spec isolation
             logger.warning(
@@ -1427,6 +1491,10 @@ def score_leaderboard(
                 "dates_scored": [],
                 "topn_alpha_vs_benchmark_intersection": None,
                 "n_dates_in_intersection": 0,
+                # Present even on the failure row: the key must exist on EVERY
+                # row, or a consumer cannot tell "not recorded" from "this row
+                # threw" (alpha-engine-config-I11424).
+                "pool_provenance": None,
                 "promotion_eligible": spec.promotion_eligible,
                 "ineligible_reason": spec.ineligible_reason,
                 "confidence": CONFIDENCE_INSUFFICIENT,
