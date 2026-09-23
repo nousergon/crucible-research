@@ -365,7 +365,8 @@ def bootstrap_register() -> ArmRegister:
 
 
 def assert_slot_floor(register: ArmRegister, *, config: ArenaConfig = ARENA_CONFIG,
-                      alert: Any = None, context: str = "") -> None:
+                      alert: Any = None, context: str = "",
+                      as_of: str | None = None) -> None:
     """PAGE and raise when the slot holds fewer active arms than a comparison needs.
 
     Deliverable 5 of alpha-engine-config-I9317, and the reason it is a probe
@@ -377,8 +378,22 @@ def assert_slot_floor(register: ArmRegister, *, config: ArenaConfig = ARENA_CONF
 
     The alert is sent BEFORE the raise, deliberately: the raise reaches an
     operator only through whatever happens to be catching it, and this
-    condition must reach one whether or not the caller is."""
-    active = register.active_arms()
+    condition must reach one whether or not the caller is.
+
+    ``as_of`` makes the count POINT-IN-TIME, and a caller that has a cycle date
+    MUST pass it (alpha-engine-config-I11441). Without it this probe counts the
+    arms live TODAY while ``run_cycle`` counts the arms live on the CYCLE'S
+    date, and the two answers differ for any cycle dated before an arm was
+    registered — this slot's earliest ``created_date`` is 2026-08-17.
+
+    MEASURED on the sibling research slot 2026-09-22: a cycle run four days
+    before its arms existed passed a present-tense floor and then decided on
+    ``active_arms: 0``, emitting ``unservable`` with champion ``None``. The
+    artifact was schema-valid and the standing detector read it as the slot
+    REFUSING TO SERVE — a fabricated cycle rendering as an ordinary red
+    verdict. §7.2: "these arms did not exist yet" and "no arm may serve" are
+    different facts and must not render alike."""
+    active = register.active_arms(as_of)
     if len(active) >= config.min_active_arms:
         return
     message = (
@@ -694,7 +709,11 @@ def cycle_document(
     floor was fine" and "nobody checked" cannot render identically.
     """
     doc = cycle.to_dict()
-    active = register.active_arms()
+    # AS OF the cycle, not today (alpha-engine-config-I11441): this field is
+    # the reader's answer to "how many arms stood behind this decision", and
+    # a present-tense count would answer a different question than the one the
+    # decision beside it was made on.
+    active = register.active_arms(cycle.as_of)
     doc["producer"] = PRODUCER
     doc["generated_at"] = generated_at or datetime.now(UTC).isoformat(timespec="seconds")
     doc["score_definition"] = SCORE_DEFINITION
