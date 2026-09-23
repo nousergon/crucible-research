@@ -1481,6 +1481,10 @@ def run_cut_promotion(
     assert_slot_floor(
         register,
         config=slot.arena_config,
+        # The CYCLE's date, not today (alpha-engine-config-I11441). It was
+        # already in scope here and passed to `evaluate_cut_slot` two lines
+        # below; the floor was the one thing counting arms on a different day.
+        as_of=decided_on,
         context=(
             f"universe-cut evaluation for {decided_on} cannot run: the arena "
             "would produce zero comparisons."

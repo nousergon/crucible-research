@@ -207,3 +207,62 @@ class TestRunArenaCycle:
         )
         validate_contract("arena_cycle", doc)
         assert doc["slot_floor"]["breached"] is False
+
+
+class TestTheSlotFloorIsPointInTime:
+    """The cuts slot's floor counted arms live TODAY while `run_cycle` counts
+    arms live on the CYCLE'S date (alpha-engine-config-I11441).
+
+    MEASURED on the sibling research slot 2026-09-22, by writing one: a cycle
+    run four days before its arms existed passed a present-tense floor and then
+    decided on `active_arms: 0`, emitting `unservable` with champion `None`.
+    Schema-valid, and the standing detector read it as the slot REFUSING TO
+    SERVE — a fabricated cycle rendering as an ordinary red verdict.
+
+    Here the shape was worse: `assert_slot_floor` had no `as_of` parameter at
+    all, so it could not be pointed at a cycle date without a signature change.
+    `run_cut_promotion` had `decided_on` in scope and passed it to
+    `evaluate_cut_slot` two lines below the floor check.
+
+    REACHABLE: `run_cut_promotion(decided_on=...)` takes its date from
+    `event["run_date"]` (`lambda/scanner_handler.py`), validated only as a
+    10-character string. Nothing bounds it to today or later, so an operator
+    invoke with a historical `run_date` reaches it.
+
+    VERIFIED RED: with `as_of` removed from the `cut_promotion` call site, the
+    two assertions below pass a floor that should refuse.
+    """
+
+    def test_the_two_counts_differ_before_the_arms_existed(self):
+        register = cut_arena.bootstrap_register()
+        # Earliest ARM_CREATED_ON in this slot is 2026-08-17.
+        assert len(register.active_arms()) == 5
+        assert len(register.active_arms("2026-08-16")) == 0
+
+    def test_a_cycle_dated_before_the_arms_existed_is_refused(self):
+        register = cut_arena.bootstrap_register()
+        cut_arena.assert_slot_floor(register)  # present tense: fine
+        with pytest.raises(cut_arena.SlotFloorBreached):
+            cut_arena.assert_slot_floor(register, as_of="2026-08-16")
+
+    def test_the_promotion_entry_point_passes_the_cycle_date(self):
+        """The call site is the fix. A signature that ACCEPTS `as_of` while its
+        one caller omits it is the same defect with a longer path to it."""
+        import inspect
+
+        import scoring.cut_promotion as cp
+
+        src = inspect.getsource(cp.run_cut_promotion)
+        assert "as_of=decided_on" in src, (
+            "run_cut_promotion must pass the cycle date to assert_slot_floor — "
+            "it is already in scope and passed to evaluate_cut_slot below"
+        )
+
+    def test_the_artifact_reports_the_count_the_decision_was_made_on(self):
+        """`slot_floor.active_arms` answers "how many arms stood behind this
+        decision". A present-tense count answers a different question than the
+        decision printed beside it."""
+        import inspect
+
+        src = inspect.getsource(cut_arena.cycle_document)
+        assert "register.active_arms(cycle.as_of)" in src
