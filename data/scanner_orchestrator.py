@@ -40,12 +40,23 @@ layer is intentionally a thin wrapper so the underlying numerical
 behavior matches Research's internal scanner byte-for-byte.
 
 The "prior cycle" diff (new_vs_prior_cycle / dropped_vs_prior_cycle)
-reads the prior week's ``signals/{prior_date}/signals.json`` via the
-``signals/latest.json`` pointer; the prior cycle's scanner picks live in
-``signals.json::universe`` (minus its ``population`` set). When no prior
-signals.json exists (very first cycle), both diff fields are empty and
-``stats.new_vs_prior_cycle_baseline_missing: true`` flags the cold-start
-case loudly per [[feedback_no_silent_fails]].
+compares this run's ``scanner_tickers`` against the ``scanner_tickers`` of the
+most recent ``candidates/{d}/candidates.json`` with ``d`` STRICTLY before
+``run_date`` — the scanner's own prior output, found by walking back day by
+day (``_read_prior_candidates_scanner_tickers``). When none exists within
+``PRIOR_CANDIDATES_LOOKBACK_DAYS`` (very first cycle), both diff fields are
+empty and ``stats.baseline_missing: true`` flags the cold-start case loudly
+per [[feedback_no_silent_fails]].
+
+It used to read the prior cycle from the ``signals/latest.json`` pointer
+(``universe - population``). That file stopped being a pointer when
+``lambda/signals_envelope_handler.py`` became its producer — it now holds the
+whole envelope, with no ``s3_key`` — so every run since reported
+``baseline_missing: true`` against a prior cycle that existed
+(alpha-engine-config-I11488: 2026-09-23's run, with
+``candidates/2026-09-18/candidates.json`` on S3). And even when it resolved,
+``universe - population`` was "board names not held", not what the prior
+scanner selected, so the diff compared two different populations.
 """
 
 from __future__ import annotations
@@ -75,6 +86,15 @@ _SHADOW_PREFIX = "candidates_shadow"
 # failed cycle is a durable record, never indistinguishable from "never ran".
 _SHADOW_STATUS_PREFIX = "candidates_shadow_status"
 _SIGNALS_LATEST_KEY = "signals/latest.json"
+
+PRIOR_CANDIDATES_LOOKBACK_DAYS = 14
+"""How far back the churn baseline looks for a prior ``candidates.json``.
+
+The scanner writes one per weekly cycle on a self-selected run day, and
+rehearsals write mid-week, so the gap to the prior cycle is anything from one
+to seven days in normal operation. Fourteen covers one wholly missed cycle; a
+baseline older than that is not "last week" and is reported as missing rather
+than silently compared against."""
 
 
 class ScannerOrchestratorError(RuntimeError):
@@ -296,6 +316,76 @@ def _resolved_scanner_params() -> dict:
     }
 
 
+def _read_prior_candidates_scanner_tickers(
+    s3_client: Any,
+    bucket: str,
+    run_date: str,
+    *,
+    lookback_days: int = PRIOR_CANDIDATES_LOOKBACK_DAYS,
+) -> tuple[list[str], str | None]:
+    """``(prior_scanner_tickers, prior_run_date)`` from the most recent
+    ``candidates/{d}/candidates.json`` with ``d`` strictly before ``run_date``.
+
+    Walks back one calendar day at a time with ``get_object`` — no
+    ``ListBucket`` dependency, the same shape as crucible-predictor's
+    ``load_candidates_artifact_with_lookback``. STRICTLY before, so a re-run
+    of the same date never diffs against itself.
+
+    An absent key is the expected case on most days and is skipped quietly.
+    Anything else — an unreadable object, malformed JSON, an artifact with no
+    ``scanner_tickers`` list — is logged at WARNING and skipped, so one bad
+    artifact neither poses as the baseline nor hides an older good one.
+
+    Returns ``([], None)`` when nothing qualifies within ``lookback_days``;
+    the caller reports that as ``baseline_missing``.
+    """
+    from datetime import date as _date
+    from datetime import timedelta
+
+    anchor = _date.fromisoformat(run_date)
+    for back in range(1, lookback_days + 1):
+        d = (anchor - timedelta(days=back)).isoformat()
+        key = f"{_CANDIDATES_PREFIX}/{d}/candidates.json"
+        try:
+            obj = s3_client.get_object(Bucket=bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001 — absent is the common case; others logged below
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code not in ("NoSuchKey", "404"):
+                logger.warning(
+                    "[scanner_orchestrator] prior candidates s3://%s/%s unreadable (skipped as churn baseline): %s",
+                    bucket,
+                    key,
+                    exc,
+                )
+            continue
+        try:
+            doc = json.loads(obj["Body"].read())
+            tickers = doc.get("scanner_tickers")
+        except Exception as exc:  # noqa: BLE001 — malformed artifact, logged and skipped
+            logger.warning(
+                "[scanner_orchestrator] prior candidates s3://%s/%s malformed (skipped as churn baseline): %s",
+                bucket,
+                key,
+                exc,
+            )
+            continue
+        if not isinstance(tickers, list):
+            logger.warning(
+                "[scanner_orchestrator] prior candidates s3://%s/%s carries no "
+                "scanner_tickers list (skipped as churn baseline)",
+                bucket,
+                key,
+            )
+            continue
+        return [t for t in tickers if isinstance(t, str) and t], d
+    logger.warning(
+        "[scanner_orchestrator] no candidates.json within %d day(s) before %s — churn baseline missing",
+        lookback_days,
+        run_date,
+    )
+    return [], None
+
+
 def build_candidates_artifact(
     run_date: str,
     *,
@@ -325,8 +415,11 @@ def build_candidates_artifact(
             f"constituents.json has {len(constituents)} tickers — refusing to scan (expected >= 800 for S&P 500+400)"
         )
 
-    # ── 2. Prior cycle: population + scanner picks for diff ──────────────
-    prior_population, prior_scanner_picks, prior_run_date = _read_prior_signals_universe_tickers(s3, bucket)
+    # ── 2. Prior cycle: population (signals) + scanner picks (candidates) ─
+    # The churn baseline is the prior cycle's OWN scanner output, not the
+    # signals envelope — see the module docstring (alpha-engine-config-I11488).
+    prior_population, _signals_picks, _signals_date = _read_prior_signals_universe_tickers(s3, bucket)
+    prior_scanner_picks, prior_run_date = _read_prior_candidates_scanner_tickers(s3, bucket, run_date)
     baseline_missing = prior_run_date is None
 
     # ── 3. Technical scores via feature store ─────────────────────────────
@@ -404,16 +497,14 @@ def build_candidates_artifact(
                     if rec["ticker"] not in _champ_set and not rec.get("filter_fail_reason"):
                         rec["filter_fail_reason"] = "rank_cutoff"
                 logger.info(
-                    "[scanner_orchestrator] live cut ranked by champion arm %r (%s): "
-                    "%d candidates",
+                    "[scanner_orchestrator] live cut ranked by champion arm %r (%s): %d candidates",
                     _champion.name,
                     _champion.description,
                     len(scanner_tickers),
                 )
     except Exception as _exc:  # noqa: BLE001 — live path degrades, never raises
         logger.warning(
-            "[scanner_orchestrator] champion re-ranking unavailable (falling back to "
-            "tech_score ranking): %s",
+            "[scanner_orchestrator] champion re-ranking unavailable (falling back to tech_score ranking): %s",
             _exc,
         )
 
@@ -622,9 +713,7 @@ def build_shadow_candidate_artifacts(
     # :func:`factor_loadings_for_run`, not re-read here. Two arms must differ
     # because their signals differ, never because they read the store at
     # different moments (alpha-engine-config-I7808).
-    factor_loadings, reason = factor_loadings_for_run(
-        live_artifact.get("run_date") or "", eval_log
-    )
+    factor_loadings, reason = factor_loadings_for_run(live_artifact.get("run_date") or "", eval_log)
     if reason or not factor_loadings:
         reason = reason or "factor loadings unavailable this cycle"
         logger.warning(
