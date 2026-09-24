@@ -107,6 +107,104 @@ class TestReadPriorSignalsUniverseTickers:
         assert set(picks) == {"MSFT", "NVDA"}
 
 
+class TestReadPriorCandidatesScannerTickers:
+    """alpha-engine-config-I11488: the churn baseline is the most recent prior
+    ``candidates.json``, however many days back it is."""
+
+    BUCKET = "alpha-engine-research"
+
+    @pytest.fixture
+    def s3(self):
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=self.BUCKET)
+            yield client
+
+    def _put(self, s3, run_date: str, body: dict | bytes):
+        s3.put_object(
+            Bucket=self.BUCKET,
+            Key=f"candidates/{run_date}/candidates.json",
+            Body=body if isinstance(body, bytes) else json.dumps(body).encode(),
+        )
+
+    def test_finds_the_prior_cycle_across_a_non_seven_day_gap(self, s3):
+        """The rehearsal shape: run_date 09-23, prior cycle 09-18."""
+        from data.scanner_orchestrator import _read_prior_candidates_scanner_tickers
+
+        self._put(s3, "2026-09-11", {"scanner_tickers": ["OLD"]})
+        self._put(s3, "2026-09-18", {"scanner_tickers": ["AAA", "BBB"]})
+        picks, date = _read_prior_candidates_scanner_tickers(s3, self.BUCKET, "2026-09-23")
+        assert date == "2026-09-18"
+        assert picks == ["AAA", "BBB"]
+
+    def test_never_diffs_a_run_against_itself(self, s3):
+        from data.scanner_orchestrator import _read_prior_candidates_scanner_tickers
+
+        self._put(s3, "2026-09-23", {"scanner_tickers": ["SELF"]})
+        self._put(s3, "2026-09-18", {"scanner_tickers": ["AAA"]})
+        picks, date = _read_prior_candidates_scanner_tickers(s3, self.BUCKET, "2026-09-23")
+        assert date == "2026-09-18"
+        assert picks == ["AAA"]
+
+    def test_a_malformed_artifact_does_not_hide_an_older_good_one(self, s3):
+        from data.scanner_orchestrator import _read_prior_candidates_scanner_tickers
+
+        self._put(s3, "2026-09-22", b"{not json")
+        self._put(s3, "2026-09-21", {"no_scanner_tickers": True})
+        self._put(s3, "2026-09-18", {"scanner_tickers": ["AAA"]})
+        picks, date = _read_prior_candidates_scanner_tickers(s3, self.BUCKET, "2026-09-23")
+        assert date == "2026-09-18"
+        assert picks == ["AAA"]
+
+    def test_nothing_within_the_lookback_is_a_missing_baseline(self, s3):
+        from data.scanner_orchestrator import (
+            PRIOR_CANDIDATES_LOOKBACK_DAYS,
+            _read_prior_candidates_scanner_tickers,
+        )
+
+        self._put(s3, "2026-09-01", {"scanner_tickers": ["STALE"]})
+        assert PRIOR_CANDIDATES_LOOKBACK_DAYS < 22
+        assert _read_prior_candidates_scanner_tickers(s3, self.BUCKET, "2026-09-23") == ([], None)
+
+    def test_the_artifact_reports_a_real_baseline_end_to_end(self, s3):
+        """Through ``build_candidates_artifact`` with only the scanner
+        primitives stubbed: a prior candidates.json 5 days back yields
+        ``baseline_missing: false`` and real churn — even though
+        ``signals/latest.json`` is absent."""
+        from contextlib import ExitStack
+
+        from data.scanner_orchestrator import build_candidates_artifact
+
+        self._put(s3, "2026-09-18", {"scanner_tickers": ["T0", "T1", "X1"]})
+        constituents = [f"T{i}" for i in range(900)]
+        with ExitStack() as stack:
+            for target, value in (
+                (
+                    "data.fetchers.price_fetcher.fetch_sp500_sp400_with_sectors",
+                    (constituents, dict.fromkeys(constituents, "Technology")),
+                ),
+                (
+                    "data.fetchers.feature_store_reader.read_latest_features",
+                    {t: {"rsi_14": 55.0} for t in constituents},
+                ),
+                ("data.fetchers.feature_store_reader.read_latest_daily_closes", {}),
+                ("scoring.technical.compute_technical_score", 70.0),
+                ("data.scanner.run_quant_filter", [{"ticker": "T0"}, {"ticker": "T2"}]),
+                ("data.fetchers.feature_store_reader.read_latest_factor_loadings", None),
+            ):
+                stack.enter_context(patch(target, return_value=value))
+            artifact = build_candidates_artifact(
+                run_date="2026-09-23",
+                s3_client=s3,
+                bucket=self.BUCKET,
+            )
+        stats = artifact["stats"]
+        assert stats["baseline_missing"] is False
+        assert stats["prior_run_date"] == "2026-09-18"
+        assert stats["new_vs_prior_cycle"] == ["T2"]
+        assert stats["dropped_vs_prior_cycle"] == ["T1", "X1"]
+
+
 class TestBuildCandidatesArtifact:
     def _setup_patches(
         self,
@@ -152,11 +250,13 @@ class TestBuildCandidatesArtifact:
             ),
             "_read_prior_signals_universe_tickers": patch(
                 "data.scanner_orchestrator._read_prior_signals_universe_tickers",
-                return_value=(
-                    prior_pop or [],
-                    prior_picks or [],
-                    prior_date,
-                ),
+                # Population only — the signals envelope no longer supplies the
+                # churn baseline (alpha-engine-config-I11488).
+                return_value=(prior_pop or [], [], None),
+            ),
+            "_read_prior_candidates_scanner_tickers": patch(
+                "data.scanner_orchestrator._read_prior_candidates_scanner_tickers",
+                return_value=(prior_picks or [], prior_date),
             ),
         }
 
