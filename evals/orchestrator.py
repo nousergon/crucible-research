@@ -1095,6 +1095,16 @@ def _submit_via_sync_rung(
     degradation_key = persist_degradation_record(
         record, bucket=bucket, s3_client=s3,
     )
+    # The same fact on the log stream the Process summary lands on
+    # (alpha-engine-config-I11485): `degraded_transport=True` there named the
+    # rung but not WHY, so a reader of the run log had to go to S3 for it.
+    logger.warning(
+        "[batch_submit] batch transport unavailable, taking the sync rung: "
+        "group=%s capability=%s exec_context=%s reason=%s requests=%d "
+        "degradation=%s",
+        unavailable.group, unavailable.capability, unavailable.exec_context,
+        unavailable.reason, len(plan["requests"]), degradation_key,
+    )
     return {
         "batch_id": batch_id,
         "processing_status": "ended_sync",
@@ -1464,6 +1474,14 @@ def process_batch_results(
         list(plan["plan_entries"]) if is_sync_batch_id(batch_id) else []
     )
     sync_fallback_evaluated = 0
+    # In-call schema/transport retries that ended in a graded eval
+    # (alpha-engine-config-I11485). `parse_retry_recovered` counts only the
+    # batch rung's parse-retry TAIL; on the sync rung every retry happens
+    # inside evaluate_artifact, so a recovered retry logged there left that
+    # counter at 0 and read as "no retries". Snapshot, then diff at the end.
+    from evals.judge import in_call_retries_recovered
+
+    _in_call_retries_at_start = in_call_retries_recovered()
     # Strip the empty_input_skip entries from `failed` — those are
     # successes (skip-marker eval persisted in Submit) not failures.
     # Preserve any `load` failures from the plan stage as failures.
@@ -1939,6 +1957,7 @@ def process_batch_results(
     # Reported on every rung, including a clean one, because a field that
     # appears only when something is wrong is indistinguishable from a field
     # nobody emitted (principles.md §2.7: no data is never rendered as green).
+    in_call_retries = in_call_retries_recovered() - _in_call_retries_at_start
     plan_entry_count = len(plan["plan_entries"])
     ungraded = [
         e for e in plan["plan_entries"]
@@ -1947,13 +1966,15 @@ def process_batch_results(
     logger.info(
         "[batch_process] done batch_id=%s date=%s haiku=%d sonnet=%d "
         "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
-        "parse_retry_recovered=%d metric_emission_failures=%d "
+        "parse_retry_recovered=%d in_call_retries_recovered=%d "
+        "metric_emission_failures=%d "
         "degraded_transport=%s sync_fallback_evaluated=%d "
         "complete=%s budget_stopped_phases=%s "
         "coverage=%d/%d ungraded=%d",
         batch_id, date, haiku_evaluated, sonnet_evaluated,
         plan.get("skipped_unmapped", 0), skipped_empty_input, len(failed),
-        parse_retry_recovered, metric_emission_failures,
+        parse_retry_recovered, in_call_retries,
+        metric_emission_failures,
         is_sync_batch_id(batch_id), sync_fallback_evaluated,
         not budget_stopped, budget_stopped_phases or "-",
         len(graded_custom_ids), plan_entry_count, len(ungraded),
@@ -1970,6 +1991,7 @@ def process_batch_results(
         "skipped_empty_input": skipped_empty_input,
         "metric_emission_failures": metric_emission_failures,
         "parse_retry_recovered": parse_retry_recovered,
+        "in_call_retries_recovered": in_call_retries,
         # Transport rung this pass actually ran on (alpha-engine-config-I9263).
         # `degraded_transport` is what a console or alarm reads to tell a
         # half-price batch pass from a full-price synchronous one; the count

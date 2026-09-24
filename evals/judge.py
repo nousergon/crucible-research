@@ -69,6 +69,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from typing import Any
@@ -1021,6 +1022,26 @@ def _judge_router_spec_and_route(*, max_tokens: int) -> tuple[ModelSpec, dict]:
     return replace(spec, reasoning={"exclude": True}), route
 
 
+_in_call_retries_recovered = 0
+_in_call_retries_lock = threading.Lock()
+
+
+def in_call_retries_recovered() -> int:
+    """Process-lifetime count of judge calls that SUCCEEDED on a retry.
+
+    Incremented by :func:`_call_openrouter_judge_llm` when an attempt after the
+    first returns a valid rubric output. Monotonic: a caller wanting the count
+    for one pass snapshots it before and diffs after, as
+    ``process_batch_results`` does (alpha-engine-config-I11485)."""
+    return _in_call_retries_recovered
+
+
+def _note_in_call_retry_recovered() -> None:
+    global _in_call_retries_recovered
+    with _in_call_retries_lock:
+        _in_call_retries_recovered += 1
+
+
 @dataclass
 class _OpenRouterJudgeCallResult:
     """Outcome of :func:`_call_openrouter_judge_llm` — a validated judge
@@ -1231,6 +1252,8 @@ def _call_openrouter_judge_llm(
             raw_args = json.loads(matching.function.arguments)
             llm_output = RubricEvalLLMOutput.model_validate(raw_args)
             last_error = None
+            if attempt > 1:
+                _note_in_call_retry_recovered()
             break
         except Exception as exc:  # noqa: BLE001 — covers JSONDecodeError + ValidationError; bounded retry
             last_error = exc
