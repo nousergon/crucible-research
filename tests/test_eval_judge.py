@@ -498,10 +498,12 @@ class TestEvaluateArtifact:
         # PRESERVED across the migration (S3 path / CloudWatch dimension /
         # rolling-mean identity; see evaluate_artifact's docstring).
         assert result.judge_model == "claude-haiku-4-5"
-        # judge_request_model is now the caller's DECLARED identity (see
-        # evaluate_artifact's docstring) — it no longer selects the model:
-        # since alpha-engine-config-I6559, the `low` router group does.
-        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+        # judge_request_model records what the call ADDRESSED — the
+        # router-resolved deployment — not the module's declared constant,
+        # which since alpha-engine-config-I6559 selects nothing
+        # (alpha-engine-config-I11484).
+        assert result.judge_request_model == "low"
+        assert result.judge_request_model != OPENROUTER_SHADOW.request_model
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
         # The model sent to the transport is the router-RESOLVED deployment
         # (this module's `live_router_resolution` fixture fakes the group
@@ -557,7 +559,11 @@ class TestEvaluateArtifact:
             )
 
         assert result.judge_model == "claude-sonnet-4-6"
-        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+        # Same addressed deployment as the Haiku tier — and the record now
+        # says so, instead of both tiers carrying a Claude-shaped identity
+        # and nothing else (alpha-engine-config-I11484).
+        assert result.judge_request_model == "low"
+        assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
 
     def test_records_resolved_model_from_response(self):
         """L4578(a): the API-resolved model is captured per-artifact for

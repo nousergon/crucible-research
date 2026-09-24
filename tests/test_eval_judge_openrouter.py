@@ -134,7 +134,9 @@ class TestEvaluateArtifactOpenRouter:
         assert isinstance(result, RubricEvalArtifact)
         assert result.judged_agent_id == "thinktank_thesis"
         assert result.judge_model == OPENROUTER_SHADOW.logical_key
-        assert result.judge_request_model == OPENROUTER_SHADOW.request_model
+        # The deployment the router resolved `low` to, not the module
+        # constant (alpha-engine-config-I11484).
+        assert result.judge_request_model == "low"
         assert result.judge_resolved_model == "deepseek/deepseek-v4-flash"
         assert len(result.dimension_scores) == 6
         assert result.overall_reasoning == "Solid grounding; regime engagement weakest."

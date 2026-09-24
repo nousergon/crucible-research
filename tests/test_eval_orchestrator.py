@@ -308,6 +308,39 @@ class TestEvaluateCorpus:
         # preceded by the judge_run_id grouping prefix:
         # {run_id}_ic_cio.{run_id}.{judge_model}.json
         assert "_ic_cio." in sonnet_keys[0]
+        # Neither fake eval carries a served model, so the escalation's
+        # distinctness is UNKNOWN — and says so (alpha-engine-config-I11484).
+        assert result["escalation_served_model_unknown"] == 1
+        assert result["escalation_same_served_model"] == 0
+
+    def test_escalation_served_by_the_first_pass_model_is_reported(
+        self, mocked_s3_with_captures,
+    ):
+        """alpha-engine-config-I11484: on 2026-09-23 the Sonnet escalation was
+        served by the same DeepSeek deployment as the Haiku pass. The corpus
+        result must say the escalation was not a second opinion."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            scores = [2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4]
+            ev = _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=scores,
+            )
+            return ev.model_copy(update={"judge_resolved_model": "deepseek-v4-flash"})
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert result["sonnet_evaluated"] == 1
+        assert result["escalation_same_served_model"] == 1
+        assert result["escalation_distinct_served_model"] == 0
 
     def test_haiku_failure_is_contained(self, mocked_s3_with_captures):
         """LLM raising on one artifact must not halt evaluation of others."""

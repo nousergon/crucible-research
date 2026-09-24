@@ -199,6 +199,76 @@ def should_escalate_to_sonnet(
     return any(d.score < threshold for d in haiku_eval.dimension_scores)
 
 
+ESCALATION_DISTINCT = "distinct"
+ESCALATION_SAME_MODEL = "same_model"
+ESCALATION_UNKNOWN = "unknown"
+
+
+def _normalize_served_model(model: str | None) -> str | None:
+    """Reduce a served-model id to the weights it names: the same model
+    reached through an aggregator (``deepseek/deepseek-v4-flash``) and direct
+    (``deepseek-v4-flash``) is the same second opinion, so the vendor prefix
+    is dropped before comparing. Mirrors
+    ``crucible-evaluator/director/retro.py::_normalize_served_model``."""
+    if not model:
+        return None
+    return model.strip().rsplit("/", 1)[-1].lower() or None
+
+
+def escalation_served_model_verdict(
+    first_pass: RubricEvalArtifact,
+    escalation: RubricEvalArtifact,
+) -> str:
+    """Did the escalation re-grade with a DIFFERENT model than the first pass?
+
+    alpha-engine-config-I11484. Sonnet escalation exists to get a stronger
+    second opinion on an artifact the first pass scored low. On 2026-09-23
+    both passes were served by the same DeepSeek deployment, so the
+    "escalation" was a resample of the same judge — and nothing said so,
+    because both records named a Claude tier. This compares what actually
+    SERVED each call (``judge_resolved_model``).
+
+    ``unknown`` when either record carries no served model; it is a real
+    answer and is never collapsed into ``distinct`` (principles.md §2.7).
+    Observation only: whether the router SHOULD send both tiers to one model
+    is a routing decision, not this module's.
+    """
+    a = _normalize_served_model(first_pass.judge_resolved_model)
+    b = _normalize_served_model(escalation.judge_resolved_model)
+    if a is None or b is None:
+        return ESCALATION_UNKNOWN
+    return ESCALATION_SAME_MODEL if a == b else ESCALATION_DISTINCT
+
+
+def _note_escalation_verdict(
+    counts: dict[str, int],
+    first_pass: RubricEvalArtifact,
+    escalation: RubricEvalArtifact,
+) -> None:
+    verdict = escalation_served_model_verdict(first_pass, escalation)
+    counts[verdict] = counts.get(verdict, 0) + 1
+    if verdict == ESCALATION_SAME_MODEL:
+        logger.warning(
+            "[eval_escalation] escalation_same_served_model agent_id=%s "
+            "run_id=%s first_pass=%s(%s) escalation=%s(%s) — the escalation "
+            "re-graded with the SAME model, so it is not a second opinion "
+            "(alpha-engine-config-I11484)",
+            escalation.judged_agent_id, escalation.run_id,
+            first_pass.judge_model, first_pass.judge_resolved_model,
+            escalation.judge_model, escalation.judge_resolved_model,
+        )
+
+
+def _escalation_result_fields(counts: dict[str, int]) -> dict[str, int]:
+    """Reported on every pass, zeros included — a field that appears only
+    when something is wrong is indistinguishable from one nobody emitted."""
+    return {
+        "escalation_distinct_served_model": counts.get(ESCALATION_DISTINCT, 0),
+        "escalation_same_served_model": counts.get(ESCALATION_SAME_MODEL, 0),
+        "escalation_served_model_unknown": counts.get(ESCALATION_UNKNOWN, 0),
+    }
+
+
 # ── Capture-corpus listing ────────────────────────────────────────────────
 
 
@@ -529,6 +599,7 @@ def evaluate_corpus(
 
     haiku_evaluated = 0
     sonnet_evaluated = 0
+    escalation_verdicts: dict[str, int] = {}
     skipped_unmapped = 0
     skipped_empty_input = 0
     skipped_degenerate_input = 0
@@ -645,6 +716,10 @@ def evaluate_corpus(
             sonnet_evaluated += 1
             persisted_keys.append(sonnet_persisted_key)
             _try_emit(sonnet_eval)
+            if not force_sonnet_pass:
+                _note_escalation_verdict(
+                    escalation_verdicts, haiku_eval, sonnet_eval,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[eval_orchestrator] sonnet eval failed for %s (%s)",
@@ -684,6 +759,7 @@ def evaluate_corpus(
         "eval_prefix": eval_prefix,
         "cw_namespace": cw_namespace,
         "would_evaluate": would_evaluate,
+        **_escalation_result_fields(escalation_verdicts),
     }
 
 
@@ -1459,6 +1535,7 @@ def process_batch_results(
 
     haiku_evaluated = 0
     sonnet_evaluated = 0
+    escalation_verdicts: dict[str, int] = {}
     failed: list[dict[str, str]] = list(plan.get("client_side_skips", []))
     # Batch results whose tool output failed schema parse (malformed
     # stringified dimension_scores etc. — the 2026-07-03 weekly lost 12
@@ -1912,6 +1989,13 @@ def process_batch_results(
                 persisted_keys.append(pkey)
                 sonnet_evaluated += 1
                 _try_emit(sonnet_eval)
+                _note_escalation_verdict(
+                    escalation_verdicts,
+                    haiku_evals_by_agent_run[
+                        (entry["agent_id"], entry["run_id"])
+                    ],
+                    sonnet_eval,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "[batch_process_escalation] sonnet eval failed for %s",
@@ -2039,4 +2123,6 @@ def process_batch_results(
         "judge_only": plan.get("judge_only", False),
         "eval_prefix": eval_prefix,
         "cw_namespace": cw_namespace,
+        # alpha-engine-config-I11484 — did escalation get a second opinion?
+        **_escalation_result_fields(escalation_verdicts),
     }

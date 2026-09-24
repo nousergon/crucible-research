@@ -588,6 +588,13 @@ class TestProcessBatchResults:
         assert summary["haiku_evaluated"] == 3
         # Exactly the ic_cio escalation should have run.
         assert summary["sonnet_evaluated"] == 1
+        # Its distinctness from the first pass is reported, whatever it is
+        # (alpha-engine-config-I11484) — never absent.
+        assert (
+            summary["escalation_distinct_served_model"]
+            + summary["escalation_same_served_model"]
+            + summary["escalation_served_model_unknown"]
+        ) == 1
 
     def test_first_saturday_path_skips_escalation_tail(self, mocked_s3):
         """force_sonnet_pass=True submits both tiers in the batch — the
