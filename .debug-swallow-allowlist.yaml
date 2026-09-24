@@ -112,7 +112,7 @@ entries:
 
   # ── Expected-absence probes with a defined fallback (evals/, scoring/) ───
   - path: evals/orchestrator.py
-    line: 435
+    line: 505
     reason: >-
       Eval-dedup manifest S3 read failed for one date. No recording
       surface -- the docstring documents the failure mode as harmless (a

@@ -732,8 +732,18 @@ def evaluate_artifact(
     The ``request_model_for(judge_model)`` Anthropic-snapshot-pinning
     indirection is UNCHANGED and still used by the Batches path
     (``build_batch_request``) for the HAIKU/SONNET specs — this function no
-    longer calls it; ``judge_request_model`` on the returned artifact now
-    records the ACTUAL OpenRouter model string that was called.
+    longer calls it.
+
+    **What the returned artifact records (alpha-engine-config-I11484).**
+    ``judge_model`` is the tier key above and says NOTHING about which model
+    graded — on 2026-09-23 every record read ``claude-haiku-4-5`` /
+    ``claude-sonnet-4-6`` while DeepSeek served all of them.
+    ``judge_resolved_model`` is the model that SERVED the call, as krepis
+    resolved it from the response (``LLMResult.model``), and
+    ``judge_request_model`` is the deployment the router group resolved to and
+    this call addressed. Neither is a constant of this module any more: since
+    I6559 the router, not this code, decides what answers, so a literal here
+    could only ever be a guess about the router's registry.
 
     On every parse-failure attempt, the raw payload head is logged at
     WARNING so production failures are diagnosable without re-running the
@@ -829,9 +839,10 @@ def evaluate_artifact(
     system_part, user_part = _split_rubric_for_caching(rendered)
 
     # ``judge_model`` stays the stable logical key (persisted + dimension —
-    # see docstring). The ACTUAL request model is the OpenRouter default
-    # ``evaluate_artifact_openrouter`` already uses — deliberately the SAME
-    # for both Haiku and Sonnet tiers per Brian's ruling (see docstring).
+    # see docstring). ``request_model`` is this tier's DECLARED model, kept
+    # for logs and error messages only: the ``low`` router group decides what
+    # physically answers (I6559), and the artifact records what the router
+    # addressed and what served (I11484), not this constant.
     request_model = OPENROUTER_SHADOW.request_model
     call_result = _call_openrouter_judge_llm(
         user_part or rendered,
@@ -845,14 +856,21 @@ def evaluate_artifact(
         callsite_id="evaljudge-sync",
     )
 
+    # alpha-engine-config-I11484: ``judge_model`` is a TIER key, not the
+    # grader, so the log names it as one and puts the served model beside it.
+    # It used to read ``judge_model=claude-haiku-4-5 ... provider_cost_usd=
+    # 0.000000`` on a call DeepSeek served and whose cost the route never
+    # reported — three claims, two of them false.
     logger.info(
-        "[eval_judge] persisted-cost agent_id=%s judge_model=%s "
-        "request_model=%s resolved_model=%s provider_cost_usd=%.6f",
+        "[eval_judge] persisted-cost agent_id=%s judge_tier=%s "
+        "served_model=%s addressed=%s declared_request_model=%s "
+        "provider_cost_usd=%s",
         artifact.agent_id,
         judge_model,
-        request_model,
         call_result.resolved_model,
-        call_result.total_usd,
+        call_result.addressed_model,
+        request_model,
+        _fmt_cost(call_result.total_usd),
     )
 
     return RubricEvalArtifact(
@@ -864,7 +882,7 @@ def evaluate_artifact(
         rubric_id=rubric_name,
         rubric_version=loaded_prompt.version,
         judge_model=judge_model,
-        judge_request_model=request_model,
+        judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
         dimension_scores=call_result.llm_output.dimension_scores,
         overall_reasoning=call_result.llm_output.overall_reasoning,
@@ -1050,7 +1068,22 @@ class _OpenRouterJudgeCallResult:
 
     llm_output: RubricEvalLLMOutput
     resolved_model: str | None
-    total_usd: float
+    """The model that actually SERVED the accepted call (alpha-engine-config-
+    I11484): ``LLMResult.model``, which krepis resolves from the response's
+    ``model`` field back through the registry to the upstream model id
+    (``krepis.llm._resolve_group_served_model``). NOT ``raw_response.model``,
+    which on the litellm_proxy route is the deployment name echoed back
+    (``low-deepseek-v4-flash-tools``) — a routing alias, not a model."""
+    total_usd: float | None
+    """Sum of provider-reported cost over the attempts, or ``None`` when no
+    attempt reported one. ``0.0`` would claim the calls were free; ``None``
+    says the route did not report — the two were indistinguishable before
+    alpha-engine-config-I11484."""
+    addressed_model: str | None = None
+    """What this call put on the wire: the router-resolved ``spec.model``
+    (the deployment the ``low`` group resolved to). Distinct from the
+    caller's declared ``request_model``, which since I6559 no longer selects
+    the physical model."""
 
 
 def _call_openrouter_judge_llm(
@@ -1143,7 +1176,7 @@ def _call_openrouter_judge_llm(
     last_error: BaseException | None = None
     llm_output: RubricEvalLLMOutput | None = None
     resolved_model: str | None = None
-    total_usd = 0.0
+    total_usd: float | None = None
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -1201,14 +1234,22 @@ def _call_openrouter_judge_llm(
             continue
 
         choice = choices[0]
-        resolved_model = getattr(resp, "model", None) or resolved_model
+        # alpha-engine-config-I11484: record what SERVED the call. krepis has
+        # already resolved the response's model field to the upstream model id
+        # on ``result.model``; the raw field is only the fallback for a result
+        # that carries none (a hand-built spec, or a test double).
+        resolved_model = (
+            getattr(result, "model", None)
+            or getattr(resp, "model", None)
+            or resolved_model
+        )
 
         # Cost from LLMResult.usage — LLMClient's _usage_from_openai()
         # already extracted provider_cost_usd from usage.cost when
         # OpenRouter opted in (which it does via _openai_extra_body).
         provider_cost = result.usage.provider_cost_usd
         if provider_cost is not None:
-            total_usd += float(provider_cost)
+            total_usd = (total_usd or 0.0) + float(provider_cost)
 
         try:
             check_openai_tool_response_for_leak(choice, tool_name=tool_name)
@@ -1280,7 +1321,14 @@ def _call_openrouter_judge_llm(
         llm_output=llm_output,
         resolved_model=resolved_model,
         total_usd=total_usd,
+        addressed_model=getattr(spec, "model", None),
     )
+
+
+def _fmt_cost(total_usd: float | None) -> str:
+    """Render a judge call's provider cost for the ``persisted-cost`` line —
+    ``unreported`` rather than ``0.000000`` when the route reported none."""
+    return "unreported" if total_usd is None else f"{total_usd:.6f}"
 
 
 def evaluate_artifact_openrouter(
@@ -1394,13 +1442,15 @@ def evaluate_artifact_openrouter(
     )
 
     logger.info(
-        "[eval_judge_openrouter] persisted-cost agent_id=%s request_model=%s "
-        "resolved_model=%s provider_cost_usd=%.6f (shadow-only, no "
-        "decision authority — config#2575)",
+        "[eval_judge_openrouter] persisted-cost agent_id=%s "
+        "served_model=%s addressed=%s declared_request_model=%s "
+        "provider_cost_usd=%s (shadow-only, no decision authority — "
+        "config#2575)",
         artifact.agent_id,
-        request_model,
         call_result.resolved_model,
-        call_result.total_usd,
+        call_result.addressed_model,
+        request_model,
+        _fmt_cost(call_result.total_usd),
     )
 
     return RubricEvalArtifact(
@@ -1412,7 +1462,7 @@ def evaluate_artifact_openrouter(
         rubric_id=rubric_name,
         rubric_version=loaded_prompt.version,
         judge_model=judge_model,
-        judge_request_model=request_model,
+        judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
         dimension_scores=call_result.llm_output.dimension_scores,
         overall_reasoning=call_result.llm_output.overall_reasoning,

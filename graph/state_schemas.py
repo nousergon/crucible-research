@@ -434,25 +434,33 @@ class RubricEvalArtifact(BaseModel):
     )
     rubric_id: str = Field(description="Rubric prompt name (e.g. 'eval_rubric_sector_quant').")
     rubric_version: str = Field(description="Rubric prompt version at eval time (semver from prompt frontmatter).")
-    judge_model: str = Field(description="STABLE logical key of the judge LLM (e.g. 'claude-haiku-4-5'). Keyed on by the S3 path, the CloudWatch 'judge_model' dimension, and the custom_id tag — held constant across snapshot pins so the rolling-mean time series doesn't reset for a non-change. See evals/judge_models.py.")
+    judge_model: str = Field(description="STABLE logical TIER key of the judge (e.g. 'claude-haiku-4-5'). Keyed on by the S3 path, the CloudWatch 'judge_model' dimension, and the custom_id tag — held constant across snapshot pins so the rolling-mean time series doesn't reset for a non-change. It is a series identity, NOT the model that graded: since alpha-engine-config-I2997 the sync path's tiers are served by whatever the router's 'low' group resolves to. Read judge_resolved_model for the grader (alpha-engine-config-I11484). See evals/judge_models.py.")
     judge_request_model: str | None = Field(
         default=None,
         description=(
-            "Exact model string sent to the Anthropic API (e.g. "
-            "'claude-haiku-4-5-20251001'). Pinned to an immutable dated "
-            "snapshot where Anthropic publishes one, else the alias. None "
-            "on skip-marker artifacts (no LLM call) and on pre-L4578(a) "
-            "records. See evals/judge_models.py."
+            "Exact model string this call put on the wire. Batch path: "
+            "the Anthropic request model (e.g. "
+            "'claude-haiku-4-5-20251001'), pinned to a dated snapshot "
+            "where Anthropic publishes one. Router-resolved sync/shadow "
+            "path: the deployment the router group resolved to (e.g. "
+            "'low-deepseek-v4-flash-tools'); records before "
+            "alpha-engine-config-I11484 carry a module constant here "
+            "instead. None on skip-marker artifacts (no LLM call) and on "
+            "pre-L4578(a) records. See evals/judge_models.py."
         ),
     )
     judge_resolved_model: str | None = Field(
         default=None,
         description=(
-            "Model string Anthropic RESOLVED the request to (response "
-            "'model' field) — the authoritative record of what actually "
-            "ran and the re-anchor trigger: a change here for a given "
-            "judge_model signals a judge upgrade that breaks score "
-            "comparability. None on skips and pre-L4578(a) records."
+            "The model that actually SERVED the call — the authoritative "
+            "record of which model graded, and the re-anchor trigger: a "
+            "change here for a given judge_model signals a judge change "
+            "that breaks score comparability. Batch path: the response "
+            "'model' field. Router-resolved path: the upstream model id "
+            "krepis resolves the response to (LLMResult.model); records "
+            "before alpha-engine-config-I11484 carry the router's "
+            "deployment name here instead. None on skips and pre-L4578(a) "
+            "records."
         ),
     )
     dimension_scores: list[RubricDimensionScore] = Field(
