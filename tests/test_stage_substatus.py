@@ -250,3 +250,19 @@ class TestTheClassNotTheInstance:
             f"{filename} returns a status over sub-results it never checks — "
             "the alpha-engine-config-I10198 swallow (sf-pipeline-policy §2.3b)"
         )
+
+
+class TestRetiredIsAPass:
+    def test_the_retired_rationale_clustering_summary_is_not_unclassified(self, sub, caplog):
+        """RationaleClustering returns ``status: "retired"`` on every run since
+        its producer was retired (alpha-engine-config-I8173). The weekly
+        rehearsal of 2026-09-25 logged it as an unclassified sub-status at
+        ERROR; it is a deliberate no-op, so it must pass silently."""
+        import logging
+
+        result = {"status": "OK", "summary": {"status": "retired", "load_failures": []}}
+        with caplog.at_level(logging.ERROR):
+            sub.enforce_worst_substatus(result, stage="RationaleClustering")
+        assert result["status"] == "OK"
+        assert "substatus_unclassified" not in result
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

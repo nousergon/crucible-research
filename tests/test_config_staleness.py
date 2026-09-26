@@ -42,10 +42,12 @@ def test_check_s3_pointer_staleness_silent_when_absent(caplog):
     assert not any("STALE" in r.message for r in caplog.records)
 
 
-def test_load_research_params_from_s3_warns_on_stale_write(monkeypatch, caplog, tmp_path):
-    """End-to-end: a simulated stale write on the real S3 read path logs the WARN."""
+def test_load_research_params_from_s3_does_not_flag_the_retired_key(monkeypatch, caplog, tmp_path):
+    """The research_params writer is retired (alpha-engine-config-I3246), so
+    the key only gets older. Loading it must not log STALE, and must still
+    return its params."""
     monkeypatch.setattr(config, "_RESEARCH_PARAMS_CACHE_PATH", str(tmp_path / "research_params_cache.json"))
-    stale_time = datetime.now(UTC) - timedelta(days=30)
+    stale_time = datetime.now(UTC) - timedelta(days=150)
     mock_s3 = MagicMock()
     mock_s3.get_object.return_value = _make_s3_response(
         {"short_interest_buy_boost": 2.0}, stale_time
@@ -53,6 +55,7 @@ def test_load_research_params_from_s3_warns_on_stale_write(monkeypatch, caplog, 
     mock_boto3 = MagicMock()
     mock_boto3.client.return_value = mock_s3
     monkeypatch.setitem(__import__("sys").modules, "boto3", mock_boto3)
-    with caplog.at_level(logging.ERROR):
-        config._load_research_params_from_s3()
-    assert any("STALE config/research_params.json" in r.message for r in caplog.records)
+    with caplog.at_level(logging.WARNING):
+        params = config._load_research_params_from_s3()
+    assert not any("STALE" in r.message for r in caplog.records)
+    assert params == {"short_interest_buy_boost": 2.0}

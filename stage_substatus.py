@@ -61,6 +61,11 @@ PASS_STATUSES: frozenset[str] = frozenset({
     "OK", "ok", "PASS", "PASSED", "SUCCESS", "SUCCEEDED", "Success",
     "COMPLETE", "COMPLETED", "CLEAN", "EMPTY", "COVERED",
     "COVERED_NO_OUTPUT", "SKIPPED", "skipped", "NOOP", "DRY_RUN",
+    # evals/rationale_clustering: the producer was retired on purpose
+    # (alpha-engine-config-I8173) and the stage now returns this on every
+    # run. Doing nothing is what it is asked to do, so it is a pass. Left
+    # unclassified, it logged an ERROR on every weekly run from 2026-09-08.
+    "retired",
 })
 
 #: A status meaning "this did not do what it was asked to do, and said so".

@@ -683,7 +683,13 @@ def _load_research_params_from_s3() -> dict | None:
         bucket = os.environ.get("RESEARCH_BUCKET", S3_BUCKET)
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=_RESEARCH_PARAMS_S3_KEY)
-        check_s3_pointer_staleness(obj.get("LastModified"), _RESEARCH_PARAMS_S3_KEY)
+        # No staleness check on this key. Its only writer, the backtester's
+        # research_optimizer live path, was retired by crucible-backtester
+        # PR562 (alpha-engine-config-I3246), and its central freshness row
+        # was removed for the same reason (alpha-engine-config-I5199). The
+        # key is a frozen config now, so "older than two weekly cycles" is
+        # true forever and logged an ERROR on every scanner run.
+        # scoring/aggregator.py still checks config/scoring_weights.json.
         data = json.loads(obj["Body"].read())
 
         # Only load known keys, skip metadata like updated_at
