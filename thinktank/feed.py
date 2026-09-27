@@ -97,12 +97,24 @@ def build_feed_window(
 ) -> FeedWindow:
     """Assemble + validate a :class:`FeedWindow`. Pure — unit-testable without S3.
 
-    Asserts the cut is the HEAD of its own basis' ranking. That holds by
-    construction in the producer (every cut is a ``_top_n`` of the table its
-    ``basis`` names), which is exactly why it went unchecked there and is worth
-    checking here: if it ever stops holding, a rank ceiling and a cut membership
-    are two different opinions about the same question, and the consumer would
-    quietly average them.
+    Asserts the cut is the HEAD of its own basis' ranking on the day the cut
+    was FORMED. That holds by construction in the producer (every cut is a
+    ``_top_n`` of the table its ``basis`` names), which is exactly why it went
+    unchecked there and is worth checking here: if it ever stops holding, a
+    rank ceiling and a cut membership are two different opinions about the
+    same question, and the consumer would quietly average them.
+
+    On a HELD cut (``cut_effective_date`` earlier than ``run_date``) the
+    invariant does not apply. Under the weekly cadence the producer carries the
+    cut forward and refreshes the ranks on purpose
+    (``scoring.universe_membership.carry_forward_cuts``), so the cut is the
+    head of the formation day's table, not today's — the design Brian ruled
+    2026-08-27: the same companies for a week, with intake and exit still
+    reading today's ranks. Refusing there turned every mid-week membership
+    write into a lost Think Tank day (2026-09-26 and -27: run_date 2026-09-25,
+    cut formed 2026-09-23, 6 of 60 names drifted outside today's top 60). The
+    drift is recorded on the provenance instead, so how stale the held cut has
+    become stays readable.
     """
     if not tickers:
         raise UniverseMembershipError(
@@ -112,16 +124,28 @@ def build_feed_window(
     ordered = tuple(t for t, _ in sorted(ranks.items(), key=lambda kv: kv[1]))
     head = set(ordered[: len(tickers)])
     window = set(tickers)
-    if head != window:
+    outside_head = sorted(window - head)
+    run_date = provenance.get("run_date")
+    cut_effective_date = provenance.get("cut_effective_date")
+    held = bool(cut_effective_date) and bool(run_date) and str(cut_effective_date) < str(run_date)
+    if outside_head and not held:
         raise UniverseMembershipError(
-            f"universe_membership (run_date={provenance.get('run_date')}): cut "
+            f"universe_membership (run_date={run_date}): cut "
             f"{provenance.get('cut')!r} is not the head of its own "
-            f"{provenance.get('basis')!r} ranking — {len(window - head)} of "
+            f"{provenance.get('basis')!r} ranking — {len(outside_head)} of "
             f"{len(window)} name(s) in the cut are outside the top {len(tickers)} "
-            f"of the rank table ({sorted(window - head)}). The cut and the rank "
+            f"of the rank table ({outside_head}). The cut and the rank "
             "ceiling would then be two different orderings of the same universe, "
             "and Think Tank would be using both."
         )
+    if outside_head:
+        logger.warning(
+            "[thinktank] held cut %r (formed %s, ranks refreshed for %s): %d of %d "
+            "name(s) have drifted outside today's top %d: %s",
+            provenance.get("cut"), cut_effective_date, run_date,
+            len(outside_head), len(window), len(tickers), outside_head,
+        )
+    provenance = {**provenance, "cut_held": held, "cut_outside_rank_head": outside_head}
     declared_size = provenance.get("declared_size")
     if declared_size is not None and int(declared_size) != len(tickers):
         raise UniverseMembershipError(
