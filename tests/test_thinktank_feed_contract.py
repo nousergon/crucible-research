@@ -386,6 +386,60 @@ def test_a_cut_that_is_not_the_head_of_its_own_ranking_is_refused():
         )
 
 
+def test_a_cut_not_the_head_on_its_formation_day_is_refused():
+    ranks = {f"T{i:04d}": i + 1 for i in range(100)}
+    with pytest.raises(UniverseMembershipError, match="not the head"):
+        build_feed_window(
+            [f"T{i:04d}" for i in range(50, 60)],
+            ranks,
+            {
+                "cut": "c_top_10",
+                "basis": "attractiveness_rank",
+                "run_date": "2026-09-23",
+                "cut_effective_date": "2026-09-23",
+            },
+        )
+
+
+def test_a_held_cut_with_refreshed_ranks_is_served_and_its_drift_recorded():
+    """Measured 2026-09-26/27: run_date 2026-09-25 carried the cut formed
+    2026-09-23 with ranks refreshed for the 25th, and 6 of 60 cut members had
+    drifted outside today's top 60. The weekly cadence holds the cut and
+    refreshes the ranks by design, so the window is the held cut and the drift
+    is a reading, not a refusal."""
+    ranks = {f"T{i:04d}": i + 1 for i in range(100)}
+    cut = [f"T{i:04d}" for i in range(8)] + ["T0050", "T0051"]
+    window = build_feed_window(
+        cut,
+        ranks,
+        {
+            "cut": "c_top_10",
+            "basis": "attractiveness_rank",
+            "run_date": "2026-09-25",
+            "cut_effective_date": "2026-09-23",
+        },
+    )
+    assert window.tickers == tuple(cut)
+    assert window.ordered[:3] == ("T0000", "T0001", "T0002")
+    assert window.provenance["cut_held"] is True
+    assert window.provenance["cut_outside_rank_head"] == ["T0050", "T0051"]
+
+
+def test_a_cut_dated_after_its_run_date_is_not_treated_as_held():
+    ranks = {f"T{i:04d}": i + 1 for i in range(100)}
+    with pytest.raises(UniverseMembershipError, match="not the head"):
+        build_feed_window(
+            [f"T{i:04d}" for i in range(50, 60)],
+            ranks,
+            {
+                "cut": "c_top_10",
+                "basis": "attractiveness_rank",
+                "run_date": "2026-09-23",
+                "cut_effective_date": "2026-09-25",
+            },
+        )
+
+
 def test_a_cut_whose_declared_size_disagrees_with_its_tickers_is_refused():
     ranks = {f"T{i:04d}": i + 1 for i in range(100)}
     with pytest.raises(UniverseMembershipError, match="declares size"):
