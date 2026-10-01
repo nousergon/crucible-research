@@ -121,3 +121,52 @@ def test_imds_failure_degrades_to_budget_only_never_to_no_deadline():
 
     ctx = runner.BoxContext(600.0, watcher)
     assert ctx.get_remaining_time_in_millis() > 0
+
+
+# ── run mode (alpha-engine-config-I11378) ───────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", [None, "", "  ", "daily"])
+def test_absent_or_daily_mode_runs_the_daily_pass(mode):
+    """The daily EventBridge rule sends no mode; its box must keep running the
+    exact event it always ran (``{}``)."""
+    assert runner.resolve_event(mode) == {}
+
+
+def test_gap_fill_mode_reaches_the_handler_as_gap_fill():
+    """``thinktank_handler`` reads ``event["mode"] == "gap_fill"`` to set
+    ``gap_fill_only`` -- the weekly SF's bulk pass over the pinned window."""
+    assert runner.resolve_event("gap_fill") == {"mode": "gap_fill"}
+
+
+@pytest.mark.parametrize("mode", ["gapfill", "gap_fill_plan", "weekly", "GAP_FILL"])
+def test_unknown_mode_refuses_rather_than_running_daily(mode):
+    with pytest.raises(ValueError, match="THINKTANK_RUN_MODE"):
+        runner.resolve_event(mode)
+
+
+def test_main_passes_the_resolved_event_to_the_handler(monkeypatch):
+    """End to end through ``main``: the env var is what the dispatcher sets."""
+    seen = {}
+
+    def _fake_handler(event, context):
+        seen["event"] = event
+        seen["has_clock"] = hasattr(context, "get_remaining_time_in_millis")
+        return {"status": "OK"}
+
+    fake = type(sys)("thinktank_handler")
+    fake.handler = _fake_handler
+    monkeypatch.setitem(sys.modules, "thinktank_handler", fake)
+
+    class _Watcher(_StubWatcher):
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner, "SpotInterruptionWatcher", _Watcher)
+    monkeypatch.setenv("THINKTANK_RUN_BUDGET_SECONDS", "60")
+    monkeypatch.setenv("THINKTANK_RUN_MODE", "gap_fill")
+    assert runner.main() == 0
+    assert seen == {"event": {"mode": "gap_fill"}, "has_clock": True}

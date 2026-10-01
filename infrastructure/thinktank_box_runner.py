@@ -94,6 +94,30 @@ _IMDS_TIMEOUT_SECONDS = 2.0
 # if runs start truncating again.
 _DEFAULT_BUDGET_SECONDS = 5400  # 90 min
 
+# Which pass this box runs. The dispatcher exports ``THINKTANK_RUN_MODE`` from
+# the event that launched it (alpha-engine-config-I11378): the daily
+# EventBridge rule sends none, so the daily pass is the default; the weekly
+# SF's ``ThinkTankCoverage`` state sends ``gap_fill``, which runs
+# ``thinktank.run.run_daily(gap_fill_only=True)`` -- intake sized to the exact
+# uncovered count of the PINNED coverage window, every name in it, no stale
+# refill. That is the bulk lever the 5/day drip lacks: the window churns weekly
+# and the drip never closes a 30+ name hole before the next churn.
+#
+# Anything else REFUSES. An unknown mode silently falling back to the daily
+# pass would make a mistyped or newer dispatcher look like it ran a gap fill.
+_RUN_MODES = {"daily": {}, "gap_fill": {"mode": "gap_fill"}}
+
+
+def resolve_event(mode: str | None) -> dict:
+    """The handler event for ``THINKTANK_RUN_MODE``. Empty/absent -> daily."""
+    key = (mode or "daily").strip() or "daily"
+    if key not in _RUN_MODES:
+        raise ValueError(
+            f"THINKTANK_RUN_MODE={mode!r} is not one of {sorted(_RUN_MODES)} -- "
+            "refusing rather than running the daily pass under another name"
+        )
+    return dict(_RUN_MODES[key])
+
 
 class SpotInterruptionWatcher:
     """Polls IMDSv2 for a spot interruption notice and latches on the first one.
@@ -199,6 +223,10 @@ def main() -> int:
             "failure this migration exists to fix"
         )
 
+    # Resolved BEFORE the watcher starts and before any import that touches
+    # S3, so a bad mode costs nothing.
+    event = resolve_event(os.environ.get("THINKTANK_RUN_MODE"))
+
     watcher = SpotInterruptionWatcher()
     watcher.start()
     context = BoxContext(budget, watcher)
@@ -206,11 +234,12 @@ def main() -> int:
     from thinktank_handler import handler  # noqa: PLC0415 - after sys.path setup
 
     logger.info(
-        "[thinktank_box_runner] starting daily run: budget=%.0fs, terminal-write reserve enforced by thinktank.run",
+        "[thinktank_box_runner] starting %s run: budget=%.0fs, terminal-write reserve enforced by thinktank.run",
+        event.get("mode", "daily"),
         budget,
     )
     try:
-        result = handler({}, context)
+        result = handler(event, context)
     finally:
         watcher.stop()
     logger.info("[thinktank_box_runner] run complete: status=%s", result.get("status"))
