@@ -5,7 +5,9 @@ Intake policy (EPIC config#1579, skeleton-crew MVP):
   scanner's DECLARED ranking — ``thinktank.feed.FeedWindow``, resolved from
   ``universe_membership/latest.json`` through the live champion pointer, never
   re-derived here (alpha-engine-config-I7842) — bounded by ``rank_ceiling``
-  (never initiate coverage on a name ranked below R);
+  (never initiate coverage on a name ranked below R), uncovered members of the
+  declared coverage WINDOW first, then everything else in rank order
+  (nous-ergon-ops-I570 — the window is what ``coverage_complete`` measures);
 - when fewer than ``daily_new_names`` eligible uncovered names exist, the
   remaining slots refresh the STALEST covered theses — coverage maintenance
   falls out of the intake rule for free (the DISCRETIONARY path);
@@ -76,7 +78,8 @@ def select_intake(
     off by one below rank 98 today (alpha-engine-config-I7844).
 
     ``new`` = top uncovered names with rank <= rank_ceiling (rank is the
-    1-based rank the membership artifact publishes). ``refresh``
+    1-based rank the membership artifact publishes), uncovered WINDOW members
+    ahead of non-window names (nous-ergon-ops-I570). ``refresh``
     fills any remaining slots with the stalest covered names (the
     DISCRETIONARY path) — UNLESS ``skip_stale_refill``, which suppresses
     that discretionary fill (used by the Saturday SF's gap-fill mode:
@@ -143,11 +146,42 @@ def select_intake(
                 ", ".join(dropped),
             )
 
+    # ── WINDOW MEMBERS FIRST (nous-ergon-ops-I570) ──────────────────────────
+    # ``coverage_complete`` — the only thing that lets this arm write
+    # leaderboard evidence — is measured over the WINDOW (``window.tickers``),
+    # not over today's rank order. On the cut's formation day the two agree:
+    # the cut is the head of the ranking, so today's order reaches every
+    # window member first. On a HELD cut they do not (``thinktank.feed``:
+    # ranks are refreshed mid-week, the cut is not), and walking today's order
+    # spent intake slots on non-window names ranked between drifted window
+    # members — names that can never move ``coverage_complete``. Measured on
+    # the live ledger 2026-10-03 (cut formed 2026-09-23, ranks of 2026-09-25):
+    # 19 window members uncovered, 74 non-window names uncovered inside
+    # rank_ceiling, and the window member at today's rank 122 sat behind ~70
+    # of them, so the arm could not reach a complete window before the cut
+    # re-formed. The rank_ceiling bound is unchanged and still reads today's
+    # rank; only the ORDER among eligible names changes, and on a formation
+    # day it does not change at all.
+    window_members = set(window.tickers)
+    eligible = [(rank, ticker) for rank, ticker in enumerate(window.ordered, start=1) if rank <= rank_ceiling]
+    eligible = [e for e in eligible if e[1] in window_members] + [e for e in eligible if e[1] not in window_members]
+
+    unreachable = sorted(
+        t for t in window_members - covered if (window.rank_of(t) is None or window.rank_of(t) > rank_ceiling)
+    )
+    if unreachable:
+        logger.warning(
+            "[thinktank] %d uncovered window member(s) rank outside rank_ceiling=%d "
+            "today and cannot be taken in by intake: %s. coverage_complete cannot "
+            "become True until the cut re-forms (nous-ergon-ops-I570).",
+            len(unreachable),
+            rank_ceiling,
+            ", ".join(f"{t}@{window.rank_of(t)}" for t in unreachable),
+        )
+
     new_rows: list[dict] = []
     unjoinable: list[str] = []
-    for rank, ticker in enumerate(window.ordered, start=1):
-        if rank > rank_ceiling:
-            break
+    for rank, ticker in eligible:
         if ticker in covered:
             continue
         row = board_rows.get(ticker)

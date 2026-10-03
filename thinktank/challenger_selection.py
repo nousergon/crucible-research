@@ -229,17 +229,29 @@ def write_challenger_selection(
     )
 
     if update_latest_pointer:
-        shadow_key = _write_shadow_signals(store, selection)
+        shadow_key = _write_shadow_signals(store, selection, window_size=coverage_gap.get("top_n"))
         if shadow_key:
             logger.info("challenger shadow signals written: %s", shadow_key)
 
     return selection
 
 
-def _write_shadow_signals(store: ThinktankStore, selection: ChallengerSelection) -> str | None:
-    """Conforming ``signals_shadow/thinktank_coverage/{trading_day}/signals.json``
-    for the shared leaderboard scorer — ONLY when ``coverage_complete``
-    (see module docstring). Returns the S3 key written, or None when skipped."""
+def _write_shadow_signals(
+    store: ThinktankStore,
+    selection: ChallengerSelection,
+    *,
+    window_size: int | None = None,
+) -> str | None:
+    """Conforming ``CHALLENGER_SHADOW_SIGNALS_KEY_TMPL`` view for the shared
+    leaderboard scorer — ONLY when ``coverage_complete`` (see module
+    docstring). Returns the S3 key written, or None when skipped.
+
+    ``window_size`` is the DECLARED coverage window ``uncovered_count`` is
+    measured over (``coverage_gap["top_n"]``), used only to word the skip
+    alert. It is not ``CHALLENGER_TOP_N``: the alert used to say "uncovered=19
+    of the declared top-20 window" for a 60-name window (nous-ergon-ops-I570),
+    which reads as an arm with almost nothing covered."""
+    key = CHALLENGER_SHADOW_SIGNALS_KEY_TMPL.format(trading_day=selection.trading_day)
     if not selection.coverage_complete:
         # ── An arm that cannot produce a cohort must SAY so ────────────────
         # alpha-engine-config-I9282. This skip is correct (an incomplete
@@ -257,21 +269,21 @@ def _write_shadow_signals(store: ThinktankStore, selection: ChallengerSelection)
         # challenger evidence is a reported event on the cycle it happens.
         logger.warning(
             "challenger shadow signals SKIPPED for %s — coverage incomplete "
-            "(uncovered=%d of the declared top-%d window). This arm "
+            "(uncovered=%d of the declared %s-name coverage window). This arm "
             "contributes NO cohort date for %s; its leaderboard row will not "
             "advance (alpha-engine-config-I9282).",
             selection.trading_day,
             selection.uncovered_count,
-            CHALLENGER_TOP_N,
+            window_size if window_size is not None else "?",
             selection.trading_day,
         )
         publish_observe_alert(
             message=(
                 f"[thinktank] challenger arm produced NO leaderboard evidence "
                 f"for {selection.trading_day}: coverage incomplete "
-                f"(uncovered={selection.uncovered_count}). "
-                f"signals_shadow/thinktank_coverage/{selection.trading_day}/"
-                f"signals.json NOT written — the arm is scored on a cohort "
+                f"(uncovered={selection.uncovered_count} of the "
+                f"{window_size if window_size is not None else '?'}-name coverage window). "
+                f"{key} NOT written — the arm is scored on a cohort "
                 f"that stopped advancing. champion-challenger-policy.md §3 "
                 f"(a no-output cycle is a MISS, not an omission)."
             ),
@@ -300,6 +312,5 @@ def _write_shadow_signals(store: ThinktankStore, selection: ChallengerSelection)
         "run_date": selection.calendar_date,
         "signals": signals,
     }
-    key = CHALLENGER_SHADOW_SIGNALS_KEY_TMPL.format(trading_day=selection.trading_day)
     store.put_json(key, payload)
     return key
