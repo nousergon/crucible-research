@@ -415,6 +415,23 @@ def build_candidates_artifact(
             f"constituents.json has {len(constituents)} tickers — refusing to scan (expected >= 800 for S&P 500+400)"
         )
 
+    # ── 1b. Declared per-ticker holds (alpha-engine-config-I11806) ──────
+    # A held name is removed from the scanner universe HERE, before the quant
+    # filter, so the eval log, the universe board and every rank table and
+    # cut derived from them never see it — no arm can pick it. The floor
+    # check above runs on the unfiltered list: a hold is not a data loss.
+    from data.ticker_holds import active_holds
+
+    holds = active_holds(run_date)
+    held_present = sorted(t for t in holds if t in set(constituents))
+    if held_present:
+        constituents = [t for t in constituents if t not in holds]
+        logger.warning(
+            "[scanner_orchestrator] %d declared hold(s) removed from the scanner universe: %s",
+            len(held_present),
+            {t: f"through {holds[t].valid_through} ({holds[t].issue})" for t in held_present},
+        )
+
     # ── 2. Prior cycle: population (signals) + scanner picks (candidates) ─
     # The churn baseline is the prior cycle's OWN scanner output, not the
     # signals envelope — see the module docstring (alpha-engine-config-I11488).
@@ -543,6 +560,15 @@ def build_candidates_artifact(
         "agent_input_set": agent_input_set,
         "scanner_eval_log": eval_log,
         "filters_applied": _resolved_scanner_params(),
+        "declared_holds": {
+            t: {
+                "valid_from": holds[t].valid_from,
+                "valid_through": holds[t].valid_through,
+                "why": holds[t].why,
+                "issue": holds[t].issue,
+            }
+            for t in held_present
+        },
         "stats": {
             "universe_size": len(constituents),
             "post_scanner": len(scanner_tickers),
