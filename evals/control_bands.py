@@ -1094,6 +1094,39 @@ def latest_complete_week_index(end_time: datetime) -> int:
     return int(end_time.timestamp()) // _WEEK_SECONDS - 1
 
 
+def query_window_start(end_time: datetime) -> datetime:
+    """The ``GetMetricData`` StartTime: ON a week-slot boundary.
+
+    CloudWatch lays a query's ``Period`` buckets from its ``StartTime``
+    (rounded down to the hour for a window this old), not from the
+    epoch. ``_week_index`` maps each returned bucket start to the
+    epoch-anchored slot ``floor(t / 7 days)``, and the review floor and
+    the STALE test look a combo up by that slot. Those two agree only
+    when the buckets ARE the slots, so the start must sit on a slot
+    boundary.
+
+    It used to be ``end - LOOKBACK_WEEKS * 7 days``, which put every
+    bucket edge at the run's own hour-of-week. Measured on the
+    2026-10-03 13:24Z run: buckets ran Saturday 13:00 -> Saturday
+    13:00, the one labelled slot 2960 (2026-09-24..10-01) covered
+    09-26 13:00 -> 10-03 13:00 and held nothing, because that week's
+    judging landed 09-24 01:00, 09-26 00:00 and 09-26 10:00 (all in
+    the bucket before it) and the 10-03 run's own judging landed at
+    13:09-13:24Z (in the open bucket after it). The floor reported 22
+    of 22 combos at 0 reviews; on slot-aligned buckets the same corpus
+    has 7 of 21 under the floor (alpha-engine-config-I11680).
+
+    The window is the ``LOOKBACK_WEEKS`` complete slots before
+    ``end_time``'s slot, plus that open slot, which
+    ``_weekly_series_by_combo`` drops -- the same 26 complete weeks the
+    unaligned window charted.
+    """
+    current_slot = int(end_time.timestamp()) // _WEEK_SECONDS
+    return datetime.fromtimestamp(
+        (current_slot - LOOKBACK_WEEKS) * _WEEK_SECONDS, tz=UTC,
+    )
+
+
 def _weekly_series_by_combo(
     metric_data_results: list[dict[str, Any]],
     combos: list[list[dict[str, str]]],
@@ -1213,7 +1246,7 @@ def compute_and_emit_control_bands(
     cw = cloudwatch_client or boto3.client("cloudwatch")
     s3 = s3_client or boto3.client("s3")
     end = end_time or datetime.now(UTC)
-    start = end - timedelta(days=LOOKBACK_WEEKS * 7)
+    start = query_window_start(end)
 
     combos = _list_metric_combos(
         cw, namespace=namespace, metric_name=source_metric,

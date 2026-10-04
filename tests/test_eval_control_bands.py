@@ -669,3 +669,113 @@ class TestLiveSeries20260908:
         r = cb.evaluate_series(_obs(vals, reviews=ns, skip=(6,)))
         assert r.status == cb.STATUS_IN_CONTROL
         assert abs(r.latest_z) < 3.0
+
+
+class TestQueryWindowIsSlotAligned:
+    """The review floor reads buckets by epoch week slot, so the query's
+    buckets must BE the slots (alpha-engine-config-I11680).
+
+    CloudWatch lays ``Period`` buckets from the query's ``StartTime``
+    (rounded down to the hour), not from the epoch. ``_CloudWatchBuckets``
+    reproduces that, so the 2026-10-03 13:24Z run can be replayed against
+    the review timestamps CloudWatch actually held for
+    ``thinktank_thesis/moat_and_business_quality/claude-haiku-4-5``.
+    """
+
+    END = datetime(2026, 10, 3, 13, 24, 41, tzinfo=_UTC)
+    # Hourly SampleCount buckets read back from CloudWatch on 2026-10-04.
+    REVIEWS = [
+        (datetime(2026, 9, 19, 12, tzinfo=_UTC), 42),
+        (datetime(2026, 9, 24, 1, tzinfo=_UTC), 21),
+        (datetime(2026, 9, 26, 0, tzinfo=_UTC), 7),
+        (datetime(2026, 9, 26, 10, tzinfo=_UTC), 5),
+        (datetime(2026, 10, 3, 13, 9, tzinfo=_UTC), 36),
+    ]
+
+    @staticmethod
+    def _cloudwatch_buckets(combos, reviews):
+        """MagicMock whose get_metric_data buckets from StartTime."""
+        cw = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {"Metrics": [{"Dimensions": d} for d in combos]},
+        ]
+        cw.get_paginator.return_value = paginator
+
+        def get_metric_data(*, MetricDataQueries, StartTime, EndTime, **_):
+            origin = StartTime.replace(minute=0, second=0, microsecond=0)
+            period = timedelta(days=7)
+            buckets: dict[datetime, int] = {}
+            for at, n in reviews:
+                if not origin <= at < EndTime:
+                    continue
+                start = origin + period * ((at - origin) // period)
+                buckets[start] = buckets.get(start, 0) + n
+            ts = sorted(buckets, reverse=True)
+            out = []
+            for q in MetricDataQueries:
+                stat = q["MetricStat"]["Stat"]
+                vals = [
+                    float(buckets[t]) if stat == "SampleCount" else 4.5
+                    for t in ts
+                ]
+                out.append({"Id": q["Id"], "Timestamps": ts, "Values": vals})
+            return {"MetricDataResults": out}
+
+        cw.get_metric_data.side_effect = get_metric_data
+        return cw
+
+    def test_start_sits_on_a_slot_boundary(self):
+        start = cb.query_window_start(self.END)
+        assert int(start.timestamp()) % cb._WEEK_SECONDS == 0
+        current = int(self.END.timestamp()) // cb._WEEK_SECONDS
+        assert current - cb._week_index(start) == cb.LOOKBACK_WEEKS
+
+    def test_start_on_a_boundary_is_its_own_slot(self):
+        boundary = cb.query_window_start(self.END)
+        later = boundary + timedelta(weeks=cb.LOOKBACK_WEEKS)
+        assert cb.query_window_start(later) == boundary
+
+    def test_the_2026_10_03_run_counts_the_week_it_judged(self):
+        combos = [_dims(
+            "thinktank_thesis", "moat_and_business_quality",
+        )]
+        cw = self._cloudwatch_buckets(combos, self.REVIEWS)
+
+        out = cb.compute_and_emit_control_bands(
+            end_time=self.END, cloudwatch_client=cw, s3_client=MagicMock(),
+        )
+
+        # Slot 2960 (2026-09-24..10-01) holds 21 + 7 + 5 = 33 reviews. The
+        # unaligned window read it as 0, so all 22 combos breached.
+        assert cb.latest_complete_week_index(self.END) == 2960
+        assert out["review_floor_breach_count"] == 0, out["review_floor_breaches"]
+        start = cw.get_metric_data.call_args.kwargs["StartTime"]
+        assert start == cb.query_window_start(self.END)
+
+    def test_the_unaligned_window_is_what_read_zero(self):
+        # Pins the mechanism, so a revert to `end - 26 weeks` is caught
+        # here rather than by the next Saturday's 22-of-22 page.
+        combos = [_dims(
+            "thinktank_thesis", "moat_and_business_quality",
+        )]
+        cw = self._cloudwatch_buckets(combos, self.REVIEWS)
+        results = cw.get_metric_data(
+            MetricDataQueries=[{
+                "Id": "n0",
+                "MetricStat": {"Stat": "SampleCount"},
+            }],
+            StartTime=self.END - timedelta(weeks=cb.LOOKBACK_WEEKS),
+            EndTime=self.END,
+        )["MetricDataResults"]
+        counts = results[0]
+        means = {
+            "Id": "m0",
+            "Timestamps": counts["Timestamps"],
+            "Values": [4.5] * len(counts["Timestamps"]),
+        }
+        series = cb._weekly_series_by_combo(
+            [means, counts], combos, end_time=self.END,
+        )
+        latest = cb.latest_complete_week_index(self.END)
+        assert all(o.week_index != latest for o in series[0])
