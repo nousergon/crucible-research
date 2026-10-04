@@ -152,7 +152,16 @@ pydantic~=2.13
 # code — `pip install ...@v0.124.152` reports 0.124.152 and still raises
 # ImportError on STATISTIC_INFORMATION_RATIO. Measured, then verified with
 # `git merge-base --is-ancestor <PR444 sha> v0.124.153`.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.153
+# v0.124.153 -> v0.124.165: alpha-engine-config-I11897 (nousergon-lib-PR461,
+# merged 2026-10-03) added ArenaConfig.promote_against. scoring/research_arena.py
+# declares promote_against=PROMOTE_AGAINST_EVERY_ARM per Brian's 2026-10-03
+# every-arm ruling (alpha-engine-config#11849), so this bump is the change: the
+# name does not import below it. v0.124.165 is the merge-time autobump directly
+# after PR461's squash; verified with
+# `git merge-base --is-ancestor 00b5d76 v0.124.165`. The other arena change in
+# the range (lib-PR453, I11084: an arm retired after as_of stays in its trailing
+# window) is a correctness fix this slot consumes unchanged.
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.165
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
