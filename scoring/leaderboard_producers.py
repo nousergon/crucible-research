@@ -1290,6 +1290,48 @@ def _cut_picks_by_date(
     return out
 
 
+def _arm_history(
+    s3: Any,
+    bucket: str,
+    spec: Any,
+    dates: Sequence[str],
+    membership_dates: Sequence[str],
+) -> dict[str, SpecDay]:
+    """``{date: SpecDay}`` for one REGISTERED arm: its own picks plus every
+    record it declares it inherits.
+
+    ONE path for every live arm, whatever row it lands on. The champion and
+    the challengers both read through here, so an arm's history cannot depend
+    on which side of the comparison it currently sits — before this helper
+    the inheritance lived inline in the challenger loop and the champion row
+    never saw it (alpha-engine-config-I11931).
+    """
+    own = _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
+    if spec.supersedes_cut:
+        # The CROSS-SURFACE inheritance (alpha-engine-config-I11422): this
+        # arm continues a membership CUT's record, not another producer
+        # shadow's. Same `setdefault` rule as `supersedes` below — the
+        # successor's own picks win every date collision, so an
+        # inheritance can fill a gap the live arm never produced and can
+        # never overwrite something it measured.
+        for date_str, day in _cut_picks_by_date(
+            s3, bucket, spec.supersedes_cut, membership_dates,
+        ).items():
+            own.setdefault(date_str, day)
+    if spec.supersedes:
+        # Inherit the predecessor's cohort dates (alpha-engine-config-I11393).
+        # The successor's OWN picks always win a date collision —
+        # ``setdefault`` only fills dates this arm did not produce — so an
+        # inheritance can never overwrite something the live arm measured.
+        inherited = _picks_by_date(
+            s3, bucket, spec.supersedes, dates,
+            score_source_for(spec.supersedes),
+        )
+        for date_str, day in inherited.items():
+            own.setdefault(date_str, day)
+    return own
+
+
 def _load_producer_specs(
     s3: Any,
     bucket: str,
@@ -1326,22 +1368,43 @@ def _load_producer_specs(
     # The membership cohort, enumerated ONCE and only when an arm actually
     # inherits from it — the listing is a full prefix walk and every arm that
     # does not declare `supersedes_cut` would pay for it.
+    champ_name = _resolve_champion_name(s3, bucket)
+    champ_spec = RESEARCH_PRODUCERS.get(champ_name) if champ_name is not None else None
+
+    # The champion is asked too: its register row may declare a cut it
+    # inherits from even when no challenger does (alpha-engine-config-I11931).
     membership_dates: list[str] = []
-    if any(spec.supersedes_cut for spec in challenger_producers()):
+    if any(
+        spec.supersedes_cut
+        for spec in (*challenger_producers(), *([champ_spec] if champ_spec else []))
+    ):
         membership_dates = [
             d for d in _cohort_dates(s3, bucket, "universe_membership/", depth=0)
             if len(d) == 10 and d[4] == "-"
         ]
 
-    champ_name = _resolve_champion_name(s3, bucket)
     champion: SpecHistory | None = None
     if champ_name is not None:
-        champ_spec = RESEARCH_PRODUCERS.get(champ_name)
         # Picks FIRST: SpecHistory is frozen, and the unmeasurable reason is a
         # property of what the read found, so it cannot be back-filled onto an
         # already-constructed row.
         champ_source = score_source_for(champ_name)
-        champ_picks = _picks_by_date(s3, bucket, champ_name, dates, champ_source)
+        # The champion keeps the record it earned as a challenger
+        # (champion-challenger-policy.md §3: a promoted arm keeps its
+        # history). Read through the SAME own-picks-plus-inheritance path the
+        # challenger loop below uses — before this, the champion row read its
+        # own source only, so an arm whose record was INHERITED
+        # (`supersedes_cut` / `supersedes`) lost all of it the cycle it was
+        # promoted. Measured 2026-10-02: `attractiveness_20` scored 15 dates
+        # as a challenger on the 2026-09-25 board, was promoted that cycle,
+        # and scored ZERO as champion — so every pairwise comparison in the
+        # producer arena came back `common_window_too_short` and the cycle
+        # was `unmeasurable` (alpha-engine-config-I11931).
+        champ_picks = (
+            _arm_history(s3, bucket, champ_spec, dates, membership_dates)
+            if champ_spec is not None
+            else _picks_by_date(s3, bucket, champ_name, dates, champ_source)
+        )
         champ_unmeasurable = None if champ_picks else (
             f"no ENTER picks on any of the {len(dates)} cohort date(s) at "
             f"score_source={champ_source!r} — the champion arm produced no "
@@ -1392,30 +1455,9 @@ def _load_producer_specs(
             promotion_eligible=spec.promotion_eligible,
             ineligible_reason=spec.ineligible_reason,
         )
-        own = _picks_by_date(s3, bucket, spec.name, dates, spec.score_source)
-        if spec.supersedes_cut:
-            # The CROSS-SURFACE inheritance (alpha-engine-config-I11422): this
-            # arm continues a membership CUT's record, not another producer
-            # shadow's. Same `setdefault` rule as `supersedes` below — the
-            # successor's own picks win every date collision, so an
-            # inheritance can fill a gap the live arm never produced and can
-            # never overwrite something it measured.
-            for date_str, day in _cut_picks_by_date(
-                s3, bucket, spec.supersedes_cut, membership_dates,
-            ).items():
-                own.setdefault(date_str, day)
-        if spec.supersedes:
-            # Inherit the predecessor's cohort dates (alpha-engine-config-I11393).
-            # The successor's OWN picks always win a date collision —
-            # ``setdefault`` only fills dates this arm did not produce — so an
-            # inheritance can never overwrite something the live arm measured.
-            inherited = _picks_by_date(
-                s3, bucket, spec.supersedes, dates,
-                score_source_for(spec.supersedes),
-            )
-            for date_str, day in inherited.items():
-                own.setdefault(date_str, day)
-        hist.by_date.update(own)
+        hist.by_date.update(
+            _arm_history(s3, bucket, spec, dates, membership_dates)
+        )
         challengers.append(hist)
 
     # A predecessor whose series a LIVE arm has inherited is NOT scored again as
