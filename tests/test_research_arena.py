@@ -385,6 +385,150 @@ class TestTheCycle:
         assert verdict.winner == ra.arm_id_for("attractiveness_20")
         assert cycle.to_dict()["config"]["promote_against"] == "every_arm"
 
+
+# ── The every-arm rule, clause by clause (alpha-engine-config-I11897) ────────
+#
+# Brian's ruling 2026-10-03 (alpha-engine-config#11849), verbatim: "All arms
+# should be compared each week, performance tracked, and if after minimum two
+# weeks an arm outperforms the champion and all other challengers then it gets
+# promoted. Otherwise we compare the common window of weeks for each arm in
+# making our comparison." Each test below pins one clause of that sentence
+# against THIS slot's ARENA_CONFIG, end to end through run_arena_cycle, so a
+# change to the config (or to the engine pin) that breaks a clause fails here
+# rather than on a live cycle.
+
+# Two consecutive two-week blocks. `PairedWindow.weeks` is the INCLUSIVE
+# calendar span of the paired dates, so 14 consecutive days is exactly 2 weeks
+# and the pair below spans 4.
+_EARLY = [f"2026-08-{d:02d}" for d in range(1, 15)]
+_LATE = [f"2026-08-{d:02d}" for d in range(15, 29)]
+
+
+def _alternating(dates: list[str], high: float, low: float) -> dict[str, float]:
+    """Mean (high + low) / 2, dispersion set by the gap: the information ratio
+    this slot ranks on is decided by the gap alone when the means match."""
+    return {d: (high if i % 2 else low) for i, d in enumerate(dates)}
+
+
+def _comparison(cycle, arm: str):
+    return next(
+        c for c in cycle.decision.comparisons if c.challenger == ra.arm_id_for(arm)
+    )
+
+
+def _rival(cycle, arm_a: str, arm_b: str):
+    pair = frozenset((ra.arm_id_for(arm_a), ra.arm_id_for(arm_b)))
+    return next(
+        v for v in cycle.decision.rivals if frozenset((v.arm_a, v.arm_b)) == pair
+    )
+
+
+class TestTheEveryArmRuling:
+    def test_no_promotion_before_two_paired_weeks(self):
+        """"after minimum two weeks": a challenger that leads the champion
+        decisively on ONE paired week is measured, recorded, and not promoted;
+        the identical lead on two paired weeks is promoted. The bar is the
+        ruling's two weeks, not more."""
+        def cycle_over(dates):
+            board = _board([
+                _row(ra.BASELINE_ARM, _alternating(dates, 0.040, -0.020)),
+                _row("tech_score_20", _alternating(dates, 0.011, 0.009)),
+            ])
+            cycle, _ = ra.run_arena_cycle(
+                board=board, champion_before=None, decided_on=_AS_OF,
+                register=ra.bootstrap_register(),
+            )
+            return cycle
+
+        one_week = cycle_over(_LATE[:7])
+        assert _comparison(one_week, "tech_score_20").window.weeks == 1
+        assert one_week.decision.champion == ra.arm_id_for(ra.BASELINE_ARM)
+        assert one_week.decision.moved is False
+        assert one_week.decision.status == "held"
+        assert "below promote_min_weeks" in _comparison(one_week, "tech_score_20").reason
+
+        two_weeks = cycle_over(_LATE)
+        assert _comparison(two_weeks, "tech_score_20").window.weeks == 2
+        assert two_weeks.decision.champion == ra.arm_id_for("tech_score_20")
+        assert two_weeks.decision.moved is True
+
+    def test_beating_the_champion_alone_is_not_enough_and_the_champion_is_kept(self):
+        """"outperforms the champion and all other challengers", with arms of
+        DIFFERENT histories. tech_score_20 has four weeks and leads the
+        champion over all four. attractiveness_20 has only the last two; on
+        THAT common window it beats tech_score_20 head to head, but it does not
+        lead the champion there. Nobody beats every arm, so the champion is
+        retained: never a promotion of an arm a rival outperforms, and never a
+        slot left with no champion."""
+        board = _board([
+            _row(
+                ra.BASELINE_ARM,
+                _alternating(_EARLY, 0.040, -0.020) | _alternating(_LATE, 0.0105, 0.0095),
+            ),
+            _row(
+                "tech_score_20",
+                _alternating(_EARLY, 0.011, 0.009) | _alternating(_LATE, 0.014, 0.006),
+            ),
+            _row("attractiveness_20", _alternating(_LATE, 0.012, 0.008)),
+        ])
+        cycle, _ = ra.run_arena_cycle(
+            board=board, champion_before=None, decided_on=_AS_OF,
+            register=ra.bootstrap_register(),
+        )
+
+        # The champion is retained, as a decision rather than an absence.
+        assert cycle.decision.champion == ra.arm_id_for(ra.BASELINE_ARM)
+        assert cycle.decision.moved is False
+        assert cycle.decision.status == "held"
+
+        # tech_score_20 leads the champion on its full four weeks...
+        tech = _comparison(cycle, "tech_score_20")
+        assert tech.window.n_dates == len(_EARLY) + len(_LATE)
+        assert tech.window.weeks == 4
+        assert tech.window.ir_diff > 0
+        # ...and is held back by the rival that beats it, which the record names.
+        assert "not ahead of " + ra.arm_id_for("attractiveness_20") in tech.reason
+
+        # The head-to-head is on the PAIR's own common window: the younger
+        # arm's two weeks, never a pool-wide window and never the older arm's
+        # full history.
+        rival = _rival(cycle, "tech_score_20", "attractiveness_20")
+        assert rival.window.n_dates == len(_LATE)
+        assert rival.window.weeks == 2
+        assert rival.winner == ra.arm_id_for("attractiveness_20")
+
+        # attractiveness_20 is age-eligible against the champion but does not
+        # lead it on their common window, so it cannot take the pointer either.
+        attr = _comparison(cycle, "attractiveness_20")
+        assert attr.window.n_dates == len(_LATE)
+        assert attr.window.ir_diff < 0
+
+    def test_an_arm_that_beats_every_arm_on_each_common_window_is_promoted(self):
+        """The positive half, with different histories: the two-week arm leads
+        the champion on their common window AND beats the four-week challenger
+        on theirs, so it is promoted even though the older arm also leads the
+        champion over a longer record."""
+        board = _board([
+            _row(ra.BASELINE_ARM, _alternating(_EARLY + _LATE, 0.040, -0.020)),
+            _row("tech_score_20", _alternating(_EARLY + _LATE, 0.014, 0.006)),
+            _row("attractiveness_20", _alternating(_LATE, 0.0105, 0.0095)),
+        ])
+        cycle, _ = ra.run_arena_cycle(
+            board=board, champion_before=None, decided_on=_AS_OF,
+            register=ra.bootstrap_register(),
+        )
+
+        assert cycle.decision.champion == ra.arm_id_for("attractiveness_20")
+        assert cycle.decision.moved is True
+
+        tech = _comparison(cycle, "tech_score_20")
+        assert tech.window.weeks == 4 and tech.window.ir_diff > 0
+        assert "not ahead of " + ra.arm_id_for("attractiveness_20") in tech.reason
+
+        rival = _rival(cycle, "tech_score_20", "attractiveness_20")
+        assert rival.window.n_dates == len(_LATE)
+        assert rival.winner == ra.arm_id_for("attractiveness_20")
+
     def test_an_arm_the_register_does_not_carry_is_not_scored(self):
         """An arm handed a series without a register row is scored by nothing
         the record can explain."""

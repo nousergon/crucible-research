@@ -207,3 +207,74 @@ class TestTheImportReachesTheBoard:
         )
         row = {r["name"]: r for r in res["leaderboard"]["specs"]}["attractiveness_60"]
         assert _D1 in row["dates_scored"]
+
+
+def _point_champion_at(s3, name: str) -> None:
+    s3.put_object(
+        Bucket=_BUCKET,
+        Key="config/producer_champion.json",
+        Body=json.dumps({"schema_version": 1, "champion": name}).encode(),
+    )
+
+
+class TestAPromotedArmKeepsItsInheritedRecord:
+    """alpha-engine-config-I11931. champion-challenger-policy.md §3: a promoted
+    arm keeps its history.
+
+    MEASURED: `attractiveness_20` scored 15 dates as a challenger on the
+    2026-09-25 board, all of them inherited through `supersedes_cut`. It was
+    promoted that cycle, and on the 2026-10-02 board — now the champion row —
+    it scored ZERO, because the champion row read its own shadow prefix only.
+    Every pairwise comparison in `arena/producer/2026-10-02.json` came back
+    `common_window_too_short: 0 paired date(s)` against an incumbent with no
+    series, and the cycle was `unmeasurable`.
+
+    VERIFIED RED: on the parent commit `test_the_champion_row_scores_its_inherited_dates`
+    fails with `n_dates_scored == 0` on the champion row.
+    """
+
+    def test_the_champion_row_scores_its_inherited_dates(self, s3):
+        from scoring.leaderboard_producers import build_producer_leaderboard
+
+        _membership(s3, _D1, _D1, _TICKERS)
+        _membership(s3, _D2, _D2, _TICKERS)
+        _point_champion_at(s3, "attractiveness_20")
+        res = build_producer_leaderboard(
+            s3, _BUCKET, _AS_OF, closes_panel_loader=_matured(_D1, _D2).loader()
+        )
+        assert res["status"] == "ok", res
+        rows = {r["name"]: r for r in res["leaderboard"]["specs"]}
+        champ = rows["attractiveness_20"]
+        assert champ["kind"] == "champion"
+        assert champ["n_dates_scored"] == 2
+        assert champ["top_n"] == 20
+        # The per-date series the arena pairs on is present for the champion,
+        # so a challenger with the same dates has a common window to share.
+        assert sorted(champ["topn_alpha_vs_population_by_date"]) == [_D1, _D2]
+        assert rows["attractiveness_60"]["n_dates_scored"] == 2
+        # Scored once, as the champion — never a second challenger row.
+        names = [r["name"] for r in res["leaderboard"]["specs"]]
+        assert names.count("attractiveness_20") == 1
+
+    def test_the_champions_own_picks_still_win_a_date_collision(self, s3):
+        """Promotion does not loosen `setdefault`: the inheritance fills a gap
+        the serving arm never produced and never replaces what it measured."""
+        from scoring.leaderboard_producers import build_producer_leaderboard
+
+        _membership(s3, _D1, _D1, _TICKERS)
+        _point_champion_at(s3, "attractiveness_20")
+        s3.put_object(
+            Bucket=_BUCKET,
+            Key=f"signals_shadow/attractiveness_20/{_D1}/signals.json",
+            Body=json.dumps({"signals": {
+                "T00": {"signal": "ENTER", "score": 99.0},
+                "T01": {"signal": "ENTER", "score": 98.0},
+            }}).encode(),
+        )
+        res = build_producer_leaderboard(
+            s3, _BUCKET, _AS_OF, closes_panel_loader=_matured(_D1).loader()
+        )
+        champ = {r["name"]: r for r in res["leaderboard"]["specs"]}["attractiveness_20"]
+        assert champ["kind"] == "champion"
+        assert champ["n_dates_scored"] == 1
+        assert champ["pool_provenance"] is None
