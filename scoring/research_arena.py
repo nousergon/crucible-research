@@ -75,6 +75,7 @@ from pathlib import Path
 from typing import Any
 
 from nousergon_lib.arena import (
+    PROMOTE_AGAINST_EVERY_ARM,
     STATISTIC_INFORMATION_RATIO,
     ArenaConfig,
     ArenaCycle,
@@ -202,6 +203,19 @@ ARENA_CONFIG = ArenaConfig(
     # it would have required stays on the record.
     promote_evidence="point",
     promote_statistic=STATISTIC_INFORMATION_RATIO,
+    # WHO a challenger must beat. Brian's ruling 2026-10-03
+    # (alpha-engine-config#11849), verbatim: "All arms should be compared each
+    # week, performance tracked, and if after minimum two weeks an arm
+    # outperforms the champion and all other challengers then it gets promoted.
+    # Otherwise we compare the common window of weeks for each arm in making our
+    # comparison." evaluation-policy.md requires `every_arm` on every `point`
+    # slot, this one by name (alpha-engine-config-I11897). A challenger now
+    # takes the pointer only if it leads the incumbent AND every other
+    # age-eligible challenger head to head, each pair on its own longest common
+    # window; every head-to-head is recorded on the cycle (`decision.rivals`).
+    # The engine refuses this with `anytime_valid`, which is why it is legal
+    # here only because the evidence is `point` (forced above).
+    promote_against=PROMOTE_AGAINST_EVERY_ARM,
 )
 
 # ── The arms ─────────────────────────────────────────────────────────────────

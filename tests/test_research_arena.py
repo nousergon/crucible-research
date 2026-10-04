@@ -97,6 +97,19 @@ class TestTheSlotRegistryRow:
         # differences and says nothing about a difference of two ratios.
         assert ra.ARENA_CONFIG.promote_evidence == "point"
 
+    def test_a_challenger_must_beat_every_arm_not_just_the_incumbent(self):
+        """Brian's ruling 2026-10-03 (alpha-engine-config#11849): an arm is
+        promoted only if it outperforms the champion AND all other challengers,
+        each pair on its own common window. evaluation-policy.md requires
+        `every_arm` on every `point` slot, this one by name
+        (alpha-engine-config-I11897)."""
+        from nousergon_lib.arena import PROMOTE_AGAINST_EVERY_ARM
+
+        assert ra.ARENA_CONFIG.promote_against == PROMOTE_AGAINST_EVERY_ARM
+        # The engine refuses every_arm under anytime_valid; it is legal here
+        # only because the evidence is point.
+        assert ra.ARENA_CONFIG.promote_evidence == "point"
+
     def test_brians_retirement_rulings_are_the_config(self):
         cfg = ra.ARENA_CONFIG
         assert (cfg.cap, cfg.grace_weeks, cfg.min_active_arms) == (5, 4, 3)
@@ -341,6 +354,36 @@ class TestTheCycle:
         assert cycle.decision.champion == ra.arm_id_for("tech_score_20")
         assert cycle.decision.moved is True
         assert "information_ratio" in cycle.decision.reason
+
+    def test_a_challenger_must_also_beat_the_other_challengers(self):
+        """Brian's ruling 2026-10-03 (alpha-engine-config#11849), end to end:
+        two challengers both lead the incumbent, and the one that loses the
+        head-to-head does not take the pointer. Every challenger-vs-challenger
+        verdict is on the record (`decision.rivals`), so "all arms compared each
+        week, performance tracked" is a reading of the artifact."""
+        dates = _dates(20, start=1) + [f"2026-09-{d:02d}" for d in range(1, 11)]
+        lumpy = {d: (0.040 if i % 2 else -0.020) for i, d in enumerate(dates)}
+        steady = {d: (0.011 if i % 2 else 0.009) for i, d in enumerate(dates)}
+        steadier = {d: (0.0125 if i % 2 else 0.0115) for i, d in enumerate(dates)}
+        board = _board([
+            _row(ra.BASELINE_ARM, lumpy),
+            _row("tech_score_20", steady),
+            _row("attractiveness_20", steadier),
+        ])
+        cycle, _ = ra.run_arena_cycle(
+            board=board, champion_before=None, decided_on="2026-09-22",
+            register=ra.bootstrap_register(),
+        )
+        assert cycle.decision.champion == ra.arm_id_for("attractiveness_20")
+        assert cycle.decision.moved is True
+        head_to_head = {
+            frozenset((v.arm_a, v.arm_b)): v for v in cycle.decision.rivals
+        }
+        verdict = head_to_head[frozenset(
+            (ra.arm_id_for("tech_score_20"), ra.arm_id_for("attractiveness_20"))
+        )]
+        assert verdict.winner == ra.arm_id_for("attractiveness_20")
+        assert cycle.to_dict()["config"]["promote_against"] == "every_arm"
 
     def test_an_arm_the_register_does_not_carry_is_not_scored(self):
         """An arm handed a series without a register row is scored by nothing
