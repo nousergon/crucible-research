@@ -431,6 +431,112 @@ class TierUsage(BaseModel):
     structured_output_rungs: dict[str, int] = Field(default_factory=dict)
 
 
+class AgentTelemetry(BaseModel):
+    """Per-agent runtime telemetry for ONE run — the live path's agent emitter.
+
+    alpha-engine-config-I9631 / I9616. The report card's three agent-runtime
+    components (``agent_validation_failure_rate``, ``retry_storm_count``,
+    ``agent_latency_p95``) were sourced from the CloudWatch ``AlphaEngine/Agents``
+    namespace, whose only emitter (``graph/agent_telemetry.py``) hangs off the
+    sector-team graph retired 2026-07-12. The namespace holds zero datapoints in
+    its whole retention, so the three components were N/A on every card.
+
+    The live agentic path is the Think Tank, and its per-decision frame already
+    exists: ``ThinktankClient.complete`` is the one call surface every agent
+    (``analyst_thesis``, ``analyst_pillar``, ``analyst_sweep``,
+    ``analyst_triage``, ``themes_macro``, ``themes_sector``) goes through. One
+    ``complete`` call is one agent decision. This block counts them there and
+    rides on the run manifest — an artifact every run already writes, under a
+    prefix the weekly producer (``scripts/build_agent_quality.py``) already
+    reads — so the measurement is DECLARED on a versioned schema rather than
+    inferred from a metric namespace nothing writes.
+
+    Field semantics (one entry per ``agent_id``):
+
+    - ``invocations`` — logical calls (one per ``complete``), success or not.
+    - ``failures`` — calls that did not return a validated payload: the
+      bounded corrective retries were exhausted (``ThinktankLLMError``) or the
+      transport raised. Same population the retired ``Failures`` metric
+      counted (any frame whose body raised).
+    - ``failure_kinds`` — ``{exception class name: count}`` over ``failures``.
+    - ``attempts`` — model calls summed over invocations, as krepis reports
+      them on ``LLMUsage.attempts`` (initial + schema/body corrective retries +
+      a budget escalation). OpenAI-SDK transport retries happen below krepis
+      and are NOT in this number.
+    - ``attempts_unreported`` — failed invocations whose exception carried no
+      usage, so their attempt count is unknown (never guessed as 1).
+    - ``retried`` — invocations that needed more than one attempt.
+    - ``retry_exhausted`` — retried invocations that STILL failed: the agent
+      hit its retry ceiling. This is the retry-storm numerator.
+    - ``durations_ms`` — wall-clock per invocation (retries included), in call
+      order. Raw samples, not a per-run percentile, so a weekly p95 can be
+      pooled across runs exactly rather than averaged from per-run p95s.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    invocations: int = 0
+    failures: int = 0
+    failure_kinds: dict[str, int] = Field(default_factory=dict)
+    attempts: int = 0
+    attempts_unreported: int = 0
+    retried: int = 0
+    retry_exhausted: int = 0
+    durations_ms: list[int] = Field(default_factory=list)
+
+    def observe(
+        self,
+        *,
+        duration_ms: int,
+        ok: bool,
+        attempts: int | None,
+        failure_kind: str | None = None,
+    ) -> None:
+        """Record one invocation. ``attempts=None`` means the count is unknown."""
+        self.invocations += 1
+        self.durations_ms.append(max(0, int(duration_ms)))
+        if attempts is None:
+            self.attempts_unreported += 1
+        else:
+            self.attempts += attempts
+            if attempts > 1:
+                self.retried += 1
+                if not ok:
+                    self.retry_exhausted += 1
+        if not ok:
+            self.failures += 1
+            kind = failure_kind or "unknown"
+            self.failure_kinds[kind] = self.failure_kinds.get(kind, 0) + 1
+
+    def absorb(self, other: AgentTelemetry) -> None:
+        """Fold *other* (same agent, another process of the same run) into self."""
+        self.invocations += other.invocations
+        self.failures += other.failures
+        for kind, n in other.failure_kinds.items():
+            self.failure_kinds[kind] = self.failure_kinds.get(kind, 0) + n
+        self.attempts += other.attempts
+        self.attempts_unreported += other.attempts_unreported
+        self.retried += other.retried
+        self.retry_exhausted += other.retry_exhausted
+        self.durations_ms.extend(other.durations_ms)
+
+
+def merge_agent_telemetry(
+    *parts: dict[str, AgentTelemetry] | dict[str, dict] | None,
+) -> dict[str, AgentTelemetry]:
+    """Fold several ``{agent_id: AgentTelemetry}`` maps into one.
+
+    Accepts dumped dicts too (a gap_fill checkpoint carries the block as JSON).
+    ``None`` parts are skipped: an uninstrumented contributor adds nothing.
+    """
+    out: dict[str, AgentTelemetry] = {}
+    for part in parts:
+        for agent_id, tel in (part or {}).items():
+            tel_model = tel if isinstance(tel, AgentTelemetry) else AgentTelemetry.model_validate(tel)
+            out.setdefault(agent_id, AgentTelemetry()).absorb(tel_model)
+    return out
+
+
 class RunManifest(_Artifact):
     """``thinktank/runs/{trading_day}/manifest_{run_id}.json`` — one per run."""
 
@@ -509,6 +615,13 @@ class RunManifest(_Artifact):
     challenger_selection_pointer_trading_day: str | None = None
     challenger_selection_pointer_lag_days: int | None = None
     usage_by_tier: dict[str, TierUsage] = Field(default_factory=dict)
+    # ── Per-agent runtime telemetry (alpha-engine-config-I9631 / I9616) ──────
+    # ``{agent_id: AgentTelemetry}``. ``None`` — the key's value on every
+    # manifest written before this field existed, and on a dry run, which
+    # makes no call — means the run was NOT instrumented. ``{}`` means it was
+    # instrumented and made no agent call. The weekly producer tells the two
+    # apart, so "unmeasured" never reads as "zero failures".
+    agent_telemetry: dict[str, AgentTelemetry] | None = None
     total_cost_usd: float = 0.0
     budget_month_spent_usd: float = 0.0
     budget_month_limit_usd: float = 0.0

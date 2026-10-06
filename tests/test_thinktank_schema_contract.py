@@ -8,6 +8,7 @@ migration. New fields are appended to the frozen sets when added.
 from __future__ import annotations
 
 from thinktank.schemas import (
+    AgentTelemetry,
     ChallengerSelection,
     ChallengerSelectionRow,
     CompanyThesis,
@@ -210,6 +211,9 @@ _FROZEN_FIELDS = {
         "context_source_freshness",
         "degraded_inputs",
         "usage_by_tier",
+        # alpha-engine-config-I9631 — per-agent runtime telemetry, the live
+        # path's agent emitter; scripts/build_agent_quality.py reads it.
+        "agent_telemetry",
         "total_cost_usd",
         "coverage_gap",
         # alpha-engine-config-I7842 — which contract this run read: the cut,
@@ -232,6 +236,18 @@ _FROZEN_FIELDS = {
         "aborted_by_error",
     },
     MonthlyCostLedger: {"schema_version", "month", "spent_usd", "updated_at", "runs"},
+    # alpha-engine-config-I9631 — the per-agent block on RunManifest. The
+    # weekly agent-quality producer reads these names, so they are contract.
+    AgentTelemetry: {
+        "invocations",
+        "failures",
+        "failure_kinds",
+        "attempts",
+        "attempts_unreported",
+        "retried",
+        "retry_exhausted",
+        "durations_ms",
+    },
 }
 
 

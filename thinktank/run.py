@@ -729,6 +729,10 @@ def _terminal_writes(
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
     manifest.usage_by_tier = client.usage_by_tier()
+    # Per-agent runtime telemetry (alpha-engine-config-I9631). Set on the
+    # abort path too: the failed call that killed the run is the one datapoint
+    # a failure-rate reader most needs, and it was observed before the raise.
+    manifest.agent_telemetry = client.agent_telemetry()
     manifest.total_cost_usd = client.total_cost_usd()
     cost_ledger = guard.record_run(
         calendar_date,
