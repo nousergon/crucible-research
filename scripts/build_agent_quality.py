@@ -29,11 +29,22 @@ value):
                                 scores stay OUT of the agent-facing scorecard,
                                 per evals/last_week_scorecard.py).
 
-Not emitted by this increment (need CloudWatch queries or new instrumentation —
-tracked on #1149): ``agent_validation_failure_rate``, ``retry_storm_count``,
-``agent_latency_p95`` (CloudWatch ``AlphaEngine/Agents``), ``pillar_emit_coverage``
-(``pillar_assessment`` is not persisted in signals.json today). These stay an
-honest N/A-MISSING-INPUT on the report card until their increment lands.
+Agent runtime metrics — ``agent_validation_failure_rate``, ``retry_storm_count``,
+``agent_latency_p95`` — are read from the live agent path's DECLARED telemetry
+(alpha-engine-config-I9631 / I9616): the ``agent_telemetry`` block every Think
+Tank run manifest carries (``thinktank/runs/{trading_day}/manifest_*.json``,
+schema ``thinktank.schemas.AgentTelemetry``), pooled over the trading-day
+partitions of the 7 days ending at ``date``. Every artifact also carries an
+``agent_telemetry_source`` block that DECLARES what was read — the window, how
+many runs were seen and instrumented, the last instrumented run, and a status —
+so a reader can tell "no agent ran", "the runs predate the emitter" and "the
+read failed" apart instead of inferring them from an absent key. Only when the
+manifests yield no agent call does the producer fall back to the legacy
+CloudWatch ``AlphaEngine/Agents`` read, whose emitter hangs off the sector-team
+graph retired 2026-07-12 and which has never held a datapoint (I9631).
+
+``pillar_emit_coverage`` is not emitted (``pillar_assessment`` is not persisted
+in signals.json today) and stays an honest N/A-MISSING-INPUT.
 
 Date handling (DATE_CONVENTIONS.md): ``date`` is the TRADING day — it keys the
 output path + ``signals/{date}/`` and matches the report card's run_date. The
@@ -85,6 +96,146 @@ _RUBRIC_PASS_THRESHOLD = 3
 # by {agent_id, env} since config#1154 — we read env="prod" only to skip the
 # test pollution on the legacy agent_id-only series.
 _AGENTS_NAMESPACE = "AlphaEngine/Agents"
+
+# Live-path agent telemetry (alpha-engine-config-I9631): the Think Tank run
+# manifests. Keyed by TRADING day, so a weekend run lands in Friday's partition
+# and a 7-calendar-day window ending at ``date`` covers one trading week.
+_THINKTANK_RUNS_PREFIX = "thinktank/runs"
+_AGENT_TELEMETRY_WINDOW_DAYS = 7
+_AGENT_TELEMETRY_SOURCE = "thinktank_run_manifest"
+_AGENT_TELEMETRY_OWNER = "crucible-research thinktank/client.py (alpha-engine-config-I9631)"
+# A dry run makes no LLM call; counting it would dilute nothing but would
+# inflate runs_seen with runs that could never have been instrumented.
+_AGENT_TELEMETRY_EXCLUDED_MODES = frozenset({"dry_run"})
+_AGENT_TELEMETRY_KEYS = (
+    "agent_validation_failure_rate",
+    "retry_storm_count",
+    "agent_latency_p95",
+)
+
+
+def _p95(samples: list[int]) -> float:
+    """Nearest-rank 95th percentile (the sample at rank ceil(0.95·n))."""
+    import math
+
+    ordered = sorted(samples)
+    return float(ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)])
+
+
+def _load_agent_telemetry(s3: Any, bucket: str, target_date: date_type) -> dict:
+    """Pool the ``agent_telemetry`` blocks of every Think Tank run manifest in
+    the window. Returns ``{"declaration": {...}, "agents": {agent_id: AgentTelemetry}}``.
+
+    Raises on an S3 error other than a missing key and on a manifest whose
+    block does not validate — the caller records that as ``status="error"``.
+    """
+    from datetime import timedelta
+
+    from thinktank.schemas import merge_agent_telemetry
+
+    start = target_date - timedelta(days=_AGENT_TELEMETRY_WINDOW_DAYS - 1)
+    paginator = s3.get_paginator("list_objects_v2")
+    runs_seen = 0
+    runs_instrumented = 0
+    last_run: dict | None = None
+    blocks: list[dict] = []
+    for offset in range(_AGENT_TELEMETRY_WINDOW_DAYS):
+        day = (start + timedelta(days=offset)).isoformat()
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{_THINKTANK_RUNS_PREFIX}/{day}/"):
+            for obj in page.get("Contents", []) or []:
+                key = obj["Key"]
+                if not key.rsplit("/", 1)[-1].startswith("manifest_") or not key.endswith(".json"):
+                    continue
+                manifest = _get_json(s3, bucket, key)
+                if not isinstance(manifest, dict):
+                    continue
+                if manifest.get("mode") in _AGENT_TELEMETRY_EXCLUDED_MODES:
+                    continue
+                runs_seen += 1
+                block = manifest.get("agent_telemetry")
+                if block is None:
+                    continue  # written before the emitter existed — unmeasured, not zero
+                runs_instrumented += 1
+                blocks.append(block)
+                stamp = (manifest.get("trading_day") or day, manifest.get("finished_at") or "")
+                if last_run is None or stamp > (last_run["trading_day"], last_run["finished_at"]):
+                    last_run = {
+                        "trading_day": stamp[0],
+                        "finished_at": stamp[1],
+                        "run_id": manifest.get("run_id"),
+                        "key": key,
+                    }
+
+    agents = merge_agent_telemetry(*blocks)
+    invocations = sum(t.invocations for t in agents.values())
+    if runs_seen == 0:
+        status = "no_runs_in_window"
+    elif runs_instrumented == 0:
+        status = "not_instrumented"
+    elif invocations == 0:
+        status = "no_agent_calls"
+    else:
+        status = "ok"
+    declaration = {
+        "source": _AGENT_TELEMETRY_SOURCE,
+        "owner": _AGENT_TELEMETRY_OWNER,
+        "status": status,
+        "window": {
+            "start": start.isoformat(),
+            "end": target_date.isoformat(),
+            "basis": f"trading-day partitions of s3://{bucket}/{_THINKTANK_RUNS_PREFIX}/",
+        },
+        "runs_seen": runs_seen,
+        "runs_instrumented": runs_instrumented,
+        "invocations": invocations,
+        "last_instrumented_run": last_run,
+    }
+    return {"declaration": declaration, "agents": agents}
+
+
+def _agent_metrics_from_telemetry(agents: dict) -> dict[str, dict]:
+    """The three report-card blocks from pooled per-agent telemetry.
+
+    Same definitions the CloudWatch readers below implement, so a component's
+    meaning does not change with its source:
+
+    - failure rate = sum(failures) / sum(invocations), ``n`` = invocations;
+    - retry storm = agents with >=1 invocation that retried and still failed
+      (hit the retry ceiling), ``n`` = agents observed;
+    - latency p95 = the slowest agent's p95 wall-clock (ms), ``n`` = agents with
+      a duration sample.
+    """
+    observed = {a: t for a, t in agents.items() if t.invocations > 0}
+    if not observed:
+        return {}
+    invocations = sum(t.invocations for t in observed.values())
+    failures = sum(t.failures for t in observed.values())
+    out: dict[str, dict] = {
+        "agent_validation_failure_rate": {
+            "value": round(failures / invocations, 4),
+            "n": invocations,
+            "failures": failures,
+            "source": _AGENT_TELEMETRY_SOURCE,
+        },
+        "retry_storm_count": {
+            "value": sum(1 for t in observed.values() if t.retry_exhausted > 0),
+            "n": len(observed),
+            "agents_at_ceiling": sorted(a for a, t in observed.items() if t.retry_exhausted > 0),
+            "attempts_unreported": sum(t.attempts_unreported for t in observed.values()),
+            "source": _AGENT_TELEMETRY_SOURCE,
+        },
+    }
+    p95_by_agent = {a: _p95(t.durations_ms) for a, t in observed.items() if t.durations_ms}
+    if p95_by_agent:
+        worst = max(p95_by_agent, key=p95_by_agent.__getitem__)
+        out["agent_latency_p95"] = {
+            "value": round(p95_by_agent[worst], 1),
+            "n": len(p95_by_agent),
+            "worst_agent": worst,
+            "p95_ms_by_agent": {a: round(v, 1) for a, v in sorted(p95_by_agent.items())},
+            "source": _AGENT_TELEMETRY_SOURCE,
+        }
+    return out
 
 
 def _day_window(run_date: date_type):
@@ -427,27 +578,58 @@ def build_agent_quality(
         }
     ic_s = time.monotonic() - t0
 
-    # Agent runtime metrics from the AlphaEngine/Agents prod telemetry
-    # (config#1154/#1149): validation-failure rate (fleet), retry-storm count +
-    # latency p95 (per-agent). Best-effort — a CW error or absent prod data leaves
-    # a component off the artifact → grader renders N/A, never breaks the others.
-    t_cw = time.monotonic()
+    # Agent runtime metrics from the LIVE path's declared telemetry — the Think
+    # Tank run manifests' agent_telemetry blocks (alpha-engine-config-I9631).
+    # The declaration is written on every artifact, whatever it found, so an
+    # absent metric always has a stated reason beside it. Per-block isolation,
+    # same as judge_outcome_ic above: a failed read is recorded as
+    # status="error" + WARN and the sibling components still land.
+    t_tel = time.monotonic()
     try:
-        cw_client = cw or boto3.client("cloudwatch", region_name="us-east-1")
-        for key, fn in (
-            ("agent_validation_failure_rate", _agent_validation_failure_rate),
-            ("retry_storm_count", _retry_storm_count),
-            ("agent_latency_p95", _agent_latency_p95),
-        ):
-            try:
-                blk = fn(cw_client, run_date)
-            except Exception as exc:  # noqa: BLE001 — per-metric isolation
-                logger.warning("[agent_quality] %s read failed: %s", key, exc)
-                continue
-            if blk is not None:
-                result[key] = blk
-    except Exception as exc:  # noqa: BLE001 — CW client creation failed
-        logger.warning("[agent_quality] cloudwatch client unavailable: %s", exc)
+        telemetry = _load_agent_telemetry(s3, bucket, target_date)
+        result["agent_telemetry_source"] = telemetry["declaration"]
+        result.update(_agent_metrics_from_telemetry(telemetry["agents"]))
+    except Exception as exc:  # noqa: BLE001 — per-block isolation, see above
+        logger.warning(
+            "[agent_quality] agent telemetry read failed (recorded as "
+            "agent_telemetry_source.status=error, other components "
+            "unaffected): %s", exc, exc_info=True,
+        )
+        result["agent_telemetry_source"] = {
+            "source": _AGENT_TELEMETRY_SOURCE,
+            "owner": _AGENT_TELEMETRY_OWNER,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    telemetry_s = time.monotonic() - t_tel
+
+    # Legacy fallback: the AlphaEngine/Agents CloudWatch namespace
+    # (config#1154/#1149). Consulted only for a metric the manifests did not
+    # yield. Its emitter is wired to the retired sector-team graph and the
+    # namespace has never held a datapoint (I9631), so on the live fleet this
+    # adds nothing; deleting it is I9631's option (b), a ruling not taken here.
+    # Best-effort — a CW error leaves the component off, never breaks others.
+    t_cw = time.monotonic()
+    missing = [k for k in _AGENT_TELEMETRY_KEYS if k not in result]
+    if missing:
+        try:
+            cw_client = cw or boto3.client("cloudwatch", region_name="us-east-1")
+            for key, fn in (
+                ("agent_validation_failure_rate", _agent_validation_failure_rate),
+                ("retry_storm_count", _retry_storm_count),
+                ("agent_latency_p95", _agent_latency_p95),
+            ):
+                if key not in missing:
+                    continue
+                try:
+                    blk = fn(cw_client, run_date)
+                except Exception as exc:  # noqa: BLE001 — per-metric isolation
+                    logger.warning("[agent_quality] %s read failed: %s", key, exc)
+                    continue
+                if blk is not None:
+                    result[key] = blk
+        except Exception as exc:  # noqa: BLE001 — CW client creation failed
+            logger.warning("[agent_quality] cloudwatch client unavailable: %s", exc)
     cw_s = time.monotonic() - t_cw
 
     # Per-phase timings + input counters (alpha-engine-config-I9205
@@ -457,11 +639,14 @@ def build_agent_quality(
     # unattributable from CloudWatch.
     logger.info(
         "[build_agent_quality] built date=%s run_date=%s n_signals=%d "
-        "n_evals=%d n_real_evals=%d ic_status=%s | signals_s=%.2f cost_s=%.2f "
-        "evals_s=%.2f judge_outcome_ic_s=%.2f cloudwatch_s=%.2f total_s=%.2f",
+        "n_evals=%d n_real_evals=%d ic_status=%s telemetry_status=%s | "
+        "signals_s=%.2f cost_s=%.2f evals_s=%.2f judge_outcome_ic_s=%.2f "
+        "agent_telemetry_s=%.2f cloudwatch_s=%.2f total_s=%.2f",
         date_str, run_date.isoformat(), n_signals, len(evals), len(real),
         (result.get("judge_outcome_ic") or {}).get("status"),
-        signals_s, cost_s, evals_s, ic_s, cw_s, time.monotonic() - t_build,
+        (result.get("agent_telemetry_source") or {}).get("status"),
+        signals_s, cost_s, evals_s, ic_s, telemetry_s, cw_s,
+        time.monotonic() - t_build,
     )
     return result
 

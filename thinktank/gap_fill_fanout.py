@@ -62,7 +62,7 @@ from thinktank.ledger import (
 )
 from thinktank.ratings import update_ratings_board
 from thinktank.run import _compute_coverage_gap
-from thinktank.schemas import EventRecord, RunManifest
+from thinktank.schemas import EventRecord, RunManifest, merge_agent_telemetry
 from thinktank.settings import ThinktankSettings, load_settings
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
@@ -216,6 +216,12 @@ def build_gap_fill_unit(
         "sector": thesis.sector,
         "attractiveness_rank": thesis.attractiveness_rank,
         "total_cost_usd": client.total_cost_usd(),
+        # This unit's agent calls (alpha-engine-config-I9631). The unit runs in
+        # its own process, so its telemetry would otherwise die with it;
+        # finalize folds every checkpoint's block into the run manifest. A unit
+        # that RAISES writes no checkpoint, so its calls are not here — the
+        # finalize manifest's ``theses_written`` vs the plan says how many.
+        "agent_telemetry": {k: v.model_dump() for k, v in client.agent_telemetry().items()},
         "built_at": datetime.now(UTC).isoformat(),
     }
     store.put_json(_checkpoint_key(trading_day, ticker), checkpoint)
@@ -363,6 +369,13 @@ def finalize_gap_fill(
         store.put_jsonl(EVENTS_KEY_TMPL.format(trading_day=trading_day), event_rows)
 
     manifest.usage_by_tier = client.usage_by_tier()
+    # The finalize client's own calls plus every checkpointed unit's
+    # (alpha-engine-config-I9631). A checkpoint written before this field
+    # existed carries no block and contributes nothing — never a fabricated 0.
+    manifest.agent_telemetry = merge_agent_telemetry(
+        *(cp.get("agent_telemetry") for cp in checkpoints),
+        client.agent_telemetry(),
+    )
     manifest.total_cost_usd = round(build_cost_usd + client.total_cost_usd(), 6)
     guard = BudgetGuard(store, settings, ssm_client=ssm_client)
     cost_ledger = guard.record_run(

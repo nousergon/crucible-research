@@ -356,3 +356,82 @@ def test_sft_meta_rides_into_row_meta(monkeypatch):
     assert row.meta["ticker"] == "AAPL"
     assert row.meta["capture_run_id"] == "testrun-AAPL-v3"
     assert row.meta["run_id"] == "testrun"  # base keys not clobbered
+
+
+# ── per-agent runtime telemetry (alpha-engine-config-I9631 / I9616) ──────────
+#
+# The live agentic path's per-decision frame is ``complete``: one call is one
+# agent decision. The report card's agent_validation_failure_rate,
+# retry_storm_count and agent_latency_p95 are computed from exactly these
+# counters (scripts/build_agent_quality.py), so each outcome class is pinned.
+
+
+def test_agent_telemetry_counts_a_clean_call(monkeypatch):
+    client, _ = _client([json.dumps({"answer": "y", "score": 1})], monkeypatch)
+    assert client.agent_telemetry() == {}  # instrumented, no calls yet
+    client.complete("thesis", agent_id="analyst_thesis", system="s", user="u", response_model=_Out)
+    tel = client.agent_telemetry()["analyst_thesis"]
+    assert (tel.invocations, tel.failures, tel.attempts, tel.retried, tel.retry_exhausted) == (1, 0, 1, 0, 0)
+    assert len(tel.durations_ms) == 1 and tel.durations_ms[0] >= 0
+
+
+def test_agent_telemetry_counts_a_recovered_retry_as_retried_not_failed(monkeypatch):
+    client, _ = _client(
+        [json.dumps({"answer": "bad"}), json.dumps({"answer": "fixed", "score": 2})],
+        monkeypatch,
+    )
+    client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    tel = client.agent_telemetry()["a"]
+    assert (tel.invocations, tel.failures, tel.attempts, tel.retried, tel.retry_exhausted) == (1, 0, 2, 1, 0)
+
+
+def test_agent_telemetry_records_an_exhausted_call_as_a_retry_ceiling_failure(monkeypatch):
+    client, _ = _client([json.dumps({"answer": "bad"})] * _STRUCTURED_ATTEMPTS, monkeypatch)
+    with pytest.raises(ThinktankLLMError):
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    tel = client.agent_telemetry()["a"]
+    assert tel.invocations == 1 and tel.failures == 1
+    assert tel.attempts == _STRUCTURED_ATTEMPTS
+    assert tel.retried == 1 and tel.retry_exhausted == 1
+    assert sum(tel.failure_kinds.values()) == 1
+    assert len(tel.durations_ms) == 1
+
+
+def test_agent_telemetry_counts_a_transport_error_with_unreported_attempts(monkeypatch):
+    """A non-LLMError escapes ``complete`` unchanged, but the frame is still a
+    failed decision — the retired emitter counted any frame that raised. The
+    exception carries no usage, so the attempt count is UNREPORTED, never
+    guessed as 1."""
+    from openai import APIConnectionError
+
+    client, _ = _scripted_client([APIConnectionError(request=SimpleNamespace())])
+    with pytest.raises(APIConnectionError):
+        client.complete("thesis", agent_id="a", system="s", user="u", response_model=_Out)
+    tel = client.agent_telemetry()["a"]
+    assert (tel.invocations, tel.failures, tel.attempts, tel.attempts_unreported) == (1, 1, 0, 1)
+    assert tel.failure_kinds == {"APIConnectionError": 1}
+    assert tel.retry_exhausted == 0
+
+
+def test_agent_telemetry_is_keyed_per_agent_and_returned_as_a_copy(monkeypatch):
+    client, _ = _client([json.dumps({"answer": "y", "score": 1})] * 3, monkeypatch)
+    for agent in ("themes_macro", "themes_sector", "themes_macro"):
+        client.complete("thesis", agent_id=agent, system="s", user="u", response_model=_Out)
+    snap = client.agent_telemetry()
+    assert {k: v.invocations for k, v in snap.items()} == {"themes_macro": 2, "themes_sector": 1}
+    snap["themes_macro"].invocations = 99
+    assert client.agent_telemetry()["themes_macro"].invocations == 2
+
+
+def test_merge_agent_telemetry_folds_dumped_blocks_and_skips_uninstrumented():
+    from thinktank.schemas import AgentTelemetry, merge_agent_telemetry
+
+    a = AgentTelemetry()
+    a.observe(duration_ms=100, ok=True, attempts=1)
+    b = AgentTelemetry()
+    b.observe(duration_ms=300, ok=False, attempts=3, failure_kind="LLMError")
+    merged = merge_agent_telemetry({"x": a}, None, {"x": b.model_dump()}, {})
+    tel = merged["x"]
+    assert (tel.invocations, tel.failures, tel.attempts, tel.retry_exhausted) == (2, 1, 4, 1)
+    assert tel.durations_ms == [100, 300]
+    assert tel.failure_kinds == {"LLMError": 1}

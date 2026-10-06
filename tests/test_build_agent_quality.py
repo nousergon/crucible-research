@@ -475,3 +475,125 @@ class TestFlatLayoutRegression:
             "Expected 6 evals from flat layout (2 dates x 3 tickers + 1 slate-level unattributable)"
         )
         assert "judge_rubric_distribution" in art
+
+
+# ── live-path agent telemetry: Think Tank run manifests (alpha-engine-config-I9631) ──
+#
+# The three agent-runtime components are read from the DECLARED telemetry on
+# thinktank/runs/{trading_day}/manifest_*.json, pooled over the 7-day window
+# ending at the trading day, and every artifact declares what it read.
+
+
+def _tel(invocations, failures=0, retried=0, retry_exhausted=0, durations=None,
+         attempts=None, unreported=0):
+    return {
+        "invocations": invocations, "failures": failures,
+        "failure_kinds": {"LLMError": failures} if failures else {},
+        "attempts": invocations if attempts is None else attempts,
+        "attempts_unreported": unreported, "retried": retried,
+        "retry_exhausted": retry_exhausted,
+        "durations_ms": list(durations if durations is not None else [1000] * invocations),
+    }
+
+
+def _manifest(s3, trading_day, run_id, telemetry, mode="daily", finished_at=None):
+    body = {"schema_version": 2, "run_id": run_id, "mode": mode,
+            "trading_day": trading_day, "calendar_date": trading_day,
+            "started_at": f"{trading_day}T14:00:00+00:00",
+            "finished_at": finished_at or f"{trading_day}T14:30:00+00:00"}
+    if telemetry is not None:
+        body["agent_telemetry"] = telemetry
+    _put_json(s3, f"thinktank/runs/{trading_day}/manifest_{run_id}.json", body)
+
+
+class TestAgentTelemetryFromRunManifests:
+    def test_three_components_computed_from_manifests(self, s3):
+        _full_run(s3)
+        # Two runs in the week; analyst_thesis hits its retry ceiling once.
+        _manifest(s3, "2026-06-10", "r1", {
+            "analyst_thesis": _tel(4, failures=1, retried=2, retry_exhausted=1,
+                                   durations=[40000, 50000, 60000, 90000]),
+            "analyst_sweep": _tel(2, durations=[3000, 4000]),
+        })
+        _manifest(s3, "2026-06-12", "r2", {
+            "analyst_thesis": _tel(4, durations=[45000, 55000, 65000, 70000]),
+            "themes_macro": _tel(2, retried=1, durations=[8000, 9000]),
+        })
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+
+        fr = art["agent_validation_failure_rate"]
+        assert fr["value"] == round(1 / 12, 4) and fr["n"] == 12 and fr["failures"] == 1
+        assert fr["source"] == "thinktank_run_manifest"
+
+        rs = art["retry_storm_count"]
+        assert rs["value"] == 1 and rs["n"] == 3  # recovered retries are not a storm
+        assert rs["agents_at_ceiling"] == ["analyst_thesis"]
+
+        lat = art["agent_latency_p95"]
+        # analyst_thesis pooled 8 samples: nearest-rank p95 = the 8th = 90000.
+        assert lat["value"] == 90000.0 and lat["n"] == 3
+        assert lat["worst_agent"] == "analyst_thesis"
+        assert lat["p95_ms_by_agent"]["analyst_sweep"] == 4000.0
+
+        decl = art["agent_telemetry_source"]
+        assert decl["status"] == "ok"
+        assert decl["runs_seen"] == 2 and decl["runs_instrumented"] == 2
+        assert decl["invocations"] == 12
+        assert decl["window"] == {"start": "2026-06-06", "end": "2026-06-12",
+                                  "basis": "trading-day partitions of s3://alpha-engine-research/thinktank/runs/"}
+        assert decl["last_instrumented_run"]["run_id"] == "r2"
+
+    def test_manifests_outside_the_window_and_dry_runs_are_ignored(self, s3):
+        _manifest(s3, "2026-06-05", "old", {"a": _tel(10, failures=10)})   # day before window
+        _manifest(s3, "2026-06-13", "future", {"a": _tel(10, failures=10)})  # after target day
+        _manifest(s3, "2026-06-11", "dry", {}, mode="dry_run")
+        _manifest(s3, "2026-06-11", "live", {"a": _tel(5)})
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert art["agent_validation_failure_rate"]["value"] == 0.0
+        assert art["agent_validation_failure_rate"]["n"] == 5
+        assert art["agent_telemetry_source"]["runs_seen"] == 1
+
+    def test_runs_that_predate_the_emitter_are_declared_not_zeroed(self, s3):
+        """A manifest with no agent_telemetry key is UNMEASURED. Rendering it as
+        zero failures would make 'no data' read green (principles.md §2.7)."""
+        _manifest(s3, "2026-06-11", "pre", None)
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
+        for key in ("agent_validation_failure_rate", "retry_storm_count", "agent_latency_p95"):
+            assert key not in art
+        decl = art["agent_telemetry_source"]
+        assert decl["status"] == "not_instrumented"
+        assert (decl["runs_seen"], decl["runs_instrumented"]) == (1, 0)
+        assert decl["last_instrumented_run"] is None
+
+    def test_no_runs_and_no_calls_are_distinct_statuses(self, s3):
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
+        assert art["agent_telemetry_source"]["status"] == "no_runs_in_window"
+        _manifest(s3, "2026-06-11", "idle", {})
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
+        assert art["agent_telemetry_source"]["status"] == "no_agent_calls"
+        assert "agent_validation_failure_rate" not in art
+
+    def test_a_malformed_block_is_an_error_not_an_absence(self, s3):
+        _full_run(s3)
+        _manifest(s3, "2026-06-11", "bad", {"a": {"invocations": "lots"}})
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=_StubCWFull({}))
+        decl = art["agent_telemetry_source"]
+        assert decl["status"] == "error" and "ValidationError" in decl["error"]
+        assert art["signal_volume_adequacy"]["value"] == 30  # siblings intact
+
+    def test_manifest_source_wins_over_the_legacy_cloudwatch_read(self, s3):
+        _manifest(s3, "2026-06-11", "live", {"a": _tel(10, failures=1)})
+        cw = _StubCWFull({"Invocations": {"x": 100}, "Failures": {"x": 50},
+                          "RetryAttempts": {"x": 3}, "RetrySuccesses": {"x": 0},
+                          "DurationMs": {"x": 99999}})
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE, cw=cw)
+        assert art["agent_validation_failure_rate"]["value"] == 0.1
+        assert art["retry_storm_count"]["value"] == 0
+        assert art["agent_latency_p95"]["value"] == 1000.0
+
+    def test_the_handler_graded_list_ignores_the_declaration(self, s3):
+        """eval_rolling_mean_handler counts blocks carrying 'value'; the
+        declaration must never be counted as a graded component."""
+        _manifest(s3, "2026-06-11", "live", {"a": _tel(1)})
+        art = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)
+        assert "value" not in art["agent_telemetry_source"]

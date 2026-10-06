@@ -387,3 +387,45 @@ def test_finalize_with_zero_checkpoints_is_a_safe_no_op(tt_config):
         )
         assert manifest.names_added == []
         assert manifest.theses_written == 0
+
+
+def test_finalize_manifest_folds_every_unit_s_agent_telemetry(tt_config):
+    """Each BUILD unit runs in its own process (alpha-engine-config-I9631): its
+    calls ride on its checkpoint, and finalize folds them into the run
+    manifest with its own — otherwise the gap_fill run's agent telemetry would
+    hold only the finalize tail."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        settings = load_settings()
+        store = ThinktankStore(BUCKET, s3)
+        run_daily(settings, store=store, client=_client(backend, "d"))
+        plan = plan_gap_fill(settings, store=store, client=_client(backend, "plan"), run_id="gf1")
+
+        unit_invocations = 0
+        for ticker in plan["tickers"]:
+            cp = build_gap_fill_unit(
+                settings,
+                store=ThinktankStore(BUCKET, s3),
+                client=_client(backend, f"u-{ticker}"),
+                run_id="gf1",
+                trading_day=plan["trading_day"],
+                calendar_date=plan["calendar_date"],
+                ticker=ticker,
+            )
+            assert cp["agent_telemetry"]["analyst_thesis"]["invocations"] == 1
+            unit_invocations += sum(t["invocations"] for t in cp["agent_telemetry"].values())
+
+        fin_client = _client(backend, "fin")
+        manifest = finalize_gap_fill(
+            settings,
+            store=store,
+            client=fin_client,
+            run_id="gf1",
+            trading_day=plan["trading_day"],
+            calendar_date=plan["calendar_date"],
+        )
+        fin_invocations = sum(t.invocations for t in fin_client.agent_telemetry().values())
+        assert sum(t.invocations for t in manifest.agent_telemetry.values()) == unit_invocations + fin_invocations
+        assert manifest.agent_telemetry["analyst_thesis"].invocations >= len(plan["tickers"])

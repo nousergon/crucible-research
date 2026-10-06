@@ -1178,3 +1178,63 @@ def test_a_stale_pointer_is_logged_at_ERROR_past_the_threshold(caplog):
             _record_pointer_lag(store, manifest, trading_day="2026-08-13")
         assert manifest.challenger_selection_pointer_lag_days == POINTER_LAG_ERROR_DAYS
         assert _levels(caplog) == ["ERROR"]
+
+
+# ── per-agent runtime telemetry on the manifest (alpha-engine-config-I9631) ──
+
+
+def _persisted_manifest(s3, manifest):
+    store = ThinktankStore(BUCKET, s3)
+    return store.get_json(f"thinktank/runs/{manifest.trading_day}/manifest_{manifest.run_id}.json")
+
+
+def test_daily_manifest_declares_per_agent_telemetry(tt_config):
+    """The run manifest is the declared artifact the weekly agent-quality
+    producer reads; every agent the run called must appear on it with one
+    invocation per call and a duration sample per invocation."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        manifest, _ = _run(tt_config, backend, s3)
+
+        tel = manifest.agent_telemetry
+        assert tel is not None and tel, "an instrumented run that made calls must carry telemetry"
+        assert sum(t.invocations for t in tel.values()) == len(backend.calls)
+        assert all(len(t.durations_ms) == t.invocations for t in tel.values())
+        assert all(t.failures == 0 for t in tel.values())
+        assert tel["analyst_thesis"].invocations == manifest.theses_written
+
+        persisted = _persisted_manifest(s3, manifest)
+        assert persisted["agent_telemetry"]["analyst_thesis"]["invocations"] == manifest.theses_written
+
+
+def test_dry_run_manifest_is_not_instrumented(tt_config):
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        manifest, _ = _run(tt_config, backend, s3, dry_run=True)
+        assert manifest.agent_telemetry is None
+
+
+def test_an_aborted_run_records_the_call_that_killed_it(tt_config):
+    """The failed call is the one datapoint a failure-rate reader most needs;
+    the abort path's terminal writes must carry it."""
+    backend = _FakeBackend()
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        _seed_read_side(s3)
+        backend.raise_on_ticker = "T2"
+        with pytest.raises(RuntimeError, match="simulated crash building T2"):
+            _run(tt_config, backend, s3)
+
+        keys = [
+            o["Key"]
+            for o in s3.list_objects_v2(Bucket=BUCKET, Prefix="thinktank/runs/").get("Contents", [])
+        ]
+        assert len(keys) == 1, keys
+        persisted = ThinktankStore(BUCKET, s3).get_json(keys[0])
+        tel = persisted["agent_telemetry"]
+        assert sum(t["failures"] for t in tel.values()) == 1
+        assert {k: n for t in tel.values() for k, n in t["failure_kinds"].items()} == {"RuntimeError": 1}

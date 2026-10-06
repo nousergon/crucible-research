@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -45,7 +46,7 @@ from nousergon_lib import sft
 from pydantic import BaseModel
 
 from thinktank import SFT_PRODUCER
-from thinktank.schemas import TierUsage
+from thinktank.schemas import AgentTelemetry, TierUsage
 from thinktank.settings import ThinktankSettings, TierSpec
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,9 @@ class ThinktankClient:
 
     _llm_clients: dict[str, LLMClient] = field(default_factory=dict, init=False)
     _usage: dict[str, TierUsage] = field(default_factory=dict, init=False)
+    # Per-agent runtime telemetry, one entry per agent_id (I9631). Filled by
+    # ``complete`` on EVERY outcome, read by ``agent_telemetry()``.
+    _agent_telemetry: dict[str, AgentTelemetry] = field(default_factory=dict, init=False)
     _sft_rows: dict[str, list[_SftRow]] = field(default_factory=dict, init=False)
     _call_seq: int = field(default=0, init=False)
 
@@ -250,6 +254,7 @@ class ThinktankClient:
         callsite_id = _callsite_id_for(tier_name, agent_id)
         client = self._llm_client_for(tier, callsite_id=callsite_id)
 
+        started = time.monotonic()
         try:
             result = client.structured(
                 system=system,
@@ -259,7 +264,21 @@ class ThinktankClient:
                 max_tokens=tier.max_tokens,
                 attempts=_STRUCTURED_ATTEMPTS,
             )
-        except LLMError as exc:
+        except Exception as exc:
+            # Observed BEFORE anything else on the failure path, so the agent
+            # frame is counted even if the metering below raises (I9631). A
+            # non-LLMError (a transport error the SDK gave up on) is a failed
+            # decision too — the retired emitter counted any frame that raised.
+            usage = getattr(exc, "usage", None)
+            self._observe_agent_call(
+                agent_id,
+                started,
+                ok=False,
+                attempts=getattr(usage, "attempts", None) if usage is not None else None,
+                failure_kind=type(exc).__name__,
+            )
+            if not isinstance(exc, LLMError):
+                raise
             # LLMClient raises LLMError on exhaustion. Record the failed
             # spend (usage is carried on the exception per the lib contract)
             # then re-raise as ThinktankLLMError for caller compatibility.
@@ -324,6 +343,9 @@ class ThinktankClient:
             ) from exc
 
         usage = result.usage
+        self._observe_agent_call(
+            agent_id, started, ok=True, attempts=getattr(usage, "attempts", None)
+        )
         cost = self._record(
             tier,
             agent_id=agent_id,
@@ -467,6 +489,35 @@ class ThinktankClient:
             )
         )
         return cost
+
+    # ── agent telemetry (alpha-engine-config-I9631) ──────────────────────────
+
+    def _observe_agent_call(
+        self,
+        agent_id: str,
+        started: float,
+        *,
+        ok: bool,
+        attempts: Any,
+        failure_kind: str | None = None,
+    ) -> None:
+        """Record one agent decision. Telemetry is bookkeeping on the run's own
+        manifest, not a network write, so there is no failure mode to swallow:
+        an attempts value that is not a positive int is recorded as unreported
+        rather than coerced."""
+        duration_ms = int(round((time.monotonic() - started) * 1000))
+        known = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0 else None
+        self._agent_telemetry.setdefault(agent_id, AgentTelemetry()).observe(
+            duration_ms=duration_ms,
+            ok=ok,
+            attempts=known,
+            failure_kind=failure_kind,
+        )
+
+    def agent_telemetry(self) -> dict[str, AgentTelemetry]:
+        """``{agent_id: AgentTelemetry}`` for every agent this client served —
+        ``{}`` (instrumented, no calls) when none was made."""
+        return {k: v.model_copy(deep=True) for k, v in self._agent_telemetry.items()}
 
     def usage_by_tier(self) -> dict[str, TierUsage]:
         return {k: v.model_copy(deep=True) for k, v in self._usage.items()}
