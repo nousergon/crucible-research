@@ -149,6 +149,7 @@ from typing import Any
 
 import boto3
 
+from evals.judge_models import SONNET
 from evals.metrics import (
     DEFAULT_METRIC_NAME,
     DEFAULT_NAMESPACE,
@@ -163,6 +164,7 @@ from evals.rolling_mean import (
     _get_metric_data_all,
     _list_metric_combos,
 )
+from evals.rubric_dimensions import declared_criteria_for_agent
 
 # Second consumer of the rolling-mean CloudWatch + changelog substrate.
 # Reused rather than re-implemented; lifting these to a shared
@@ -347,6 +349,34 @@ is the honest state of a corpus with 6 usable weeks for those combos,
 and it is published on the unmeasurable stream rather than folded into
 the healthy zero."""
 
+FLOOR_WINDOW_WEEKS_BY_JUDGE: dict[str, int] = {SONNET.logical_key: 5}
+"""How many complete week slots the judged-corpus floor sums a judge tier's
+reviews over. A tier not named here is a WEEKLY tier: one slot, exactly the
+floor ``MIN_REVIEWS_PER_WEEK`` was derived for.
+
+The Sonnet tier is not weekly, by the pipeline's own declaration: the weekly
+SF's ``ComputeEvalCadence`` sets ``force_sonnet_pass=true`` only when the run
+starts on day-of-month <= 7 (the monthly Sonnet sweep, ROADMAP §1626); every
+other Saturday runs Haiku plus a per-artifact Sonnet ESCALATION tail, whose
+volume depends on what Haiku scored. Measured 2026-10-07 on epoch slots,
+``thinktank_thesis/*/claude-sonnet-4-6`` held 72 / 17 / **0 / 0** / 36 reviews
+in slots 2957..2961 — the sweep weeks (09-05, 10-03) carry it, and the weeks
+between are routinely under four. Charged against a one-week floor that is a
+breach in roughly three weeks of four with nothing wrong, which is how
+``alpha-engine-eval-review-floor`` stayed latched from 2026-09-12 to 10-07
+and drove nous-ergon-ops "CloudWatch alarm age" red.
+
+Five, not four: first Saturdays are four OR five weeks apart (08-01, 09-05,
+10-03, 11-07), so five complete slots always contain one sweep, and a window
+that does not contain a sweep is a sweep that did not happen — the real
+starvation this floor exists for. A first-Saturday run that fails and is
+recovered on day 8 or later never sets ``force_sonnet_pass``; this window
+then reads the Sonnet combos under four and the floor fires, correctly.
+
+The weekly failure the floor was written from (every rerun carrying
+``skip_eval_judge``) is still caught on the weekly window by every Haiku
+combo, so widening the Sonnet window loses no detection of it."""
+
 DEFAULT_MAX_STALENESS_WEEKS = 1
 """How many complete weeks the newest observation may lag before the
 combo is ``STALE`` rather than judged.
@@ -380,8 +410,12 @@ REVIEW_FLOOR_BREACH_METRIC_NAME = (
     "agent_quality_score_weekly_review_floor_breach_count"
 )
 """Dimensionless single-datapoint metric = how many discovered combos had
-FEWER than ``MIN_REVIEWS_PER_WEEK`` judged reviews in the newest COMPLETE
-calendar week -- counting a combo with no bucket at all as a breach.
+FEWER than ``MIN_REVIEWS_PER_WEEK`` judged reviews in their judge tier's
+cadence window ending at the newest COMPLETE calendar week -- one week for
+a weekly tier, ``FLOOR_WINDOW_WEEKS_BY_JUDGE`` weeks for the monthly Sonnet
+sweep -- counting a combo with no bucket at all as a breach. A combo whose
+criterion the agent's rubric does not declare is left out of the count
+(``evals/rubric_dimensions.py``).
 
 This is the judged-corpus floor alarm ``alpha-engine-config-I10169``
 deliverable 3 asks for, and it is deliberately ONE dimensionless stream
@@ -1347,29 +1381,54 @@ def compute_and_emit_control_bands(
     # INSUFFICIENT_HISTORY, which are statements about the chart, not
     # about the corpus).
     review_floor_breaches: list[str] = []
+    # A criterion the agent's rubric does not declare is not a combo the
+    # corpus owes reviews to: it is a judge that invented a dimension
+    # (2026-10-03, ``thinktank_theme/dimension_note/claude-haiku-4-5``, one
+    # review, ever) and the judge now drops those before emitting. Left
+    # in, a phantom that already reached CloudWatch would hold this count
+    # >= 1 until ListMetrics stops returning it. UNKNOWN (no rubric, or an
+    # unreadable one) keeps the combo, exactly as before.
+    review_floor_excluded_undeclared: list[str] = []
+    declared_by_agent: dict[str, tuple[str, ...] | None] = {}
     for idx, dims in enumerate(combos):
-        latest_obs = next(
-            (
-                o for o in series_by_combo.get(idx, [])
-                if o.week_index == latest_week
-            ),
-            None,
+        flat = _dims_to_dict(dims)
+        agent = flat.get("judged_agent_id")
+        criterion = flat.get("criterion")
+        judge = flat.get("judge_model")
+        label = f"{agent}/{criterion}/{judge}"
+        if agent not in declared_by_agent:
+            declared_by_agent[agent] = declared_criteria_for_agent(agent)
+        declared = declared_by_agent[agent]
+        if declared is not None and criterion not in declared:
+            review_floor_excluded_undeclared.append(label)
+            continue
+        window = FLOOR_WINDOW_WEEKS_BY_JUDGE.get(judge, 1)
+        first_week = latest_week - window + 1
+        reviews = sum(
+            o.reviews for o in series_by_combo.get(idx, [])
+            if first_week <= o.week_index <= latest_week
         )
-        if latest_obs is None or latest_obs.reviews < MIN_REVIEWS_PER_WEEK:
-            flat = _dims_to_dict(dims)
+        if reviews < MIN_REVIEWS_PER_WEEK:
             review_floor_breaches.append(
-                f"{flat.get('judged_agent_id')}/{flat.get('criterion')}/"
-                f"{flat.get('judge_model')}="
-                f"{0 if latest_obs is None else latest_obs.reviews}"
+                f"{label}={reviews}" + (f"/{window}w" if window > 1 else "")
             )
+    if review_floor_excluded_undeclared:
+        logger.warning(
+            "[control_bands] judged-corpus floor: %d combo(s) left out of "
+            "the floor because their rubric does not declare the criterion: "
+            "%s",
+            len(review_floor_excluded_undeclared),
+            review_floor_excluded_undeclared,
+        )
     if review_floor_breaches:
         logger.error(
             "[control_bands] judged-corpus floor: %d of %d combo(s) had "
-            "fewer than %d reviews in the newest complete week (slot %d): "
-            "%s — the judged corpus, not the chart, is the thing that is "
-            "wrong (alpha-engine-config-I10169)",
-            len(review_floor_breaches), len(combos), MIN_REVIEWS_PER_WEEK,
-            latest_week, review_floor_breaches[:20],
+            "fewer than %d reviews in their cadence window ending at the "
+            "newest complete week (slot %d): %s — the judged corpus, not "
+            "the chart, is the thing that is wrong (alpha-engine-config-I10169)",
+            len(review_floor_breaches),
+            len(combos) - len(review_floor_excluded_undeclared),
+            MIN_REVIEWS_PER_WEEK, latest_week, review_floor_breaches[:30],
         )
 
     # ── Pass 2: the verdicts, against the pooled prior ────────────────
@@ -1491,6 +1550,7 @@ def compute_and_emit_control_bands(
         "zscores_emitted": len(zscore_data),
         "review_floor_breach_count": len(review_floor_breaches),
         "review_floor_breaches": review_floor_breaches,
+        "review_floor_excluded_undeclared": review_floor_excluded_undeclared,
         "sigma_b_pooled": sigma_b_pooled_measured,
         "sigma_b_pooled_applied": POOLED_SIGMA_B_ENABLED,
         "failed": failed,
@@ -1513,6 +1573,7 @@ def _empty_summary(start: datetime, end: datetime) -> dict[str, Any]:
         "zscores_emitted": 0,
         "review_floor_breach_count": 0,
         "review_floor_breaches": [],
+        "review_floor_excluded_undeclared": [],
         "sigma_b_pooled": None,
         "sigma_b_pooled_applied": POOLED_SIGMA_B_ENABLED,
         "failed": [],
