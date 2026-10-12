@@ -68,6 +68,10 @@ from evals.judge_batch_transport import (
 )
 from evals.judge_models import request_model_for
 from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
+from evals.rubric_dimensions import (
+    declared_dimensions,
+    keep_declared_dimension_scores,
+)
 from graph.state_schemas import RubricEvalArtifact
 
 logger = logging.getLogger(__name__)
@@ -1742,7 +1746,13 @@ def process_batch_results(
                 judge_model=entry["judge_model"],
                 judge_request_model=request_model_for(entry["judge_model"]),
                 judge_resolved_model=resolved_model,
-                dimension_scores=llm_output.dimension_scores,
+                dimension_scores=keep_declared_dimension_scores(
+                    llm_output.dimension_scores,
+                    declared_dimensions(loaded_prompt.text),
+                    agent_id=entry["agent_id"],
+                    judge_model=entry["judge_model"],
+                    rubric_id=entry["rubric_id"],
+                ),
                 overall_reasoning=llm_output.overall_reasoning,
             )
             try:

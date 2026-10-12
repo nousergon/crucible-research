@@ -95,6 +95,10 @@ from nousergon_lib.eval_artifacts import (
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
 from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
+from evals.rubric_dimensions import (
+    declared_dimensions,
+    keep_declared_dimension_scores,
+)
 from graph.state_schemas import (
     RubricEvalArtifact,
     RubricEvalLLMOutput,
@@ -884,7 +888,13 @@ def evaluate_artifact(
         judge_model=judge_model,
         judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
-        dimension_scores=call_result.llm_output.dimension_scores,
+        dimension_scores=keep_declared_dimension_scores(
+            call_result.llm_output.dimension_scores,
+            declared_dimensions(loaded_prompt.text),
+            agent_id=artifact.agent_id,
+            judge_model=judge_model,
+            rubric_id=rubric_name,
+        ),
         overall_reasoning=call_result.llm_output.overall_reasoning,
     )
 
@@ -1464,7 +1474,13 @@ def evaluate_artifact_openrouter(
         judge_model=judge_model,
         judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
-        dimension_scores=call_result.llm_output.dimension_scores,
+        dimension_scores=keep_declared_dimension_scores(
+            call_result.llm_output.dimension_scores,
+            declared_dimensions(loaded_prompt.text),
+            agent_id=artifact.agent_id,
+            judge_model=judge_model,
+            rubric_id=rubric_name,
+        ),
         overall_reasoning=call_result.llm_output.overall_reasoning,
     )
 
