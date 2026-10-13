@@ -119,9 +119,37 @@ jobs:
           python-version: '3.12'
 
       - name: Install krepis (runner-side canary + alert CLI)
+        id: install_krepis
         run: pip install "krepis>=0.59.25"
 
+      # ── Per-Lambda failure isolation (crucible-research deploy resilience) ──
+      #
+      # Every Lambda below is its own step in ONE job, so before this change a
+      # failure in any step skipped every step after it: on 2026-10-12 (run
+      # 38290200265, attempt 1) the scanner step hit a transient AWS
+      # AccessDenied and signals-envelope, openrouter-shadow, its schedule and
+      # alerts never ran, leaving the Lambda deploy drift check red until a
+      # manual re-run. Each deploy step now carries an explicit `if:` so a
+      # sibling's failure no longer skips it. No `continue-on-error`: a failed
+      # step still fails the job, so `notify-main-failure` still fires and the
+      # changelog still records `failure`. One runner, no matrix, no extra
+      # minutes.
+      #
+      # Ordering dependencies are kept, not dropped:
+      #   - The image-share Lambdas deploy `$ECR_REPO:latest`, which THIS step
+      #     builds and pushes, and stamp ALPHA_ENGINE_CODE_SHA=<this sha> on
+      #     whatever that tag holds. If this step failed they would stamp the
+      #     new SHA onto an old image and the drift detector would read them as
+      #     in sync. So they run only when `steps.deploy_main.outcome ==
+      #     'success'`.
+      #   - The openrouter-shadow schedule needs the openrouter-shadow function.
+      #   - The alerts Lambda builds its own image (Dockerfile.alerts), so it
+      #     needs only the setup steps (gated through `install_krepis`, the
+      #     last of them; it runs only if every earlier setup step passed).
+      # `!cancelled()` replaces the implicit `success()` so a cancelled run
+      # still stops. tests/test_deploy_workflow_failure_isolation.py pins this.
       - name: Deploy main Lambda (alpha-engine-research-runner)
+        id: deploy_main
         working-directory: alpha-engine-research
         env:
           # deploy.sh defaults CONFIG_REPO_DIR to $(dirname $(pwd))/
@@ -147,6 +175,8 @@ jobs:
       # push, which is the merged-but-not-deployed class this workflow's own
       # comments record (the original eval_judge_batch case).
       - name: Deploy eval-judge submit Lambda
+        id: deploy_eval_judge_submit
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -163,6 +193,8 @@ jobs:
       # the merged-but-not-deployed class (cf. alpha-engine-data L4609).
       # Found 2026-06-11 investigating the perpetual quality-floor ALARM.
       - name: Deploy eval rolling-mean Lambda (alpha-engine-research-eval-rolling-mean)
+        id: deploy_eval_rolling_mean
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -194,6 +226,8 @@ jobs:
       # match the eval-judge precedent so capture-format or extraction
       # logic changes propagate without manual intervention.
       - name: Deploy rationale-clustering Lambda (alpha-engine-research-rationale-clustering)
+        id: deploy_rationale_clustering
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -207,6 +241,8 @@ jobs:
       # current at first manual deploy. Cost-aggregation logic changes
       # in scripts/aggregate_costs.py propagate cleanly via this step.
       - name: Deploy aggregate-costs Lambda (alpha-engine-research-aggregate-costs)
+        id: deploy_aggregate_costs
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -222,6 +258,8 @@ jobs:
       # data/scanner.py + data/scanner_orchestrator.py propagate
       # cleanly via this step.
       - name: Deploy scanner Lambda (alpha-engine-research-scanner)
+        id: deploy_scanner
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -248,6 +286,8 @@ jobs:
       # The ci-deploy-guard test (tests/test_deploy_targets_invoked_by_
       # workflow.py) enforces this step's existence.
       - name: Deploy signals-envelope Lambda (alpha-engine-research-signals-envelope)
+        id: deploy_signals_envelope
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -262,6 +302,8 @@ jobs:
       # a manual step, matching every other shared-image Lambda's precedent
 
       - name: Deploy openrouter-shadow Lambda (alpha-engine-research-openrouter-shadow)
+        id: deploy_openrouter_shadow
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
@@ -287,6 +329,8 @@ jobs:
       # deploy/github-actions-lambda-deploy-policy.json in nous-ergon-ops —
       # no new identity, no new grant.
       - name: Apply the openrouter-shadow EventBridge schedule (idempotent)
+        id: apply_openrouter_shadow_schedule
+        if: ${{ !cancelled() && steps.deploy_openrouter_shadow.outcome == 'success' }}
         working-directory: alpha-engine-research
         run: bash infrastructure/setup-openrouter-shadow-schedule.sh
 
@@ -310,12 +354,15 @@ jobs:
       # image (Dockerfile.alerts), so a failure in it must not be able to
       # block the trading-critical publishes above it.
       - name: Deploy alerts Lambda (alpha-engine-research-alerts)
+        id: deploy_alerts
+        if: ${{ !cancelled() && steps.install_krepis.outcome == 'success' }}
         working-directory: alpha-engine-research
         env:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh alerts
 
       - name: Report deployed version
+        if: ${{ !cancelled() && steps.deploy_main.outcome == 'success' }}
         run: |
           echo "Triggered by: ${{ github.event_name }}"
           echo "Research commit: ${{ github.sha }}"
