@@ -512,6 +512,107 @@ class TestProcessBatchResults:
         for k in summary["persisted_keys"]:
             assert k.startswith("decision_artifacts/_eval/")
 
+    def test_cited_rubric_validates_batch_evidence_against_the_capture(
+        self, mocked_s3, monkeypatch,
+    ):
+        """alpha-engine-config-I12312: when the rubric declares the
+        ``judge_evidence.v1`` contract, the batch rung parses per-finding
+        evidence, re-reads the judged capture and validates every citation
+        against it — the same verdict shape the sync rung writes."""
+        from pathlib import Path
+
+        from agents.prompt_loader import LoadedPrompt
+        from evals.orchestrator import (
+            build_batch_plan,
+            process_batch_results,
+            submit_batch,
+        )
+
+        cited = LoadedPrompt(
+            name="eval_rubric_cited",
+            text=(
+                "═══ DIMENSION 1: dim_0 ═══\n═══ DIMENSION 2: dim_1 ═══\n"
+                "═══ EVIDENCE CONTRACT: judge_evidence.v1 ═══\n"
+                "{agent_input}\n{agent_output}"
+            ),
+            version="1.0.0", hash="c" * 64, source_path=Path("/dev/null"),
+        )
+        monkeypatch.setattr(orch, "load_prompt", lambda name: cited)
+        monkeypatch.setattr(judge_mod, "load_prompt", lambda name: cited)
+
+        plan = build_batch_plan(
+            date="2026-05-09", bucket="alpha-engine-research",
+            s3_client=mocked_s3,
+        )
+        fake_batch = MagicMock()
+        fake_batch.id = "msgbatch_cited"
+        fake_client = MagicMock()
+        fake_client.messages.batches.create.return_value = fake_batch
+        submit_result = submit_batch(plan, batch_client=fake_client, s3_client=mocked_s3)
+        # The batch request carried the CITED tool schema.
+        from graph.state_schemas import CitedRubricEvalLLMOutput
+
+        sent = fake_client.messages.batches.create.call_args.kwargs["requests"]
+        assert sent and all(
+            r["params"]["tools"][0]["input_schema"] == CitedRubricEvalLLMOutput.model_json_schema()
+            for r in sent
+        )
+
+        plan_entries = json.loads(
+            mocked_s3.get_object(
+                Bucket="alpha-engine-research", Key=submit_result["plan_s3_key"],
+            )["Body"].read()
+        )["plan_entries"]
+        from evals.judge_citations import build_judge_inputs
+
+        results = []
+        offered = {}
+        for e in plan_entries:
+            capture = json.loads(mocked_s3.get_object(
+                Bucket="alpha-engine-research", Key=e["capture_s3_key"],
+            )["Body"].read())
+            ids = [el.id for el in build_judge_inputs(capture["input_data_snapshot"])[0]]
+            offered[e["capture_s3_key"]] = ids
+            r = _make_batch_result_succeeded(e["custom_id"], scores=[4, 4])
+            dims = r.result.message.content[0].input["dimension_scores"]
+            dims[0]["evidence"] = [{
+                "claim_quote": "ok",
+                "claim_span": {"field": "out", "start": 0, "end": 2},
+                "source_ref": ids[0],
+            }]
+            dims[1]["evidence"] = [{
+                "claim_quote": "not in the output",
+                "claim_span": {"field": "out", "start": 0, "end": 2},
+                "source_ref": ids[0],
+            }]
+            results.append(r)
+        fake_client.messages.batches.results.return_value = iter(results)
+
+        summary = process_batch_results(
+            batch_id=submit_result["batch_id"],
+            plan_s3_key=submit_result["plan_s3_key"],
+            bucket="alpha-engine-research",
+            batch_client=fake_client,
+            s3_client=mocked_s3,
+            emit_metrics=False,
+        )
+        assert summary["failed"] == []
+        llm_keys = [
+            k for k in summary["persisted_keys"]
+            if json.loads(mocked_s3.get_object(Bucket="alpha-engine-research", Key=k)["Body"].read())["dimension_scores"]
+        ]
+        assert len(llm_keys) == 3
+        for k in llm_keys:
+            body = json.loads(mocked_s3.get_object(Bucket="alpha-engine-research", Key=k)["Body"].read())
+            assert body["citation_check"]["citations_total"] == 2
+            assert body["citation_check"]["citations_valid"] == 1
+            assert body["citation_check"]["unsupported_dimensions"] == ["dim_1"]
+            assert body["dimension_scores"][0]["evidence"][0]["location"] == "exact"
+            assert body["judge_call"]["callsite_id"] == "evaljudge-batch"
+            assert body["judge_call"]["custom_id"]
+            assert [i["id"] for i in body["judge_inputs"]] == offered[body["judged_artifact_s3_key"]]
+            assert body["judge_parser_version"] and body["rubric_hash"] == "c" * 64
+
     def test_weekly_path_runs_sonnet_escalation_tail_on_borderline_haiku(
         self, mocked_s3,
     ):
@@ -1040,5 +1141,6 @@ class TestBatchCostEmission:
 
         src = inspect.getsource(orchestrator.process_batch_results)
         emit_at = src.index("_emit_batch_cost_record(message_payload")
-        parse_at = src.index("parse_batch_message(message_payload)")
+        # ``cited=`` since alpha-engine-config-I12312; the ORDER is the claim.
+        parse_at = src.index("parse_batch_message(message_payload")
         assert emit_at < parse_at
