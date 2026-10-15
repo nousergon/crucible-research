@@ -242,7 +242,29 @@ def _make_manifest_entry(eval_artifact: dict, eval_s3_key: str) -> dict:
         "eval_s3_key": eval_s3_key,
         "judged_artifact_s3_key": eval_artifact.get("judged_artifact_s3_key"),
         "judge_skip_reason": eval_artifact.get("judge_skip_reason"),
+        **_citation_entry_fields(eval_artifact),
     }
+
+
+def _citation_entry_fields(eval_artifact: dict) -> dict:
+    """Citation-validator counts and the judged trace id, for verdicts that
+    carry them (alpha-engine-config-I12312). Absent keys — not ``None`` —
+    for older and uncited verdicts, so their manifest rows are unchanged.
+    Mirrors ``evals.judge._sidecar_citation_fields`` without importing the
+    judge runtime (module isolation, as for the capture-date helper)."""
+    out: dict = {}
+    check = eval_artifact.get("citation_check")
+    if isinstance(check, dict):
+        out.update(
+            citation_contract=check.get("contract"),
+            citations_total=check.get("citations_total"),
+            citations_valid=check.get("citations_valid"),
+            citations_invalid=check.get("citations_invalid"),
+            findings_unsupported=check.get("findings_unsupported"),
+        )
+    if eval_artifact.get("judged_trace_id"):
+        out["judged_trace_id"] = eval_artifact["judged_trace_id"]
+    return out
 
 
 def build_manifests(
