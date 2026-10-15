@@ -186,8 +186,17 @@ class TestBuildBatchRequest:
             artifact, judge_model="claude-haiku-4-5", custom_id=cid,
         )
         # The Pydantic model is the contract — the tool spec must match.
+        # Which model depends on the LIVE rubric: one declaring the
+        # ``judge_evidence.v1`` citation contract is judged with the cited
+        # schema (alpha-engine-config-I12312), every other with the plain one.
+        from agents.prompt_loader import load_prompt
+        from evals.judge_citations import declared_citation_contract
+        from graph.state_schemas import CitedRubricEvalLLMOutput
+
+        cited = declared_citation_contract(load_prompt("eval_rubric_thinktank_theme").text)
+        expected = CitedRubricEvalLLMOutput if cited else RubricEvalLLMOutput
         assert req["params"]["tools"][0]["input_schema"] == (
-            RubricEvalLLMOutput.model_json_schema()
+            expected.model_json_schema()
         )
 
 
