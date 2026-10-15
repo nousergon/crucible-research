@@ -12,10 +12,10 @@ from pydantic import BaseModel
 
 from thinktank.client import (
     _STRUCTURED_ATTEMPTS,
-    _callsite_id_for,
     SftCaptureWriteError,
     ThinktankClient,
     ThinktankLLMError,
+    _callsite_id_for,
 )
 from thinktank.settings import ThinktankSettings, TierSpec
 
