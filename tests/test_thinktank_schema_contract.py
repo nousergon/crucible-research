@@ -48,6 +48,8 @@ _FROZEN_FIELDS = {
         "prompt_version",
         "cost_usd",
         "pillar_assessment",
+        "thesis_citations",
+        "pillar_citations",
     },
     CompanyThesisLLM: {
         "business_summary",
@@ -63,6 +65,7 @@ _FROZEN_FIELDS = {
         "summary",
         "rating",
         "rating_rationale",
+        "claims",
     },
     # Response contract for new generations: same field set, rating REQUIRED.
     CompanyThesisRatedLLM: {
@@ -79,6 +82,7 @@ _FROZEN_FIELDS = {
         "summary",
         "rating",
         "rating_rationale",
+        "claims",
     },
     RatingRow: {
         "ticker",
@@ -282,7 +286,7 @@ def test_schema_version_stamped_on_artifacts():
         ChallengerSelection,
     ):
         assert "schema_version" in model.model_fields
-        assert model.model_fields["schema_version"].default == 2
+        assert model.model_fields["schema_version"].default == 3
 
 
 def test_llm_outputs_forbid_extra_fields():

@@ -34,6 +34,80 @@ class ThesisSection(BaseModel):
     body: str
 
 
+class CitedClaim(BaseModel):
+    """One key claim of an LLM output, tied to the sources it relies on.
+
+    alpha-engine-config-I12312: every thesis and pillar input is rendered as a
+    ``<source cid="…">`` block, and the cited prompt versions ask the model to
+    list its key claims here with the cids each relies on. ``claim`` carries
+    the same inline ``[cid]`` markers as the prose, which is what
+    ``krepis.llm_trace`` reads to set ``cited_in_output`` on the trace row.
+    The list is model output; it is checked against the cids actually rendered
+    into the prompt by :func:`thinktank.citations.check_citations`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    section: str = Field(description="The output field this claim supports, e.g. valuation, risks, quality.")
+    claim: str = Field(description="The claim in one sentence, with its inline [cid] markers.")
+    citations: list[str] = Field(
+        description=(
+            "The cids of the sources this claim relies on, in citation order. "
+            "Empty when the claim rests on general knowledge or records an "
+            "absence of evidence."
+        ),
+    )
+
+
+class CheckedClaim(BaseModel):
+    """A :class:`CitedClaim` after deterministic validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section: str
+    claim: str
+    # Cids that were rendered into the prompt: the claim's own `citations`
+    # entries that resolve, then any inline [cid] marker in `claim` that
+    # resolves, first citation first.
+    citations: list[str] = Field(default_factory=list)
+    # Entries of the claim's `citations` list that name no source rendered
+    # into this prompt. Kept, never dropped: a fabricated citation is a
+    # finding, not noise.
+    invalid_citations: list[str] = Field(default_factory=list)
+    # True when the claim has no valid citation. Flagged, never fatal.
+    uncited: bool = False
+
+
+class CitationCheck(BaseModel):
+    """Per-call citation validation, stored on the thesis artifact.
+
+    Computed after the call from the structured output and the prompt's
+    ``RenderedSources`` alone — no model judgment. A failed check never fails
+    the run; it is recorded here and logged at WARNING.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_id: str = ""
+    prompt_version: str = ""
+    # Every cid rendered into the prompt, in prompt order.
+    rendered_cids: list[str] = Field(default_factory=list)
+    # Rendered cids the output cites anywhere — a claim's `citations` list or
+    # an inline [cid] marker in any string field. Superset of what the trace
+    # row's `cited_in_output` reads (inline markers only).
+    cited_cids: list[str] = Field(default_factory=list)
+    # Rendered cids the output never cites.
+    uncited_sources: list[str] = Field(default_factory=list)
+    # Distinct `citations` entries, across all claims, naming no rendered cid.
+    invalid_cids: list[str] = Field(default_factory=list)
+    # Distinct inline [x] markers that name no rendered cid. Recorded but not
+    # counted as invalid: "[1]" in a numbered list is not a citation.
+    unresolved_markers: list[str] = Field(default_factory=list)
+    claim_count: int = 0
+    uncited_claim_count: int = 0
+    claims: list[CheckedClaim] = Field(default_factory=list)
+
+
 class CompanyThesisLLM(BaseModel):
     """The LLM-authored core of a thesis (what the model must return)."""
 
@@ -75,6 +149,17 @@ class CompanyThesisLLM(BaseModel):
             "2-4 sentences: why this specific number — the evidence that drives it and what would move it up or down."
         ),
     )
+    # alpha-engine-config-I12312: the key claims and the source cids each
+    # relies on. Default-empty HERE so theses stored before citations existed
+    # still parse (S3 add-only contract); CompanyThesisCitedLLM makes the key
+    # required on the call.
+    claims: list[CitedClaim] = Field(
+        default_factory=list,
+        description=(
+            "The thesis's key claims, one per entry, each with the cids of "
+            "the sources it relies on."
+        ),
+    )
 
 
 class CompanyThesisRatedLLM(CompanyThesisLLM):
@@ -95,6 +180,41 @@ class CompanyThesisRatedLLM(CompanyThesisLLM):
     rating_rationale: str = Field(
         description=CompanyThesisLLM.model_fields["rating_rationale"].description,
     )
+
+
+class CompanyThesisCitedLLM(CompanyThesisRatedLLM):
+    """Response contract for the cited thesis prompt (thinktank_thesis_cited).
+
+    ``claims`` is a required key. It may be empty: an output with no claims is
+    flagged by the citation check, not retried into a failure.
+    """
+
+    claims: list[CitedClaim] = Field(
+        description=CompanyThesisLLM.model_fields["claims"].description,
+    )
+
+
+class CitedPillarAssessmentLLM(QualitativePillarAssessment):
+    """Response contract for the cited pillar prompt (thinktank_pillar_cited).
+
+    The nousergon-lib pillar contract plus a required ``claims`` key. The
+    claims are split off before the assessment is stored, so
+    ``CompanyThesis.pillar_assessment`` stays exactly the library shape; the
+    checked claims are kept on ``CompanyThesis.pillar_citations``.
+    """
+
+    claims: list[CitedClaim] = Field(
+        description=(
+            "The key claims behind the pillar scores, one per entry, each "
+            "with the cids of the sources it relies on."
+        ),
+    )
+
+    def assessment(self) -> QualitativePillarAssessment:
+        """The library-shaped assessment, without ``claims``."""
+        return QualitativePillarAssessment.model_validate(
+            self.model_dump(exclude={"claims"})
+        )
 
 
 class CompanyThesis(_Artifact):
@@ -126,6 +246,11 @@ class CompanyThesis(_Artifact):
     # the scanner composite (thinktank/analyst.py::_facts_board_row still
     # withholds attractiveness_score/pillars from every prompt).
     pillar_assessment: QualitativePillarAssessment | None = None
+    # alpha-engine-config-I12312: deterministic citation checks of the thesis
+    # and pillar calls (cids cited vs cids rendered into each prompt). None on
+    # theses built before the cited prompts.
+    thesis_citations: CitationCheck | None = None
+    pillar_citations: CitationCheck | None = None
 
 
 # ── Ratings board (console/eval rollup) ──────────────────────────────────────

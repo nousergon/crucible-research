@@ -60,7 +60,7 @@ class _FakeBackend:
     def _create(self, **kwargs):
         name = kwargs["response_format"]["json_schema"]["name"]
         user = kwargs["messages"][-1]["content"]
-        if name == "CompanyThesisRatedLLM" and self.raise_on_ticker:
+        if name == "CompanyThesisCitedLLM" and self.raise_on_ticker:
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             if m_ticker and m_ticker.group(1) == self.raise_on_ticker:
                 raise RuntimeError(f"simulated crash building {self.raise_on_ticker}")
@@ -75,7 +75,7 @@ class _FakeBackend:
                 "material_change": self.macro_material_change,
                 "change_summary": "changed" if self.macro_material_change else "",
             }
-        elif name == "CompanyThesisRatedLLM":
+        elif name == "CompanyThesisCitedLLM":
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             body = {
@@ -92,8 +92,9 @@ class _FakeBackend:
                 "summary": "s",
                 "rating": self.ratings.get(ticker, 72),
                 "rating_rationale": "evidence-driven number",
+                "claims": [{"section": "valuation", "claim": "v [board]", "citations": ["board"]}],
             }
-        elif name == "QualitativePillarAssessment":
+        elif name == "CitedPillarAssessmentLLM":
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             score = self.ratings.get(ticker, 72)
@@ -122,6 +123,7 @@ class _FakeBackend:
                 "stewardship": _sub("stewardship"),
                 "defensiveness": _sub("defensiveness"),
                 "catalyst_horizon_modulation": 0,
+                "claims": [{"section": "quality", "claim": "q [board]", "citations": ["board"]}],
             }
         elif name == "SweepBatchLLM":
             m = re.search(r"batch: (.+)", user)
@@ -300,6 +302,18 @@ def test_daily_lifecycle_end_to_end(tt_config):
         t0 = store.get_json("thinktank/theses/T0/latest.json")
         assert t0["version"] == 1 and t0["update_reason"] == "initial"
         assert t0["macro_theme_version"] == 1
+        # alpha-engine-config-I12312: both calls' citations are checked
+        # against the cids their prompts rendered, and stored.
+        assert t0["prompt_version"] == "0.4.0"
+        assert t0["thesis"]["claims"][0]["citations"] == ["board"]
+        for key in ("thesis_citations", "pillar_citations"):
+            check = t0[key]
+            assert "board" in check["rendered_cids"]
+            assert check["cited_cids"] == ["board"]
+            assert check["invalid_cids"] == [] and check["uncited_claim_count"] == 0
+        assert t0["thesis_citations"]["prompt_id"] == "thinktank_thesis_cited"
+        assert t0["pillar_citations"]["prompt_id"] == "thinktank_pillar_cited"
+        assert "claims" not in t0["pillar_assessment"]
         macro = store.get_json("thinktank/themes/macro/macro/latest.json")
         assert macro["version"] == 1 and macro["update_reason"] == "seed"
         assert macro["weekly_anchor_date"] == "2026-06-28"
@@ -316,6 +330,13 @@ def test_daily_lifecycle_end_to_end(tt_config):
         t1 = store.get_json("thinktank/theses/T1/latest.json")
         assert t1["version"] == 2 and t1["update_reason"] == "event"
         assert t1["event_context"] == "guidance cut"
+        # The re-underwrite shows the prior thesis without yesterday's
+        # citations: the same cid can name a different source today.
+        t1_prompt = [u for n, u in backend.users
+                     if n == "CompanyThesisCitedLLM" and '"ticker": "T1"' in u][-1]
+        prior_section = t1_prompt.split("PRIOR THESIS", 1)[1].split("CURRENT HOUSE THEMES", 1)[0]
+        assert '"valuation":"v"' in prior_section
+        assert "[board]" not in prior_section and '"claims"' not in prior_section
         macro = store.get_json("thinktank/themes/macro/macro/latest.json")
         assert macro["version"] == 2 and macro["update_reason"] == "event"
         events = store.get_text(f"thinktank/events/{manifest2.trading_day}.jsonl")
@@ -652,7 +673,7 @@ def test_ratings_board_and_prompt_independence(tt_config):
 
         # the anchoring pin: no scanner-opinion JSON keys in any thesis OR
         # pillar-extraction prompt (config#2678 must not reverse this)
-        opinion_prompts = [u for n, u in backend.users if n in ("CompanyThesisRatedLLM", "QualitativePillarAssessment")]
+        opinion_prompts = [u for n, u in backend.users if n in ("CompanyThesisCitedLLM", "CitedPillarAssessmentLLM")]
         assert opinion_prompts, "no thesis/pillar calls captured"
         for user in opinion_prompts:
             for banned in ('"attractiveness_score"', '"pillars"', '"focus_score"', '"tech_score"'):
@@ -761,7 +782,7 @@ def test_challenger_selection_written_daily_then_gap_fill(tt_config):
         assert manifest.challenger_selection_written is True
 
         sel = store.get_json("thinktank/challenger_selection/latest.json")
-        assert sel["schema_version"] == 2  # config#2678 bump — see thinktank/__init__.py
+        assert sel["schema_version"] == 3  # alpha-engine-config-I12312 bump — see thinktank/__init__.py
         # The artifact must self-report the arm whose shadow prefix it is
         # written under (§7.5). Both moved together on 2026-09-22.
         assert sel["arm"] == "thinktank_20"

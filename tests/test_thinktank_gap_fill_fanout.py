@@ -59,7 +59,7 @@ class _FakeBackend:
                 "material_change": self.macro_material_change,
                 "change_summary": "changed" if self.macro_material_change else "",
             }
-        elif name == "CompanyThesisRatedLLM":
+        elif name == "CompanyThesisCitedLLM":
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             body = {
@@ -76,8 +76,9 @@ class _FakeBackend:
                 "summary": "s",
                 "rating": self.ratings.get(ticker, 72),
                 "rating_rationale": "evidence-driven number",
+                "claims": [{"section": "valuation", "claim": "v [board]", "citations": ["board"]}],
             }
-        elif name == "QualitativePillarAssessment":
+        elif name == "CitedPillarAssessmentLLM":
             m_ticker = re.search(r'"ticker":\s*"(\w+)"', user)
             ticker = m_ticker.group(1) if m_ticker else None
             score = self.ratings.get(ticker, 72)
@@ -101,6 +102,7 @@ class _FakeBackend:
                 "stewardship": _sub("stewardship"),
                 "defensiveness": _sub("defensiveness"),
                 "catalyst_horizon_modulation": 0,
+                "claims": [{"section": "quality", "claim": "q [board]", "citations": ["board"]}],
             }
         elif name == "SweepBatchLLM":
             m = re.search(r"batch: (.+)", user)
