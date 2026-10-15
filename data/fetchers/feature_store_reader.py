@@ -133,10 +133,20 @@ _FACTOR_TECHNICAL_COLS: tuple[str, ...] = (
 # the columns they asked for — the widening is invisible above this module.
 _ARCTIC_UNION_COLS: tuple[str, ...] = tuple(dict.fromkeys(_TECHNICAL_COLS + _FACTOR_TECHNICAL_COLS))
 
-# Single-entry memo for the union read, keyed on ``(tickers, ref_date)``.
-# See :func:`_read_arctic_union_cached` for why it holds exactly one entry
-# and why the date is part of the key.
+# Single-entry memo for the union read: the raw per-ticker frames of ONE
+# read window, plus that window's reference date. See
+# :func:`_read_arctic_union_cached` for why it holds exactly one entry and
+# how a request on a different date or universe is served from it exactly.
 _ARCTIC_UNION_CACHE: dict = {}
+
+# Extra calendar days the union read reaches back beyond one request's
+# lookback, so a later request whose reference date is up to this many days
+# EARLIER than the cached one still has its whole window inside the cached
+# frames. The two callers in a Saturday run differ by exactly one day: the
+# scanner's tech_score read uses the calendar date (Saturday) and the factor
+# pillar uses run_date (Friday). Both reads were full round-trips, because
+# the memo was keyed on the exact date (alpha-engine-config-I10533).
+_ARCTIC_UNION_REUSE_DAYS = 7
 
 # Trailing window to read so the latest row is found even after a long
 # weekend or holiday stretch. Wide enough to be robust, narrow enough that
@@ -198,42 +208,74 @@ def _assert_fresh(latest_ts, ref_date, *, source: str, what: str) -> None:
         )
 
 
-def _read_arctic_latest(
+def _read_arctic_frames(
+    universe_lib,
     tickers: list[str],
+    columns: tuple[str, ...],
+    start_ts,
+    end_ts,
+) -> dict:
+    """Raw frames per ticker from ONE ``read_batch`` over ``[start_ts, end_ts]``.
+
+    Uses ``read_batch`` rather than a per-ticker loop — at ~900 symbols the
+    round-trip count, not the payload, dominates. A ticker whose read came
+    back without data maps to ``None``.
+    """
+    from arcticdb.version_store.library import ReadRequest
+
+    results = universe_lib.read_batch(
+        [ReadRequest(symbol=t, date_range=(start_ts, end_ts), columns=list(columns)) for t in tickers]
+    )
+    frames: dict = dict.fromkeys(tickers)
+    for ticker, res in zip(tickers, results, strict=False):
+        frames[ticker] = getattr(res, "data", None)
+    return frames
+
+
+def _lookback_window(ref_date):
+    """``(start_ts, end_ts)`` of one request's read window, both inclusive."""
+    import pandas as pd
+
+    end_ts = pd.Timestamp(ref_date).normalize()
+    return end_ts - pd.Timedelta(days=_ARCTIC_LOOKBACK_DAYS), end_ts
+
+
+def _latest_rows_from_frames(
+    tickers: list[str],
+    frames: dict,
     columns: tuple[str, ...],
     ref_date,
     *,
     what: str,
 ) -> dict[str, dict]:
-    """Newest row per ticker from the ArcticDB ``universe`` library.
+    """Newest row per ticker inside ``ref_date``'s lookback window.
 
-    Returns ``{ticker: {column: float}}``. Uses ``read_batch`` rather than a
-    per-ticker loop — at ~900 symbols the round-trip count, not the payload,
-    dominates.
+    ``frames`` may cover a WIDER window than this request's (a cached union
+    read); rows outside ``[ref_date - lookback, ref_date]`` are dropped
+    first, so the answer is the one a dedicated read of this window would
+    have produced. Raises ``FeatureStoreStalenessError`` on the same
+    error-rate, empty and staleness conditions as before.
     """
     import numpy as np
     import pandas as pd
-    from arcticdb.version_store.library import ReadRequest
 
-    universe_lib = _connect_universe_lib()
-
-    end_ts = pd.Timestamp(ref_date).normalize()
-    start_ts = end_ts - pd.Timedelta(days=_ARCTIC_LOOKBACK_DAYS)
-
-    results = universe_lib.read_batch(
-        [ReadRequest(symbol=t, date_range=(start_ts, end_ts), columns=list(columns)) for t in tickers]
-    )
+    start_ts, end_ts = _lookback_window(ref_date)
 
     out: dict[str, dict] = {}
     n_err = 0
     newest = None
-    for ticker, res in zip(tickers, results, strict=False):
-        df = getattr(res, "data", None)
+    for ticker in tickers:
+        df = frames.get(ticker)
         if df is None or getattr(df, "empty", True):
             n_err += 1
             continue
-        row = df.sort_index().iloc[-1]
-        row_ts = df.sort_index().index[-1]
+        df = df.sort_index()
+        df = df[(df.index >= start_ts) & (df.index <= end_ts)]
+        if df.empty:
+            n_err += 1
+            continue
+        row = df.iloc[-1]
+        row_ts = df.index[-1]
         if newest is None or row_ts > newest:
             newest = row_ts
         values = {
@@ -268,43 +310,91 @@ def _read_arctic_latest(
     return out
 
 
+def _read_arctic_latest(
+    tickers: list[str],
+    columns: tuple[str, ...],
+    ref_date,
+    *,
+    what: str,
+) -> dict[str, dict]:
+    """Newest row per ticker from the ArcticDB ``universe`` library.
+
+    Returns ``{ticker: {column: float}}``. One ``read_batch`` over this
+    request's own lookback window.
+    """
+    start_ts, end_ts = _lookback_window(ref_date)
+    frames = _read_arctic_frames(_connect_universe_lib(), tickers, columns, start_ts, end_ts)
+    return _latest_rows_from_frames(tickers, frames, columns, ref_date, what=what)
+
+
 def _read_arctic_union_cached(tickers: list[str], ref_date, *, what: str) -> dict[str, dict]:
-    """``_read_arctic_latest`` over :data:`_ARCTIC_UNION_COLS`, once per run.
+    """``_read_arctic_latest`` over :data:`_ARCTIC_UNION_COLS`, read once per run.
 
-    Single-entry, keyed on ``(tickers, ref_date)``. Single rather than
-    unbounded because the only reuse that exists is within one Scanner
-    invocation over one universe on one date; an LRU would hold ~900 rows of
-    a universe nothing will ask for again, in a 1024MB Lambda, for the life
-    of a warm container.
+    The memo holds the RAW frames of one read window, ``[ref - lookback -
+    reuse, ref]``, and answers every request by re-deriving the newest row
+    inside that request's own window (:func:`_latest_rows_from_frames`). So:
 
-    The key carries ``ref_date`` deliberately. An operator replay for an
-    earlier date shares the container with the run before it, and serving it
-    that run's rows would silently answer for the wrong day — the exact
-    class :class:`FeatureStoreStalenessError` exists to make loud.
+    - **An earlier reference date is served exactly.** The factor pillar asks
+      for run_date (Friday) after the scanner asked for the calendar date
+      (Saturday). The Friday answer drops any row after Friday, which is what
+      a dedicated Friday read returns. A date LATER than the cached one, or
+      more than :data:`_ARCTIC_UNION_REUSE_DAYS` earlier, is a miss: the
+      frames cannot hold rows the read never asked for.
+    - **A different universe costs only the symbols not yet read.** The
+      scanner's list has the declared holds removed (CTVA since 2026-10-04)
+      and the factor pillar's does not, so an exact-tuple key never matched.
+      The missing symbols are read over the cached window and added.
+    - **Every request re-runs the error-rate and staleness assertions** on
+      its own rows. They are pure functions of the frames, so a hit cannot
+      carry one request's verdict onto another.
 
-    On a hit the staleness and error-rate assertions in
-    :func:`_read_arctic_latest` do not re-run. They already passed for these
-    exact rows on the miss, and re-asserting identical data cannot fail
-    differently; the cache never spans dates, so it cannot carry a verdict
-    forward onto data it was not computed for.
+    Before this, the memo was keyed on ``(tickers, ref_date)`` exactly and
+    never hit in production: both differences above held on every Saturday,
+    so each Scanner run paid two full read_batch round-trips over ~900
+    symbols (37 s on 2026-10-10, 92 s on the 2026-10-15 rehearsal,
+    alpha-engine-config-I10533).
+
+    Single-entry, because the only reuse that exists is within one Scanner
+    invocation over one universe; an LRU would hold frames nothing will ask
+    for again, in a 1024MB Lambda, for the life of a warm container.
     """
     import pandas as pd
 
-    key = (tuple(tickers), pd.Timestamp(ref_date).normalize())
-    cached = _ARCTIC_UNION_CACHE.get(key)
-    if cached is not None:
-        logger.info(
-            "[data_source=arcticdb] %s: served from this run's union read (%d tickers, ref %s) — no second read_batch",
-            what,
-            len(cached),
-            ref_date,
-        )
-        return cached
+    ref_ts = pd.Timestamp(ref_date).normalize()
+    cached = _ARCTIC_UNION_CACHE.get("entry")
+    reusable = (
+        cached is not None
+        and ref_ts <= cached["ref"]
+        and ref_ts >= cached["ref"] - pd.Timedelta(days=_ARCTIC_UNION_REUSE_DAYS)
+    )
 
-    rows = _read_arctic_latest(tickers, _ARCTIC_UNION_COLS, ref_date, what=what)
-    _ARCTIC_UNION_CACHE.clear()
-    _ARCTIC_UNION_CACHE[key] = rows
-    return rows
+    if reusable:
+        frames = cached["frames"]
+        missing = [t for t in dict.fromkeys(tickers) if t not in frames]
+        if missing:
+            frames.update(
+                _read_arctic_frames(
+                    _connect_universe_lib(), missing, _ARCTIC_UNION_COLS, cached["start"], cached["ref"]
+                )
+            )
+        logger.info(
+            "[data_source=arcticdb] %s: served from this run's union read (ref %s, cached ref %s, "
+            "%d of %d tickers newly read) — no full second read_batch",
+            what,
+            ref_date,
+            cached["ref"].date(),
+            len(missing),
+            len(tickers),
+        )
+    else:
+        start_ts = _lookback_window(ref_ts)[0] - pd.Timedelta(days=_ARCTIC_UNION_REUSE_DAYS)
+        frames = _read_arctic_frames(
+            _connect_universe_lib(), list(dict.fromkeys(tickers)), _ARCTIC_UNION_COLS, start_ts, ref_ts
+        )
+        _ARCTIC_UNION_CACHE.clear()
+        _ARCTIC_UNION_CACHE["entry"] = {"ref": ref_ts, "start": start_ts, "frames": frames}
+
+    return _latest_rows_from_frames(tickers, frames, _ARCTIC_UNION_COLS, ref_date, what=what)
 
 
 def _project(rows: dict[str, dict], columns: tuple[str, ...]) -> dict[str, dict]:
