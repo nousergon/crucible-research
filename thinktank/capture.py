@@ -94,6 +94,9 @@ def _emit(
         ),
         input_data_snapshot=input_data_snapshot,
         agent_output=agent_output,
+        # The join to the call's llm_trace.v1 record (alpha-engine-config-I12312).
+        trace_id=result.trace_id,
+        span_id=result.span_id,
         s3_bucket=bucket,
         s3_client=s3_client,
         timestamp=_partition_timestamp(trading_day),

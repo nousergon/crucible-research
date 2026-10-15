@@ -18,11 +18,22 @@ import logging
 from nousergon_lib.pillars import QualitativePillarAssessment
 
 from agents.prompt_loader import load_prompt
+from data.substrate.reader import (
+    ANALYST_REVISIONS_PREFIX,
+    INSIDER_TRANSACTIONS_PREFIX,
+    INST_OWNERSHIP_PREFIX,
+    NEWS_AGGREGATES_PREFIX,
+)
 from thinktank import THESIS_KEY_TMPL, THESIS_LATEST_TMPL
 from thinktank.archive import save_moat_profile
 from thinktank.capture import emit_thesis_capture
 from thinktank.client import ThinktankClient
-from thinktank.context import ContextBundle, filings_excerpts
+from thinktank.context import (
+    SIGNALS_LATEST_KEY,
+    UNIVERSE_BOARD_KEY,
+    ContextBundle,
+    filings_sources,
+)
 from thinktank.schemas import (
     CompanyThesis,
     CompanyThesisRatedLLM,
@@ -30,6 +41,7 @@ from thinktank.schemas import (
     TickerEventAssessment,
     TriageDecisionLLM,
 )
+from thinktank.sources import Slot, format_with_sources, s3_object_source
 from thinktank.storage import ThinktankStore
 from thinktank.themes import ThemeKeeper
 
@@ -105,7 +117,7 @@ def build_thesis(
     sector = (board_row or {}).get("sector") or (prior.sector if prior else None)
 
     sources: list[str] = []
-    filings = filings_excerpts(ticker) if ctx.rag_available else []
+    filings = filings_sources(ticker) if ctx.rag_available else []
     if filings:
         sources.append("rag_filings")
     news = ctx.news_by_ticker.get(ticker)
@@ -128,19 +140,30 @@ def build_thesis(
 
     next_version = (prior.version + 1) if prior else 1
     prompt = load_prompt("thinktank_thesis")
-    rendered = prompt.format(
+    # alpha-engine-config-I12312: every input is a cited source (stable id,
+    # sha256, offsets) on the call's llm_trace.v1 record, not an anonymous
+    # JSON dump. The same slots feed the thesis and the pillar prompt.
+    input_slots = _thesis_input_slots(
+        ctx,
+        bucket=store.bucket,
+        ticker=ticker,
+        board_row=board_row,
+        signals_entry=signals_entry,
+        news=news,
+        insider=insider,
+        analyst=analyst,
+        inst_own=inst_own,
+        filings=filings,
+    )
+    subject = {"kind": "ticker", "id": ticker}
+    rendered, rendered_sources = format_with_sources(
+        prompt,
         ticker=ticker,
         sector=sector or "unknown",
         update_reason=update_reason,
         prior_thesis=prior.thesis.model_dump_json() if prior else "(none — initial coverage)",
         event_context=event_context or "(none)",
-        board_row=json.dumps(_facts_board_row(board_row), default=str),
-        weekly_signal=json.dumps(signals_entry or {}, default=str),
-        news_aggregate=json.dumps(news or {}, default=str),
-        insider_transactions=json.dumps(insider or {}, default=str),
-        analyst_revisions=json.dumps(analyst or {}, default=str),
-        inst_ownership=json.dumps(inst_own or {}, default=str),
-        filings_excerpts="\n---\n".join(filings) or "(no filings context available)",
+        **input_slots,
         macro_theme=themes.macro_summary(),
         sector_theme=themes.sector_summary(sector),
     )
@@ -152,6 +175,8 @@ def build_thesis(
         response_model=CompanyThesisRatedLLM,
         prompt_id=prompt.name,
         prompt_version=prompt.version,
+        sources=rendered_sources,
+        subject=subject,
         sft_meta={
             "ticker": ticker,
             "thesis_version": next_version,
@@ -168,16 +193,11 @@ def build_thesis(
     # corrective retry, then ThinktankLLMError) on a parse failure — there
     # is no lax-mode empty path for this to silently degrade onto.
     pillar_prompt = load_prompt("thinktank_pillar")
-    rendered_pillar = pillar_prompt.format(
+    rendered_pillar, rendered_pillar_sources = format_with_sources(
+        pillar_prompt,
         ticker=ticker,
         sector=sector or "unknown",
-        board_row=json.dumps(_facts_board_row(board_row), default=str),
-        weekly_signal=json.dumps(signals_entry or {}, default=str),
-        news_aggregate=json.dumps(news or {}, default=str),
-        insider_transactions=json.dumps(insider or {}, default=str),
-        analyst_revisions=json.dumps(analyst or {}, default=str),
-        inst_ownership=json.dumps(inst_own or {}, default=str),
-        filings_excerpts="\n---\n".join(filings) or "(no filings context available)",
+        **input_slots,
         macro_theme=themes.macro_summary(),
         sector_theme=themes.sector_summary(sector),
     )
@@ -189,6 +209,8 @@ def build_thesis(
         response_model=QualitativePillarAssessment,
         prompt_id=pillar_prompt.name,
         prompt_version=pillar_prompt.version,
+        sources=rendered_pillar_sources,
+        subject=subject,
         sft_meta={
             "ticker": ticker,
             "thesis_version": next_version,
@@ -241,7 +263,13 @@ def build_thesis(
             "insider_transactions": insider or {},
             "analyst_revisions": analyst or {},
             "inst_ownership": inst_own or {},
-            "filings_excerpts": filings,
+            "filings_excerpts": [f["text"] for f in filings],
+            # The ids the excerpts above came from, in the same order
+            # (alpha-engine-config-I12312).
+            "filings_sources": [
+                {k: f.get(k) for k in ("cid", "source_id", "document_id", "uri", "version")}
+                for f in filings
+            ],
             "macro_theme": themes.macro_summary(),
             "sector_theme": themes.sector_summary(sector),
             "prior_thesis": prior.thesis.model_dump() if prior else None,
@@ -261,6 +289,91 @@ def build_thesis(
         result.cost_usd,
     )
     return thesis
+
+
+def _thesis_input_slots(
+    ctx: ContextBundle,
+    *,
+    bucket: str,
+    ticker: str,
+    board_row: dict | None,
+    signals_entry: dict | None,
+    news: dict | None,
+    insider: dict | None,
+    analyst: dict | None,
+    inst_own: dict | None,
+    filings: list[dict],
+) -> dict[str, Slot]:
+    """The thesis/pillar inputs as cited source slots (alpha-engine-config-I12312).
+
+    Each slot renders exactly the text the prompt carried before — the same
+    ``json.dumps`` of the same dict, the same filings excerpts — inside a
+    ``<source cid="…">`` block. An absent input renders as the placeholder it
+    always did and cites nothing.
+
+    S3 identity: the board and the weekly signals are whole objects, so they
+    carry their key and the VersionId the read recorded. The four substrate
+    tables are partitioned datasets read through ``data.substrate.reader``,
+    so they carry the table prefix and the row's own as-of stamp.
+    """
+
+    def _json(value: dict | None) -> str:
+        return json.dumps(value or {}, default=str)
+
+    def _one(cid: str, value: dict | None, *, key: str, version: str | None,
+             meta: dict) -> Slot:
+        if not value:
+            return Slot(empty=_json(value))
+        return Slot(
+            sources=[
+                s3_object_source(
+                    cid, bucket=bucket, key=key, text=_json(value),
+                    version=version, meta=meta,
+                )
+            ],
+            empty=_json(value),
+        )
+
+    facts = _facts_board_row(board_row)
+    row_meta = {"ticker": ticker}
+    return {
+        "board_row": _one(
+            "board", facts, key=UNIVERSE_BOARD_KEY,
+            version=ctx.s3_versions.get(UNIVERSE_BOARD_KEY),
+            meta={**row_meta, "projection": "facts_only"},
+        ),
+        "weekly_signal": _one(
+            "signal", signals_entry, key=SIGNALS_LATEST_KEY,
+            version=ctx.s3_versions.get(SIGNALS_LATEST_KEY),
+            meta={**row_meta, "signals_date": ctx.weekly_signals_date()},
+        ),
+        "news_aggregate": _one(
+            "news", news, key=f"{NEWS_AGGREGATES_PREFIX}/",
+            version=_as_of("aggregate_date", news), meta=row_meta,
+        ),
+        "insider_transactions": _one(
+            "insider", insider, key=f"{INSIDER_TRANSACTIONS_PREFIX}/",
+            version=None, meta={**row_meta, "rollup": "90d"},
+        ),
+        "analyst_revisions": _one(
+            "analyst", analyst, key=f"{ANALYST_REVISIONS_PREFIX}/",
+            version=None, meta=row_meta,
+        ),
+        "inst_ownership": _one(
+            "inst", inst_own, key=f"{INST_OWNERSHIP_PREFIX}/",
+            version=_as_of("quarter", inst_own), meta=row_meta,
+        ),
+        "filings_excerpts": Slot(
+            sources=filings,
+            empty="(no filings context available)",
+            separator="\n---\n",
+        ),
+    }
+
+
+def _as_of(column: str, row: dict | None) -> str | None:
+    value = (row or {}).get(column)
+    return f"{column}:{value}" if value not in (None, "") else None
 
 
 def _facts_board_row(row: dict | None) -> dict:
@@ -393,6 +506,7 @@ def triage(
         response_model=TriageDecisionLLM,
         prompt_id=prompt.name,
         prompt_version=prompt.version,
+        subject={"kind": "ticker", "id": assessment.ticker},
         sft_meta={"ticker": assessment.ticker, "severity": assessment.severity},
     )
     return result.parsed  # type: ignore[return-value]

@@ -245,6 +245,7 @@ class ThemeKeeper:
                 response_model=ThemeThesisLLM,
                 prompt_id=sector_prompt.name,
                 prompt_version=sector_prompt.version,
+                subject={"kind": "sector", "id": sector},
                 sft_meta={"kind": "sector", "key": sector, "update_reason": "seed",
                           "theme_version": 1, "trading_day": self._trading_day},
             )
@@ -311,6 +312,7 @@ class ThemeKeeper:
                 response_model=ThemeThesisLLM,
                 prompt_id=sector_prompt.name,
                 prompt_version=sector_prompt.version,
+                subject={"kind": "sector", "id": sector},
                 sft_meta={"kind": "sector", "key": sector,
                           "update_reason": "reconcile",
                           "theme_version": (prior.version + 1) if prior else 1,
