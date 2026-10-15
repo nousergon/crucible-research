@@ -105,8 +105,11 @@ def test_env_override_forces_the_weekly_snapshot_even_with_tickers():
 def test_stale_arcticdb_rows_raise_instead_of_ranking_the_universe():
     mod = _reload_with_source(None)
     lib = MagicMock()
-    # Newest row is ~3 months old — the daily producer has stopped writing.
-    lib.read_batch.return_value = [_batch_result(_arctic_frame("2026-05-01"))]
+    # Newest row in the lookback window is 7 trading days old — the daily
+    # producer has stopped writing. (A row outside the window never reaches
+    # the reader: ArcticDB's date_range drops it, and so does the reader's
+    # own window filter, which serves cached wider reads.)
+    lib.read_batch.return_value = [_batch_result(_arctic_frame("2026-07-20"))]
 
     with (
         patch.object(mod, "_connect_universe_lib", return_value=lib),
@@ -187,9 +190,9 @@ def _union_frame(last_date: str) -> pd.DataFrame:
     idx = pd.DatetimeIndex([pd.Timestamp(last_date)])
     return pd.DataFrame(
         {
-            "rsi_14": [55.0],           # scanner only
-            "momentum_20d": [0.03],     # both
-            "return_60d": [0.11],       # factor only
+            "rsi_14": [55.0],  # scanner only
+            "momentum_20d": [0.03],  # both
+            "return_60d": [0.11],  # factor only
         },
         index=idx,
     )
@@ -257,51 +260,167 @@ def test_a_ticker_left_with_no_requested_column_is_dropped_not_emptied():
     assert rows is None  # no ticker survived the projection → empty → None
 
 
-def test_a_different_ref_date_is_a_miss_not_a_stale_hit():
-    """An operator replay sharing a warm container must not read the wrong day."""
-    mod = _reload_with_source(None)
+def _multi_day_frame(*days: str, value_of=lambda i: float(i)) -> pd.DataFrame:
+    """Union-column rows on several days, ``momentum_20d`` = day ordinal."""
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    n = len(days)
+    return pd.DataFrame(
+        {
+            "rsi_14": [50.0 + i for i in range(n)],
+            "momentum_20d": [value_of(i) for i in range(n)],
+            "return_60d": [0.1 + i for i in range(n)],
+        },
+        index=idx,
+    )
+
+
+def _lib_serving(frames_by_symbol: dict[str, pd.DataFrame]) -> MagicMock:
+    """A universe lib whose read_batch answers each requested symbol."""
     lib = MagicMock()
-    lib.read_batch.side_effect = [
-        [_batch_result(_union_frame("2026-07-29"))],
-        [_batch_result(_union_frame("2026-07-28"))],
-    ]
+
+    def _read_batch(requests):
+        return [_batch_result(frames_by_symbol.get(r.symbol)) for r in requests]
+
+    lib.read_batch.side_effect = _read_batch
+    return lib
+
+
+def _requested_symbols(lib: MagicMock, call: int) -> list[str]:
+    return [r.symbol for r in lib.read_batch.call_args_list[call][0][0]]
+
+
+def test_the_saturday_shape_is_one_full_read_not_two():
+    """The production pair: calendar Saturday first, run_date Friday second.
+
+    scanner_orchestrator passes no ref_date (so the calendar date) and the
+    universe with declared holds removed; factor_scoring passes run_date and
+    the full universe. Under the exact (tickers, ref_date) key this was two
+    full read_batch round-trips on every Saturday (alpha-engine-config-I10533).
+    """
+    mod = _reload_with_source(None)
+    frames = {
+        "AAPL": _multi_day_frame("2026-10-14", "2026-10-15", "2026-10-16"),
+        "CTVA": _multi_day_frame("2026-10-14", "2026-10-15", "2026-10-16"),
+    }
+    lib = _lib_serving(frames)
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        scanner_rows = mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-10-17").date())
+        factor_rows = mod.read_latest_features(
+            ["AAPL", "CTVA"], columns=("return_60d",), ref_date=pd.Timestamp("2026-10-16").date()
+        )
+
+    assert lib.read_batch.call_count == 2
+    assert _requested_symbols(lib, 0) == ["AAPL"]
+    assert _requested_symbols(lib, 1) == ["CTVA"], "only the symbol the first read lacked is read again"
+    assert scanner_rows == {"AAPL": {"rsi_14": 52.0, "momentum_20d": 2.0}}
+    assert factor_rows == {"AAPL": {"return_60d": 2.1}, "CTVA": {"return_60d": 2.1}}
+
+
+def test_an_earlier_ref_date_is_served_as_of_that_date_not_the_cached_one():
+    """An operator replay sharing a warm container must not read the wrong day.
+
+    The cached frames hold a row AFTER the second request's date. Serving the
+    first request's newest row would hand the earlier date tomorrow's data.
+    """
+    mod = _reload_with_source(None)
+    lib = _lib_serving({"AAPL": _multi_day_frame("2026-07-27", "2026-07-28", "2026-07-29")})
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        later = mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
+        earlier = mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-28").date())
+
+    assert lib.read_batch.call_count == 1
+    assert later["AAPL"]["momentum_20d"] == 2.0
+    assert earlier["AAPL"]["momentum_20d"] == 1.0
+
+
+def test_a_later_ref_date_is_a_miss_not_a_stale_hit():
+    """The cached read never asked for rows after its own date."""
+    mod = _reload_with_source(None)
+    lib = _lib_serving({"AAPL": _multi_day_frame("2026-07-28", "2026-07-29", "2026-07-30")})
 
     with patch.object(mod, "_connect_universe_lib", return_value=lib):
         mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
-        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-28").date())
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-30").date())
 
     assert lib.read_batch.call_count == 2
 
 
-def test_a_different_universe_is_a_miss():
+def test_a_ref_date_older_than_the_reuse_margin_is_a_miss():
+    """Past the margin the cached window no longer covers the request's lookback."""
     mod = _reload_with_source(None)
-    lib = MagicMock()
-    lib.read_batch.side_effect = [
-        [_batch_result(_union_frame("2026-07-29"))],
-        [_batch_result(_union_frame("2026-07-29"))],
-    ]
+    lib = _lib_serving({"AAPL": _multi_day_frame("2026-07-21", "2026-07-29")})
+    ref = pd.Timestamp("2026-07-29")
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=ref.date())
+        old = (ref - pd.Timedelta(days=mod._ARCTIC_UNION_REUSE_DAYS + 1)).date()
+        mod.read_latest_features(["AAPL"], ref_date=old)
+
+    assert lib.read_batch.call_count == 2
+
+
+def test_the_union_read_covers_every_reusable_requests_lookback():
+    """The read reaches back lookback + margin, so every hit is an exact answer."""
+    mod = _reload_with_source(None)
+    lib = _lib_serving({"AAPL": _multi_day_frame("2026-07-29")})
+    ref = pd.Timestamp("2026-07-29")
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL"], ref_date=ref.date())
+
+    start, end = lib.read_batch.call_args[0][0][0].date_range
+    assert end == ref
+    assert start == ref - pd.Timedelta(days=mod._ARCTIC_LOOKBACK_DAYS + mod._ARCTIC_UNION_REUSE_DAYS)
+
+
+def test_a_hit_still_raises_on_its_own_stale_rows():
+    """Assertions re-run per request; a hit carries no verdict across dates."""
+    mod = _reload_with_source(None)
+    # AAPL is fresh on both dates. MSFT's only row is 2026-07-29, so on the
+    # cached Wednesday read both have rows, but a Tuesday request finds no
+    # MSFT row in its window: 50% read failure, over the 5% ceiling.
+    lib = _lib_serving(
+        {
+            "AAPL": _multi_day_frame("2026-07-28", "2026-07-29"),
+            "MSFT": _multi_day_frame("2026-07-29"),
+        }
+    )
+
+    with patch.object(mod, "_connect_universe_lib", return_value=lib):
+        mod.read_latest_features(["AAPL", "MSFT"], ref_date=pd.Timestamp("2026-07-29").date())
+        with pytest.raises(mod.FeatureStoreStalenessError, match="read-failure rate"):
+            mod.read_latest_features(["AAPL", "MSFT"], ref_date=pd.Timestamp("2026-07-28").date())
+
+    assert lib.read_batch.call_count == 1
+
+
+def test_a_different_universe_reads_only_the_new_symbols():
+    mod = _reload_with_source(None)
+    lib = _lib_serving({"AAPL": _union_frame("2026-07-29"), "MSFT": _union_frame("2026-07-29")})
     ref = pd.Timestamp("2026-07-29").date()
 
     with patch.object(mod, "_connect_universe_lib", return_value=lib):
         mod.read_latest_features(["AAPL"], ref_date=ref)
-        mod.read_latest_features(["MSFT"], ref_date=ref)
+        out = mod.read_latest_features(["MSFT"], ref_date=ref)
 
     assert lib.read_batch.call_count == 2
+    assert _requested_symbols(lib, 1) == ["MSFT"]
+    assert set(out) == {"MSFT"}
 
 
 def test_the_memo_holds_one_entry_so_a_warm_container_cannot_accumulate():
     mod = _reload_with_source(None)
-    lib = MagicMock()
-    lib.read_batch.side_effect = [
-        [_batch_result(_union_frame("2026-07-29"))],
-        [_batch_result(_union_frame("2026-07-28"))],
-    ]
+    lib = _lib_serving({"AAPL": _multi_day_frame("2026-07-29", "2026-07-30")})
 
     with patch.object(mod, "_connect_universe_lib", return_value=lib):
         mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-29").date())
-        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-28").date())
+        mod.read_latest_features(["AAPL"], ref_date=pd.Timestamp("2026-07-30").date())
 
+    assert lib.read_batch.call_count == 2
     assert len(mod._ARCTIC_UNION_CACHE) == 1
+    assert mod._ARCTIC_UNION_CACHE["entry"]["ref"] == pd.Timestamp("2026-07-30")
 
 
 def test_factor_scoring_reads_its_column_list_from_the_reader():
