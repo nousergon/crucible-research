@@ -397,8 +397,8 @@ class ThinktankClient:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cost_usd=cost,
-            trace_id=getattr(result, "trace_id", None),
-            span_id=getattr(result, "span_id", None),
+            trace_id=result.trace_id,
+            span_id=result.span_id,
         )
 
     # ── cost ─────────────────────────────────────────────────────────────────

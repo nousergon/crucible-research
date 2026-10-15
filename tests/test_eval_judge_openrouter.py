@@ -161,10 +161,9 @@ class TestEvaluateArtifactOpenRouter:
         # krepis's router-edge attribution (alpha-engine-config-I12312): the
         # request carries call-site / run / trace metadata the LiteLLM spend
         # log persists. Consumed by the proxy, never forwarded upstream.
-        metadata = extra_body.pop("metadata", None)
-        if metadata is not None:
-            assert metadata["tags"][0].startswith("callsite:")
-            assert "trace_id" in metadata["spend_logs_metadata"]
+        metadata = extra_body.pop("metadata")
+        assert metadata["tags"][0].startswith("callsite:")
+        assert "trace_id" in metadata["spend_logs_metadata"]
         assert extra_body == {
             # Truncation-avoidance default, forwarded from the ModelSpec.
             "reasoning": {"exclude": True},
