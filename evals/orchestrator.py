@@ -48,7 +48,11 @@ from agents.prompt_loader import load_prompt
 from evals.judge import (
     DEFAULT_EVAL_PREFIX,
     DEFAULT_MAX_TOKENS,
+    JUDGE_PARSER_VERSION,
     _make_skip_eval_artifact,
+    _render_for_judge,
+    _split_rubric_for_caching,
+    _verdict_fields,
     build_batch_request,
     decode_custom_id,
     encode_custom_id,
@@ -66,13 +70,14 @@ from evals.judge_batch_transport import (
     resolve_batch_transport,
     sync_batch_id,
 )
+from evals.judge_citations import declared_citation_contract
 from evals.judge_models import request_model_for
 from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
 from evals.rubric_dimensions import (
     declared_dimensions,
     keep_declared_dimension_scores,
 )
-from graph.state_schemas import RubricEvalArtifact
+from graph.state_schemas import JudgeCallRef, RubricEvalArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -1699,6 +1704,11 @@ def process_batch_results(
                 })
                 continue
 
+            # Look up rubric_version cheaply — load_prompt is cached. Read
+            # BEFORE the parse so the parse knows whether the rubric declares
+            # a citation contract (alpha-engine-config-I12312).
+            loaded_prompt = load_prompt(entry["rubric_id"])
+            cited = declared_citation_contract(loaded_prompt.text) is not None
             try:
                 message_payload = (
                     result_payload["message"]
@@ -1713,7 +1723,17 @@ def process_batch_results(
                 # exactly the messages that go to the sync retry queue — the
                 # expensive ones, since those are the ones paid for twice.
                 _emit_batch_cost_record(message_payload, entry=entry)
-                llm_output = parse_batch_message(message_payload)
+                llm_output = parse_batch_message(message_payload, cited=cited)
+                # A contract-declaring rubric is validated against the
+                # artifact it judged (alpha-engine-config-I12312), so the
+                # capture is re-read here; a failed read takes the same sync
+                # retry path as a failed parse, which re-judges it whole.
+                judged = (
+                    _load_capture_artifact(
+                        s3, key=entry["capture_s3_key"], bucket=bucket,
+                    )
+                    if cited else None
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "[batch_process] parse failed for custom_id=%s "
@@ -1733,8 +1753,41 @@ def process_batch_results(
                 else getattr(message_payload, "model", None)
             )
 
-            # Look up rubric_version cheaply — load_prompt is cached.
-            loaded_prompt = load_prompt(entry["rubric_id"])
+            batch_call_ref = JudgeCallRef(
+                callsite_id=_BATCH_CALLSITE_ID,
+                custom_id=cid,
+                response_id=(
+                    message_payload.get("id")
+                    if isinstance(message_payload, dict)
+                    else getattr(message_payload, "id", None)
+                ),
+                attempts=1,
+            )
+            if judged is not None:
+                judge_prompt = _render_for_judge(judged, loaded_prompt)
+                system_part, user_part = _split_rubric_for_caching(judge_prompt.text)
+                verdict_fields = _verdict_fields(
+                    judged,
+                    loaded_prompt=loaded_prompt,
+                    rendered=judge_prompt,
+                    llm_output=llm_output,
+                    rubric_name=entry["rubric_id"],
+                    judge_model=entry["judge_model"],
+                    system_sent=system_part,
+                    user_sent=user_part or judge_prompt.text,
+                )
+            else:
+                verdict_fields = {
+                    "dimension_scores": keep_declared_dimension_scores(
+                        llm_output.dimension_scores,
+                        declared_dimensions(loaded_prompt.text),
+                        agent_id=entry["agent_id"],
+                        judge_model=entry["judge_model"],
+                        rubric_id=entry["rubric_id"],
+                    ),
+                    "rubric_hash": loaded_prompt.hash,
+                    "judge_parser_version": JUDGE_PARSER_VERSION,
+                }
             eval_artifact = RubricEvalArtifact(
                 run_id=entry["run_id"],
                 judge_run_id=judge_run_id,
@@ -1746,14 +1799,9 @@ def process_batch_results(
                 judge_model=entry["judge_model"],
                 judge_request_model=request_model_for(entry["judge_model"]),
                 judge_resolved_model=resolved_model,
-                dimension_scores=keep_declared_dimension_scores(
-                    llm_output.dimension_scores,
-                    declared_dimensions(loaded_prompt.text),
-                    agent_id=entry["agent_id"],
-                    judge_model=entry["judge_model"],
-                    rubric_id=entry["rubric_id"],
-                ),
                 overall_reasoning=llm_output.overall_reasoning,
+                judge_call=batch_call_ref,
+                **verdict_fields,
             )
             try:
                 pkey = persist_eval_artifact(

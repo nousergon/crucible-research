@@ -291,7 +291,17 @@ class TestBuildBatchRequestContract:
 
         assert live["custom_id"] == cid
         assert live["params"]["model"] == "claude-haiku-4-5-20251001"
-        assert live["params"]["tools"][0] == _golden_build_rubric_tool_spec()
+        # The golden pins the UNCITED composition. A live rubric declaring the
+        # ``judge_evidence.v1`` citation contract (alpha-engine-config-I12312)
+        # deliberately swaps in the cited schema under the same tool name.
+        from agents.prompt_loader import load_prompt
+        from evals.judge_citations import declared_citation_contract
+
+        if declared_citation_contract(load_prompt("eval_rubric_thinktank_thesis").text):
+            assert live["params"]["tools"][0] == judge_mod._build_rubric_tool_spec(cited=True)
+            assert live["params"]["tools"][0]["name"] == "RubricEvalLLMOutput"
+        else:
+            assert live["params"]["tools"][0] == _golden_build_rubric_tool_spec()
         assert live["params"]["tool_choice"] == {
             "type": "tool", "name": "RubricEvalLLMOutput",
         }
