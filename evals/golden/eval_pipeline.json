@@ -138,15 +138,15 @@
     },
     {
       "agent_id": "thinktank_theme",
-      "prompt_hash": "585f0b6dfe287ab6b43fb76c25b1e3fe3d55c745d620f50401039c7b6b027011",
+      "prompt_hash": "2a9ac3c67b8658822a4c92557d54436647bc1f80d17562d9e500288c7b05826e",
       "rubric_id": "eval_rubric_thinktank_theme",
-      "version": "0.2.0"
+      "version": "1.0.0"
     },
     {
       "agent_id": "thinktank_thesis",
-      "prompt_hash": "5f8a8b1e0edd17a8dd89f70890a0e2153461d1314ec399cb321388e1c17c523e",
+      "prompt_hash": "79a9147484c7fdcd07c65c78c425c3d13d8d42261a75df6016997d91a4c38384",
       "rubric_id": "eval_rubric_thinktank_thesis",
-      "version": "0.2.0"
+      "version": "1.0.0"
     }
   ],
   "schema": 1
