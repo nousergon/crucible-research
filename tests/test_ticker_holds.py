@@ -16,12 +16,15 @@ import pytest
 from data.ticker_holds import DECLARED_HOLDS, TickerHold, active_holds
 
 
-def test_ctva_is_held_through_october():
+def test_ctva_is_held_through_its_first_post_spin_earnings():
+    # Q3 2026 results are released after the close on 2026-11-11 (ruling #10,
+    # 2026-10-14): held through that date, scanned again from 11-12.
     hold = DECLARED_HOLDS["CTVA"]
     assert hold.issue == "alpha-engine-config-I11806"
     assert "CTVA" in active_holds("2026-10-05")
     assert "CTVA" in active_holds("2026-10-31")
-    assert "CTVA" not in active_holds("2026-11-01")
+    assert "CTVA" in active_holds("2026-11-11")
+    assert "CTVA" not in active_holds("2026-11-12")
     assert "CTVA" not in active_holds("2026-09-30")
 
 
@@ -97,11 +100,11 @@ def test_a_held_ticker_never_reaches_the_quant_filter(universe):
     assert "CTVA" not in artifact["scanner_tickers"]
     assert artifact["stats"]["universe_size"] == 899
     assert artifact["declared_holds"]["CTVA"]["issue"] == "alpha-engine-config-I11806"
-    assert artifact["declared_holds"]["CTVA"]["valid_through"] == "2026-10-31"
+    assert artifact["declared_holds"]["CTVA"]["valid_through"] == "2026-11-11"
 
 
 def test_after_expiry_the_ticker_is_scanned_again(universe):
-    artifact, scanned = _build(universe, "2026-11-02", dict(DECLARED_HOLDS))
+    artifact, scanned = _build(universe, "2026-11-12", dict(DECLARED_HOLDS))
     assert "CTVA" in scanned
     assert artifact["declared_holds"] == {}
 

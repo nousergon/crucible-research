@@ -38,12 +38,19 @@ class TickerHold:
 DECLARED_HOLDS: dict[str, TickerHold] = {
     "CTVA": TickerHold(
         valid_from="2026-10-01",
-        valid_through="2026-10-31",
+        # Extended 2026-10-14 (Brian's ruling #10): held until Corteva's first
+        # post-spin earnings. Corteva announced on 2026-10-06 that its Q3 2026
+        # results are released after the market close on Wednesday
+        # 2026-11-11, so the hold covers run dates through 11-11 and the first
+        # run that can see those results (11-12) scans the name again.
+        valid_through="2026-11-11",
         why=(
             "2026-10-01 spin-off of VYLR (1:1) left CTVA's stored price history "
-            "unadjusted (77.65 -> 12.57, a false -84% day) and its P/E at 1.75; "
-            "held until the declared CRSP adjustment (factor 0.1555) lands in "
-            "nousergon-data and the features are rebuilt"
+            "unadjusted (77.65 -> 12.57, a false -84% day) and its P/E at 1.75 "
+            "(post-spin price over pre-spin earnings). The price restatement "
+            "(CRSP factor 0.1555) is nousergon-data#2032; the P/E stays wrong "
+            "until the first post-spin earnings (Q3 2026, released after the "
+            "close on 2026-11-11), so the hold runs through that date"
         ),
         issue="alpha-engine-config-I11806",
     ),
