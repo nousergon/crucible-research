@@ -27,7 +27,8 @@ research-typed-state-capture-260429.md`` (Day-1 design doc § 3).
 
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Any, Literal
 
 # LLM-output schemas live in alpha-engine-lib so the replay harness in
 # alpha-engine-backtester can validate against the canonical contract
@@ -92,6 +93,16 @@ __all__ = [
     "InvestmentThesis",
     "PopulationRotationEvent",
     "RubricEvalArtifact",
+    # Judge evidence contract (alpha-engine-config-I12312).
+    "ClaimSpan",
+    "JudgeEvidence",
+    "CitedRubricDimensionLLM",
+    "CitedRubricEvalLLMOutput",
+    "ValidatedEvidence",
+    "CitedRubricDimensionScore",
+    "CitationCheck",
+    "JudgeInputRef",
+    "JudgeCallRef",
 ]
 
 
@@ -405,6 +416,273 @@ class PopulationRotationEvent(BaseModel):
 # not an LLM-output schema.
 
 
+# ── Judge evidence contract (alpha-engine-config-I12312) ─────────────────
+#
+# A judge finding is only as good as the text it points at. Under the
+# ``judge_evidence.v1`` contract every rubric dimension the judge scores
+# carries ``evidence``: a verbatim quote from the JUDGED output, where that
+# quote sits (field path + character offsets into that field's string), and
+# the id of the judge-input element that supports or contradicts it. The
+# judge is shown every input element under an explicit id and every output
+# field under its path (``evals/judge_citations.py``), so both halves of a
+# citation name something that was actually on the page.
+#
+# The LLM-facing shapes (``JudgeEvidence`` / ``CitedRubricDimensionLLM`` /
+# ``CitedRubricEvalLLMOutput``) are deliberately lenient — every evidence
+# field defaults — so one malformed citation cannot fail the whole verdict's
+# parse. Validity is decided AFTERWARDS, deterministically, and recorded on
+# the persisted shapes (``ValidatedEvidence`` / ``CitedRubricDimensionScore``
+# / ``CitationCheck``): a model never decides whether its own citation
+# resolves (evaluation-policy § Citation-faithfulness leg, "Forbids").
+
+
+def _schema_requires(*names: str):
+    """``json_schema_extra`` hook: mark ``names`` required in the TOOL schema
+    the judge is shown while the parser keeps their defaults — a judge that
+    omits one still parses, and the omission is then counted by the
+    validator instead of failing the verdict."""
+
+    def _hook(schema: dict[str, Any]) -> None:
+        req = list(schema.get("required", []))
+        schema["required"] = req + [n for n in names if n not in req]
+
+    return _hook
+
+
+class ClaimSpan(BaseModel):
+    """Where a quoted claim sits in the judged artifact's output.
+
+    ``field`` is the output field path exactly as the judge prompt labelled
+    it (``thesis.risks[0]``); ``start``/``end`` are character offsets into
+    that field's string value, end-exclusive (Python slice semantics).
+    """
+
+    model_config = ConfigDict(extra="allow", json_schema_extra=_schema_requires("field", "start", "end"))
+
+    field: str = Field(default="", description="Output field path, exactly as labelled in the judge prompt (e.g. 'thesis.risks[0]').")
+    start: int | None = Field(default=None, description="0-based character offset of the quote's first character within the field's text.")
+    end: int | None = Field(default=None, description="End-exclusive character offset (start + length of the quote).")
+
+
+class JudgeEvidence(BaseModel):
+    """One citation as the judge EMITS it — unvalidated."""
+
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra=_schema_requires("claim_quote", "claim_span", "source_ref"),
+    )
+
+    claim_quote: str = Field(default="", description="VERBATIM substring of one labelled output field — copy it exactly; never paraphrase.")
+    claim_span: ClaimSpan | None = Field(default=None, description="Field path + character offsets of claim_quote in that field.")
+    source_ref: str = Field(default="", description="The id of the judge-input element this claim relies on, exactly as labelled (e.g. 'in:board_row', 'in:filings_excerpts[2]', 'cid:f1').")
+
+    @field_validator("claim_span", mode="before")
+    @classmethod
+    def _lenient_span(cls, v: Any) -> Any:
+        """Shape-coerce, never content-repair: a ``[start, end]`` pair keeps
+        its offsets with no field, a bare string is taken as the field. The
+        validator then locates the quote — or marks it unlocated."""
+        if isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, int) for x in v):
+            return {"field": "", "start": v[0], "end": v[1]}
+        if isinstance(v, str):
+            return {"field": v}
+        return v
+
+    @field_validator("claim_quote", "source_ref", mode="before")
+    @classmethod
+    def _none_is_empty(cls, v: Any) -> Any:
+        return "" if v is None else v
+
+
+class CitedRubricDimensionLLM(RubricDimensionScore):
+    """``RubricDimensionScore`` plus the evidence the judge relied on."""
+
+    model_config = ConfigDict(extra="allow", json_schema_extra=_schema_requires("evidence"))
+
+    evidence: list[JudgeEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Evidence for this dimension's finding: one entry per output claim "
+            "the score rests on, each quoting the output verbatim and naming "
+            "the input element id it was checked against."
+        ),
+    )
+
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _parse_string_as_list(cls, v: Any) -> Any:
+        """Same defence as the lib's ``dimension_scores`` validator: a
+        JSON-encoded string where an array belongs is parsed, not failed."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return v
+            return parsed if isinstance(parsed, list) else v
+        return v
+
+
+class CitedRubricEvalLLMOutput(RubricEvalLLMOutput):
+    """The judge tool schema under the ``judge_evidence.v1`` contract."""
+
+    dimension_scores: list[CitedRubricDimensionLLM] = Field(
+        default_factory=list,
+        min_length=1,
+        description=(
+            "Array of per-dimension score entries. Return one entry per "
+            "rubric dimension as a structured array (NOT a single "
+            "JSON-encoded string). Each entry must be a JSON object with "
+            "`dimension`, `score`, `reasoning` and `evidence` fields. Order "
+            "matches the rubric prompt's dimension list."
+        ),
+    )
+
+
+class ValidatedEvidence(BaseModel):
+    """One citation as PERSISTED — the judge's claim, untouched, plus the
+    deterministic validator's findings about it.
+
+    ``claim_span`` is what the judge said and is never rewritten;
+    ``located_span`` is where the quote actually is. ``location``:
+
+    * ``exact`` — the quote occurs verbatim at the judge's own span.
+    * ``relocated`` — the span was wrong but the quote occurs exactly once
+      (in the named field, else across the whole output), so
+      ``located_span`` names that one occurrence. Recorded, never silent.
+    * ``unlocated`` — empty quote, not found verbatim, or found more than
+      once with no correct span to choose between them.
+
+    ``source_status``: ``known`` (the id names an element given to the
+    judge), ``unknown`` (it names nothing that was given), ``missing``
+    (no id). ``valid`` iff located (exact or relocated) AND known.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_quote: str
+    claim_span: ClaimSpan | None = None
+    source_ref: str = ""
+    location: Literal["exact", "relocated", "unlocated"]
+    located_span: ClaimSpan | None = None
+    source_status: Literal["known", "unknown", "missing"]
+    valid: bool
+    reason: str | None = Field(
+        default=None,
+        description="Why the citation is relocated or invalid (e.g. 'span_mismatch', 'quote_not_found', 'quote_ambiguous', 'unknown_source_ref'). None for an exact, known citation.",
+    )
+
+
+class CitedRubricDimensionScore(RubricDimensionScore):
+    """Persisted dimension score. Reads every pre-I12312 verdict unchanged:
+    the evidence fields all default, and ``unsupported is None`` means the
+    rubric never asked for citations (not "had none")."""
+
+    evidence: list[ValidatedEvidence] = Field(default_factory=list)
+    valid_evidence_count: int | None = Field(
+        default=None,
+        description="Citations on this finding that passed validation. None when the rubric did not request citations.",
+    )
+    unsupported: bool | None = Field(
+        default=None,
+        description="True when the rubric requested citations and this finding carries zero valid ones. None when citations were not requested.",
+    )
+
+
+class CitationCheck(BaseModel):
+    """Verdict-level counts from the deterministic citation validator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract: str = Field(description="Citation contract the rubric declared, e.g. 'judge_evidence.v1'.")
+    inputs_offered: int = Field(description="Number of id-labelled input elements the judge was shown.")
+    output_fields_offered: int = Field(description="Number of path-labelled output fields the judge was shown.")
+    citations_total: int = 0
+    citations_valid: int = 0
+    citations_invalid: int = 0
+    located_exact: int = 0
+    located_relocated: int = 0
+    unlocated: int = 0
+    unknown_source_ref: int = 0
+    missing_source_ref: int = 0
+    findings_total: int = 0
+    findings_unsupported: int = 0
+    unsupported_dimensions: list[str] = Field(default_factory=list)
+
+
+class JudgeInputRef(BaseModel):
+    """One element of the judge's input bundle, by id and content hash —
+    enough to prove a replay rendered the same bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    sha256: str = Field(description="sha256 of the exact text rendered for this element.")
+    chars: int
+
+
+class JudgeCallRef(BaseModel):
+    """Identifiers of the judge LLM call itself, so a verdict joins to the
+    call's cost record (``_cost_raw/{date}/{cost_run_id}/{callsite_id}.*``)
+    and to the provider/router logs (``response_id``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    callsite_id: str | None = None
+    cost_run_id: str | None = Field(default=None, description="run_id of the krepis cost sink the call's cost record went to; None when cost emission is off.")
+    response_id: str | None = Field(default=None, description="Provider/router response id of the accepted attempt (Batches: the message id).")
+    custom_id: str | None = Field(default=None, description="Batches API custom_id (batch rung only).")
+    registry_id: str | None = None
+    served_deployment: str | None = None
+    finish_reason: str | None = None
+    fallback_used: bool | None = None
+    attempts: int | None = Field(default=None, description="Attempts this verdict took, including the accepted one.")
+    max_tokens: int | None = None
+    cost_emission_error: str | None = None
+    # ── grader identity + the judge call's own llm_trace.v1 join ──────────
+    # alpha-engine-config-I12312 (programme item 4: EvalJudge verdict ->
+    # trace_id) and alpha-engine-config-I11484 (grader identity). The model
+    # that graded is RubricEvalArtifact.judge_resolved_model and the prompt
+    # version is rubric_version + rubric_hash; these add the remaining two
+    # facts, the router group and the call's trace ids.
+    model_group: str | None = Field(
+        default=None,
+        description=(
+            "Router model group the call resolved through (e.g. 'low'). None "
+            "on the batch rung, which calls Anthropic Batches directly and "
+            "resolves no group, and on verdicts written before this field."
+        ),
+    )
+    trace_id: str | None = Field(
+        default=None,
+        description=(
+            "W3C trace id (32 hex) krepis stamped on the judge call's "
+            "LLMResult: the key of its llm_trace.v1 row. Shared by every call "
+            "in one trace run, so the row is (trace_id, span_id). None on the "
+            "batch rung and under a krepis without llm_trace (<0.59.74)."
+        ),
+    )
+    span_id: str | None = Field(
+        default=None,
+        description="W3C span id (16 hex) of the judge call itself; with trace_id it names exactly one llm_trace.v1 row.",
+    )
+    trace_run_id: str | None = Field(
+        default=None,
+        description=(
+            "run_id of the krepis trace sink the call's llm_trace.v1 row was "
+            "written to (llm_traces/v1/rows/date=*/callsite=*/<run_id>.*). "
+            "None when no trace sink was configured, so trace_id is set but "
+            "no row exists to join to."
+        ),
+    )
+    trace_emission_error: str | None = Field(
+        default=None,
+        description="krepis's trace_emission_error for the call: set when the trace row failed to write.",
+    )
+
+
 class RubricEvalArtifact(BaseModel):
     """One persisted eval result.
 
@@ -423,7 +701,14 @@ class RubricEvalArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[2, 3] = Field(
+        default=3,
+        description=(
+            "3 since alpha-engine-config-I12312 (judge evidence, input "
+            "bundle and call identifiers — all additive and optional). 2 "
+            "is read unchanged."
+        ),
+    )
     run_id: str = Field(description="Pipeline-invocation identifier of the JUDGED artifact; ties this eval back to the agent's run.")
     judge_run_id: str = Field(description="UUID of the eval-judge batch invocation that produced this eval. Constant across all artifacts emitted by one batch; lets operators query 'what did this judge batch produce?' without scanning the corpus.")
     timestamp: str = Field(description="ISO-8601 emission time. Per-artifact wall-clock; used as the date-partition source when present.")
@@ -463,7 +748,7 @@ class RubricEvalArtifact(BaseModel):
             "records."
         ),
     )
-    dimension_scores: list[RubricDimensionScore] = Field(
+    dimension_scores: list[CitedRubricDimensionScore] = Field(
         default_factory=list,
         description=(
             "Per-dimension scores from the judge LLM. Empty list when "
@@ -498,3 +783,75 @@ class RubricEvalArtifact(BaseModel):
             "workstream. None when the judge actually ran the LLM."
         ),
     )
+    # ── alpha-engine-config-I12312: evidence, replay bundle, joins ──────
+    # Every field below is optional, so a schema_version 2 verdict reads
+    # unchanged and every consumer that reads verdicts as dicts
+    # (crucible-dashboard's eval_loader, the _eval_by_capture manifest
+    # builder) sees only extra keys.
+    citation_check: CitationCheck | None = Field(
+        default=None,
+        description=(
+            "Deterministic citation-validator counts. None when the rubric "
+            "declared no citation contract, on skip markers, and on verdicts "
+            "written before alpha-engine-config-I12312."
+        ),
+    )
+    judge_inputs: list[JudgeInputRef] = Field(
+        default_factory=list,
+        description=(
+            "The id-labelled input elements the judge was shown, each with "
+            "the sha256 of its rendered text. Empty under the legacy "
+            "(uncited) rendering."
+        ),
+    )
+    rubric_hash: str | None = Field(
+        default=None,
+        description="sha256 of the rubric template body (LoadedPrompt.hash) — the prompt-template element of the version tuple.",
+    )
+    judge_prompt_sha256: str | None = Field(
+        default=None,
+        description="sha256 over the exact system + user text sent to the judge, so a replay can prove it rendered the same prompt.",
+    )
+    judge_parser_version: str | None = Field(
+        default=None,
+        description="Version of the code turning the judge's tool call into this verdict (evals.judge.JUDGE_PARSER_VERSION).",
+    )
+    judge_call: JudgeCallRef | None = Field(
+        default=None,
+        description="Identifiers of the judge call itself (cost-record run id, response id, ...). None on skips and older verdicts.",
+    )
+    judged_trace_id: str | None = Field(
+        default=None,
+        description="trace_id of the JUDGED artifact's own LLM call (llm_trace.v1), when the artifact carries one.",
+    )
+    judged_span_id: str | None = Field(
+        default=None,
+        description="span_id of the JUDGED artifact's own LLM call, when the artifact carries one.",
+    )
+
+    @field_validator("dimension_scores", mode="before")
+    @classmethod
+    def _accept_plain_dimension_scores(cls, v: Any) -> Any:
+        """Accept the lib's plain ``RubricDimensionScore`` (the uncited
+        parser's output) by its fields: pydantic does not coerce a parent
+        instance into a subclass field on its own.
+
+        An uncited score cannot carry validated evidence, so any
+        ``evidence``/``valid_evidence_count``/``unsupported`` it holds as a
+        pydantic EXTRA (the lib model is ``extra="allow"``) is unvalidated
+        model output and is dropped rather than persisted as if checked.
+        """
+        if not isinstance(v, list):
+            return v
+        out = []
+        for item in v:
+            if isinstance(item, BaseModel) and not isinstance(item, CitedRubricDimensionScore):
+                item = item.model_dump()
+                for key in _VALIDATOR_OWNED_KEYS:
+                    item.pop(key, None)
+            out.append(item)
+        return out
+
+
+_VALIDATOR_OWNED_KEYS = ("evidence", "valid_evidence_count", "unsupported")
+"""Dimension-score keys only the deterministic citation validator may set."""

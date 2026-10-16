@@ -242,7 +242,48 @@ def _make_manifest_entry(eval_artifact: dict, eval_s3_key: str) -> dict:
         "eval_s3_key": eval_s3_key,
         "judged_artifact_s3_key": eval_artifact.get("judged_artifact_s3_key"),
         "judge_skip_reason": eval_artifact.get("judge_skip_reason"),
+        **_citation_entry_fields(eval_artifact),
     }
+
+
+def _citation_entry_fields(eval_artifact: dict) -> dict:
+    """Citation-validator counts and the judged trace id, for verdicts that
+    carry them (alpha-engine-config-I12312). Absent keys — not ``None`` —
+    for older and uncited verdicts, so their manifest rows are unchanged.
+    Mirrors ``evals.judge._sidecar_citation_fields`` without importing the
+    judge runtime (module isolation, as for the capture-date helper)."""
+    out: dict = {}
+    check = eval_artifact.get("citation_check")
+    if isinstance(check, dict):
+        out.update(
+            citation_contract=check.get("contract"),
+            citations_total=check.get("citations_total"),
+            citations_valid=check.get("citations_valid"),
+            citations_invalid=check.get("citations_invalid"),
+            findings_unsupported=check.get("findings_unsupported"),
+        )
+    if eval_artifact.get("judged_trace_id"):
+        out["judged_trace_id"] = eval_artifact["judged_trace_id"]
+    # The judge call's router group and its own llm_trace.v1 row
+    # (alpha-engine-config-I12312 item 4, I11484). Present-only, and read
+    # from ``judge_call`` alone, so an older verdict's row is unchanged.
+    call = eval_artifact.get("judge_call")
+    if isinstance(call, dict):
+        for src, dst in JUDGE_CALL_JOIN_KEYS:
+            if call.get(src):
+                out[dst] = call[src]
+    return out
+
+
+JUDGE_CALL_JOIN_KEYS: tuple[tuple[str, str], ...] = (
+    ("model_group", "judge_model_group"),
+    ("trace_id", "judge_trace_id"),
+    ("span_id", "judge_span_id"),
+    ("trace_run_id", "judge_trace_run_id"),
+)
+"""``judge_call`` field -> flat key on the manifest row and the
+``latest.json`` sidecar. ``evals.judge`` imports this (never the reverse,
+for the module isolation above), so the two projections cannot drift."""
 
 
 def build_manifests(

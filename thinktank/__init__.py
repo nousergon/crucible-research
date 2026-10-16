@@ -33,7 +33,10 @@ __version__ = "0.1.0"
 # RatingRow.raw_llm_rating (M0 contract-discipline: schema_version bumps on
 # any shape change, per this module's own docstring). Additive-only — old
 # artifacts (schema_version=1) still parse under both new fields' defaults.
-SCHEMA_VERSION = 2
+# alpha-engine-config-I12312: bumped 2 -> 3 for CompanyThesisLLM.claims +
+# CompanyThesis.thesis_citations / pillar_citations. Additive-only again —
+# schema_version 1 and 2 artifacts still parse under the new fields' defaults.
+SCHEMA_VERSION = 3
 
 # S3 namespace (single source of truth for key templates)
 LEDGER_KEY = "thinktank/coverage_ledger.json"

@@ -339,6 +339,15 @@ def _assert_board_fallback_fresh(
                 msg,
             )
             return
+        # alpha-engine-config-I12351: a weekly-SF REHEARSAL may run on stale
+        # data (Brian, 2026-10-16). The refusal is recorded in the stage's
+        # response under ``rehearsal.degradations`` and the rehearsal
+        # continues; on every other run tolerate_stale returns False and this
+        # raises exactly as before.
+        from data.rehearsal import tolerate_stale
+
+        if tolerate_stale(msg, where="signals_envelope.universe_board_fallback"):
+            return
         raise RuntimeError(msg)
 
 

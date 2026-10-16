@@ -62,6 +62,29 @@ identical ``request_model`` and the identical call core since I2997 above —
 routing both through the router preserves that (pre-existing, not new)
 convergence rather than causing it; see ``evaluate_artifact_openrouter``'s
 docstring for the full decision.
+
+**alpha-engine-config-I12312 (2026-10-15): evidence tied to the text.** A
+rubric that declares ``EVIDENCE CONTRACT: judge_evidence.v1`` is rendered with
+every judge-input element under an explicit id and every output leaf under its
+field path (``evals/judge_citations.py``), and judged with
+``CitedRubricEvalLLMOutput``: each dimension carries ``evidence`` — a verbatim
+quote of the judged output, its field path + character span, and the
+``source_ref`` id of the input element it was checked against. Every rung
+(sync, shadow, batch) then validates each citation deterministically in
+``_verdict_fields`` and records the result on the verdict (``citation_check``,
+per-dimension ``unsupported``), with the replay bundle (``judge_inputs``,
+``judge_prompt_sha256``, ``rubric_hash``, ``judge_parser_version``), the judged
+artifact's ``trace_id``/``span_id`` when it carries them, and the judge call's
+own identifiers (``judge_call``). A rubric without the declaration renders and
+parses exactly as before.
+
+**Verdict -> judge trace (alpha-engine-config-I12312 item 4, I11484).**
+``judge_call`` also names the grader's router group (``model_group``) and the
+judge call's OWN ``llm_trace.v1`` row: ``trace_id``/``span_id`` as krepis
+stamped them on the result, and ``trace_run_id``, the run of the trace sink the
+row went to (``None`` when none was configured, so no row exists). The
+``latest.json`` sidecar and the ``_eval_by_capture`` manifest carry them flat as
+``judge_model_group``/``judge_trace_id``/``judge_span_id``/``judge_trace_run_id``.
 """
 
 from __future__ import annotations
@@ -94,12 +117,23 @@ from nousergon_lib.eval_artifacts import (
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
+from evals.eval_manifest import JUDGE_CALL_JOIN_KEYS
+from evals.judge_citations import (
+    JudgeBundle,
+    build_bundle,
+    declared_citation_contract,
+    judge_prompt_sha256,
+    render_cited_rubric,
+    validate_dimension_scores,
+)
 from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for
 from evals.rubric_dimensions import (
     declared_dimensions,
     keep_declared_dimension_scores,
 )
 from graph.state_schemas import (
+    CitedRubricEvalLLMOutput,
+    JudgeCallRef,
     RubricEvalArtifact,
     RubricEvalLLMOutput,
 )
@@ -199,6 +233,15 @@ Caps at 3 to bound worst-case latency (each retry is a full Haiku
 call ≈ 3-8s). Beyond 3 attempts the underlying issue is structural
 (rubric prompt too dense, model regressed, etc.) and surfaces as a
 loud failure for the operator to diagnose."""
+
+
+JUDGE_PARSER_VERSION = "2.0.0"
+"""Version of the code that turns a judge tool call into a verdict — the
+parser element of evaluation-policy's version tuple, stamped on every verdict
+as ``judge_parser_version``. 2.0.0 (alpha-engine-config-I12312): rubrics that
+declare ``judge_evidence.v1`` are parsed with per-finding ``evidence`` and
+validated by ``evals.judge_citations``. Bump on any change to parsing,
+dimension filtering or citation validation."""
 
 
 # ── Agent → rubric mapping ────────────────────────────────────────────────
@@ -349,6 +392,97 @@ def _render_rubric(
     )
 
 
+@dataclass(frozen=True)
+class _RenderedJudgePrompt:
+    """A rubric rendered for one artifact, plus what the citation validator
+    needs to check the verdict against it."""
+
+    text: str
+    contract: str | None
+    """The citation contract the rubric declares; ``None`` = legacy render."""
+    bundle: JudgeBundle | None
+    """The id-labelled bundle the judge was shown (cited renders only)."""
+
+
+def _render_for_judge(artifact: DecisionArtifact, loaded_prompt: LoadedPrompt) -> _RenderedJudgePrompt:
+    """Render ``loaded_prompt`` for ``artifact`` in the mode the rubric declares.
+
+    A rubric declaring ``EVIDENCE CONTRACT: judge_evidence.v1`` is rendered
+    with every input element under an explicit id and every output leaf under
+    its field path (``evals/judge_citations.py``), so the judge can cite both.
+    Any other rubric goes through :func:`_render_rubric` unchanged — byte for
+    byte what it rendered before alpha-engine-config-I12312.
+    """
+    contract = declared_citation_contract(loaded_prompt.text)
+    if contract is None:
+        return _RenderedJudgePrompt(text=_render_rubric(artifact, loaded_prompt), contract=None, bundle=None)
+    bundle = build_bundle(artifact)
+    return _RenderedJudgePrompt(
+        text=render_cited_rubric(loaded_prompt.text, bundle),
+        contract=contract,
+        bundle=bundle,
+    )
+
+
+def _judged_trace_ids(artifact: Any) -> dict[str, str | None]:
+    """The judged artifact's own ``trace_id``/``span_id``, when it carries
+    them (crucible-research#849 stamps them on the ``DecisionArtifact`` fields
+    nousergon-lib v0.124.173 added; older artifacts default to ``None``)."""
+    return {
+        "judged_trace_id": getattr(artifact, "trace_id", None),
+        "judged_span_id": getattr(artifact, "span_id", None),
+    }
+
+
+def _verdict_fields(
+    artifact: DecisionArtifact,
+    *,
+    loaded_prompt: LoadedPrompt,
+    rendered: _RenderedJudgePrompt,
+    llm_output: RubricEvalLLMOutput,
+    rubric_name: str,
+    judge_model: str,
+    system_sent: str,
+    user_sent: str,
+) -> dict[str, Any]:
+    """The ``RubricEvalArtifact`` fields every judge rung derives the same
+    way: declared-dimension filtering, then — for a contract-declaring rubric
+    — deterministic citation validation, plus the replay bundle and the
+    version-tuple stamps. Shared by the sync, shadow and batch rungs so the
+    three cannot disagree about what a verdict records."""
+    kept = keep_declared_dimension_scores(
+        llm_output.dimension_scores,
+        declared_dimensions(loaded_prompt.text),
+        agent_id=artifact.agent_id,
+        judge_model=judge_model,
+        rubric_id=rubric_name,
+    )
+    fields: dict[str, Any] = {
+        "dimension_scores": kept,
+        "rubric_hash": loaded_prompt.hash,
+        "judge_prompt_sha256": judge_prompt_sha256(system_sent, user_sent),
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        **_judged_trace_ids(artifact),
+    }
+    if rendered.contract is not None and rendered.bundle is not None:
+        scored, check = validate_dimension_scores(kept, rendered.bundle, contract=rendered.contract)
+        fields["dimension_scores"] = scored
+        fields["citation_check"] = check
+        fields["judge_inputs"] = [e.ref() for e in rendered.bundle.inputs]
+        log = logger.warning if (check.citations_invalid or check.findings_unsupported) else logger.info
+        log(
+            "[eval_judge] citation_check agent_id=%s run_id=%s judge=%s "
+            "citations=%d valid=%d invalid=%d (unlocated=%d unknown_ref=%d "
+            "missing_ref=%d relocated=%d) unsupported_findings=%d/%d %s",
+            artifact.agent_id, artifact.run_id, judge_model,
+            check.citations_total, check.citations_valid, check.citations_invalid,
+            check.unlocated, check.unknown_source_ref, check.missing_source_ref,
+            check.located_relocated, check.findings_unsupported, check.findings_total,
+            check.unsupported_dimensions,
+        )
+    return fields
+
+
 def _split_rubric_for_caching(rendered: str) -> tuple[str, str]:
     """Split a rendered rubric into a cacheable system prompt and volatile
     user content.
@@ -443,6 +577,8 @@ def _make_skip_eval_artifact(
             f"Judge short-circuited: {skip_reason}.",
         ),
         judge_skip_reason=skip_reason,
+        judge_parser_version=JUDGE_PARSER_VERSION,
+        **_judged_trace_ids(artifact),
     )
 
 
@@ -549,8 +685,23 @@ _RUBRIC_TOOL_DESCRIPTION = (
 )
 
 
-def _build_rubric_tool_spec() -> dict[str, Any]:
+_CITED_RUBRIC_TOOL_DESCRIPTION = (
+    "Emit the rubric eval as a structured tool call. Each rubric "
+    "dimension produces one entry in dimension_scores with an integer "
+    "score, short reasoning, and evidence: for every output claim the "
+    "score rests on, a VERBATIM quote of one labelled output field, its "
+    "claim_span (field path + character offsets), and the source_ref id "
+    "of the input element it was checked against. overall_reasoning is "
+    "a 1-2 sentence cross-dimension summary."
+)
+
+
+def _build_rubric_tool_spec(*, cited: bool = False) -> dict[str, Any]:
     """Synthesize the Anthropic tool-use spec for the rubric eval call.
+
+    ``cited=True`` (a rubric declaring ``judge_evidence.v1``) pins the
+    schema to ``CitedRubricEvalLLMOutput`` — the same tool name, with
+    per-dimension ``evidence``. The uncited spec is unchanged.
 
     Pinning the input_schema to ``RubricEvalLLMOutput.model_json_schema()``
     means the schema-bump path is single-source-of-truth: edit the
@@ -560,6 +711,12 @@ def _build_rubric_tool_spec() -> dict[str, Any]:
     lift) — schema-agnostic in the lib (accepts any Pydantic model), so
     this wrapper is the one place that pins it to ``RubricEvalLLMOutput``.
     """
+    if cited:
+        return _lib_build_tool_spec(
+            CitedRubricEvalLLMOutput,
+            tool_name=_RUBRIC_TOOL_NAME,
+            description=_CITED_RUBRIC_TOOL_DESCRIPTION,
+        )
     return _lib_build_tool_spec(
         RubricEvalLLMOutput,
         tool_name=_RUBRIC_TOOL_NAME,
@@ -609,9 +766,10 @@ def build_batch_request(
         )
 
     loaded_prompt = load_prompt(rubric_name)
-    rendered = _render_rubric(artifact, loaded_prompt)
+    judge_prompt = _render_for_judge(artifact, loaded_prompt)
+    rendered = judge_prompt.text
     system_part, user_part = _split_rubric_for_caching(rendered)
-    tool_spec = _build_rubric_tool_spec()
+    tool_spec = _build_rubric_tool_spec(cited=judge_prompt.contract is not None)
 
     # Force the model to call the rubric tool — equivalent to
     # ``with_structured_output(...)``'s ``tool_choice`` posture. Without
@@ -644,6 +802,8 @@ def build_batch_request(
 
 def parse_batch_message(
     message_payload: Any,
+    *,
+    cited: bool = False,
 ) -> RubricEvalLLMOutput:
     """Parse one batch result's ``message`` block into ``RubricEvalLLMOutput``.
 
@@ -667,12 +827,15 @@ def parse_batch_message(
     unwrapped so callers/tests can still distinguish the two (both are
     ``ValueError`` subclasses, so catching bare ``ValueError`` here
     would incorrectly conflate them).
+
+    ``cited=True`` parses with ``CitedRubricEvalLLMOutput`` (per-finding
+    ``evidence``) — pass it when the rubric declares ``judge_evidence.v1``.
     """
     try:
         return _lib_parse_batch_tool_result(
             message_payload,
             tool_name=_RUBRIC_TOOL_NAME,
-            schema=RubricEvalLLMOutput,
+            schema=CitedRubricEvalLLMOutput if cited else RubricEvalLLMOutput,
         )
     except _LibToolResultNotFoundError:
         raise ValueError(
@@ -839,7 +1002,8 @@ def evaluate_artifact(
             skip_reason="degenerate_input",
         )
 
-    rendered = _render_rubric(artifact, loaded_prompt)
+    judge_prompt = _render_for_judge(artifact, loaded_prompt)
+    rendered = judge_prompt.text
     system_part, user_part = _split_rubric_for_caching(rendered)
 
     # ``judge_model`` stays the stable logical key (persisted + dimension —
@@ -858,6 +1022,7 @@ def evaluate_artifact(
         max_retries=max_retries,
         log_prefix="[eval_judge]",
         callsite_id="evaljudge-sync",
+        cited=judge_prompt.contract is not None,
     )
 
     # alpha-engine-config-I11484: ``judge_model`` is a TIER key, not the
@@ -888,14 +1053,18 @@ def evaluate_artifact(
         judge_model=judge_model,
         judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
-        dimension_scores=keep_declared_dimension_scores(
-            call_result.llm_output.dimension_scores,
-            declared_dimensions(loaded_prompt.text),
-            agent_id=artifact.agent_id,
-            judge_model=judge_model,
-            rubric_id=rubric_name,
-        ),
         overall_reasoning=call_result.llm_output.overall_reasoning,
+        judge_call=call_result.call_ref,
+        **_verdict_fields(
+            artifact,
+            loaded_prompt=loaded_prompt,
+            rendered=judge_prompt,
+            llm_output=call_result.llm_output,
+            rubric_name=rubric_name,
+            judge_model=judge_model,
+            system_sent=call_result.system_sent,
+            user_sent=call_result.user_sent,
+        ),
     )
 
 
@@ -1094,6 +1263,13 @@ class _OpenRouterJudgeCallResult:
     (the deployment the ``low`` group resolved to). Distinct from the
     caller's declared ``request_model``, which since I6559 no longer selects
     the physical model."""
+    call_ref: JudgeCallRef | None = None
+    """Identifiers joining the verdict to this call's cost record and the
+    provider/router logs (alpha-engine-config-I12312)."""
+    system_sent: str = ""
+    """The exact system text sent (after the generic-default substitution)."""
+    user_sent: str = ""
+    """The exact user text sent."""
 
 
 def _call_openrouter_judge_llm(
@@ -1107,6 +1283,7 @@ def _call_openrouter_judge_llm(
     log_prefix: str,
     system_prompt: str = "",
     callsite_id: str = "evaljudge-sync",
+    cited: bool = False,
 ) -> _OpenRouterJudgeCallResult:
     """Shared router-resolved judge-call core: forced-tool-call request +
     leak guard + bounded retry loop. Used by BOTH ``evaluate_artifact``
@@ -1145,9 +1322,16 @@ def _call_openrouter_judge_llm(
     immediately, since — like ordinary schema non-conformance — a
     resample often recovers.
 
+    ``cited=True`` (the rubric declares ``judge_evidence.v1``) forces the
+    ``CitedRubricEvalLLMOutput`` tool schema and parses with it, so each
+    finding carries its ``evidence``; validation happens in the caller.
+
     Raises ``RuntimeError`` if all ``max_retries`` attempts fail (leak
     guard trip or schema validation failure).
     """
+    output_schema = CitedRubricEvalLLMOutput if cited else RubricEvalLLMOutput
+    system_sent = system_prompt or "You are a strict, evidence-grounded rubric judge."
+    cost_sink = _judge_cost_sink()
     spec, route = _judge_router_spec_and_route(max_tokens=max_tokens)
     llm_client = LLMClient(
         spec,
@@ -1162,7 +1346,7 @@ def _call_openrouter_judge_llm(
         # Process-scoped sink — see ``_judge_cost_sink``. Without this the
         # judge's per-call spend is invisible to AggregateCosts
         # (alpha-engine-config-I5206).
-        cost_sink=_judge_cost_sink(),
+        cost_sink=cost_sink,
     )
     logger.info(
         "%s:%s callsite=%s group=%s route=%s deployment=%s request_model=%s",
@@ -1170,7 +1354,7 @@ def _call_openrouter_judge_llm(
         route.get("route"), spec.model, request_model,
     )
 
-    tool_schema = _build_rubric_tool_spec()
+    tool_schema = _build_rubric_tool_spec(cited=cited)
     tool_name = tool_schema["name"]
     tools = [
         {
@@ -1187,11 +1371,14 @@ def _call_openrouter_judge_llm(
     llm_output: RubricEvalLLMOutput | None = None
     resolved_model: str | None = None
     total_usd: float | None = None
+    accepted_result: Any = None
+    attempts_made = 0
 
     for attempt in range(1, max_retries + 1):
+        attempts_made = attempt
         try:
             result = llm_client.complete(
-                system=system_prompt or "You are a strict, evidence-grounded rubric judge.",
+                system=system_sent,
                 user_content=rendered,
                 max_tokens=max_tokens,
                 extra={
@@ -1301,7 +1488,8 @@ def _call_openrouter_judge_llm(
 
         try:
             raw_args = json.loads(matching.function.arguments)
-            llm_output = RubricEvalLLMOutput.model_validate(raw_args)
+            llm_output = output_schema.model_validate(raw_args)
+            accepted_result = result
             last_error = None
             if attempt > 1:
                 _note_in_call_retry_recovered()
@@ -1332,6 +1520,69 @@ def _call_openrouter_judge_llm(
         resolved_model=resolved_model,
         total_usd=total_usd,
         addressed_model=getattr(spec, "model", None),
+        call_ref=_judge_call_ref(
+            accepted_result,
+            callsite_id=callsite_id,
+            cost_sink=cost_sink,
+            trace_sink=getattr(llm_client, "_trace_sink", None),
+            attempts=attempts_made,
+            max_tokens=max_tokens,
+            model_group=JUDGE_MODEL_GROUP,
+        ),
+        system_sent=system_sent,
+        user_sent=rendered,
+    )
+
+
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _judge_call_ref(
+    result: Any,
+    *,
+    callsite_id: str,
+    cost_sink: Any,
+    attempts: int,
+    max_tokens: int,
+    trace_sink: Any = None,
+    model_group: str | None = None,
+) -> JudgeCallRef:
+    """The accepted call's identifiers, read from krepis's ``LLMResult``.
+
+    ``cost_run_id`` is the run id the process-default cost sink files this
+    call's cost record under; with ``callsite_id`` and the record's date it
+    names the ``_cost_raw/`` object holding the row. ``response_id`` is the
+    provider/router response id. Every read is defensive: a field krepis
+    does not set (or a test double without it) records ``None``.
+
+    ``trace_id``/``span_id`` are the keys of the call's own ``llm_trace.v1``
+    row (krepis>=0.59.74 stamps them on every result, sink or not), and
+    ``trace_run_id`` is the run id of the trace sink that row went to —
+    ``None`` when the client had no trace sink, which says the ids name a
+    row that was never written (alpha-engine-config-I12312, programme item
+    4). ``model_group`` completes the grader identity alongside the verdict's
+    ``judge_resolved_model`` and ``rubric_version``/``rubric_hash``
+    (alpha-engine-config-I11484).
+    """
+    raw = getattr(result, "raw_response", None)
+    fallback = getattr(result, "fallback_used", None)
+    return JudgeCallRef(
+        callsite_id=callsite_id,
+        cost_run_id=_str_or_none(getattr(cost_sink, "run_id", None)),
+        response_id=_str_or_none(getattr(raw, "id", None)),
+        registry_id=_str_or_none(getattr(result, "registry_id", None)),
+        served_deployment=_str_or_none(getattr(result, "served_deployment", None)),
+        finish_reason=_str_or_none(getattr(result, "finish_reason", None)),
+        fallback_used=fallback if isinstance(fallback, bool) else None,
+        attempts=attempts,
+        max_tokens=max_tokens,
+        cost_emission_error=_str_or_none(getattr(result, "cost_emission_error", None)),
+        model_group=_str_or_none(model_group),
+        trace_id=_str_or_none(getattr(result, "trace_id", None)),
+        span_id=_str_or_none(getattr(result, "span_id", None)),
+        trace_run_id=_str_or_none(getattr(trace_sink, "run_id", None)),
+        trace_emission_error=_str_or_none(getattr(result, "trace_emission_error", None)),
     )
 
 
@@ -1436,7 +1687,8 @@ def evaluate_artifact_openrouter(
             skip_reason="degenerate_input",
         )
 
-    rendered = _render_rubric(artifact, loaded_prompt)
+    judge_prompt = _render_for_judge(artifact, loaded_prompt)
+    rendered = judge_prompt.text
     system_part, user_part = _split_rubric_for_caching(rendered)
     request_model = request_model_for(judge_model)
     call_result = _call_openrouter_judge_llm(
@@ -1449,6 +1701,7 @@ def evaluate_artifact_openrouter(
         max_retries=max_retries,
         log_prefix="[eval_judge_openrouter]",
         callsite_id="evaljudge-shadow",
+        cited=judge_prompt.contract is not None,
     )
 
     logger.info(
@@ -1474,14 +1727,18 @@ def evaluate_artifact_openrouter(
         judge_model=judge_model,
         judge_request_model=call_result.addressed_model or request_model,
         judge_resolved_model=call_result.resolved_model,
-        dimension_scores=keep_declared_dimension_scores(
-            call_result.llm_output.dimension_scores,
-            declared_dimensions(loaded_prompt.text),
-            agent_id=artifact.agent_id,
-            judge_model=judge_model,
-            rubric_id=rubric_name,
-        ),
         overall_reasoning=call_result.llm_output.overall_reasoning,
+        judge_call=call_result.call_ref,
+        **_verdict_fields(
+            artifact,
+            loaded_prompt=loaded_prompt,
+            rendered=judge_prompt,
+            llm_output=call_result.llm_output,
+            rubric_name=rubric_name,
+            judge_model=judge_model,
+            system_sent=call_result.system_sent,
+            user_sent=call_result.user_sent,
+        ),
     )
 
 
@@ -1691,6 +1948,7 @@ def persist_eval_artifact(
                 "run_id": artifact.run_id,
                 "judge_model": artifact.judge_model,
                 "timestamp": artifact.timestamp,
+                **_sidecar_citation_fields(artifact),
             },
             indent=2,
         ).encode("utf-8")
@@ -1707,3 +1965,31 @@ def persist_eval_artifact(
                 exc_info=True,
             )
     return key
+
+
+def _sidecar_citation_fields(artifact: RubricEvalArtifact) -> dict[str, Any]:
+    """Citation counts + trace join for the ``latest.json`` sidecar and the
+    ``_eval_by_capture`` manifest rows. Empty for an uncited verdict, so a
+    pre-I12312-shaped pointer is unchanged."""
+    out: dict[str, Any] = {}
+    check = artifact.citation_check
+    if check is not None:
+        out.update(
+            citation_contract=check.contract,
+            citations_total=check.citations_total,
+            citations_valid=check.citations_valid,
+            citations_invalid=check.citations_invalid,
+            findings_unsupported=check.findings_unsupported,
+        )
+    if artifact.judged_trace_id:
+        out["judged_trace_id"] = artifact.judged_trace_id
+    # The judge call's router group and its own llm_trace.v1 row
+    # (alpha-engine-config-I12312 item 4, I11484). Present-only, and read
+    # from ``judge_call`` alone, so an older verdict's row is unchanged.
+    call = artifact.judge_call
+    if call is not None:
+        for src, dst in JUDGE_CALL_JOIN_KEYS:
+            value = getattr(call, src, None)
+            if value:
+                out[dst] = value
+    return out

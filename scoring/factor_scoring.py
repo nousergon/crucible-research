@@ -729,13 +729,19 @@ def _resolve_group_snapshot(
         df = pd.read_parquet(io.BytesIO(obj["Body"].read()), engine="pyarrow")
         stale_td = count_trading_days(_date.fromisoformat(resolved), _date.fromisoformat(run_date_str))
         if stale_td > max_staleness_td:
-            raise FactorSnapshotStalenessError(
+            msg = (
                 f"factor group {group!r}: newest snapshot on or before "
                 f"{run_date_str} is {resolved}, {stale_td} NYSE trading days "
                 f"behind (bound {max_staleness_td}). Refusing to rank the "
                 "universe on it. Producer: alpha-engine-data "
                 f"{'builders/daily_append.py (weekday MorningEnrich)' if group == 'technical' else 'collectors/fundamentals.py (Saturday DataPhase1)'}."
             )
+            # alpha-engine-config-I12351: degrade-and-continue on a REHEARSAL
+            # only; every other run raises exactly as before.
+            from data.rehearsal import tolerate_stale
+
+            if not tolerate_stale(msg, where=f"factor_scoring._resolve_group_snapshot[{group}]"):
+                raise FactorSnapshotStalenessError(msg)
         logger.info(
             "Factor group %r resolved to %s (%d trading days behind %s, bound %d)",
             group,

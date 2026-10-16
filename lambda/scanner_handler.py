@@ -74,6 +74,26 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 
+# ArcticDB S3 read concurrency (alpha-engine-config-I12271). MUST run before
+# anything imports arcticdb: the library reads ``ARCTICDB_*`` configuration
+# from the environment once, at import, and sizes its I/O thread pool from it.
+#
+# Unset, the pool is sized from the CPU count (1.5x), which on this 1024 MB
+# function is a handful of threads. Every scanner read is a ``read_batch``
+# over ~900 symbols and is bound by S3 round-trip latency, not bytes or CPU,
+# so the run time scales with (segments per symbol) / (I/O threads). The
+# segment count is not constant: the weekday ``daily_append`` adds one
+# segment per symbol per session and only the Saturday weekly collection
+# rewrites each symbol back to one. Measured on the AAPL/XOM index: 1
+# segment at every successful scanner run (09-24 .. 10-10), 5 at
+# rehearsal-2026-10-14-1 and 6 at rehearsal-2026-10-15-1 — and the two
+# technical/factor reads went from 53 s / 41 s (10-10) to 168 s / 151 s
+# (10-15), killing the run at the 450 s ceiling both times. Measured on 150
+# symbols against the live library, 3 -> 32 I/O threads took one read from
+# 45-47 s to 5-6 s. setdefault, so a function-level environment value
+# still wins.
+os.environ.setdefault("ARCTICDB_VersionStore_NumIOThreads_int", "32")
+
 # Repo root on sys.path so ``from data.scanner_orchestrator import ...``
 # resolves under Lambda's task layout. Mirrors the existing handlers
 # (rationale_clustering, eval_rolling_mean, aggregate_costs).
@@ -150,8 +170,24 @@ def handler(event, context):
     configured and never raises, so the uniform rule costs nothing and leaves
     no per-handler judgment call for the next producer to get wrong.
     """
+    # alpha-engine-config-I12351: a weekly-SF REHEARSAL (execution name
+    # ``rehearsal-*``, threaded as ``execution_name``) re-keys every S3 write
+    # under ``rehearsal/<name>/`` — no universe_membership/latest.json, no
+    # ISO-week re-cut, no champion pointer at a live key. Activated before
+    # ``_run`` creates any S3 client. A production event leaves it inert.
+    from data.rehearsal import isolate
+
+    _stage = (
+        "ScannerLeaderboard"
+        if isinstance(event, dict) and event.get("mode") == _MODE_SCANNER_LEADERBOARD
+        else "Scanner"
+    )
     try:
-        return _run(event, context)
+        with isolate(event if isinstance(event, dict) else None, stage=_stage) as _rehearsal:
+            result = _run(event, context)
+            if _rehearsal is not None and isinstance(result, dict):
+                result["rehearsal"] = _rehearsal.summary()
+            return result
     finally:
         try:
             from krepis.cost_sink import flush_default_sink
@@ -498,10 +534,11 @@ def _run(event, context):
     market_regime = event.get("market_regime", "neutral")
 
     logger.info(
-        "[scanner_handler] start run_date=%s (trading day) bucket=%s market_regime=%s",
+        "[scanner_handler] start run_date=%s (trading day) bucket=%s market_regime=%s arcticdb_io_threads=%s",
         run_date,
         bucket,
         market_regime,
+        os.environ.get("ARCTICDB_VersionStore_NumIOThreads_int", "default"),
     )
 
     s3_client = boto3.client("s3")
