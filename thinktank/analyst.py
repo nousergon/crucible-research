@@ -27,6 +27,12 @@ from data.substrate.reader import (
 from thinktank import THESIS_KEY_TMPL, THESIS_LATEST_TMPL
 from thinktank.archive import save_moat_profile
 from thinktank.capture import emit_thesis_capture
+from thinktank.citations import (
+    check_citations,
+    log_citation_check,
+    require_citation_instruction,
+    strip_citation_markers,
+)
 from thinktank.client import ThinktankClient
 from thinktank.context import (
     SIGNALS_LATEST_KEY,
@@ -35,8 +41,9 @@ from thinktank.context import (
     filings_sources,
 )
 from thinktank.schemas import (
+    CitedPillarAssessmentLLM,
     CompanyThesis,
-    CompanyThesisRatedLLM,
+    CompanyThesisCitedLLM,
     SweepBatchLLM,
     TickerEventAssessment,
     TriageDecisionLLM,
@@ -51,6 +58,13 @@ THESIS_TIER = "thesis"
 SWEEP_TIER = "sweep"
 TRIAGE_TIER = "triage"
 PILLAR_TIER = "pillar"
+
+# alpha-engine-config-I12312: the cited prompt versions. Each carries
+# krepis.llm_trace.CITATION_INSTRUCTION and asks for a structured `claims`
+# list; the uncited predecessors (thinktank_thesis / thinktank_pillar) stay
+# in alpha-engine-config for rollback until these have run clean.
+THESIS_PROMPT = "thinktank_thesis_cited"
+PILLAR_PROMPT = "thinktank_pillar_cited"
 
 _ANALYST_SYSTEM = (
     "You are a buy-side equity research analyst writing an institutional "
@@ -139,7 +153,8 @@ def build_thesis(
         sources.append("weekly_signals")
 
     next_version = (prior.version + 1) if prior else 1
-    prompt = load_prompt("thinktank_thesis")
+    prompt = load_prompt(THESIS_PROMPT)
+    require_citation_instruction(prompt)
     # alpha-engine-config-I12312: every input is a cited source (stable id,
     # sha256, offsets) on the call's llm_trace.v1 record, not an anonymous
     # JSON dump. The same slots feed the thesis and the pillar prompt.
@@ -161,7 +176,7 @@ def build_thesis(
         ticker=ticker,
         sector=sector or "unknown",
         update_reason=update_reason,
-        prior_thesis=prior.thesis.model_dump_json() if prior else "(none — initial coverage)",
+        prior_thesis=_prior_thesis_text(prior),
         event_context=event_context or "(none)",
         **input_slots,
         macro_theme=themes.macro_summary(),
@@ -172,7 +187,7 @@ def build_thesis(
         agent_id="analyst_thesis",
         system=_ANALYST_SYSTEM,
         user=rendered,
-        response_model=CompanyThesisRatedLLM,
+        response_model=CompanyThesisCitedLLM,
         prompt_id=prompt.name,
         prompt_version=prompt.version,
         sources=rendered_sources,
@@ -192,7 +207,8 @@ def build_thesis(
     # qual_analyst.py's pattern). client.complete() fails loud (bounded
     # corrective retry, then ThinktankLLMError) on a parse failure — there
     # is no lax-mode empty path for this to silently degrade onto.
-    pillar_prompt = load_prompt("thinktank_pillar")
+    pillar_prompt = load_prompt(PILLAR_PROMPT)
+    require_citation_instruction(pillar_prompt)
     rendered_pillar, rendered_pillar_sources = format_with_sources(
         pillar_prompt,
         ticker=ticker,
@@ -206,7 +222,7 @@ def build_thesis(
         agent_id="analyst_pillar",
         system=_PILLAR_SYSTEM,
         user=rendered_pillar,
-        response_model=QualitativePillarAssessment,
+        response_model=CitedPillarAssessmentLLM,
         prompt_id=pillar_prompt.name,
         prompt_version=pillar_prompt.version,
         sources=rendered_pillar_sources,
@@ -217,7 +233,27 @@ def build_thesis(
             "trading_day": trading_day,
         },
     )
-    pillar_assessment: QualitativePillarAssessment = pillar_result.parsed  # type: ignore[assignment]
+    cited_pillar: CitedPillarAssessmentLLM = pillar_result.parsed  # type: ignore[assignment]
+    pillar_assessment: QualitativePillarAssessment = cited_pillar.assessment()
+
+    # alpha-engine-config-I12312: deterministic citation checks against the
+    # cids each prompt actually rendered. Recorded and logged; never fatal.
+    thesis_citations = check_citations(
+        result.parsed.model_dump(),
+        result.parsed.claims,
+        rendered_sources,
+        prompt_id=prompt.name,
+        prompt_version=prompt.version,
+    )
+    pillar_citations = check_citations(
+        cited_pillar.model_dump(),
+        cited_pillar.claims,
+        rendered_pillar_sources,
+        prompt_id=pillar_prompt.name,
+        prompt_version=pillar_prompt.version,
+    )
+    log_citation_check(thesis_citations, ticker=ticker, call="thesis")
+    log_citation_check(pillar_citations, ticker=ticker, call="pillar")
 
     macro_v, sector_vs = themes.theme_versions()
     thesis = CompanyThesis(
@@ -239,6 +275,8 @@ def build_thesis(
         prompt_version=prompt.version,
         cost_usd=result.cost_usd + pillar_result.cost_usd,
         pillar_assessment=pillar_assessment,
+        thesis_citations=thesis_citations,
+        pillar_citations=pillar_citations,
     )
     _write_thesis(store, thesis)
     save_moat_profile(
@@ -289,6 +327,20 @@ def build_thesis(
         result.cost_usd,
     )
     return thesis
+
+
+def _prior_thesis_text(prior: CompanyThesis | None) -> str:
+    """The prior thesis as the prompt shows it: no claims, no [cid] markers.
+
+    Its citations named the sources of the run that wrote it; the same cid
+    can name a different document today, so they are removed rather than
+    left for the model to copy. A prior written before citations renders
+    byte-identical to the old ``model_dump_json()``.
+    """
+    if prior is None:
+        return "(none — initial coverage)"
+    body = strip_citation_markers(prior.thesis.model_dump(exclude={"claims"}))
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
 
 def _thesis_input_slots(
