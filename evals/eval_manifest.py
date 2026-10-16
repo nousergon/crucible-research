@@ -264,7 +264,26 @@ def _citation_entry_fields(eval_artifact: dict) -> dict:
         )
     if eval_artifact.get("judged_trace_id"):
         out["judged_trace_id"] = eval_artifact["judged_trace_id"]
+    # The judge call's router group and its own llm_trace.v1 row
+    # (alpha-engine-config-I12312 item 4, I11484). Present-only, and read
+    # from ``judge_call`` alone, so an older verdict's row is unchanged.
+    call = eval_artifact.get("judge_call")
+    if isinstance(call, dict):
+        for src, dst in JUDGE_CALL_JOIN_KEYS:
+            if call.get(src):
+                out[dst] = call[src]
     return out
+
+
+JUDGE_CALL_JOIN_KEYS: tuple[tuple[str, str], ...] = (
+    ("model_group", "judge_model_group"),
+    ("trace_id", "judge_trace_id"),
+    ("span_id", "judge_span_id"),
+    ("trace_run_id", "judge_trace_run_id"),
+)
+"""``judge_call`` field -> flat key on the manifest row and the
+``latest.json`` sidecar. ``evals.judge`` imports this (never the reverse,
+for the module isolation above), so the two projections cannot drift."""
 
 
 def build_manifests(
