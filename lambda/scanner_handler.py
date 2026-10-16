@@ -170,8 +170,24 @@ def handler(event, context):
     configured and never raises, so the uniform rule costs nothing and leaves
     no per-handler judgment call for the next producer to get wrong.
     """
+    # alpha-engine-config-I12351: a weekly-SF REHEARSAL (execution name
+    # ``rehearsal-*``, threaded as ``execution_name``) re-keys every S3 write
+    # under ``rehearsal/<name>/`` — no universe_membership/latest.json, no
+    # ISO-week re-cut, no champion pointer at a live key. Activated before
+    # ``_run`` creates any S3 client. A production event leaves it inert.
+    from data.rehearsal import isolate
+
+    _stage = (
+        "ScannerLeaderboard"
+        if isinstance(event, dict) and event.get("mode") == _MODE_SCANNER_LEADERBOARD
+        else "Scanner"
+    )
     try:
-        return _run(event, context)
+        with isolate(event if isinstance(event, dict) else None, stage=_stage) as _rehearsal:
+            result = _run(event, context)
+            if _rehearsal is not None and isinstance(result, dict):
+                result["rehearsal"] = _rehearsal.summary()
+            return result
     finally:
         try:
             from krepis.cost_sink import flush_default_sink

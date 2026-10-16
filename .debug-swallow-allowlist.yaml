@@ -48,7 +48,7 @@ entries:
     tracking: alpha-engine-config-I10226
 
   - path: data/fetchers/feature_store_reader.py
-    line: 561
+    line: 569
     reason: >-
       Feature-store S3 read/parse failed. No recording surface --
       expected-absence-with-fallback; caller treats None as "no feature
@@ -57,7 +57,7 @@ entries:
     tracking: alpha-engine-config-I10226
 
   - path: data/fetchers/feature_store_reader.py
-    line: 652
+    line: 660
     reason: >-
       Factor-loading parquet absent/unreadable at the latest snapshot
       date. No recording surface -- expected-absence probe with a
@@ -66,7 +66,7 @@ entries:
     tracking: alpha-engine-config-I10226
 
   - path: data/fetchers/feature_store_reader.py
-    line: 692
+    line: 700
     reason: >-
       Factor-loading read/parse failed outside the inner try (e.g.
       list_objects_v2 or parquet decode). No recording surface --
@@ -75,7 +75,7 @@ entries:
     tracking: alpha-engine-config-I10226
 
   - path: data/fetchers/feature_store_reader.py
-    line: 767
+    line: 775
     reason: >-
       Daily-closes staging parquet read/parse failed. No recording
       surface -- expected-absence-with-fallback; caller degrades to its
