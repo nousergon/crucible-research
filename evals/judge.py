@@ -77,6 +77,14 @@ per-dimension ``unsupported``), with the replay bundle (``judge_inputs``,
 artifact's ``trace_id``/``span_id`` when it carries them, and the judge call's
 own identifiers (``judge_call``). A rubric without the declaration renders and
 parses exactly as before.
+
+**Verdict -> judge trace (alpha-engine-config-I12312 item 4, I11484).**
+``judge_call`` also names the grader's router group (``model_group``) and the
+judge call's OWN ``llm_trace.v1`` row: ``trace_id``/``span_id`` as krepis
+stamped them on the result, and ``trace_run_id``, the run of the trace sink the
+row went to (``None`` when none was configured, so no row exists). The
+``latest.json`` sidecar and the ``_eval_by_capture`` manifest carry them flat as
+``judge_model_group``/``judge_trace_id``/``judge_span_id``/``judge_trace_run_id``.
 """
 
 from __future__ import annotations
@@ -109,6 +117,7 @@ from nousergon_lib.eval_artifacts import (
 
 from agents.prompt_loader import LoadedPrompt, load_prompt
 from config import MAX_TOKENS_STRATEGIC, S3_BUCKET
+from evals.eval_manifest import JUDGE_CALL_JOIN_KEYS
 from evals.judge_citations import (
     JudgeBundle,
     build_bundle,
@@ -1515,8 +1524,10 @@ def _call_openrouter_judge_llm(
             accepted_result,
             callsite_id=callsite_id,
             cost_sink=cost_sink,
+            trace_sink=getattr(llm_client, "_trace_sink", None),
             attempts=attempts_made,
             max_tokens=max_tokens,
+            model_group=JUDGE_MODEL_GROUP,
         ),
         system_sent=system_sent,
         user_sent=rendered,
@@ -1534,6 +1545,8 @@ def _judge_call_ref(
     cost_sink: Any,
     attempts: int,
     max_tokens: int,
+    trace_sink: Any = None,
+    model_group: str | None = None,
 ) -> JudgeCallRef:
     """The accepted call's identifiers, read from krepis's ``LLMResult``.
 
@@ -1542,6 +1555,15 @@ def _judge_call_ref(
     names the ``_cost_raw/`` object holding the row. ``response_id`` is the
     provider/router response id. Every read is defensive: a field krepis
     does not set (or a test double without it) records ``None``.
+
+    ``trace_id``/``span_id`` are the keys of the call's own ``llm_trace.v1``
+    row (krepis>=0.59.74 stamps them on every result, sink or not), and
+    ``trace_run_id`` is the run id of the trace sink that row went to —
+    ``None`` when the client had no trace sink, which says the ids name a
+    row that was never written (alpha-engine-config-I12312, programme item
+    4). ``model_group`` completes the grader identity alongside the verdict's
+    ``judge_resolved_model`` and ``rubric_version``/``rubric_hash``
+    (alpha-engine-config-I11484).
     """
     raw = getattr(result, "raw_response", None)
     fallback = getattr(result, "fallback_used", None)
@@ -1556,6 +1578,11 @@ def _judge_call_ref(
         attempts=attempts,
         max_tokens=max_tokens,
         cost_emission_error=_str_or_none(getattr(result, "cost_emission_error", None)),
+        model_group=_str_or_none(model_group),
+        trace_id=_str_or_none(getattr(result, "trace_id", None)),
+        span_id=_str_or_none(getattr(result, "span_id", None)),
+        trace_run_id=_str_or_none(getattr(trace_sink, "run_id", None)),
+        trace_emission_error=_str_or_none(getattr(result, "trace_emission_error", None)),
     )
 
 
@@ -1956,4 +1983,13 @@ def _sidecar_citation_fields(artifact: RubricEvalArtifact) -> dict[str, Any]:
         )
     if artifact.judged_trace_id:
         out["judged_trace_id"] = artifact.judged_trace_id
+    # The judge call's router group and its own llm_trace.v1 row
+    # (alpha-engine-config-I12312 item 4, I11484). Present-only, and read
+    # from ``judge_call`` alone, so an older verdict's row is unchanged.
+    call = artifact.judge_call
+    if call is not None:
+        for src, dst in JUDGE_CALL_JOIN_KEYS:
+            value = getattr(call, src, None)
+            if value:
+                out[dst] = value
     return out

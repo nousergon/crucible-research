@@ -641,6 +641,46 @@ class JudgeCallRef(BaseModel):
     attempts: int | None = Field(default=None, description="Attempts this verdict took, including the accepted one.")
     max_tokens: int | None = None
     cost_emission_error: str | None = None
+    # ── grader identity + the judge call's own llm_trace.v1 join ──────────
+    # alpha-engine-config-I12312 (programme item 4: EvalJudge verdict ->
+    # trace_id) and alpha-engine-config-I11484 (grader identity). The model
+    # that graded is RubricEvalArtifact.judge_resolved_model and the prompt
+    # version is rubric_version + rubric_hash; these add the remaining two
+    # facts, the router group and the call's trace ids.
+    model_group: str | None = Field(
+        default=None,
+        description=(
+            "Router model group the call resolved through (e.g. 'low'). None "
+            "on the batch rung, which calls Anthropic Batches directly and "
+            "resolves no group, and on verdicts written before this field."
+        ),
+    )
+    trace_id: str | None = Field(
+        default=None,
+        description=(
+            "W3C trace id (32 hex) krepis stamped on the judge call's "
+            "LLMResult: the key of its llm_trace.v1 row. Shared by every call "
+            "in one trace run, so the row is (trace_id, span_id). None on the "
+            "batch rung and under a krepis without llm_trace (<0.59.74)."
+        ),
+    )
+    span_id: str | None = Field(
+        default=None,
+        description="W3C span id (16 hex) of the judge call itself; with trace_id it names exactly one llm_trace.v1 row.",
+    )
+    trace_run_id: str | None = Field(
+        default=None,
+        description=(
+            "run_id of the krepis trace sink the call's llm_trace.v1 row was "
+            "written to (llm_traces/v1/rows/date=*/callsite=*/<run_id>.*). "
+            "None when no trace sink was configured, so trace_id is set but "
+            "no row exists to join to."
+        ),
+    )
+    trace_emission_error: str | None = Field(
+        default=None,
+        description="krepis's trace_emission_error for the call: set when the trace row failed to write.",
+    )
 
 
 class RubricEvalArtifact(BaseModel):

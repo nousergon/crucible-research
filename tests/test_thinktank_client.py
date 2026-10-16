@@ -15,6 +15,7 @@ from thinktank.client import (
     SftCaptureWriteError,
     ThinktankClient,
     ThinktankLLMError,
+    _callsite_id_for,
 )
 from thinktank.settings import ThinktankSettings, TierSpec
 
@@ -435,3 +436,47 @@ def test_merge_agent_telemetry_folds_dumped_blocks_and_skips_uninstrumented():
     assert (tel.invocations, tel.failures, tel.attempts, tel.retry_exhausted) == (2, 1, 4, 1)
     assert tel.durations_ms == [100, 300]
     assert tel.failure_kinds == {"LLMError": 1}
+
+
+# ── callsite ids (alpha-engine-config-I12312) ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "tier_name, agent_id, expected",
+    [
+        ("thesis", "analyst_thesis", "thinktank-thesis"),
+        ("pillar", "analyst_pillar", "thinktank-pillar"),
+        ("sweep", "analyst_sweep", "thinktank-sweep"),
+        ("triage", "analyst_triage", "thinktank-triage"),
+        ("themes", "themes_macro", "thinktank-themes-macro"),
+        ("themes", "themes_sector", "thinktank-themes-sector"),
+    ],
+)
+def test_every_shipped_tier_maps_to_a_registered_callsite(caplog, tier_name, agent_id, expected):
+    """Each tier the Think Tank calls has an explicit, registered id.
+
+    ``triage`` used to reach the fallback, which produced the right string but
+    logged "unregistered callsite" on every triage call. Reaching the fallback
+    at all is the defect, so the warning's absence is asserted too.
+    """
+    with caplog.at_level("WARNING", logger="thinktank.client"):
+        assert _callsite_id_for(tier_name, agent_id) == expected
+    assert "unregistered callsite" not in caplog.text
+
+
+def test_the_analyst_tier_constants_are_all_mapped(caplog):
+    """A new ``*_TIER`` in analyst.py without a branch here fails this test."""
+    from thinktank import analyst
+
+    tiers = [v for k, v in vars(analyst).items() if k.endswith("_TIER") and isinstance(v, str)]
+    assert "triage" in tiers
+    with caplog.at_level("WARNING", logger="thinktank.client"):
+        for tier in tiers:
+            _callsite_id_for(tier, f"analyst_{tier}")
+    assert "unregistered callsite" not in caplog.text
+
+
+def test_an_unknown_tier_still_falls_back_loudly(caplog):
+    with caplog.at_level("WARNING", logger="thinktank.client"):
+        assert _callsite_id_for("novel", "analyst_novel") == "thinktank-novel"
+    assert "unregistered callsite" in caplog.text

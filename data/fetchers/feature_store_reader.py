@@ -198,7 +198,7 @@ def _assert_fresh(latest_ts, ref_date, *, source: str, what: str) -> None:
 
     stale_td = count_trading_days(latest_ts.date(), ref_date)
     if stale_td > _MAX_STALENESS_TRADING_DAYS:
-        raise FeatureStoreStalenessError(
+        msg = (
             f"{what} newest row is {latest_ts.date()} — {stale_td} NYSE "
             f"trading days behind {ref_date} (bound "
             f"{_MAX_STALENESS_TRADING_DAYS}). Source={source}. The weekday "
@@ -206,6 +206,14 @@ def _assert_fresh(latest_ts, ref_date, *, source: str, what: str) -> None:
             "MorningEnrich) did not write, or wrote without the "
             "cross-sectional second pass."
         )
+        # alpha-engine-config-I12351: a weekly-SF REHEARSAL may run on stale
+        # data; the refusal is recorded and the rehearsal continues. Every
+        # other run raises exactly as before (tolerate_stale returns False).
+        from data.rehearsal import tolerate_stale
+
+        if tolerate_stale(msg, where=f"feature_store_reader._assert_fresh[{what}]"):
+            return
+        raise FeatureStoreStalenessError(msg)
 
 
 def _read_arctic_frames(

@@ -652,12 +652,18 @@ def _priceable_model_for_failed_call(client: LLMClient, tier: TierSpec) -> str:
 def _callsite_id_for(tier_name: str, agent_id: str) -> str:
     """Map (tier_name, agent_id) → registered callsite_id.
 
-    The 5 thinktank sites:
+    The 6 thinktank sites:
       thesis + analyst_thesis  → thinktank-thesis
       pillar + analyst_pillar  → thinktank-pillar
       sweep  + analyst_sweep   → thinktank-sweep
+      triage + analyst_triage  → thinktank-triage
       themes + themes_macro    → thinktank-themes-macro
       themes + themes_sector   → thinktank-themes-sector
+
+    ``triage`` used to reach the fallback below, which produced the same
+    string but logged "unregistered callsite" on every triage call
+    (alpha-engine-config-I12312). Its id is unchanged by the explicit branch,
+    so cost rows already written under ``thinktank-triage`` stay continuous.
 
     The themes tier is the only one that maps to two different callsite_ids.
     The agent_id disambiguates.
@@ -668,6 +674,8 @@ def _callsite_id_for(tier_name: str, agent_id: str) -> str:
         return "thinktank-pillar"
     if tier_name == "sweep":
         return "thinktank-sweep"
+    if tier_name == "triage":
+        return "thinktank-triage"
     if tier_name == "themes":
         if "sector" in agent_id:
             return "thinktank-themes-sector"
