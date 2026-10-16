@@ -201,5 +201,14 @@ python -m krepis.session_dlp preflight || fail "DLP preflight failed (gitleaks b
 export AWS_DEFAULT_REGION="$REGION"
 export ALPHA_ENGINE_EXPERIMENT_ID
 export THINKTANK_RUN_BUDGET_SECONDS
+# llm_trace.v1 capture (alpha-engine-config-I12312, audit-2026-10-14 §6.3):
+# every Think Tank LLM call writes one trace row, with content and cited
+# sources, under s3://alpha-engine-research/llm_traces/v1/. Coverage is an
+# environment fact: krepis traces nothing when these are unset, and raises
+# before any spend when exactly one is set. thinktank/run.py builds the sink
+# from them, keyed on the run id. The box role's s3:PutObject on
+# llm_traces/v1/* is codified in nous-ergon-ops, not here.
+export KREPIS_TRACE_SINK_BUCKET="${KREPIS_TRACE_SINK_BUCKET:-alpha-engine-research}"
+export KREPIS_TRACE_SINK_PREFIX="${KREPIS_TRACE_SINK_PREFIX:-llm_traces/v1}"
 log "starting daily run (budget=${THINKTANK_RUN_BUDGET_SECONDS}s)"
 python infrastructure/thinktank_box_runner.py

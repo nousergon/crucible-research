@@ -60,6 +60,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from nousergon_lib.dates import now_dual
 
@@ -337,6 +338,7 @@ def run_daily(
         settings=settings,
         run_id=run_id,
         cost_sink=cost_sink,
+        trace_sink=_trace_sink_for_run(run_id),
     )
     themes = ThemeKeeper(store, client, ctx, trading_day=trading_day, calendar_date=calendar_date)
 
@@ -747,6 +749,37 @@ def _terminal_writes(
         manifest.model_dump(),
     )
     client.flush_sft(store.s3, store.bucket, trading_day)
+
+
+def _trace_sink_for_run(run_id: str) -> Any | None:
+    """The ``llm_trace.v1`` sink for this run, or ``None`` when tracing is off.
+
+    Configured by the environment (``KREPIS_TRACE_SINK_BUCKET`` +
+    ``KREPIS_TRACE_SINK_PREFIX``, exported by
+    ``infrastructure/thinktank_spot_bootstrap.sh``), but built HERE rather
+    than left to krepis's process default, for one reason: the default keys
+    its rows on ``KREPIS_RUN_ID`` or a random id, and this run's id is minted
+    above. Passing it makes every trace row, and the W3C trace id krepis
+    derives from it, join this run's manifest, cost rows and DecisionArtifacts
+    (alpha-engine-config-I12312). A half-configured environment raises
+    ``TraceSinkConfigError`` before any spend, as the default would.
+    """
+    import os
+
+    from krepis.trace_sink import (
+        BUCKET_ENV_VAR,
+        PREFIX_ENV_VAR,
+        S3JsonlTraceSink,
+        default_trace_sink_from_env,
+    )
+
+    bucket = os.environ.get(BUCKET_ENV_VAR, "").strip()
+    prefix = os.environ.get(PREFIX_ENV_VAR, "").strip()
+    if not bucket and not prefix:
+        return None
+    if not bucket or not prefix:
+        default_trace_sink_from_env()  # raises TraceSinkConfigError naming the gap
+    return S3JsonlTraceSink(bucket=bucket, prefix=prefix, run_id=run_id, register_atexit=True)
 
 
 def _record_pointer_lag(store: ThinktankStore, manifest: RunManifest, *, trading_day: str) -> None:

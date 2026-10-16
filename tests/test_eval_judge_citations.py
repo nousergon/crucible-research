@@ -382,14 +382,6 @@ class TestBackwardCompat:
 # ── End to end over a stubbed transport ─────────────────────────────────
 
 
-class _TracedArtifact(DecisionArtifact):
-    """A DecisionArtifact that carries the producer's trace ids, as
-    crucible-research#849 stamps them (the lib field lands separately)."""
-
-    trace_id: str | None = None
-    span_id: str | None = None
-
-
 class _Sink:
     run_id = "judge-run-cost-01"
 
@@ -436,7 +428,9 @@ class TestEndToEnd:
         monkeypatch.setattr(judge_mod, "load_prompt", lambda name: _cited_prompt())
         monkeypatch.setattr(judge_mod, "_judge_cost_sink", lambda: sink)
         base = _thesis_artifact()
-        art = _TracedArtifact(**base.model_dump(), trace_id="4bf92f3577b34da6a3ce929d0e0e4736", span_id="00f067aa0ba902b7")
+        # DecisionArtifact carries trace_id/span_id natively since nousergon-lib
+        # v0.124.173 (lib-PR472); crucible-research#849 stamps them.
+        art = base.model_copy(update={"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7"})
         fake = MagicMock()
         fake.chat.completions.create.return_value = _response(_judge_args(art))
         with _patch_llm_client(judge_mod, fake):
@@ -491,7 +485,14 @@ class TestEndToEnd:
     def test_request_shape_is_unchanged_but_for_the_cited_tool(self, judged):
         _, fake, _ = judged
         kw = fake.chat.completions.create.call_args.kwargs
-        assert kw["extra_body"] == {"reasoning": {"exclude": True}}
+        extra_body = dict(kw["extra_body"])
+        # krepis's router-edge attribution (alpha-engine-config-I12312): the
+        # request carries call-site / run / trace metadata the LiteLLM spend
+        # log persists. Consumed by the proxy, never forwarded upstream.
+        metadata = extra_body.pop("metadata")
+        assert metadata["tags"][0].startswith("callsite:")
+        assert "trace_id" in metadata["spend_logs_metadata"]
+        assert extra_body == {"reasoning": {"exclude": True}}
         assert kw["tools"][0]["function"]["parameters"] == CitedRubricEvalLLMOutput.model_json_schema()
         assert kw["tool_choice"] == {"type": "function", "function": {"name": "RubricEvalLLMOutput"}}
 

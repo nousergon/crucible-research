@@ -157,7 +157,14 @@ class TestEvaluateArtifactOpenRouter:
         # provider=="openrouter" — the provider is now the router-edge
         # custom provider, not "openrouter" literal.
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"] == {
+        extra_body = dict(call_kwargs["extra_body"])
+        # krepis's router-edge attribution (alpha-engine-config-I12312): the
+        # request carries call-site / run / trace metadata the LiteLLM spend
+        # log persists. Consumed by the proxy, never forwarded upstream.
+        metadata = extra_body.pop("metadata")
+        assert metadata["tags"][0].startswith("callsite:")
+        assert "trace_id" in metadata["spend_logs_metadata"]
+        assert extra_body == {
             # Truncation-avoidance default, forwarded from the ModelSpec.
             "reasoning": {"exclude": True},
         }

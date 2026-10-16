@@ -426,8 +426,8 @@ def _render_for_judge(artifact: DecisionArtifact, loaded_prompt: LoadedPrompt) -
 
 def _judged_trace_ids(artifact: Any) -> dict[str, str | None]:
     """The judged artifact's own ``trace_id``/``span_id``, when it carries
-    them (crucible-research#849 stamps them; older artifacts and the current
-    ``DecisionArtifact`` schema do not, so both default to ``None``)."""
+    them (crucible-research#849 stamps them on the ``DecisionArtifact`` fields
+    nousergon-lib v0.124.173 added; older artifacts default to ``None``)."""
     return {
         "judged_trace_id": getattr(artifact, "trace_id", None),
         "judged_span_id": getattr(artifact, "span_id", None),

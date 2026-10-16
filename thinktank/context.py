@@ -154,6 +154,11 @@ class ContextBundle:
     inst_ownership_by_ticker: dict[str, dict] = field(default_factory=dict)
     rag_available: bool = False
     sources_present: dict[str, bool] = field(default_factory=dict)
+    #: ``{s3_key: VersionId}`` of the objects read whole (board, signals),
+    #: so an ``s3_object`` prompt source names the exact version a prompt
+    #: was built from (alpha-engine-config-I12312). ``None`` when the read
+    #: returned no VersionId.
+    s3_versions: dict[str, str | None] = field(default_factory=dict)
     #: ``{source_name: FreshnessVerdict}`` for every source with a checkable
     #: as-of timestamp — the fresh ones too. A source that emits no freshness
     #: verdict is unobserved, not healthy (observability-policy §3.4/§8.3).
@@ -193,6 +198,10 @@ def load_context(store: Any) -> ContextBundle:
     bundle.board = store.get_json(UNIVERSE_BOARD_KEY)
     bundle.signals = store.get_json(SIGNALS_LATEST_KEY)
     bundle.regime_substrate = _load_regime_substrate(store)
+    read_versions = getattr(store, "read_versions", None) or {}
+    for key in (UNIVERSE_BOARD_KEY, SIGNALS_LATEST_KEY):
+        if key in read_versions:
+            bundle.s3_versions[key] = read_versions[key]
 
     # The substrate dates ITSELF (``calendar_date``), so unlike the retired
     # Markdown macro report there is no object-metadata inference here. A
@@ -455,18 +464,39 @@ def _load_inst_ownership(store: Any) -> dict[str, dict]:
     return {row["ticker"]: {c: row.get(c) for c in cols} for _, row in df.iterrows()}
 
 
-def filings_excerpts(ticker: str, *, k: int = 6) -> list[str]:
-    """Hybrid-retrieve filing chunks for one ticker (mirrors qual_tools)."""
+#: The retrieval query ``filings_sources`` sends. Module-level so its sha256
+#: on each source's ``retrieval.query_sha256`` is reproducible.
+FILINGS_QUERY = (
+    "business model, competitive position, guidance, risk factors, "
+    "recent results"
+)
+
+#: Characters of each chunk injected into the prompt.
+FILINGS_EXCERPT_CHARS = 1500
+
+
+def filings_sources(ticker: str, *, k: int = 6) -> list[dict]:
+    """Hybrid-retrieve filing chunks for one ticker as citable prompt sources.
+
+    Each entry is ``RetrievalResult.as_source()`` (a ``SourceBlock``
+    mapping): cid ``f1``..``fk`` in rank order, the chunk id, the parent
+    document id and URL, the retrieval scores, and as ``text`` exactly what
+    the prompt injects — the ``[doc_type | filed_date]`` header plus the
+    first ``FILINGS_EXCERPT_CHARS`` characters of the chunk.
+
+    This used to return only that text, so the chunk id, document id, URL,
+    section label, scores and rank were discarded before rendering and no
+    record could say which filing a thesis was built from
+    (alpha-engine-config-I12312, audit-2026-10-14 §3.3).
+    """
     try:
-        from datetime import date, timedelta
+        from datetime import UTC, date, datetime, timedelta
 
         from nousergon_lib.rag import retrieve
 
+        retrieved_at = datetime.now(UTC).isoformat()
         hits = retrieve(
-            query=(
-                "business model, competitive position, guidance, risk factors, "
-                "recent results"
-            ),
+            query=FILINGS_QUERY,
             tickers=[ticker],
             doc_types=["10-K", "10-Q", "8-K", "earnings_transcript"],
             min_date=date.today() - timedelta(days=730),
@@ -477,10 +507,20 @@ def filings_excerpts(ticker: str, *, k: int = 6) -> list[str]:
     except Exception as exc:  # noqa: BLE001 — context source, absence recorded
         logger.warning("thinktank context: rag retrieve failed for %s: %s", ticker, exc)
         return []
-    out: list[str] = []
+    out: list[dict] = []
     for r in hits or []:
         text = getattr(r, "content", None)
-        if text:
-            header = f"[{getattr(r, 'doc_type', '?')} | {getattr(r, 'filed_date', '?')}]"
-            out.append(f"{header}\n{str(text)[:1500]}")
+        if not text:
+            continue
+        header = f"[{getattr(r, 'doc_type', '?')} | {getattr(r, 'filed_date', '?')}]"
+        rank = len(out) + 1
+        out.append(
+            r.as_source(
+                f"f{rank}",
+                rank=rank,
+                text=f"{header}\n{str(text)[:FILINGS_EXCERPT_CHARS]}",
+                query=FILINGS_QUERY,
+                retrieved_at=retrieved_at,
+            )
+        )
     return out

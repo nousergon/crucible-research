@@ -99,6 +99,11 @@ class LLMCallResult:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    # The join to this call's ``llm_trace.v1`` record (krepis
+    # ``LLMResult.trace_id`` / ``span_id``): the run's W3C trace id and this
+    # call's span. Stamped on the DecisionArtifact (alpha-engine-config-I12312).
+    trace_id: str | None = None
+    span_id: str | None = None
 
 
 @dataclass
@@ -137,6 +142,10 @@ class ThinktankClient:
     client_factory: Callable[[ModelSpec, str], Any] | None = None
     # ── I5223: cost_sink for shared telemetry (set by run.py) ────────────
     cost_sink: S3JsonlCostSink | None = None
+    # ── I12312: llm_trace.v1 sink, keyed on this run's id (set by run.py).
+    # None → krepis falls back to its process default from
+    # KREPIS_TRACE_SINK_BUCKET/PREFIX, or traces nothing when unset.
+    trace_sink: Any | None = None
 
     _llm_clients: dict[str, LLMClient] = field(default_factory=dict, init=False)
     _usage: dict[str, TierUsage] = field(default_factory=dict, init=False)
@@ -220,6 +229,7 @@ class ThinktankClient:
                 max_retries=10,
                 timeout=180.0,
                 cost_sink=self.cost_sink,
+                trace_sink=self.trace_sink,
             )
             self._llm_clients[cache_key] = client
         return self._llm_clients[cache_key]
@@ -237,6 +247,8 @@ class ThinktankClient:
         prompt_id: str = "",
         prompt_version: str = "",
         sft_meta: dict[str, Any] | None = None,
+        sources: Any | None = None,
+        subject: dict[str, str] | None = None,
     ) -> LLMCallResult:
         """One structured LLM call on the named tier. Validates or raises.
 
@@ -249,6 +261,14 @@ class ThinktankClient:
         That is the intended consolidation — but the budget must not SHRINK on
         the way through, so it is passed explicitly rather than defaulted. See
         ``_STRUCTURED_ATTEMPTS``.
+
+        **alpha-engine-config-I12312:** ``sources`` (a
+        ``krepis.llm_trace.RenderedSources`` already embedded in ``user``, as
+        :func:`thinktank.sources.format_with_sources` returns), ``subject``
+        (``{"kind": "ticker", "id": "QLYS"}``), ``prompt_id`` and
+        ``prompt_version`` go to the call's ``llm_trace.v1`` record. Passing
+        a ``RenderedSources`` leaves ``user`` byte-identical, so the SFT row
+        below records exactly the prompt that was sent.
         """
         tier = self.settings.tier(tier_name)
         callsite_id = _callsite_id_for(tier_name, agent_id)
@@ -263,6 +283,10 @@ class ThinktankClient:
                 schema_name=response_model.__name__,
                 max_tokens=tier.max_tokens,
                 attempts=_STRUCTURED_ATTEMPTS,
+                sources=sources,
+                subject=subject,
+                prompt_id=prompt_id or None,
+                prompt_version=prompt_version or None,
             )
         except Exception as exc:
             # Observed BEFORE anything else on the failure path, so the agent
@@ -373,6 +397,8 @@ class ThinktankClient:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cost_usd=cost,
+            trace_id=result.trace_id,
+            span_id=result.span_id,
         )
 
     # ── cost ─────────────────────────────────────────────────────────────────

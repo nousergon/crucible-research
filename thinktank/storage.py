@@ -21,6 +21,12 @@ class ThinktankStore:
     def __init__(self, bucket: str, s3_client: Any | None = None) -> None:
         self.bucket = bucket
         self.s3 = s3_client or boto3.client("s3")
+        #: ``{key: VersionId}`` for every object this store has read. The
+        #: version is what an ``s3_object`` prompt source cites, so a trace
+        #: names the exact object a prompt was built from
+        #: (alpha-engine-config-I12312). ``None`` when the bucket returned no
+        #: VersionId (unversioned, or a test double).
+        self.read_versions: dict[str, str | None] = {}
 
     def get_json(self, key: str) -> Any | None:
         try:
@@ -32,6 +38,7 @@ class ThinktankStore:
             if code in ("404", "NoSuchKey"):
                 return None
             raise
+        self.read_versions[key] = obj.get("VersionId")
         return json.loads(obj["Body"].read().decode("utf-8"))
 
     def get_text(self, key: str) -> str | None:
@@ -44,6 +51,7 @@ class ThinktankStore:
             if code in ("404", "NoSuchKey"):
                 return None
             raise
+        self.read_versions[key] = obj.get("VersionId")
         return obj["Body"].read().decode("utf-8")
 
     def list_keys(self, prefix: str) -> list[str]:
