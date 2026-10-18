@@ -48,6 +48,37 @@ def _anchor_kwargs(anchor: str) -> dict[str, str]:
     """
     return {"macro_anchor": anchor, "macro_report": anchor}
 
+
+def _macro_inputs(macro_anchor: str, developments: str) -> dict[str, str]:
+    """The macro prompt's inputs beyond regime and prior theme, keyed as the
+    judge snapshot records them.
+
+    A theme call and its ``input_data_snapshot`` both come from this mapping,
+    so the judge is shown every input the theme keeper was given. Until
+    2026-10-18 the snapshot carried only kind, key, update_reason, regime,
+    anchor date and prior theme. The macro anchor block, the sector rating,
+    the house macro theme and the intraweek developments were in the prompt
+    but not in the snapshot. Roughly 99% of the new figures a theme cited
+    were in its prompt, while about 1% were visible to the judge. So the
+    judge scored real inputs as fabricated (``grounding_in_inputs``) and a
+    flag those inputs earned as unearned (``churn_discipline``). That drove
+    the 2026-10-17 eval control breach (alpha-engine-config-I12403).
+    """
+    return {"macro_anchor": macro_anchor, "developments": developments}
+
+
+def _sector_inputs(rating, macro_theme: str, developments: str) -> dict[str, str]:
+    """The sector prompt's inputs beyond regime and prior theme (see
+    :func:`_macro_inputs`). ``macro_theme`` is the house macro theme the
+    sector prompt renders as ``{macro_summary}``. It uses the same key the
+    per-name thesis snapshot uses for the same text."""
+    return {
+        "sector_rating": str(rating),
+        "macro_theme": macro_theme,
+        "developments": developments,
+    }
+
+
 TIER = "themes"
 
 _MACRO_SYSTEM = (
@@ -202,12 +233,13 @@ class ThemeKeeper:
     def _seed_all(self, weekly_date: str | None) -> None:
         logger.info("seeding themes from weekly artifacts (weekly=%s)", weekly_date)
         prompt = load_prompt("thinktank_theme_macro")
+        inputs = _macro_inputs(self._macro_anchor_block(), "(none)")
         rendered = prompt.format(
             mode="seed",
             market_regime=self._ctx.market_regime(),
-            **_anchor_kwargs(self._macro_anchor_block()),
+            **_anchor_kwargs(inputs["macro_anchor"]),
             prior_theme="(none — first seed)",
-            developments="(none)",
+            developments=inputs["developments"],
         )
         result = self._client.complete(
             TIER,
@@ -222,20 +254,21 @@ class ThemeKeeper:
         )
         self._store_new(
             kind="macro", key="macro", prior=None, llm=result, reason="seed",
-            weekly_anchor=weekly_date,
+            weekly_anchor=weekly_date, prompt_inputs=inputs,
             system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
 
         sector_prompt = load_prompt("thinktank_theme_sector")
         for sector, rating in self._ctx.sector_ratings().items():
+            inputs = _sector_inputs(rating, self.macro_summary(), "(none)")
             rendered = sector_prompt.format(
                 mode="seed",
                 sector=sector,
-                sector_rating=str(rating),
+                sector_rating=inputs["sector_rating"],
                 market_regime=self._ctx.market_regime(),
-                macro_summary=self.macro_summary(),
+                macro_summary=inputs["macro_theme"],
                 prior_theme="(none — first seed)",
-                developments="(none)",
+                developments=inputs["developments"],
             )
             result = self._client.complete(
                 TIER,
@@ -251,7 +284,7 @@ class ThemeKeeper:
             )
             self._store_new(
                 kind="sector", key=sector, prior=None, llm=result, reason="seed",
-                weekly_anchor=weekly_date,
+                weekly_anchor=weekly_date, prompt_inputs=inputs,
                 system=_SECTOR_SYSTEM, user=rendered, prompt_hash=sector_prompt.hash,
             )
 
@@ -265,13 +298,17 @@ class ThemeKeeper:
         )
         self.reconciled = True
         prompt = load_prompt("thinktank_theme_macro")
+        inputs = _macro_inputs(
+            self._macro_anchor_block(),
+            "(reconcile to the new weekly analysis; note any divergence "
+            "between your intraweek view and the weekly report)",
+        )
         rendered = prompt.format(
             mode="reconcile",
             market_regime=self._ctx.market_regime(),
-            **_anchor_kwargs(self._macro_anchor_block()),
+            **_anchor_kwargs(inputs["macro_anchor"]),
             prior_theme=macro.theme.model_dump_json(),
-            developments="(reconcile to the new weekly analysis; note any divergence "
-            "between your intraweek view and the weekly report)",
+            developments=inputs["developments"],
         )
         result = self._client.complete(
             TIER,
@@ -287,7 +324,7 @@ class ThemeKeeper:
         )
         self._store_new(
             kind="macro", key="macro", prior=macro, llm=result, reason="reconcile",
-            weekly_anchor=weekly_date,
+            weekly_anchor=weekly_date, prompt_inputs=inputs,
             divergence=result.parsed.change_summary or None,
             system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
@@ -295,14 +332,17 @@ class ThemeKeeper:
         sector_prompt = load_prompt("thinktank_theme_sector")
         for sector, rating in self._ctx.sector_ratings().items():
             prior = load_theme(self._store, "sector", sector)
+            inputs = _sector_inputs(
+                rating, self.macro_summary(), "(reconcile to the new weekly analysis)"
+            )
             rendered = sector_prompt.format(
                 mode="reconcile",
                 sector=sector,
-                sector_rating=str(rating),
+                sector_rating=inputs["sector_rating"],
                 market_regime=self._ctx.market_regime(),
-                macro_summary=self.macro_summary(),
+                macro_summary=inputs["macro_theme"],
                 prior_theme=prior.theme.model_dump_json() if prior else "(none)",
-                developments="(reconcile to the new weekly analysis)",
+                developments=inputs["developments"],
             )
             result = self._client.complete(
                 TIER,
@@ -320,7 +360,7 @@ class ThemeKeeper:
             )
             self._store_new(
                 kind="sector", key=sector, prior=prior, llm=result, reason="reconcile",
-                weekly_anchor=weekly_date,
+                weekly_anchor=weekly_date, prompt_inputs=inputs,
                 divergence=result.parsed.change_summary or None,
                 system=_SECTOR_SYSTEM, user=rendered, prompt_hash=sector_prompt.hash,
             )
@@ -329,12 +369,15 @@ class ThemeKeeper:
 
     def _daily_update_macro(self, prior: ThemeThesis, developments: str) -> None:
         prompt = load_prompt("thinktank_theme_macro")
+        inputs = _macro_inputs(
+            "(unchanged since weekly anchor — see prior theme)", developments[:8000]
+        )
         rendered = prompt.format(
             mode="update",
             market_regime=self._ctx.market_regime(),
-            **_anchor_kwargs("(unchanged since weekly anchor — see prior theme)"),
+            **_anchor_kwargs(inputs["macro_anchor"]),
             prior_theme=prior.theme.model_dump_json(),
-            developments=developments[:8000],
+            developments=inputs["developments"],
         )
         result = self._client.complete(
             TIER,
@@ -353,7 +396,7 @@ class ThemeKeeper:
             return
         self._store_new(
             kind="macro", key="macro", prior=prior, llm=result, reason="event",
-            weekly_anchor=prior.weekly_anchor_date,
+            weekly_anchor=prior.weekly_anchor_date, prompt_inputs=inputs,
             system=_MACRO_SYSTEM, user=rendered, prompt_hash=prompt.hash,
         )
 
@@ -368,6 +411,7 @@ class ThemeKeeper:
         llm,
         reason: str,
         weekly_anchor: str | None,
+        prompt_inputs: dict[str, str],
         divergence: str | None = None,
         system: str = "",
         user: str = "",
@@ -409,6 +453,9 @@ class ThemeKeeper:
                 "market_regime": self._ctx.market_regime(),
                 "weekly_anchor_date": weekly_anchor,
                 "prior_theme": prior.theme.model_dump() if prior else None,
+                # Every other input the prompt was rendered with, so the judge
+                # sees what the theme keeper saw (see ``_macro_inputs``).
+                **prompt_inputs,
             },
             agent_output=theme.model_dump(),
             bucket=self._store.bucket,
