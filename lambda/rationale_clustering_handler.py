@@ -96,8 +96,23 @@ def handler(event, context):
     configured and never raises, so the uniform rule costs nothing and leaves
     no per-handler judgment call for the next producer to get wrong.
     """
+    # alpha-engine-config-I12351: a weekly-SF REHEARSAL (execution name
+    # ``rehearsal-*``, threaded as ``execution_name``) re-keys every S3 write
+    # under ``rehearsal/<name>/``. Its ``_analysis/`` JSON and stage-coverage verdict otherwise land at the
+    # live keys the Saturday run writes.
+    # Activated before ``_run`` creates any S3 client; a production event
+    # leaves it inert. The cost-sink flush stays OUTSIDE it: a rehearsal's
+    # LLM calls are real spend and are recorded at the live key.
+    from data.rehearsal import isolate
+
     try:
-        return _run(event, context)
+        with isolate(
+            event if isinstance(event, dict) else None, stage="RationaleClustering"
+        ) as _rehearsal:
+            result = _run(event, context)
+            if _rehearsal is not None and isinstance(result, dict):
+                result["rehearsal"] = _rehearsal.summary()
+            return result
     finally:
         try:
             from krepis.cost_sink import flush_default_sink
