@@ -307,6 +307,10 @@ def _load(name: str, rel: str):
     [
         ("lambda/scanner_handler.py", "_rehearsal_scanner_handler"),
         ("lambda/signals_envelope_handler.py", "_rehearsal_signals_handler"),
+        # alpha-engine-config-I12351 (C3): rehearsal-2026-10-16-2's
+        # AggregateCosts and RationaleClustering wrote live keys too.
+        ("lambda/aggregate_costs_handler.py", "_rehearsal_aggregate_costs_handler"),
+        ("lambda/rationale_clustering_handler.py", "_rehearsal_rationale_clustering_handler"),
     ],
 )
 def test_handlers_activate_isolation_before_run(s3, monkeypatch, rel, name):
@@ -328,6 +332,33 @@ def test_handlers_activate_isolation_before_run(s3, monkeypatch, rel, name):
     out = mod.handler({"run_date": "2026-10-16", "execution_name": "a1b2c3d4"}, None)
     assert "rehearsal" not in out
     assert {"universe_membership/latest.json", "signals/latest.json"} <= _keys(s3)
+
+
+def test_research_self_test_mode_is_isolated(s3, monkeypatch):
+    """alpha-engine-config-I12351 (C3): rehearsal-2026-10-16-2's
+    ResearchSelfTest wrote the LIVE ``research/2026-10-15/self_test.json`` and
+    ``ops/checks/ae-research-self-test/latest.json``: a fresh, genuine verdict
+    the freshness monitor and the console read as the week's."""
+    mod = _load("_rehearsal_research_handler", "lambda/handler.py")
+    live = ("research/2026-10-15/self_test.json", "ops/checks/ae-research-self-test/latest.json")
+
+    def fake_emit(trading_date):
+        for key in live:
+            boto3.client("s3").put_object(Bucket=BUCKET, Key=key, Body=b"V")
+
+    monkeypatch.setattr(mod, "_ensure_init", lambda: None)
+    monkeypatch.setattr(mod, "_maybe_emit_self_test", fake_emit)
+    monkeypatch.setattr(mod, "_resolve_self_test_date", lambda event: "2026-10-15")
+    monkeypatch.setattr(mod, "_assert_self_test_coverage", lambda event, started: {})
+
+    out = mod._run({"mode": "self_test", "date": "2026-10-15", "execution_name": REHEARSAL}, None)
+    assert _keys(s3) == {f"{NS}{key}" for key in live}
+    assert out["status"] == "OK"
+    assert out["rehearsal"]["writes_redirected"] == 2
+
+    out = mod._run({"mode": "self_test", "date": "2026-10-15", "execution_name": "a1b2c3d4"}, None)
+    assert "rehearsal" not in out
+    assert set(live) <= _keys(s3)
 
 
 # ── stale data: degrade under rehearsal, refuse in production ──────────────

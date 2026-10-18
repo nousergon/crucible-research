@@ -593,23 +593,37 @@ def _run(event, context):
                 "status": "OK", "mode": "self_test", "date": run_date,
                 "dry_run": True, "verdict": result.get("verdict"),
             }
-        _maybe_emit_self_test(datetime.date.fromisoformat(run_date))
-        # The battery never raises and never fails the caller: its verdict is
-        # carried in the artifact, the console row and the logs. The SF state is
-        # non-blocking for the same reason — a verdict stage that dies must not
-        # kill the stages that do not depend on it.
-        return {
-            "status": "OK", "mode": "self_test", "date": run_date,
-            # alpha-engine-config-I10194 §2 / I10172: `ResearchSelfTest` was
-            # the 7th NEVER-INSTRUMENTED stage. This branch returned here
-            # directly and never reached the `assert_stage_coverage` block in
-            # `_run_challengers_only` — so a declared, entered SF state
-            # recorded no verdict at all, which the sweep reads as `absent`:
-            # indistinguishable from a stage that never ran. A §2.3a
-            # CORRECTNESS verdict whose absence must never read as a pass had
-            # its own absence unreadable too.
-            **_assert_self_test_coverage(event, _self_test_started),
-        }
+        # alpha-engine-config-I12351: a weekly-SF REHEARSAL (execution name
+        # ``rehearsal-*``, threaded as ``execution_name``) runs the battery for
+        # real but re-keys every S3 write under ``rehearsal/<name>/``.
+        # ``rehearsal-2026-10-16-2`` wrote the LIVE
+        # ``research/2026-10-15/self_test.json`` and
+        # ``ops/checks/ae-research-self-test/latest.json`` — a fresh, genuine
+        # verdict that the freshness monitor and the console read as the
+        # week's. A production event leaves it inert.
+        from data.rehearsal import isolate
+
+        with isolate(event, stage="ResearchSelfTest") as _rehearsal:
+            _maybe_emit_self_test(datetime.date.fromisoformat(run_date))
+            # The battery never raises and never fails the caller: its verdict is
+            # carried in the artifact, the console row and the logs. The SF state is
+            # non-blocking for the same reason — a verdict stage that dies must not
+            # kill the stages that do not depend on it.
+            out = {
+                "status": "OK", "mode": "self_test", "date": run_date,
+                # alpha-engine-config-I10194 §2 / I10172: `ResearchSelfTest` was
+                # the 7th NEVER-INSTRUMENTED stage. This branch returned here
+                # directly and never reached the `assert_stage_coverage` block in
+                # `_run_challengers_only` — so a declared, entered SF state
+                # recorded no verdict at all, which the sweep reads as `absent`:
+                # indistinguishable from a stage that never ran. A §2.3a
+                # CORRECTNESS verdict whose absence must never read as a pass had
+                # its own absence unreadable too.
+                **_assert_self_test_coverage(event, _self_test_started),
+            }
+            if _rehearsal is not None:
+                out["rehearsal"] = _rehearsal.summary()
+        return out
 
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
