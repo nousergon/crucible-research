@@ -235,3 +235,60 @@ def test_the_trace_row_cites_every_source_and_the_result_carries_its_ids(monkeyp
         span = c["span"]
         source = next(s for s in rendered.sources if s.block.cid == c["cid"])
         assert user[span["char_start"]:span["char_end"]] == source.block.text
+
+
+# ── declared capture level (ruling C, alpha-engine-config-I12312) ───────────
+#
+# Brian ruled 2026-10-18 that the Think Tank keeps `full` traces. The client
+# passes the level explicitly instead of leaving it to krepis's environment
+# default, and falls back to `off` where no sink exists (krepis refuses a
+# declared `full` that writes nowhere).
+
+_SINK_ENV = ("KREPIS_TRACE_SINK_BUCKET", "KREPIS_TRACE_SINK_PREFIX")
+
+
+def _no_sink_env(monkeypatch):
+    for name in (*_SINK_ENV, "KREPIS_TRACE_CAPTURE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_think_tank_declares_full():
+    from thinktank import client as tc
+
+    assert tc.THINKTANK_TRACE_CAPTURE == "full"
+
+
+def test_the_sink_env_names_match_krepis():
+    from krepis import trace_sink as ts
+
+    from thinktank import client as tc
+
+    assert tc.TRACE_SINK_ENV_VARS == (ts.BUCKET_ENV_VAR, ts.PREFIX_ENV_VAR)
+
+
+def test_a_run_sink_builds_every_client_at_full_and_stores_bodies(monkeypatch):
+    _no_sink_env(monkeypatch)
+    sink = InMemoryTraceSink()
+    client = _client(monkeypatch, sink, _Completions())
+    assert client.trace_capture_level() == "full"
+    llm = client._llm_client_for(client.settings.tiers["thesis"], callsite_id="thinktank-thesis")
+    assert llm._trace_capture == "full"
+    client.complete("thesis", agent_id="analyst_thesis", system="s", user="u", response_model=_Out)
+    assert len(sink.rows) == 1
+    assert sink.blobs, "a `full` record stores its prompt and output bodies"
+
+
+def test_no_sink_anywhere_builds_clients_at_off_without_raising(monkeypatch):
+    _no_sink_env(monkeypatch)
+    client = _client(monkeypatch, None, _Completions())
+    assert client.trace_capture_level() == "off"
+    llm = client._llm_client_for(client.settings.tiers["thesis"], callsite_id="thinktank-thesis")
+    assert llm._trace_capture == "off"
+
+
+def test_an_env_sink_alone_also_declares_full(monkeypatch):
+    _no_sink_env(monkeypatch)
+    monkeypatch.setenv("KREPIS_TRACE_SINK_BUCKET", "alpha-engine-research")
+    monkeypatch.setenv("KREPIS_TRACE_SINK_PREFIX", "llm_traces/v1")
+    client = _client(monkeypatch, None, _Completions())
+    assert client.trace_capture_level() == "full"

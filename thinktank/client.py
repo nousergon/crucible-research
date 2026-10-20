@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -120,6 +121,24 @@ class _SftRow:
     meta: dict[str, Any]
 
 
+#: The ``llm_trace.v1`` capture level every Think Tank call site DECLARES
+#: (``thinktank-thesis``, ``-pillar``, ``-sweep``, ``-triage``,
+#: ``-themes-macro``, ``-themes-sector``). Brian's ruling C on
+#: alpha-engine-config-I12312 (2026-10-18): operator-internal call sites whose
+#: inputs are the fleet's own artifacts keep ``full`` traces. It must match
+#: the ``trace_capture`` field of each call site's LLM_CALLSITE_REGISTRY row.
+#:
+#: Passed explicitly rather than left to krepis's default, so the level is a
+#: reviewed declaration and not an accident of the environment. A record whose
+#: DLP verdict is not ``ok`` is still downgraded to ``hash_only`` by krepis at
+#: run time, and ``KREPIS_TRACE_CAPTURE`` can still lower it.
+THINKTANK_TRACE_CAPTURE = "full"
+
+#: The env pair krepis's process-default trace sink reads
+#: (``krepis.trace_sink.BUCKET_ENV_VAR`` / ``PREFIX_ENV_VAR``).
+TRACE_SINK_ENV_VARS = ("KREPIS_TRACE_SINK_BUCKET", "KREPIS_TRACE_SINK_PREFIX")
+
+
 @dataclass
 class ThinktankClient:
     """Per-run LLM client: tier routing, validation, cost meter, SFT staging.
@@ -187,6 +206,9 @@ class ThinktankClient:
             client = LLMClient(
                 spec,
                 callsite_id=callsite_id,
+                # Declared `full` (ruling C, alpha-engine-config-I12312), or
+                # `off` when no sink exists. See trace_capture_level.
+                trace_capture=self.trace_capture_level(),
                 api_key=api_key,
                 client_factory=self.client_factory,
                 # max_retries=10, was 3 (alpha-engine-config-I8351).
@@ -233,6 +255,23 @@ class ThinktankClient:
             )
             self._llm_clients[cache_key] = client
         return self._llm_clients[cache_key]
+
+    def trace_capture_level(self) -> str:
+        """The ``trace_capture=`` every Think Tank ``LLMClient`` is built with.
+
+        :data:`THINKTANK_TRACE_CAPTURE` when a trace sink exists: the run's own
+        (``trace_sink``, built by ``run.py``) or krepis's process default from
+        ``KREPIS_TRACE_SINK_BUCKET``/``PREFIX``. ``off`` when neither does,
+        because krepis refuses at construction a declared ``full`` that writes
+        nowhere, and every host without the env (a laptop, CI) would then fail
+        every call. A half-configured env is not masked: krepis's own env
+        check raises on it before any spend.
+        """
+        if self.trace_sink is not None or any(
+            os.environ.get(name, "").strip() for name in TRACE_SINK_ENV_VARS
+        ):
+            return THINKTANK_TRACE_CAPTURE
+        return "off"
 
     # ── the one call surface ─────────────────────────────────────────────────
 
