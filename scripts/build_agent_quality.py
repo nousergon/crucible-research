@@ -16,7 +16,11 @@ value):
 
 - ``cost_per_signal``           total run LLM $ / finalized signal count
 - ``signal_volume_adequacy``    count of finalized signals (signals.json)
-- ``judge_rubric_pass_rate``    % of real judge evals with every rubric dim >= pass
+- ``judge_rubric_pass_rate``    % of real judge evals with every rubric dim >= pass,
+                                over the TRAILING 28 DAYS ending at ``run_date``
+                                (headline ``value``/``n``); the pooled all-history
+                                rate rides beside it as ``pooled_all_history``
+                                (alpha-engine-config-I12391 ruling, 2026-10-20)
 - ``judge_rubric_distribution`` modal-score concentration across all rubric dims
                                 (higher = rubric collapse)
 - ``judge_outcome_ic``          judge-score → realized-outcome validation (old
@@ -65,7 +69,7 @@ import os
 import sys
 import time
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
 from typing import Any
 
@@ -91,6 +95,18 @@ _OUTPUT_PREFIX = "backtest"
 # escalate-if-any-dim-below-3 gate, evals.orchestrator.DEFAULT_HAIKU_ESCALATE_THRESHOLD);
 # an eval passes iff every dimension passes.
 _RUBRIC_PASS_THRESHOLD = 3
+
+# judge_rubric_pass_rate headline window (alpha-engine-config-I12391, Brian's
+# ruling 2026-10-20): trailing 28 calendar days ending at ``run_date``
+# (inclusive), filtered on each eval artifact's own ``timestamp``. The 400-day
+# ``DEFAULT_EVAL_LOOKBACK_DAYS`` in evals/judge_outcome_ic is a SCAN bound for
+# the outcome-IC join, not a quality window — pooling over it graded the
+# current judge against agents retired months ago (78.9% pooled vs ~85.5% over
+# the trailing window at ruling time). Below ``_JUDGE_PASS_WINDOW_MIN_N`` real
+# evals in the window the headline falls back to the pooled figure and says so
+# (``basis = "pooled_fallback"``) rather than grading a handful of evals.
+_JUDGE_PASS_WINDOW_DAYS = 28
+_JUDGE_PASS_WINDOW_MIN_N = 30
 
 # Per-agent runtime telemetry namespace (graph/agent_telemetry.py). Dimensioned
 # by {agent_id, env} since config#1154 — we read env="prod" only to skip the
@@ -435,6 +451,71 @@ def _load_evals(s3: Any, bucket: str, run_date: date_type) -> list[dict]:
     return artifacts
 
 
+def _eval_passes(e: dict) -> bool:
+    return all(
+        int(d.get("score", 0)) >= _RUBRIC_PASS_THRESHOLD for d in e["dimension_scores"]
+    )
+
+
+def _eval_day(e: dict) -> date_type | None:
+    """UTC calendar day of an eval's own ``timestamp``, or None if absent/unparseable."""
+    ts = e.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC)
+    return dt.date()
+
+
+def _judge_rubric_pass_rate_block(real: list[dict], run_date: date_type) -> dict:
+    """Headline = trailing-window pass rate; pooled all-history kept beside it.
+
+    ``value``/``n`` keep their shape so every consumer (evaluator research tile,
+    Director, rolling-mean handler) reads the windowed headline unchanged.
+    ``basis`` says which population ``value`` was computed over; a thin window
+    falls back to the pooled figure LOUDLY (``basis="pooled_fallback"``) and the
+    window's own N and rate stay visible. Evals with no parseable ``timestamp``
+    cannot be placed in the window: they count in the pooled figure only and are
+    reported as ``window.n_undated``."""
+    n_pool = len(real)
+    pooled = {"value": round(sum(map(_eval_passes, real)) / n_pool, 4), "n": n_pool}
+
+    start = run_date - timedelta(days=_JUDGE_PASS_WINDOW_DAYS - 1)
+    in_window: list[dict] = []
+    n_undated = 0
+    for e in real:
+        day = _eval_day(e)
+        if day is None:
+            n_undated += 1
+        elif start <= day <= run_date:
+            in_window.append(e)
+    n_win = len(in_window)
+    win_value = round(sum(map(_eval_passes, in_window)) / n_win, 4) if n_win else None
+    window = {
+        "start": start.isoformat(), "end": run_date.isoformat(),
+        "days": _JUDGE_PASS_WINDOW_DAYS, "basis_field": "timestamp",
+        "value": win_value, "n": n_win, "min_n": _JUDGE_PASS_WINDOW_MIN_N,
+        "n_undated": n_undated,
+    }
+
+    if n_win >= _JUDGE_PASS_WINDOW_MIN_N:
+        return {"value": win_value, "n": n_win,
+                "basis": f"trailing_{_JUDGE_PASS_WINDOW_DAYS}d",
+                "window": window, "pooled_all_history": pooled}
+    logger.warning(
+        "[build_agent_quality] judge_rubric_pass_rate: only %d real eval(s) in the "
+        "trailing %dd window %s..%s (< min_n %d) — headline FALLS BACK to the "
+        "pooled all-history rate (n=%d) and is marked basis=pooled_fallback",
+        n_win, _JUDGE_PASS_WINDOW_DAYS, start, run_date, _JUDGE_PASS_WINDOW_MIN_N, n_pool,
+    )
+    return {"value": pooled["value"], "n": pooled["n"], "basis": "pooled_fallback",
+            "window": window, "pooled_all_history": pooled}
+
+
 def _coerce_date(value: date_type | str, field: str) -> date_type:
     """Normalize a fleet date carrier to ``datetime.date``, or fail loud.
 
@@ -528,11 +609,7 @@ def build_agent_quality(
     ]
     if real:
         n_eval = len(real)
-        passes = sum(
-            1 for e in real
-            if all(int(d.get("score", 0)) >= _RUBRIC_PASS_THRESHOLD for d in e["dimension_scores"])
-        )
-        result["judge_rubric_pass_rate"] = {"value": round(passes / n_eval, 4), "n": n_eval}
+        result["judge_rubric_pass_rate"] = _judge_rubric_pass_rate_block(real, run_date)
 
         all_scores = [int(d.get("score", 0)) for e in real for d in e["dimension_scores"]]
         if all_scores:
