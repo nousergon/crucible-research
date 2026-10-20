@@ -112,6 +112,11 @@ class TestFullRun:
         prr = art["judge_rubric_pass_rate"]
         assert prr["n"] == 3
         assert prr["value"] == pytest.approx(2 / 3, rel=1e-3)
+        # 3 evals in the trailing window is below min_n → the headline is the
+        # pooled figure, and it SAYS so (alpha-engine-config-I12391).
+        assert prr["basis"] == "pooled_fallback"
+        assert prr["window"]["n"] == 3
+        assert prr["pooled_all_history"] == {"value": pytest.approx(2 / 3, rel=1e-3), "n": 3}
 
     def test_judge_distribution(self, s3):
         # 18 dim-scores: score 4 appears 13x (4+4+5) → modal concentration 13/18.
@@ -476,6 +481,76 @@ class TestFlatLayoutRegression:
         )
         assert "judge_rubric_distribution" in art
 
+
+
+# ── judge_rubric_pass_rate trailing window (alpha-engine-config-I12391) ──────
+
+
+def _dated_eval(day: str, passed: bool, agent: str = "thinktank_thesis") -> dict:
+    e = _eval([4, 4, 4] if passed else [4, 2, 4])
+    e["timestamp"] = f"{day}T13:00:00Z"
+    e["judged_agent_id"] = agent
+    return e
+
+
+class TestJudgePassRateWindow:
+    """Brian's ruling 2026-10-20: the headline is a trailing 28-day window
+    ending at run_date; the pooled all-history rate is a companion field."""
+
+    def _seed(self, s3, evals):
+        for i, e in enumerate(evals):
+            _put_json(s3, f"decision_artifacts/_eval/26061312{i:02d}_e{i}.json", e)
+
+    def test_old_failures_outside_the_window_do_not_move_the_headline(self, s3):
+        # 40 passing evals inside the window, 60 failing evals from a retired
+        # agent two months earlier, 1 eval with no timestamp.
+        inside = [_dated_eval("2026-06-01", True) for _ in range(20)]
+        inside += [_dated_eval("2026-06-13", True) for _ in range(19)]
+        inside += [_dated_eval("2026-06-10", False)]
+        old = [_dated_eval("2026-04-10", False, agent="thesis_update:tech:X") for _ in range(60)]
+        undated = _dated_eval("2026-06-13", True)
+        undated["timestamp"] = None
+        self._seed(s3, inside + old + [undated])
+
+        prr = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)["judge_rubric_pass_rate"]
+        assert prr["basis"] == "trailing_28d"
+        assert prr["n"] == 40
+        assert prr["value"] == pytest.approx(39 / 40, rel=1e-3)
+        assert prr["window"] == {
+            "start": "2026-05-17", "end": "2026-06-13", "days": 28,
+            "basis_field": "timestamp", "value": pytest.approx(39 / 40, rel=1e-3),
+            "n": 40, "min_n": 30, "n_undated": 1,
+        }
+        assert prr["pooled_all_history"]["n"] == 101
+        assert prr["pooled_all_history"]["value"] == pytest.approx(40 / 101, rel=1e-3)
+
+    def test_window_bounds_are_inclusive_and_anchored_on_run_date(self):
+        from scripts.build_agent_quality import _judge_rubric_pass_rate_block
+
+        real = [_dated_eval("2026-05-17", True) for _ in range(30)]   # first day: in
+        real += [_dated_eval("2026-05-16", False) for _ in range(5)]  # day before: out
+        real += [_dated_eval("2026-06-14", False) for _ in range(5)]  # after run_date: out
+        blk = _judge_rubric_pass_rate_block(real, _RUN_DATE)
+        assert blk["basis"] == "trailing_28d"
+        assert (blk["value"], blk["n"]) == (1.0, 30)
+        assert blk["pooled_all_history"] == {"value": pytest.approx(30 / 40), "n": 40}
+
+    def test_thin_window_falls_back_to_pooled_and_marks_it(self):
+        from scripts.build_agent_quality import _judge_rubric_pass_rate_block
+
+        real = [_dated_eval("2026-06-12", False) for _ in range(29)]
+        real += [_dated_eval("2026-03-01", True) for _ in range(71)]
+        blk = _judge_rubric_pass_rate_block(real, _RUN_DATE)
+        assert blk["basis"] == "pooled_fallback"
+        assert (blk["value"], blk["n"]) == (0.71, 100)
+        assert (blk["window"]["value"], blk["window"]["n"]) == (0.0, 29)
+
+    def test_empty_window_carries_no_fabricated_rate(self):
+        from scripts.build_agent_quality import _judge_rubric_pass_rate_block
+
+        blk = _judge_rubric_pass_rate_block([_dated_eval("2026-01-02", True)], _RUN_DATE)
+        assert blk["basis"] == "pooled_fallback"
+        assert blk["window"]["value"] is None and blk["window"]["n"] == 0
 
 # ── live-path agent telemetry: Think Tank run manifests (alpha-engine-config-I9631) ──
 #
