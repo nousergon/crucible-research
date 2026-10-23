@@ -123,8 +123,8 @@ from evals.judge_citations import (
     build_bundle,
     declared_citation_contract,
     judge_prompt_sha256,
-    render_cited_rubric,
     judge_trace_sources_or_none,
+    render_cited_rubric,
     validate_dimension_scores,
 )
 from evals.judge_models import OPENROUTER_SHADOW, TAG_BY_LOGICAL, request_model_for

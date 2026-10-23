@@ -194,8 +194,9 @@ def test_uncited_rubric_sends_no_sources(monkeypatch):
     exactly as before: no sources, no citations."""
     from pathlib import Path
 
-    from agents.prompt_loader import LoadedPrompt
     from krepis.llm_trace import row_extension
+
+    from agents.prompt_loader import LoadedPrompt
 
     legacy = LoadedPrompt(
         name="eval_rubric_thinktank_thesis",
