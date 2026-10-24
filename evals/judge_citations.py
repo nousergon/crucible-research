@@ -363,3 +363,92 @@ def validate_dimension_scores(
             check.missing_source_ref += int(v.source_status == "missing")
     check.citations_invalid = check.citations_total - check.citations_valid
     return scored, check
+
+
+# ── llm_trace.v1 sources (alpha-engine-config-I12312, the EvalJudge door) ──
+
+
+#: ``krepis.llm_trace.SourceBlock.kind`` for every judge source: the judged
+#: DecisionArtifact is the fleet's own artifact (Brian's ruling C, 2026-10-18).
+TRACE_SOURCE_KIND = "artifact"
+
+
+def judge_trace_sources(
+    user_content: str,
+    bundle: JudgeBundle | None,
+    *,
+    judged_artifact_s3_key: str | None = None,
+) -> Any:
+    """The ``krepis.llm_trace.RenderedSources`` for one judge call, or ``None``.
+
+    One source per bundle element the judge was shown IN ``user_content``:
+    every ``<input id="…">`` element and every ``<output field="…">`` leaf,
+    in bundle order. Its text is the element's own characters, located
+    verbatim between its tags, so the recorded sha256 and offsets are of what
+    the judge read. An element that is not in ``user_content`` exactly once
+    (it landed in the cached system part, or its block repeats) is left out
+    rather than given an offset into the wrong text.
+
+    ``source_id`` is ``<judged artifact key>#<judge ref>`` (the ref alone when
+    the key is unknown), which is what an eval joins a verdict's
+    ``evidence.source_ref`` to the trace's ``citations[]`` on. The judge ref
+    itself is kept in ``meta.judge_ref``.
+
+    Same shape as the Director's ``trace_sources`` (crucible-evaluator
+    ``director/citations.py``): a ``RenderedSources`` whose ``text`` is the
+    whole user content, so krepis locates it once at offset 0.
+    """
+    if bundle is None or not user_content:
+        return None
+    from krepis.llm_trace import RenderedSource, RenderedSources, SourceBlock, sha256_hex
+
+    items: list[tuple[str, str, str, str]] = [
+        ("input", e.id, f'<input id="{e.id}">\n', e.text) for e in bundle.inputs
+    ]
+    items.extend(
+        ("output", f"out:{path}", f'<output field="{path}">\n', text)
+        for path, text in bundle.outputs.items()
+    )
+    closers = {"input": "\n</input>", "output": "\n</output>"}
+    rendered = []
+    for role, ref, head, text in items:
+        block_text = head + text + closers[role]
+        hits = _occurrences(user_content, block_text)
+        if len(hits) != 1:
+            continue
+        start = hits[0] + len(head)
+        end = start + len(text)
+        source_id = f"{judged_artifact_s3_key}#{ref}" if judged_artifact_s3_key else ref
+        block = SourceBlock(
+            cid=f"j{len(rendered) + 1}",
+            kind=TRACE_SOURCE_KIND,
+            source_id=source_id,
+            text=text,
+            document_id=judged_artifact_s3_key or None,
+            meta={"judge_ref": ref, "role": role, "contract": CITATION_CONTRACT},
+        )
+        rendered.append(
+            RenderedSource(block=block, content_sha256=sha256_hex(text), char_start=start, char_end=end)
+        )
+    if not rendered:
+        return None
+    return RenderedSources(text=user_content, sources=tuple(rendered))
+
+
+def judge_trace_sources_or_none(
+    user_content: str,
+    bundle: JudgeBundle | None,
+    *,
+    judged_artifact_s3_key: str | None = None,
+) -> Any:
+    """:func:`judge_trace_sources`, never raising. Trace sources are telemetry:
+    a fault building them is logged and the judge call goes ahead without them."""
+    try:
+        return judge_trace_sources(user_content, bundle, judged_artifact_s3_key=judged_artifact_s3_key)
+    except Exception as exc:  # noqa: BLE001 — telemetry never blocks the call
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "judge: trace sources unavailable, call proceeds without them: %s", exc,
+        )
+        return None
