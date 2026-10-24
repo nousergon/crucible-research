@@ -1,0 +1,497 @@
+{
+  "schema_version": 1,
+  "guard": "hardcoded-env-refs",
+  "tracker": "alpha-engine-config-I12492",
+  "note": "Shrink-only ceiling of hard-coded account/bucket literals per file. Never raise an entry; lower it with `python3 hardcoded_env_refs.py --repo . --update` when a literal is removed.",
+  "totals": {
+    "account_hits": 10,
+    "account_files": 9,
+    "bucket_hits": 394,
+    "bucket_files": 155,
+    "files": 159
+  },
+  "files": {
+    ".github/workflows/alert-class-pr-guard.yml": {
+      "bucket": 1
+    },
+    ".github/workflows/canary-replay.yml": {
+      "account": 1,
+      "bucket": 2
+    },
+    ".github/workflows/ci.yml": {
+      "bucket": 4
+    },
+    ".github/workflows/deploy.yml": {
+      "account": 1,
+      "bucket": 11
+    },
+    ".github/workflows/lambda-deploy-drift.yml": {
+      "account": 1
+    },
+    "Dockerfile": {
+      "bucket": 1
+    },
+    "agents/sector_teams/qual_tools.py": {
+      "bucket": 1
+    },
+    "agents/sector_teams/quant_tools.py": {
+      "bucket": 1
+    },
+    "config.py": {
+      "bucket": 1
+    },
+    "config/thinktank.sample.yaml": {
+      "bucket": 1
+    },
+    "console.descriptor.yaml": {
+      "bucket": 7
+    },
+    "contracts/arm_shadow_signals.schema.json": {
+      "bucket": 1
+    },
+    "data/fetchers/analyst_fetcher.py": {
+      "bucket": 1
+    },
+    "data/fetchers/feature_store_reader.py": {
+      "bucket": 1
+    },
+    "data/fetchers/insider_fetcher.py": {
+      "bucket": 1
+    },
+    "data/fetchers/macro_fetcher.py": {
+      "bucket": 1
+    },
+    "data/fetchers/news_fetcher.py": {
+      "bucket": 1
+    },
+    "data/fetchers/price_fetcher.py": {
+      "bucket": 1
+    },
+    "data/fetchers/revision_fetcher.py": {
+      "bucket": 1
+    },
+    "data/rehearsal.py": {
+      "bucket": 1
+    },
+    "data/scanner_orchestrator.py": {
+      "bucket": 1
+    },
+    "data/substrate/reader.py": {
+      "bucket": 4
+    },
+    "dry_run.py": {
+      "bucket": 1
+    },
+    "emailer/formatter.py": {
+      "bucket": 2
+    },
+    "evals/calibration_kappa.py": {
+      "bucket": 1
+    },
+    "evals/control_bands.py": {
+      "bucket": 2
+    },
+    "evals/eval_manifest.py": {
+      "bucket": 1
+    },
+    "evals/judge_reanchor.py": {
+      "bucket": 2
+    },
+    "evals/judge_spot_run.py": {
+      "bucket": 1
+    },
+    "evals/openrouter_shadow.py": {
+      "bucket": 1
+    },
+    "evals/orchestrator.py": {
+      "bucket": 1
+    },
+    "evals/perturbation.py": {
+      "bucket": 1
+    },
+    "evals/rationale_clustering.py": {
+      "bucket": 2
+    },
+    "evals/rolling_mean.py": {
+      "bucket": 3
+    },
+    "flow-doctor.yaml": {
+      "bucket": 1
+    },
+    "graph/agent_telemetry.py": {
+      "bucket": 1
+    },
+    "graph/llm_cost_tracker.py": {
+      "bucket": 4
+    },
+    "graph/state_schemas.py": {
+      "bucket": 1
+    },
+    "infrastructure/deploy.sh": {
+      "bucket": 5
+    },
+    "infrastructure/eval_judge_spot_bootstrap.sh": {
+      "account": 1,
+      "bucket": 2
+    },
+    "infrastructure/lambda_deploy_drift.py": {
+      "bucket": 1
+    },
+    "infrastructure/setup-openrouter-shadow-schedule.sh": {
+      "account": 1
+    },
+    "infrastructure/setup-thinktank-schedule.sh": {
+      "account": 1
+    },
+    "infrastructure/setup_scanner_alarm.sh": {
+      "account": 1
+    },
+    "infrastructure/thinktank_spot_bootstrap.sh": {
+      "account": 1,
+      "bucket": 3
+    },
+    "invocation_budget.py": {
+      "bucket": 1
+    },
+    "lambda/aggregate_costs_handler.py": {
+      "bucket": 2
+    },
+    "lambda/eval_judge_handler.py": {
+      "bucket": 1
+    },
+    "lambda/eval_judge_submit_handler.py": {
+      "bucket": 1
+    },
+    "lambda/eval_rolling_mean_handler.py": {
+      "bucket": 3
+    },
+    "lambda/handler.py": {
+      "bucket": 1
+    },
+    "lambda/openrouter_shadow_handler.py": {
+      "bucket": 2
+    },
+    "lambda/scanner_handler.py": {
+      "bucket": 3
+    },
+    "lambda/signals_envelope_handler.py": {
+      "bucket": 2
+    },
+    "main.py": {
+      "bucket": 1
+    },
+    "scoring/aggregator.py": {
+      "bucket": 1
+    },
+    "scoring/boost_signals.py": {
+      "bucket": 2
+    },
+    "scoring/factor_scoring.py": {
+      "bucket": 5
+    },
+    "scoring/leaderboard_producers.py": {
+      "bucket": 2
+    },
+    "scoring/leaderboard_scoring.py": {
+      "bucket": 1
+    },
+    "scoring/promotion_guards.py": {
+      "bucket": 1
+    },
+    "scoring/research_arena.py": {
+      "bucket": 1
+    },
+    "scoring/self_test.py": {
+      "bucket": 1
+    },
+    "scoring/signals_envelope.py": {
+      "bucket": 1
+    },
+    "scoring/spec_promotion.py": {
+      "bucket": 1
+    },
+    "scoring/universe_board.py": {
+      "bucket": 1
+    },
+    "scoring/universe_membership.py": {
+      "bucket": 1
+    },
+    "scoring/verdict_digest.py": {
+      "bucket": 3
+    },
+    "scoring/weekly_ledger.py": {
+      "bucket": 1
+    },
+    "scripts/aggregate_costs.py": {
+      "bucket": 3
+    },
+    "scripts/backfill_calibrator_v1_context.py": {
+      "bucket": 3
+    },
+    "scripts/backfill_cut_arms.py": {
+      "bucket": 1
+    },
+    "scripts/backfill_eval_option_b.py": {
+      "bucket": 1
+    },
+    "scripts/backfill_filling_arm_shadows.py": {
+      "bucket": 1
+    },
+    "scripts/backfill_orphan_theses.py": {
+      "bucket": 3
+    },
+    "scripts/backfill_orphaned_judge_partitions.py": {
+      "bucket": 1
+    },
+    "scripts/backfill_universe_membership.py": {
+      "bucket": 1
+    },
+    "scripts/build_agent_quality.py": {
+      "bucket": 1
+    },
+    "scripts/corpus_stats.py": {
+      "bucket": 1
+    },
+    "scripts/cost_capture_freshness.py": {
+      "bucket": 1
+    },
+    "scripts/curate_rag_query.py": {
+      "bucket": 1
+    },
+    "scripts/refresh_llm_fixtures.py": {
+      "bucket": 2
+    },
+    "scripts/replay_harness.py": {
+      "bucket": 2
+    },
+    "scripts/run_experiment.py": {
+      "bucket": 1
+    },
+    "scripts/run_judge_cross_validation.py": {
+      "bucket": 4
+    },
+    "scripts/seed_rag_retrieval_queries.py": {
+      "bucket": 1
+    },
+    "scripts/smoke_eval_judge.py": {
+      "bucket": 1
+    },
+    "tests/fixtures/cuts_leaderboard_2026-08-19_structure.json": {
+      "bucket": 1
+    },
+    "tests/fixtures/sf_substatus/weekly_2026-08-15_scheduled.json": {
+      "bucket": 2
+    },
+    "tests/test_agent_quality_date_carrier_contract.py": {
+      "bucket": 1
+    },
+    "tests/test_aggregate_costs.py": {
+      "bucket": 1
+    },
+    "tests/test_aggregate_costs_handler.py": {
+      "bucket": 1
+    },
+    "tests/test_backfill_calibrator_v1_context.py": {
+      "bucket": 11
+    },
+    "tests/test_backfill_eval_option_b.py": {
+      "bucket": 20
+    },
+    "tests/test_backfill_orphaned_judge_partitions.py": {
+      "bucket": 1
+    },
+    "tests/test_build_agent_quality.py": {
+      "bucket": 2
+    },
+    "tests/test_champion_that_is_also_retired.py": {
+      "bucket": 2
+    },
+    "tests/test_corpus_stats.py": {
+      "bucket": 1
+    },
+    "tests/test_cost_coverage.py": {
+      "bucket": 2
+    },
+    "tests/test_cost_sink_deploy_wiring.py": {
+      "bucket": 1
+    },
+    "tests/test_cross_surface_history_import.py": {
+      "bucket": 1
+    },
+    "tests/test_decision_capture_integration.py": {
+      "bucket": 3
+    },
+    "tests/test_eval_calibration_kappa.py": {
+      "bucket": 6
+    },
+    "tests/test_eval_corpus_volume_and_sigma.py": {
+      "bucket": 1
+    },
+    "tests/test_eval_judge.py": {
+      "bucket": 10
+    },
+    "tests/test_eval_judge_batch_transport.py": {
+      "bucket": 3
+    },
+    "tests/test_eval_manifest.py": {
+      "bucket": 19
+    },
+    "tests/test_eval_monthly_sync_all_pairs.py": {
+      "bucket": 6
+    },
+    "tests/test_eval_openrouter_shadow.py": {
+      "bucket": 8
+    },
+    "tests/test_eval_orchestrator.py": {
+      "bucket": 26
+    },
+    "tests/test_eval_orchestrator_batch.py": {
+      "bucket": 38
+    },
+    "tests/test_eval_rolling_mean.py": {
+      "bucket": 1
+    },
+    "tests/test_eval_scan_bound.py": {
+      "bucket": 1
+    },
+    "tests/test_formatter.py": {
+      "bucket": 1
+    },
+    "tests/test_freshness.py": {
+      "bucket": 5
+    },
+    "tests/test_judge_coverage_gate.py": {
+      "bucket": 1
+    },
+    "tests/test_judge_reanchor.py": {
+      "bucket": 1
+    },
+    "tests/test_leaderboard_arm_gap_annotation_all_boards.py": {
+      "bucket": 2
+    },
+    "tests/test_leaderboard_cohort_intersection.py": {
+      "bucket": 2
+    },
+    "tests/test_leaderboard_long_horizon_and_confidence.py": {
+      "bucket": 1
+    },
+    "tests/test_leaderboard_scoring.py": {
+      "bucket": 1
+    },
+    "tests/test_llm_cost_tracker.py": {
+      "bucket": 4
+    },
+    "tests/test_mis_wired_predictor_dates_marked.py": {
+      "bucket": 1
+    },
+    "tests/test_morning_brief.py": {
+      "bucket": 3
+    },
+    "tests/test_no_secret_environ_reads.py": {
+      "bucket": 1
+    },
+    "tests/test_null_choices_provider_error.py": {
+      "bucket": 1
+    },
+    "tests/test_openrouter_shadow_handler.py": {
+      "bucket": 2
+    },
+    "tests/test_orphaned_producer_repoints.py": {
+      "bucket": 1
+    },
+    "tests/test_panel_cache_identity.py": {
+      "bucket": 1
+    },
+    "tests/test_pool_provenance_on_the_board.py": {
+      "bucket": 1
+    },
+    "tests/test_recursion_budget_contract.py": {
+      "bucket": 1
+    },
+    "tests/test_rehearsal_isolation.py": {
+      "account": 2,
+      "bucket": 1
+    },
+    "tests/test_replay_harness.py": {
+      "bucket": 1
+    },
+    "tests/test_research_arena.py": {
+      "bucket": 1
+    },
+    "tests/test_research_slot_routing.py": {
+      "bucket": 1
+    },
+    "tests/test_retired_producer_scoring.py": {
+      "bucket": 1
+    },
+    "tests/test_run_experiment_cli.py": {
+      "bucket": 1
+    },
+    "tests/test_scanner_orchestrator.py": {
+      "bucket": 2
+    },
+    "tests/test_setup_eventbridge_chokepoint.py": {
+      "bucket": 1
+    },
+    "tests/test_signals_envelope_composite_weights.py": {
+      "bucket": 1
+    },
+    "tests/test_signals_envelope_contract.py": {
+      "bucket": 1
+    },
+    "tests/test_signals_envelope_s3.py": {
+      "bucket": 1
+    },
+    "tests/test_stage_coverage_assertions.py": {
+      "bucket": 2
+    },
+    "tests/test_substrate_reader.py": {
+      "bucket": 5
+    },
+    "tests/test_thinktank_archive.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_citations.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_client.py": {
+      "bucket": 5
+    },
+    "tests/test_thinktank_context.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_feed_contract.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_gap_fill_fanout.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_group_addressing.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_judge_wiring.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_ledger_costs.py": {
+      "bucket": 7
+    },
+    "tests/test_thinktank_macro_anchor.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_run.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_structured_rung_visibility.py": {
+      "bucket": 1
+    },
+    "tests/test_thinktank_trace_sources.py": {
+      "bucket": 4
+    },
+    "thinktank/feed.py": {
+      "bucket": 1
+    },
+    "thinktank/settings.py": {
+      "bucket": 1
+    }
+  }
+}
