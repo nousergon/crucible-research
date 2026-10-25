@@ -19,9 +19,20 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 # ceiling, so a fresh build resolves the DLP-hook version. Pinned version
 # + sha256 mirror krepis's own working CI step (test.yml) — do not
 # re-derive. No `sudo` needed: Docker RUN executes as root by default (no
-# USER directive in this image). `/opt/llm-routing` is session_dlp.py's
-# first standard-path fallback (before its final Lambda-bundled-package
-# fallback), so no `KREPIS_GITLEAKS_DIR` override is needed.
+# USER directive in this image).
+#
+# The RULESET is not written here, deliberately (alpha-engine-config-I8058).
+# session_dlp.py resolves $KREPIS_GITLEAKS_DIR, then
+# /opt/{llm,groom,drain}-llm-routing, then the ruleset krepis ships as package
+# data (krepis/dlp_config/, since krepis-PR211; this repo pins a later
+# krepis). That packaged copy is the fleet's real egress config: stock rules
+# plus the nousergon-specific custom rules for our own credential shapes. This
+# image used to write a two-line `[extend] useDefault = true` stub to
+# /opt/llm-routing. An operator directory outranks the packaged copy, so the
+# stub SHADOWED the real ruleset with gitleaks' stock rules alone, and the scan
+# returned clean on exactly the shapes the custom rules exist for. Leaving
+# /opt/llm-routing absent is what lets the packaged ruleset win.
+# tests/test_dockerfile_dlp_ruleset.py fails if a stub comes back.
 # alpha-engine-config-I7744 — `tar` and `gzip` are NOT in
 # public.ecr.aws/lambda/python:3.12, and the gitleaks step below untars a
 # .tar.gz. It ran BEFORE the only microdnf install in this file, so it exited
@@ -49,9 +60,7 @@ RUN set -euo pipefail && \
     chmod +x /tmp/gitleaks && \
     mv /tmp/gitleaks /usr/local/bin/gitleaks && \
     rm -f /tmp/gitleaks.tar.gz && \
-    gitleaks version && \
-    mkdir -p /opt/llm-routing && \
-    printf '[extend]\nuseDefault = true\n' > /opt/llm-routing/gitleaks-egress.toml
+    gitleaks version
 
 RUN microdnf install -y git && microdnf clean all
 
@@ -92,6 +101,17 @@ RUN pip install --no-cache-dir "nousergon-lib[arcticdb,flow-doctor,rag,contracts
     grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^nousergon-lib" requirements.txt > /tmp/req-lambda.txt && \
     pip install --no-cache-dir -r /tmp/req-lambda.txt && \
     rm -rf /root/.cache/pip /tmp/req-lambda.txt
+
+# alpha-engine-config-I8058: assert at BUILD time that the krepis this image
+# just installed can run its DLP scan here (binary on PATH, ruleset resolvable,
+# scanning enabled; preflight exits 1 otherwise) AND that the ruleset it
+# resolved IS the packaged fleet ruleset. A narrower config, such as the stub
+# this image used to write, makes every scan come back clean while still
+# scanning, so it fails the build here rather than passing quietly at runtime.
+# Must follow the pip install, because the installed krepis decides. No scan,
+# no network call.
+RUN out="$(python -m krepis.session_dlp preflight)" && echo "${out}" && \
+    echo "${out}" | grep -qx 'ruleset_matches_packaged: True'
 
 # Copy application code
 COPY agents/ ${LAMBDA_TASK_ROOT}/agents/
