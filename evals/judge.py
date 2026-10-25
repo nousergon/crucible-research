@@ -123,6 +123,7 @@ from evals.judge_citations import (
     build_bundle,
     declared_citation_contract,
     judge_prompt_sha256,
+    judge_trace_sources_or_none,
     render_cited_rubric,
     validate_dimension_scores,
 )
@@ -1023,6 +1024,11 @@ def evaluate_artifact(
         log_prefix="[eval_judge]",
         callsite_id="evaljudge-sync",
         cited=judge_prompt.contract is not None,
+        trace_sources=judge_trace_sources_or_none(
+            user_part or rendered,
+            judge_prompt.bundle,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+        ),
     )
 
     # alpha-engine-config-I11484: ``judge_model`` is a TIER key, not the
@@ -1284,6 +1290,7 @@ def _call_openrouter_judge_llm(
     system_prompt: str = "",
     callsite_id: str = "evaljudge-sync",
     cited: bool = False,
+    trace_sources: Any = None,
 ) -> _OpenRouterJudgeCallResult:
     """Shared router-resolved judge-call core: forced-tool-call request +
     leak guard + bounded retry loop. Used by BOTH ``evaluate_artifact``
@@ -1325,6 +1332,12 @@ def _call_openrouter_judge_llm(
     ``cited=True`` (the rubric declares ``judge_evidence.v1``) forces the
     ``CitedRubricEvalLLMOutput`` tool schema and parses with it, so each
     finding carries its ``evidence``; validation happens in the caller.
+
+    ``trace_sources`` (a ``krepis.llm_trace.RenderedSources`` from
+    ``judge_trace_sources_or_none``) is handed to krepis as ``sources=``, so
+    the call's ``llm_trace.v1`` row carries a typed citation for every input
+    element and output field the judge was shown (alpha-engine-config-I12312).
+    ``None`` sends no ``sources=`` at all, exactly as before.
 
     Raises ``RuntimeError`` if all ``max_retries`` attempts fail (leak
     guard trip or schema validation failure).
@@ -1377,6 +1390,7 @@ def _call_openrouter_judge_llm(
     for attempt in range(1, max_retries + 1):
         attempts_made = attempt
         try:
+            source_kwargs = {"sources": trace_sources} if trace_sources is not None else {}
             result = llm_client.complete(
                 system=system_sent,
                 user_content=rendered,
@@ -1385,6 +1399,7 @@ def _call_openrouter_judge_llm(
                     "tools": tools,
                     "tool_choice": {"type": "function", "function": {"name": tool_name}},
                 },
+                **source_kwargs,
             )
         except PermanentContractError:
             # A 4xx that REFUSES the request shape. Identical on every attempt
@@ -1702,6 +1717,11 @@ def evaluate_artifact_openrouter(
         log_prefix="[eval_judge_openrouter]",
         callsite_id="evaljudge-shadow",
         cited=judge_prompt.contract is not None,
+        trace_sources=judge_trace_sources_or_none(
+            user_part or rendered,
+            judge_prompt.bundle,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+        ),
     )
 
     logger.info(
