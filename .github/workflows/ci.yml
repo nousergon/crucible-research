@@ -112,8 +112,13 @@ jobs:
           chmod +x gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
           gitleaks version
-          sudo mkdir -p /opt/groom-llm-routing
-          printf '[extend]\nuseDefault = true\n' | sudo tee /opt/groom-llm-routing/gitleaks-egress.toml > /dev/null
+          # alpha-engine-config-I8058: no /opt ruleset stub here. A stub in an
+          # operator dir outranks krepis's packaged ruleset (krepis-PR211), so
+          # tests scanned with stock rules only. Assert the runner resolves
+          # the packaged ruleset, so a reintroduced stub fails this step.
+          dlp_preflight="$(python -m krepis.session_dlp preflight)"
+          echo "$dlp_preflight"
+          grep -qx 'ruleset_matches_packaged: True' <<<"$dlp_preflight"
 
       - name: Run tests
         working-directory: alpha-engine-research
