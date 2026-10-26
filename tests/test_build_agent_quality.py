@@ -618,6 +618,51 @@ class TestAgentTelemetryFromRunManifests:
                                   "basis": "trading-day partitions of s3://alpha-engine-research/thinktank/runs/"}
         assert decl["last_instrumented_run"]["run_id"] == "r2"
 
+    def test_latency_block_carries_sample_counts_and_a_per_class_split(self, s3):
+        """alpha-engine-config-I12625: ``n`` is the AGENT count. The 10-23 card
+        printed N=6 over 107 pooled invocations and the Director read it as six
+        samples. The block must say how many samples it pooled, and split the
+        p95 by latency class so long-form writers can be graded on their own bar."""
+        _manifest(s3, "2026-06-10", "r1", {
+            "analyst_thesis": _tel(4, durations=[40000, 50000, 60000, 90000]),
+            "analyst_pillar": _tel(3, durations=[20000, 25000, 30000]),
+            "analyst_sweep": _tel(2, durations=[3000, 4000]),
+        })
+        _manifest(s3, "2026-06-12", "r2", {
+            "analyst_thesis": _tel(4, durations=[45000, 55000, 65000, 70000]),
+            "themes_macro": _tel(2, durations=[8000, 9000]),
+            "brand_new_agent": _tel(1, durations=[12000]),
+        })
+        lat = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)["agent_latency_p95"]
+
+        # Headline contract unchanged: worst agent overall, n = agents.
+        assert lat["value"] == 90000.0 and lat["n"] == 5
+        assert lat["worst_agent"] == "analyst_thesis"
+        # Sample counts.
+        assert lat["n_samples"] == 16
+        assert lat["worst_agent_n_samples"] == 8
+        assert lat["n_samples_by_agent"] == {
+            "analyst_pillar": 3, "analyst_sweep": 2, "analyst_thesis": 8,
+            "brand_new_agent": 1, "themes_macro": 2,
+        }
+        # Classes: an agent not declared long-form grades on the stricter bar.
+        assert lat["class_by_agent"]["brand_new_agent"] == "short_form"
+        assert lat["class_by_agent"]["analyst_pillar"] == "long_form"
+        assert lat["by_class"] == {
+            "short_form": {"p95_ms": 12000.0, "worst_agent": "brand_new_agent",
+                           "n_agents": 3, "n_samples": 5, "worst_agent_n_samples": 1},
+            "long_form": {"p95_ms": 90000.0, "worst_agent": "analyst_thesis",
+                          "n_agents": 2, "n_samples": 11, "worst_agent_n_samples": 8},
+        }
+        # No nested block may read as a graded component.
+        assert all("value" not in blk for blk in lat["by_class"].values())
+
+    def test_a_class_with_no_agents_is_absent_not_zero(self, s3):
+        _manifest(s3, "2026-06-11", "live", {"analyst_sweep": _tel(3, durations=[1000, 2000, 3000])})
+        lat = build_agent_quality(s3, _BUCKET, _DATE, run_date=_RUN_DATE)["agent_latency_p95"]
+        assert set(lat["by_class"]) == {"short_form"}
+        assert lat["n_samples"] == 3
+
     def test_manifests_outside_the_window_and_dry_runs_are_ignored(self, s3):
         _manifest(s3, "2026-06-05", "old", {"a": _tel(10, failures=10)})   # day before window
         _manifest(s3, "2026-06-13", "future", {"a": _tel(10, failures=10)})  # after target day
