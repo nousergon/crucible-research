@@ -129,6 +129,21 @@ _AGENT_TELEMETRY_KEYS = (
     "agent_latency_p95",
 )
 
+# Latency classes (alpha-engine-config-I12625). One wall-clock target does not
+# fit every Think Tank agent: the long-form writers emit ~6-11K output tokens
+# per decision at a flat ~190 tok/s (measured on the 10-23 card's manifests),
+# so their p95 is generation length, not a slow call, and a 60s red line is a
+# ceiling on output length rather than on latency. The block therefore splits
+# its p95 by class so the card can grade each class against its own bar. An
+# agent not named here is ``short_form``: the stricter class, so a new agent is
+# never graded more leniently by omission.
+_LONG_FORM_AGENTS = frozenset({"analyst_thesis", "analyst_pillar"})
+_LATENCY_CLASSES = ("short_form", "long_form")
+
+
+def _latency_class(agent_id: str) -> str:
+    return "long_form" if agent_id in _LONG_FORM_AGENTS else "short_form"
+
 
 def _p95(samples: list[int]) -> float:
     """Nearest-rank 95th percentile (the sample at rank ceil(0.95·n))."""
@@ -219,7 +234,13 @@ def _agent_metrics_from_telemetry(agents: dict) -> dict[str, dict]:
     - retry storm = agents with >=1 invocation that retried and still failed
       (hit the retry ceiling), ``n`` = agents observed;
     - latency p95 = the slowest agent's p95 wall-clock (ms), ``n`` = agents with
-      a duration sample.
+      a duration sample. ``n`` is an AGENT count, not a sample size: the
+      10-23 card read ``N=6`` as six samples when it pooled 107 invocations
+      (alpha-engine-config-I12625). So the block also carries ``n_samples``
+      (duration samples pooled over those agents), ``n_samples_by_agent``,
+      ``class_by_agent``, and ``by_class`` — each latency class's worst
+      agent, its p95 and its sample counts — so a reader can grade per class.
+      ``n`` keeps its meaning; renaming it would break the card's contract.
     """
     observed = {a: t for a, t in agents.items() if t.invocations > 0}
     if not observed:
@@ -244,11 +265,33 @@ def _agent_metrics_from_telemetry(agents: dict) -> dict[str, dict]:
     p95_by_agent = {a: _p95(t.durations_ms) for a, t in observed.items() if t.durations_ms}
     if p95_by_agent:
         worst = max(p95_by_agent, key=p95_by_agent.__getitem__)
+        samples_by_agent = {a: len(observed[a].durations_ms) for a in sorted(p95_by_agent)}
+        class_by_agent = {a: _latency_class(a) for a in sorted(p95_by_agent)}
+        by_class: dict[str, dict] = {}
+        for cls in _LATENCY_CLASSES:
+            members = [a for a, c in class_by_agent.items() if c == cls]
+            if not members:
+                continue
+            cls_worst = max(members, key=p95_by_agent.__getitem__)
+            by_class[cls] = {
+                # ``p95_ms``, not ``value``: a nested ``value`` would read as a
+                # graded component to a reader that walks the artifact.
+                "p95_ms": round(p95_by_agent[cls_worst], 1),
+                "worst_agent": cls_worst,
+                "n_agents": len(members),
+                "n_samples": sum(samples_by_agent[a] for a in members),
+                "worst_agent_n_samples": samples_by_agent[cls_worst],
+            }
         out["agent_latency_p95"] = {
             "value": round(p95_by_agent[worst], 1),
             "n": len(p95_by_agent),
+            "n_samples": sum(samples_by_agent.values()),
             "worst_agent": worst,
+            "worst_agent_n_samples": samples_by_agent[worst],
             "p95_ms_by_agent": {a: round(v, 1) for a, v in sorted(p95_by_agent.items())},
+            "n_samples_by_agent": samples_by_agent,
+            "class_by_agent": class_by_agent,
+            "by_class": by_class,
             "source": _AGENT_TELEMETRY_SOURCE,
         }
     return out
