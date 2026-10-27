@@ -168,26 +168,115 @@ def _emit_rag_log(
     )
 
 
-def _format_results(results, *, include_source: bool = False) -> str:
-    """Compose the agent-visible text bundle from the retrieval results.
+def render_identified_sources(
+    results,
+    *,
+    tool: str,
+    cid_prefix: str,
+    query: str | None,
+    include_source: bool = False,
+) -> tuple[str, int]:
+    """Render retrieval results as IDENTIFIED sources for an agent's context.
 
-    Same pattern as query_filings — one section per result, separated
-    by --- horizontal rules. ``include_source`` adds the vendor source
-    column (useful for news where the same article may appear from
-    multiple sources).
+    knowledge-integrity-policy § Retrieval provenance: retrieved text enters
+    the prompt as an identified source, never as anonymous text, and a
+    ``[doc_type | filed_date]`` header is not identity
+    (alpha-engine-config-I12680). These tools used to return exactly that
+    header plus the chunk; ``chunk_id`` reached only a log line and the
+    S3 side capture.
+
+    Each result now goes through ``RetrievalResult.as_source()`` and the
+    krepis ``render_sources`` renderer, as Think Tank's ``filings_sources``
+    does. The injected text leads with the corpus's own keys
+    (``rag.chunks/<id> | rag.documents/<id>``), so the tool message the
+    agent reads -- and its trace -- names the rows it came from.
+
+    A result missing either id is WITHHELD, never rendered unidentified,
+    and counted in a ``RAG_UNIDENTIFIED`` warning (degraded context).
+
+    Returns ``(rendered_text, n_withheld)``; the text is empty when every
+    result was withheld.
     """
-    parts = []
+    from datetime import UTC, datetime
+
+    from krepis.llm_trace import render_sources
+
+    retrieved_at = datetime.now(UTC).isoformat()
+    blocks: list[dict[str, Any]] = []
+    withheld = 0
     for r in results:
-        header_bits = [r.doc_type, str(r.filed_date)]
+        chunk_id = getattr(r, "chunk_id", None)
+        document_id = getattr(r, "document_id", None)
+        if not chunk_id or not document_id:
+            withheld += 1
+            continue
+        header_bits = [
+            f"rag.chunks/{chunk_id}",
+            f"rag.documents/{document_id}",
+            str(r.doc_type),
+            str(r.filed_date),
+        ]
         if include_source:
             header_bits.append(getattr(r, "source", "") or "?")
         section = getattr(r, "section_label", None) or ""
         if section:
             header_bits.append(section)
-        parts.append(
-            f"[{' | '.join(header_bits)}]\n{r.content}"
+        rank = len(blocks) + 1
+        blocks.append(
+            r.as_source(
+                f"{cid_prefix}{rank}",
+                rank=rank,
+                text=f"[{' | '.join(header_bits)}]\n{r.content}",
+                query=query,
+                retrieved_at=retrieved_at,
+            )
         )
-    return "\n\n---\n\n".join(parts)
+    if withheld:
+        log.warning(
+            "RAG_UNIDENTIFIED tool=%s withheld=%d of=%d -- results without both "
+            "a rag.chunks and a rag.documents id are not rendered into the prompt "
+            "(knowledge-integrity § Retrieval provenance)",
+            tool, withheld, len(results),
+        )
+    if not blocks:
+        return "", withheld
+    return render_sources(blocks, separator="\n\n---\n\n").text, withheld
+
+
+def _format_results(
+    results,
+    *,
+    tool: str,
+    query: str | None,
+    include_source: bool = False,
+) -> str:
+    """Compose the agent-visible text bundle from the retrieval results.
+
+    One identified ``<source>`` block per result, separated by ---
+    horizontal rules (see :func:`render_identified_sources`).
+    ``include_source`` adds the vendor source column (useful for news where
+    the same article may appear from multiple sources).
+    """
+    text, withheld = render_identified_sources(
+        results, tool=tool, cid_prefix=_CID_PREFIX[tool], query=query,
+        include_source=include_source,
+    )
+    if not text:
+        return (
+            f"{tool}: {withheld} result(s) withheld -- none carried both a chunk "
+            f"and a document id, so none can be cited (degraded context)."
+        )
+    return text
+
+
+#: Citation-id prefix per tool, so a reader can tell which tool a cid came
+#: from. Unique within one rendered result; krepis validates the shape.
+_CID_PREFIX = {
+    "search_news": "news",
+    "search_filings": "filing",
+    "search_transcripts": "transcript",
+    "query_filings": "qf",
+}
 
 
 # ── search_news ─────────────────────────────────────────────────────────
@@ -225,7 +314,7 @@ def search_news_impl(
             ticker=ticker, doc_types=["news"],
             n_results=len(results), results=results,
         )
-        return _format_results(results, include_source=True)
+        return _format_results(results, tool="search_news", query=query, include_source=True)
     except Exception as e:
         _rag_stats["search_news"]["failed"] += 1
         log.warning(
@@ -280,7 +369,7 @@ def search_filings_impl(
             ticker=ticker, doc_types=doc_types,
             n_results=len(results), results=results,
         )
-        return _format_results(results, include_source=False)
+        return _format_results(results, tool="search_filings", query=query)
     except Exception as e:
         _rag_stats["search_filings"]["failed"] += 1
         log.warning(
@@ -331,7 +420,7 @@ def search_transcripts_impl(
             ticker=ticker, doc_types=["earnings_transcript"],
             n_results=len(results), results=results,
         )
-        return _format_results(results, include_source=False)
+        return _format_results(results, tool="search_transcripts", query=query)
     except Exception as e:
         _rag_stats["search_transcripts"]["failed"] += 1
         log.warning(
