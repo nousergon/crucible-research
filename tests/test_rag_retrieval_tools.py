@@ -14,7 +14,6 @@ Covers:
 from __future__ import annotations
 
 from datetime import date
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,21 +37,31 @@ def _fake_result(
     content="story body",
     source="news_polygon",
     chunk_id="c1",
+    document_id="d1",
     vector_score=0.9,
     keyword_score=0.5,
     combined_score=0.78,
 ):
-    return SimpleNamespace(
+    """A real ``RetrievalResult`` (so ``as_source()`` is the lib's own), plus
+    the ``source`` vendor column the news path renders."""
+    from nousergon_lib.rag.retrieval import RetrievalResult
+
+    r = RetrievalResult(
+        content=content,
+        ticker="AAPL",
         doc_type=doc_type,
         filed_date=filed_date,
         section_label=section_label,
-        content=content,
-        source=source,
+        similarity=combined_score or vector_score or 0.5,
         chunk_id=chunk_id,
+        retrieval_method="hybrid",
         vector_score=vector_score,
         keyword_score=keyword_score,
         combined_score=combined_score,
+        document_id=document_id,
     )
+    r.source = source
+    return r
 
 
 @pytest.fixture(autouse=True)
@@ -369,3 +378,54 @@ class TestToolsetWiring:
         assert "search_news" in names
         assert "search_filings" in names
         assert "search_transcripts" in names
+
+
+class TestIdentifiedSources:
+    """knowledge-integrity § Retrieval provenance (alpha-engine-config-I12680):
+    retrieved text enters the prompt as an identified source -- the corpus's
+    own keys, never a ``[doc_type | filed_date]`` header alone."""
+
+    def test_every_rendered_chunk_names_its_chunk_and_document_rows(self):
+        results = [
+            _fake_result(content="first body", chunk_id="11", document_id="101"),
+            _fake_result(content="second body", chunk_id="12", document_id="102"),
+        ]
+        with patch("nousergon_lib.rag.retrieve", return_value=results):
+            out = search_filings_impl("AAPL", "risk")
+        assert '<source cid="filing1">' in out and '<source cid="filing2">' in out
+        assert "rag.chunks/11 | rag.documents/101" in out
+        assert "rag.chunks/12 | rag.documents/102" in out
+        assert out.index("first body") < out.index("second body")
+
+    @pytest.mark.parametrize("missing", ["chunk_id", "document_id"])
+    def test_result_missing_an_id_is_withheld_never_rendered(self, missing, caplog):
+        bad = _fake_result(content="anonymous body", chunk_id="13", document_id="103")
+        setattr(bad, missing, None)
+        good = _fake_result(content="identified body", chunk_id="14", document_id="104")
+        with patch("nousergon_lib.rag.retrieve", return_value=[bad, good]):
+            with caplog.at_level("WARNING"):
+                out = search_transcripts_impl("AAPL", "guidance")
+        assert "anonymous body" not in out
+        assert "identified body" in out and '<source cid="transcript1">' in out
+        assert "RAG_UNIDENTIFIED tool=search_transcripts withheld=1 of=2" in caplog.text
+
+    def test_all_withheld_says_degraded_instead_of_rendering_text(self):
+        bad = _fake_result(content="anonymous body", document_id=None)
+        with patch("nousergon_lib.rag.retrieve", return_value=[bad]):
+            out = search_news_impl("AAPL", "q")
+        assert "anonymous body" not in out
+        assert "withheld" in out and "degraded context" in out
+
+    def test_injected_text_is_what_the_source_block_hashes(self):
+        """The ids travel inside the exact text the SourceBlock records, so a
+        trace of this tool message resolves to the rows without a re-search."""
+        from agents.sector_teams.rag_retrieval_tools import render_identified_sources
+
+        r = _fake_result(content="body", chunk_id="15", document_id="105")
+        text, withheld = render_identified_sources(
+            [r], tool="search_filings", cid_prefix="filing", query="q")
+        assert withheld == 0
+        assert text == (
+            '<source cid="filing1">\n[rag.chunks/15 | rag.documents/105 | news | '
+            '2026-05-10 | headline]\nbody\n</source>'
+        )

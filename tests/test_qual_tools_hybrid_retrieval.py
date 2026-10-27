@@ -39,6 +39,13 @@ def _mock_retrieval_result(
     """
     r = MagicMock()
     r.chunk_id = chunk_id
+    r.document_id = f"doc-{chunk_id}"
+    # as_source is the lib's own, bound to this stand-in, so the rendered
+    # text is exactly what production renders (alpha-engine-config-I12680).
+    from nousergon_lib.rag.retrieval import RetrievalResult
+
+    r.as_source = lambda *a, **k: RetrievalResult.as_source(r, *a, **k)
+    r.url = None
     r.content = f"chunk content {chunk_id}"
     r.ticker = "TEST"
     r.doc_type = "10-K"
@@ -247,3 +254,23 @@ class TestQualToolsRerankFlag:
         assert "rerank=none" in msg
         assert "rerank_input_n=0" in msg
         assert "'rerank_score': None" in msg
+
+
+class TestQueryFilingsIdentifiedSources:
+    """alpha-engine-config-I12680: query_filings renders identified sources."""
+
+    def test_query_filings_renders_chunk_and_document_ids(self) -> None:
+        results = [_mock_retrieval_result("c-1", combined=0.8)]
+        with patch("nousergon_lib.rag.retrieve", return_value=results):
+            out = _get_query_filings_tool().invoke({"ticker": "TEST", "query": "risk"})
+        assert '<source cid="qf1">' in out
+        assert "rag.chunks/c-1 | rag.documents/doc-c-1 | 10-K | 2025-06-30 | MD&A" in out
+        assert "chunk content c-1" in out
+
+    def test_query_filings_withholds_a_result_with_no_document_id(self) -> None:
+        r = _mock_retrieval_result("c-2", combined=0.8)
+        r.document_id = None
+        with patch("nousergon_lib.rag.retrieve", return_value=[r]):
+            out = _get_query_filings_tool().invoke({"ticker": "TEST", "query": "risk"})
+        assert "chunk content c-2" not in out
+        assert "degraded context" in out

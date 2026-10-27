@@ -477,12 +477,12 @@ def create_qual_tools(context: dict) -> list:
                 rerank=_RAG_RERANK or "none",
                 results=results,
             )
-            formatted = []
-            for r in results:
-                formatted.append(
-                    f"[{r.doc_type} | {r.filed_date} | {r.section_label}]\n{r.content}"
-                )
-            return "\n\n---\n\n".join(formatted)
+            # Identified sources, never a bare header (alpha-engine-config-I12680,
+            # knowledge-integrity § Retrieval provenance). A result missing
+            # either id is withheld and logged as RAG_UNIDENTIFIED.
+            from agents.sector_teams.rag_retrieval_tools import _format_results
+
+            return _format_results(results, tool="query_filings", query=query)
         except Exception as e:
             _rag_stats["failed"] += 1
             log.warning("RAG_UNAVAILABLE ticker=%s error_type=%s error=%s", ticker, type(e).__name__, e)
