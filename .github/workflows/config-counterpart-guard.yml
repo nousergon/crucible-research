@@ -15,6 +15,13 @@ name: Config counterpart guard
 
 on:
   pull_request:
+  # So the required context reports on a merge-queue entry instead of leaving it
+  # in AWAITING_CHECKS until it auto-dequeues (alpha-engine-config-I12747). The
+  # lib callee reads github.head_ref, which is empty on merge_group, and exits 1
+  # there: a queue entry FAILS CLOSED on this check rather than passing blind.
+  # This repo runs no merge queue today, so no merge_group run fires.
+  merge_group:
+    types: [checks_requested]
 
 permissions: {}
 
