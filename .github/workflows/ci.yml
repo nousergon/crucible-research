@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # So the required context `test` reports on a merge-queue entry; the fleet
+  # merge-group required-check guard accepts only this shape
+  # (alpha-engine-config-I12747). Without it a queue entry waits forever on `test`.
+  merge_group:
+    types: [checks_requested]
 
 permissions: {}
 
@@ -41,6 +46,9 @@ jobs:
         id: direct_checkout
         env:
           TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+          # On merge_group head_ref is empty and ref_name is the gh-readonly-queue/
+          # ref, which never names a config branch, so the clone falls back to config
+          # main: the same config the post-merge main run validates against.
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           set -euo pipefail
