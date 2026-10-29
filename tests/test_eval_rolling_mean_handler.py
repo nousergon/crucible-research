@@ -261,6 +261,32 @@ class TestHandler:
             tzinfo=UTC,
         )
 
+    def test_control_bands_get_the_declared_judge_reanchors(self, handler_mod):
+        """alpha-engine-config-I11484: the handler passes the declared
+        re-anchors to the control bands, so no baseline straddles the
+        2026-08-30 judge switch."""
+        captured = {}
+
+        def fake_bands(**kwargs):
+            captured.update(kwargs)
+            return {
+                "failed": [], "combos_discovered": 0,
+                "combos_insufficient_history": 0, "breach_count": 0,
+                "breach_emits": [],
+            }
+
+        with (
+            patch.object(handler_mod, "_ensure_init"),
+            patch("evals.rolling_mean.compute_and_emit_4w_mean", return_value=_ok_summary()),
+            patch("evals.control_bands.compute_and_emit_control_bands", side_effect=fake_bands),
+        ):
+            handler_mod.handler({"end_time_iso": "2026-10-24T12:00:00Z"}, context=None)
+
+        slot = datetime(2026, 8, 27, tzinfo=UTC)
+        assert captured["reset_before_by_judge"] == {
+            "claude-haiku-4-5": slot, "claude-sonnet-4-6": slot,
+        }
+
     def test_end_time_defaults_to_none_when_unset(self, handler_mod):
         captured = {}
 

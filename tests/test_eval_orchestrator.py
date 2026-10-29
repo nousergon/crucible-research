@@ -1,11 +1,10 @@
 """Unit tests for the LLM-as-judge orchestrator (PR 3b of P3.1).
 
 Covers:
-- ``should_escalate_to_sonnet`` — Haiku-tier flag-out logic.
 - ``list_capture_keys`` — S3 listing of captures, exclusion of the
   ``_eval/`` subtree, and ``.json``-only filtering.
 - ``evaluate_corpus`` end-to-end with moto-mocked S3 + a stubbed
-  ``evaluate_artifact``: per-artifact escalation, force_sonnet_pass,
+  ``evaluate_artifact``: no escalation (I11484), force_sonnet_pass,
   unmapped-agent skipping, mid-batch error containment.
 
 Real LLM is never called — all eval invocations go through a stubbed
@@ -166,34 +165,6 @@ def mocked_s3_with_captures():
         yield client
 
 
-# ── should_escalate_to_sonnet ─────────────────────────────────────────────
-
-
-class TestShouldEscalateToSonnet:
-    def test_no_dimension_below_threshold(self):
-        from evals.orchestrator import should_escalate_to_sonnet
-        eval_ = _make_eval("ic_cio", scores=[5, 4, 3, 4])
-        assert should_escalate_to_sonnet(eval_, threshold=3) is False
-
-    def test_one_dimension_below_threshold(self):
-        from evals.orchestrator import should_escalate_to_sonnet
-        eval_ = _make_eval("ic_cio", scores=[5, 4, 2, 4])
-        assert should_escalate_to_sonnet(eval_, threshold=3) is True
-
-    def test_threshold_is_strict_less_than(self):
-        # score == threshold should NOT escalate (the rubric midpoint
-        # is acceptable; only "below 3" triggers).
-        from evals.orchestrator import should_escalate_to_sonnet
-        eval_ = _make_eval("ic_cio", scores=[3, 3, 3, 3])
-        assert should_escalate_to_sonnet(eval_, threshold=3) is False
-
-    def test_custom_threshold(self):
-        from evals.orchestrator import should_escalate_to_sonnet
-        eval_ = _make_eval("ic_cio", scores=[4, 4, 4, 4])
-        # Tighter gate: below 5 → escalate.
-        assert should_escalate_to_sonnet(eval_, threshold=5) is True
-
-
 # ── list_capture_keys ─────────────────────────────────────────────────────
 
 
@@ -276,20 +247,19 @@ class TestEvaluateCorpus:
         assert len(haiku_keys) == 5
         assert len(sonnet_keys) == 5
 
-    def test_per_artifact_escalation_when_haiku_score_below_threshold(
-        self, mocked_s3_with_captures,
-    ):
-        """ic_cio gets a Haiku score of 2 → escalates to Sonnet.
-        Other agents stay at 4 → no escalation."""
+    def test_low_haiku_score_does_not_escalate(self, mocked_s3_with_captures):
+        """alpha-engine-config-I11484: the per-artifact escalation leg is
+        dropped. A first-tier score below the old threshold no longer buys a
+        second-tier re-grade, and no escalation fields are reported."""
         from evals import orchestrator as orch
 
         def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
-            scores = [2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4]
+            assert judge_model == "claude-haiku-4-5"
             return _make_eval(
                 artifact.agent_id,
                 run_id=artifact.run_id,
                 judge_model=judge_model,
-                scores=scores,
+                scores=[1, 1, 2, 2],
             )
 
         with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
@@ -300,47 +270,10 @@ class TestEvaluateCorpus:
             )
 
         assert result["haiku_evaluated"] == 5
-        assert result["sonnet_evaluated"] == 1
-        # The Sonnet escalation should be for ic_cio specifically.
-        sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
-        assert len(sonnet_keys) == 1
-        # Canonical flat path (config#793): agent_id is in the basename,
-        # preceded by the judge_run_id grouping prefix:
-        # {run_id}_ic_cio.{run_id}.{judge_model}.json
-        assert "_ic_cio." in sonnet_keys[0]
-        # Neither fake eval carries a served model, so the escalation's
-        # distinctness is UNKNOWN — and says so (alpha-engine-config-I11484).
-        assert result["escalation_served_model_unknown"] == 1
-        assert result["escalation_same_served_model"] == 0
-
-    def test_escalation_served_by_the_first_pass_model_is_reported(
-        self, mocked_s3_with_captures,
-    ):
-        """alpha-engine-config-I11484: on 2026-09-23 the Sonnet escalation was
-        served by the same DeepSeek deployment as the Haiku pass. The corpus
-        result must say the escalation was not a second opinion."""
-        from evals import orchestrator as orch
-
-        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
-            scores = [2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4]
-            ev = _make_eval(
-                artifact.agent_id,
-                run_id=artifact.run_id,
-                judge_model=judge_model,
-                scores=scores,
-            )
-            return ev.model_copy(update={"judge_resolved_model": "deepseek-v4-flash"})
-
-        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
-            result = orch.evaluate_corpus(
-                date="2026-05-09",
-                bucket="alpha-engine-research",
-                s3_client=mocked_s3_with_captures,
-            )
-
-        assert result["sonnet_evaluated"] == 1
-        assert result["escalation_same_served_model"] == 1
-        assert result["escalation_distinct_served_model"] == 0
+        assert result["sonnet_evaluated"] == 0
+        assert not [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
+        assert not [k for k in result if k.startswith("escalation_")]
+        assert not hasattr(orch, "should_escalate_to_sonnet")
 
     def test_haiku_failure_is_contained(self, mocked_s3_with_captures):
         """LLM raising on one artifact must not halt evaluation of others."""
@@ -384,17 +317,18 @@ class TestEvaluateCorpus:
                 artifact.agent_id,
                 run_id=artifact.run_id,
                 judge_model=judge_model,
-                scores=[2, 4, 4, 4],  # triggers escalation
+                scores=[2, 4, 4, 4],
             )
 
         with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
             result = orch.evaluate_corpus(
                 date="2026-05-09",
                 bucket="alpha-engine-research",
+                force_sonnet_pass=True,
                 s3_client=mocked_s3_with_captures,
             )
 
-        # Every mapped artifact has Haiku score 2 → all 5 escalate.
+        # force_sonnet_pass → every mapped artifact gets a second-tier attempt.
         assert result["haiku_evaluated"] == 5
         assert result["sonnet_evaluated"] == 0
         # All 5 Sonnet attempts failed; no Haiku failures.
@@ -816,13 +750,14 @@ class TestEvaluateCorpus:
                 artifact.agent_id,
                 run_id=artifact.run_id,
                 judge_model=judge_model,
-                scores=[2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4],
+                scores=[4, 4, 4, 4],
             )
 
         with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
             result = orch.evaluate_corpus(
                 date="2026-05-09",
                 bucket="alpha-engine-research",
+                force_sonnet_pass=True,
                 s3_client=mocked_s3_with_captures,
             )
 

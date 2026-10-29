@@ -1,30 +1,24 @@
 """LLM-as-judge orchestrator (PR 3b of ROADMAP P3.1, Phase 2 P1).
 
 Fans the judge module out over every captured DecisionArtifact for a
-given date partition, applies two-tier sampling (Haiku default + Sonnet
-escalation), and persists results to S3.
+given date partition, scores each one on the first tier (plus a second-tier
+pass on the ``force_sonnet_pass`` cadence), and persists results to S3.
 
-Two-tier sampling logic (per ROADMAP §1626):
+Tiers (per ROADMAP §1626):
 
-  1. **Haiku for cost on every weekly run.** Every artifact whose
-     ``agent_id`` resolves to a rubric is scored with Haiku.
+  1. **First tier on every weekly run.** Every artifact whose ``agent_id``
+     resolves to a rubric is scored on ``DEFAULT_HAIKU_MODEL``.
 
-  2. **Sonnet for nuance on a sampled subset.** A Sonnet pass also
-     runs for any artifact when *either* of these holds:
-       - ``force_sonnet_pass`` was passed in by the caller (used by
-         the Saturday SF every 4th run — the run-frequency cadence is
-         a SF concern, not a Lambda concern, so this flag is the
-         contract surface).
-       - The Haiku eval flagged a dimension score below
-         ``haiku_escalate_threshold`` (default 3) — Haiku itself said
-         the artifact has a concerning gap; Sonnet's nuance is worth
-         the cost to confirm or refute.
+  2. **Second tier when ``force_sonnet_pass`` is set** (the Saturday SF every
+     4th run — the run-frequency cadence is a SF concern, not a Lambda
+     concern, so this flag is the contract surface).
 
-Per-artifact escalation (rather than batch-level "if any artifact's
-Haiku score < 3, re-run all of them with Sonnet") is the deliberate
-choice — only the borderline ones get the expensive pass, which keeps
-weekly judging cost bounded while preserving diagnostic depth where
-it matters.
+There is no per-artifact escalation (alpha-engine-config-I11484, Brian's
+2026-10-28 ruling). It used to re-grade any artifact whose first-tier eval
+scored a dimension below 3 on the second tier, but both tier keys resolve
+through the same ``low`` router group, so the "second opinion" was the
+first-pass model again. Tier keys name the S3 path and the CloudWatch
+dimension; ``judge_resolved_model`` on each record names what served it.
 
 Eval is observability, NOT a gate. Errors during evaluation of any
 single artifact are logged loudly and accumulated in the result
@@ -89,13 +83,14 @@ DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
 """Cost-tier judge — runs on every artifact every weekly run."""
 
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
-"""Nuance-tier judge — runs on the sampled subset (force_sonnet_pass
-or Haiku-flagged borderline)."""
+"""Second-tier judge key — runs only on the ``force_sonnet_pass`` cadence.
 
-DEFAULT_HAIKU_ESCALATE_THRESHOLD = 3
-"""Any Haiku dimension score strictly below this value escalates the
-artifact to a Sonnet pass. 3 is the rubric midpoint — below 3 means
-Haiku flagged a real problem, not just an average dimension."""
+There is no per-artifact escalation any more (alpha-engine-config-I11484,
+Brian's 2026-10-28 ruling "accept DeepSeek"). Both tiers resolve through the
+same ``low`` router group, so re-grading a low-scored artifact on the
+second tier sampled the same model again; the 10-24 records showed all 8
+escalations served by the first-pass model. The leg was dropped rather
+than routed to a stronger group, which would have raised spend."""
 
 JUDGE_ONLY_EVAL_PREFIX = "decision_artifacts/_eval_judge_only/"
 """S3 path prefix for ``judge_only`` test-track outputs (PR 4e).
@@ -180,102 +175,6 @@ def _next_item_affordable(
         estimate = floor_s
     needed = estimate + PROCESS_WRITE_RESERVE_S
     return remaining_s() >= needed, needed
-
-
-# ── Sampling decision ─────────────────────────────────────────────────────
-
-
-def should_escalate_to_sonnet(
-    haiku_eval: RubricEvalArtifact,
-    *,
-    threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
-) -> bool:
-    """Per-artifact escalation: True iff any Haiku dimension score is
-    below ``threshold``.
-
-    Callers MUST only pass a ``haiku_eval`` whose ``judge_model`` is an
-    AUTHORITATIVE tier — never a shadow-only judge_model (see
-    ``evals.judge_models.SHADOW_LOGICAL_KEYS``, config#2575). A shadow
-    judge's scores get no escalation authority until its perturbation-
-    suite validation passes and an explicit promotion event lifts the
-    exclusion; this function does not itself gate on that (it has no
-    judge_model to check — ``RubricEvalArtifact.judge_model`` is a field
-    on the artifact, not a parameter here), so the discipline lives in
-    every call site never feeding it a shadow artifact in the first
-    place. ``evals.openrouter_shadow`` deliberately never calls this
-    function.
-    """
-    return any(d.score < threshold for d in haiku_eval.dimension_scores)
-
-
-ESCALATION_DISTINCT = "distinct"
-ESCALATION_SAME_MODEL = "same_model"
-ESCALATION_UNKNOWN = "unknown"
-
-
-def _normalize_served_model(model: str | None) -> str | None:
-    """Reduce a served-model id to the weights it names: the same model
-    reached through an aggregator (``deepseek/deepseek-v4-flash``) and direct
-    (``deepseek-v4-flash``) is the same second opinion, so the vendor prefix
-    is dropped before comparing. Mirrors
-    ``crucible-evaluator/director/retro.py::_normalize_served_model``."""
-    if not model:
-        return None
-    return model.strip().rsplit("/", 1)[-1].lower() or None
-
-
-def escalation_served_model_verdict(
-    first_pass: RubricEvalArtifact,
-    escalation: RubricEvalArtifact,
-) -> str:
-    """Did the escalation re-grade with a DIFFERENT model than the first pass?
-
-    alpha-engine-config-I11484. Sonnet escalation exists to get a stronger
-    second opinion on an artifact the first pass scored low. On 2026-09-23
-    both passes were served by the same DeepSeek deployment, so the
-    "escalation" was a resample of the same judge — and nothing said so,
-    because both records named a Claude tier. This compares what actually
-    SERVED each call (``judge_resolved_model``).
-
-    ``unknown`` when either record carries no served model; it is a real
-    answer and is never collapsed into ``distinct`` (principles.md §2.7).
-    Observation only: whether the router SHOULD send both tiers to one model
-    is a routing decision, not this module's.
-    """
-    a = _normalize_served_model(first_pass.judge_resolved_model)
-    b = _normalize_served_model(escalation.judge_resolved_model)
-    if a is None or b is None:
-        return ESCALATION_UNKNOWN
-    return ESCALATION_SAME_MODEL if a == b else ESCALATION_DISTINCT
-
-
-def _note_escalation_verdict(
-    counts: dict[str, int],
-    first_pass: RubricEvalArtifact,
-    escalation: RubricEvalArtifact,
-) -> None:
-    verdict = escalation_served_model_verdict(first_pass, escalation)
-    counts[verdict] = counts.get(verdict, 0) + 1
-    if verdict == ESCALATION_SAME_MODEL:
-        logger.warning(
-            "[eval_escalation] escalation_same_served_model agent_id=%s "
-            "run_id=%s first_pass=%s(%s) escalation=%s(%s) — the escalation "
-            "re-graded with the SAME model, so it is not a second opinion "
-            "(alpha-engine-config-I11484)",
-            escalation.judged_agent_id, escalation.run_id,
-            first_pass.judge_model, first_pass.judge_resolved_model,
-            escalation.judge_model, escalation.judge_resolved_model,
-        )
-
-
-def _escalation_result_fields(counts: dict[str, int]) -> dict[str, int]:
-    """Reported on every pass, zeros included — a field that appears only
-    when something is wrong is indistinguishable from one nobody emitted."""
-    return {
-        "escalation_distinct_served_model": counts.get(ESCALATION_DISTINCT, 0),
-        "escalation_same_served_model": counts.get(ESCALATION_SAME_MODEL, 0),
-        "escalation_served_model_unknown": counts.get(ESCALATION_UNKNOWN, 0),
-    }
 
 
 # ── Capture-corpus listing ────────────────────────────────────────────────
@@ -549,7 +448,6 @@ def evaluate_corpus(
     haiku_model: str = DEFAULT_HAIKU_MODEL,
     sonnet_model: str = DEFAULT_SONNET_MODEL,
     force_sonnet_pass: bool = False,
-    haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
     dry_run: bool = False,
     judge_only: bool = False,
     s3_client: Any | None = None,
@@ -608,7 +506,6 @@ def evaluate_corpus(
 
     haiku_evaluated = 0
     sonnet_evaluated = 0
-    escalation_verdicts: dict[str, int] = {}
     skipped_unmapped = 0
     skipped_empty_input = 0
     skipped_degenerate_input = 0
@@ -637,9 +534,9 @@ def evaluate_corpus(
 
     logger.info(
         "[eval_orchestrator] start date=%s bucket=%s capture_keys=%d "
-        "haiku_model=%s sonnet_model=%s force_sonnet=%s threshold=%d",
+        "haiku_model=%s sonnet_model=%s force_sonnet=%s",
         date, bucket, len(capture_keys), haiku_model, sonnet_model,
-        force_sonnet_pass, haiku_escalate_threshold,
+        force_sonnet_pass,
     )
 
     for key in capture_keys:
@@ -688,14 +585,12 @@ def evaluate_corpus(
                 "key": key, "agent_id": artifact.agent_id,
                 "stage": "haiku", "error": str(exc),
             })
-            # Skip the Sonnet escalation if Haiku itself failed —
-            # there's no haiku_eval to inspect for the threshold gate.
             continue
 
         # Empty-input structural skip — judge.evaluate_artifact already
         # short-circuited (no LLM call), persisted a skip-marker eval
-        # with empty dimension_scores + judge_skip_reason set. Don't
-        # escalate to Sonnet (nothing to evaluate); count separately
+        # with empty dimension_scores + judge_skip_reason set. Nothing
+        # for a second tier to grade; count separately
         # for ops visibility. Split between the two skip families:
         # ``precluded_by_empty_upstream`` (agent never ran) vs
         # ``degenerate_input`` (agent ran but inputs were degenerate;
@@ -707,11 +602,9 @@ def evaluate_corpus(
                 skipped_empty_input += 1
             continue
 
-        # Sonnet tier — sampled subset.
-        escalate = force_sonnet_pass or should_escalate_to_sonnet(
-            haiku_eval, threshold=haiku_escalate_threshold,
-        )
-        if not escalate:
+        # Second tier — the force_sonnet_pass cadence only. No per-artifact
+        # escalation (alpha-engine-config-I11484; see DEFAULT_SONNET_MODEL).
+        if not force_sonnet_pass:
             continue
 
         try:
@@ -725,10 +618,6 @@ def evaluate_corpus(
             sonnet_evaluated += 1
             persisted_keys.append(sonnet_persisted_key)
             _try_emit(sonnet_eval)
-            if not force_sonnet_pass:
-                _note_escalation_verdict(
-                    escalation_verdicts, haiku_eval, sonnet_eval,
-                )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[eval_orchestrator] sonnet eval failed for %s (%s)",
@@ -768,7 +657,6 @@ def evaluate_corpus(
         "eval_prefix": eval_prefix,
         "cw_namespace": cw_namespace,
         "would_evaluate": would_evaluate,
-        **_escalation_result_fields(escalation_verdicts),
     }
 
 
@@ -825,9 +713,8 @@ def build_batch_plan(
     every mapped artifact gets BOTH a Haiku entry AND a Sonnet entry
     in the same batch — calibration insurance per ROADMAP §1626.
     For weekly cadence (force_sonnet_pass=False), only Haiku entries
-    are added; the Process Lambda runs Sonnet escalations
-    synchronously after Haiku results arrive (small set, well under
-    the Process Lambda's 15-min budget).
+    are added, and nothing escalates to the second tier afterwards
+    (alpha-engine-config-I11484).
 
     Empty-input captures are persisted client-side immediately with
     a skip-marker artifact (no batch slot consumed). Unmapped agents
@@ -1001,7 +888,7 @@ def build_batch_plan(
 
     # Mint ONE judge_run_id for this whole batch invocation. Threaded
     # to every RubricEvalArtifact emitted by this batch (skip-markers
-    # via _persist_client_side_skips, Haiku-pass + Sonnet-escalation
+    # via _persist_client_side_skips, and every graded eval
     # via process_batch_results) so all artifacts cluster under a
     # single _eval/{date}/{judge_run_id}/ directory. Persisted on the
     # plan manifest so Process Lambda inherits the same UUID across
@@ -1469,11 +1356,10 @@ def process_batch_results(
     s3_client: Any | None = None,
     cloudwatch_client: Any | None = None,
     emit_metrics: bool = True,
-    haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
     remaining_s=None,
 ) -> dict[str, Any]:
     """Stream the completed batch's results, parse + persist + emit
-    each, then run any Sonnet escalations synchronously.
+    each.
 
     Drives the Process Lambda after the SF Poll loop has confirmed
     ``processing_status='ended'``. Streams results using the SDK's
@@ -1481,24 +1367,13 @@ def process_batch_results(
     Process Lambda's memory footprint stays bounded by individual
     result size, not full-corpus size.
 
-    Sonnet-escalation tail (weekly cadence only): once Haiku results
-    are persisted, any artifact whose Haiku score has a dimension
-    below ``haiku_escalate_threshold`` is re-evaluated synchronously
-    via ``evaluate_artifact``. First-Saturday-of-month cadence
-    (``force_sonnet_pass=True`` in the plan) already submitted Sonnet
-    requests in the batch; this tail is a no-op in that case.
+    No escalation tail (alpha-engine-config-I11484): borderline first-tier
+    evals are not re-graded. First-Saturday-of-month cadence
+    (``force_sonnet_pass=True`` in the plan) still submits a second-tier
+    request per artifact in the batch.
 
-    Its cardinality is DATA-dependent, not bounded by anything: every
-    Haiku eval that flags a borderline dimension adds one synchronous
-    judge call. A week where the judged agents degrade is exactly a week
-    the tail grows, so the runtime rises with the thing it exists to
-    measure. The docstring here used to claim "typical cardinality is
-    small (1-3 artifacts/run) so the synchronous tail fits trivially" —
-    an assumption, never a bound.
-
-    **Deadline discipline (alpha-engine-config-I6920 class).** All three
-    loops — the result stream, the parse-retry tail and the escalation
-    tail — ask before each item whether it still fits in ``remaining_s``
+    **Deadline discipline (alpha-engine-config-I6920 class).** Every
+    loop — the result stream, the sync rung and the parse-retry tail — asks before each item whether it still fits in ``remaining_s``
     (see ``_next_item_affordable``). When it does not, that loop stops,
     the work already done is kept, the manifest build and summary still
     run inside ``PROCESS_WRITE_RESERVE_S``, and the summary carries
@@ -1532,8 +1407,7 @@ def process_batch_results(
     sonnet_model = plan["sonnet_model"]
     haiku_model = plan["haiku_model"]
     # Inherit the batch's judge_run_id from the persisted plan manifest.
-    # All artifacts emitted by THIS Process invocation (Haiku-pass +
-    # Sonnet-escalation tail) share this UUID so they cluster under
+    # All artifacts emitted by THIS Process invocation share this UUID so they cluster under
     # _eval/{date}/{judge_run_id}/ alongside the skip-markers Submit
     # already wrote. Fall back to a fresh UUID for legacy plan
     # manifests written pre-Option-B (replay safety only).
@@ -1544,7 +1418,6 @@ def process_batch_results(
 
     haiku_evaluated = 0
     sonnet_evaluated = 0
-    escalation_verdicts: dict[str, int] = {}
     failed: list[dict[str, str]] = list(plan.get("client_side_skips", []))
     # Batch results whose tool output failed schema parse (malformed
     # stringified dimension_scores etc. — the 2026-07-03 weekly lost 12
@@ -1581,13 +1454,8 @@ def process_batch_results(
     # item that failed to parse and was then recovered by the retry tail must
     # count once, and a counter incremented at each site would report 101%
     # coverage on exactly the week the retry tail earned its keep.
-    #
-    # The Sonnet-escalation tail deliberately does NOT record here: it emits a
-    # SECOND eval for an entry the Haiku pass already graded, so counting it
-    # would let escalations paper over an ungraded entry elsewhere. Coverage
-    # is measured over plan entries, and each entry is graded exactly once.
+    # Coverage is measured over plan entries, and each entry is graded once.
     graded_custom_ids: set[str] = set()
-    haiku_evals_by_agent_run: dict[tuple[str, str], RubricEvalArtifact] = {}
 
     # Deadline bookkeeping. Each phase keeps its OWN latency sample —
     # see PROCESS_STREAM_ITEM_FLOOR_S for why they may not be shared.
@@ -1812,9 +1680,6 @@ def process_batch_results(
                 graded_custom_ids.add(entry["custom_id"])
                 if entry["judge_model"] == haiku_model:
                     haiku_evaluated += 1
-                    haiku_evals_by_agent_run[
-                        (entry["agent_id"], entry["run_id"])
-                    ] = eval_artifact
                 elif entry["judge_model"] == sonnet_model:
                     sonnet_evaluated += 1
                 _try_emit(eval_artifact)
@@ -1869,9 +1734,6 @@ def process_batch_results(
             sync_fallback_evaluated += 1
             if entry["judge_model"] == haiku_model:
                 haiku_evaluated += 1
-                haiku_evals_by_agent_run[
-                    (entry["agent_id"], entry["run_id"])
-                ] = sync_eval
             elif entry["judge_model"] == sonnet_model:
                 sonnet_evaluated += 1
             _try_emit(sync_eval)
@@ -1895,9 +1757,8 @@ def process_batch_results(
     # stop_reason=tool_use at ~1k of the 10752 cap) was terminal, silently
     # thinning the eval corpus (12/85 lost on 2026-07-03, run=PARTIAL).
     # One synchronous evaluate_artifact per failed item re-rolls the
-    # decoder via the sync path's own retry loop. Runs BEFORE the
-    # escalation tail so a recovered borderline Haiku eval still
-    # escalates to Sonnet. Overflow past the cap is terminal-failed loud.
+    # decoder via the sync path's own retry loop. Overflow past the cap
+    # is terminal-failed loud.
     #
     # The cap is a COST guard, not a time budget. It was written as one —
     # "40 × ≲8s ≪ the Process Lambda's 15-min ceiling" — and that assumed
@@ -1946,9 +1807,6 @@ def process_batch_results(
             parse_retry_recovered += 1
             if entry["judge_model"] == haiku_model:
                 haiku_evaluated += 1
-                haiku_evals_by_agent_run[
-                    (entry["agent_id"], entry["run_id"])
-                ] = retry_eval
             elif entry["judge_model"] == sonnet_model:
                 sonnet_evaluated += 1
             _try_emit(retry_eval)
@@ -1969,102 +1827,6 @@ def process_batch_results(
                 "error": f"retry: {exc}; original: {orig_err}",
             })
         retry_latencies_ms.append(int((time.time() - _retry_t0) * 1000))
-
-    # Sonnet-escalation tail (weekly cadence only). First-Saturday
-    # already submitted Sonnet via the batch so we skip the tail in
-    # that path — every artifact already has a Sonnet eval.
-    escalation_latencies_ms: list[int] = []
-    if not force_sonnet_pass:
-        # Select first, then spend. The eligibility test is pure in-memory
-        # work over evals already held, so materialising the queue costs
-        # nothing and makes the deadline residue an exact count rather than
-        # "however many entries we had not looked at yet".
-        escalation_queue = [
-            entry for entry in plan["plan_entries"]
-            if entry["judge_model"] == haiku_model
-            and (
-                _he := haiku_evals_by_agent_run.get(
-                    (entry["agent_id"], entry["run_id"])
-                )
-            ) is not None
-            and should_escalate_to_sonnet(
-                _he, threshold=haiku_escalate_threshold,
-            )
-        ]
-        logger.info(
-            "[batch_process_escalation] %d of %d haiku evals flagged for "
-            "sonnet escalation", len(escalation_queue),
-            len(haiku_evals_by_agent_run),
-        )
-        _esc_t0: float | None = None
-        for _esc_i, entry in enumerate(escalation_queue):
-            # Close out the previous item here — the body's load-failure
-            # path `continue`s, and a sample that misses it would under-
-            # estimate the phase (same reasoning as the stream loop).
-            if _esc_t0 is not None:
-                escalation_latencies_ms.append(
-                    int((time.time() - _esc_t0) * 1000)
-                )
-            affordable, needed = _next_item_affordable(
-                remaining_s, escalation_latencies_ms,
-                floor_s=PROCESS_LLM_ITEM_FLOOR_S,
-            )
-            if not affordable:
-                _stop_for_budget(
-                    "sonnet_escalation",
-                    len(escalation_queue) - _esc_i, needed,
-                )
-                break
-            _esc_t0 = time.time()
-
-            try:
-                artifact = _load_capture_artifact(
-                    s3, key=entry["capture_s3_key"], bucket=bucket,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    "[batch_process_escalation] load failed for %s",
-                    entry["capture_s3_key"],
-                )
-                failed.append({
-                    "key": entry["capture_s3_key"],
-                    "agent_id": entry["agent_id"],
-                    "stage": "escalation_load",
-                    "error": str(exc),
-                })
-                continue
-
-            try:
-                sonnet_eval = evaluate_artifact(
-                    artifact, judge_run_id=judge_run_id,
-                    judge_model=sonnet_model,
-                    judged_artifact_s3_key=entry["capture_s3_key"],
-                )
-                pkey = persist_eval_artifact(
-                    sonnet_eval, s3_client=s3, bucket=bucket,
-                    prefix=eval_prefix,
-                )
-                persisted_keys.append(pkey)
-                sonnet_evaluated += 1
-                _try_emit(sonnet_eval)
-                _note_escalation_verdict(
-                    escalation_verdicts,
-                    haiku_evals_by_agent_run[
-                        (entry["agent_id"], entry["run_id"])
-                    ],
-                    sonnet_eval,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    "[batch_process_escalation] sonnet eval failed for %s",
-                    entry["capture_s3_key"],
-                )
-                failed.append({
-                    "key": entry["capture_s3_key"],
-                    "agent_id": entry["agent_id"],
-                    "stage": "escalation_sonnet",
-                    "error": str(exc),
-                })
 
     # Empty-input skips already had their skip-marker artifacts
     # written in Submit; count them here for the SF result so the
@@ -2181,6 +1943,4 @@ def process_batch_results(
         "judge_only": plan.get("judge_only", False),
         "eval_prefix": eval_prefix,
         "cw_namespace": cw_namespace,
-        # alpha-engine-config-I11484 — did escalation get a second opinion?
-        **_escalation_result_fields(escalation_verdicts),
     }

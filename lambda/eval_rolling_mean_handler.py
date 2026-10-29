@@ -355,9 +355,15 @@ def _run(event, context):
     control_bands: dict
     try:
         from evals.control_bands import compute_and_emit_control_bands
+        from evals.judge_reanchor import reset_before_by_judge
 
+        # Declared judge re-anchors (alpha-engine-config-I11484): no combo's
+        # baseline may straddle a judge model change.
+        _judge_resets = reset_before_by_judge(end_time or datetime.now(UTC))
         cb = run_bounded(
-            lambda: compute_and_emit_control_bands(end_time=end_time),
+            lambda: compute_and_emit_control_bands(
+                end_time=end_time, reset_before_by_judge=_judge_resets,
+            ),
             name="control_bands",
             ceiling_s=_CEILING_CONTROL_BANDS_S,
             budget=_budget,

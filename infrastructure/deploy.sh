@@ -1022,12 +1022,11 @@ deploy_rationale_clustering() {
 #   * Submit  — plan-build + manifest write + one batch-create call.
 #               Network-bound, no LLM. 512MB / 300s.
 #   * Poll    — single retrieve API call. Trivial. 256MB / 60s.
-#   * Process — streams all batch results + parses + persists +
-#               sync Sonnet escalation tail. 1024MB / 900s
-#               (the legacy single-Lambda's spec — bounded only by
-#               the synchronous escalation tail for borderline Haiku
-#               results, which is the same workload the legacy
-#               single-Lambda ran).
+#   * Process — streams all batch results + parses + persists, plus
+#               the sync rung and parse-retry tail. 1024MB / 900s
+#               (the legacy single-Lambda's spec; the escalation
+#               tail it was sized for was dropped by
+#               alpha-engine-config-I11484).
 #
 # Prerequisite: build_and_deploy_main must have run at least once on
 # this branch so the ECR ${ECR_REPO}:latest image contains

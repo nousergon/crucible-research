@@ -145,6 +145,8 @@ class TestHandler:
                 "force_sonnet_pass": True,
                 "haiku_model": "claude-haiku-4-5-test",
                 "sonnet_model": "claude-sonnet-4-6-test",
+                # No longer read (alpha-engine-config-I11484); an SF that
+                # still sends it must not break the handler.
                 "haiku_escalate_threshold": 4,
             }, context=None)
 
@@ -152,7 +154,7 @@ class TestHandler:
         assert captured["force_sonnet_pass"] is True
         assert captured["haiku_model"] == "claude-haiku-4-5-test"
         assert captured["sonnet_model"] == "claude-sonnet-4-6-test"
-        assert captured["haiku_escalate_threshold"] == 4
+        assert "haiku_escalate_threshold" not in captured
 
     def test_dry_run_and_judge_only_flags_default_false(self, handler_mod):
         """Production Saturday SF invocations don't pass dry_run /

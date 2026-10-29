@@ -14,8 +14,9 @@ alongside the primary judges' scores for the same artifacts.
 **Shadow-only, no decision authority (config#2575 binding constraint,
 carried forward from config#1676/#1675).** This module:
 
-* Does NOT feed the OpenRouter shadow judge's scores into
-  ``should_escalate_to_sonnet`` or any escalation-routing decision.
+* Does NOT feed the OpenRouter shadow judge's scores into any
+  escalation-routing decision (the orchestrator has none since
+  alpha-engine-config-I11484).
 * Does NOT wire into the production Saturday Batches-API SF/Lambda
   chain (Submit/Poll/Process) — that is deploy-risk-bearing
   infrastructure (new SF states, IAM grants, Lambda image changes) that
@@ -27,8 +28,7 @@ carried forward from config#1676/#1675).** This module:
 * Is READ by nothing else in this codebase's decision paths — enforced
   structurally by ``evals.judge_models.SHADOW_LOGICAL_KEYS``, which every
   escalation/consumption call site should check before trusting a
-  ``judge_model`` value (see ``evals.orchestrator.should_escalate_to_sonnet``
-  and its docstring note).
+  ``judge_model`` value.
 
 Agreement metric (item 5): :func:`compute_shadow_agreement` compares the
 shadow judge's per-dimension scores against the PRIMARY judge (Haiku, the
