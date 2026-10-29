@@ -142,7 +142,7 @@ class TestLedgerFromProcessBatchResults:
     """The ledger counts PLAN ENTRIES, once each, on whichever rung graded them."""
 
     @staticmethod
-    def _run(monkeypatch, *, n, fail_indices=(), escalate=False):
+    def _run(monkeypatch, *, n, fail_indices=()):
         import json as _json
         from unittest.mock import MagicMock
 
@@ -168,9 +168,6 @@ class TestLedgerFromProcessBatchResults:
 
         monkeypatch.setattr(orch, "evaluate_artifact", _fake_eval)
         monkeypatch.setattr(orch, "persist_eval_artifact", lambda *a, **k: "key")
-        monkeypatch.setattr(
-            orch, "should_escalate_to_sonnet", lambda *a, **k: escalate,
-        )
         return orch.process_batch_results(
             batch_id="sync-2026-08-29",
             plan_s3_key="plan.json",
@@ -198,19 +195,6 @@ class TestLedgerFromProcessBatchResults:
         assert len(summary["ungraded_entries"]) == 1
         with pytest.raises(JudgeCoverageShortfall):
             enforce_coverage(summary)
-
-    def test_escalations_do_not_inflate_coverage(self, monkeypatch):
-        """A Sonnet escalation is a SECOND eval of an already-graded entry.
-
-        Counting it would let escalations paper over an ungraded entry
-        elsewhere: 4 graded + 1 escalation would read as 5 of 5 while one
-        agent silently lost its eval. Here every entry escalates, so a
-        double-count would report 10 graded against 5 planned.
-        """
-        summary = self._run(monkeypatch, n=5, escalate=True)
-        assert summary["sonnet_evaluated"] == 5, "escalation tail must have run"
-        assert summary["plan_entries_graded"] == 5, "coverage counts entries, not evals"
-        assert summary["plan_entry_count"] == 5
 
 
 class TestExecContextIsResolvedPerCall:

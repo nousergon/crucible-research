@@ -91,8 +91,9 @@ _COST_RAW_PREFIX = "decision_artifacts/_cost_raw"
 _EVAL_PREFIX = "decision_artifacts/_eval"
 _OUTPUT_PREFIX = "backtest"
 
-# A rubric dimension "passes" at score >= 3 (mirrors the judge's own
-# escalate-if-any-dim-below-3 gate, evals.orchestrator.DEFAULT_HAIKU_ESCALATE_THRESHOLD);
+# A rubric dimension "passes" at score >= 3 (the rubric midpoint; it was also
+# the judge's escalate-if-any-dim-below-3 gate until alpha-engine-config-I11484
+# dropped the escalation leg);
 # an eval passes iff every dimension passes.
 _RUBRIC_PASS_THRESHOLD = 3
 

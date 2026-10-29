@@ -357,8 +357,9 @@ floor ``MIN_REVIEWS_PER_WEEK`` was derived for.
 The Sonnet tier is not weekly, by the pipeline's own declaration: the weekly
 SF's ``ComputeEvalCadence`` sets ``force_sonnet_pass=true`` only when the run
 starts on day-of-month <= 7 (the monthly Sonnet sweep, ROADMAP §1626); every
-other Saturday runs Haiku plus a per-artifact Sonnet ESCALATION tail, whose
-volume depends on what Haiku scored. Measured 2026-10-07 on epoch slots,
+other Saturday ran the first tier plus a per-artifact ESCALATION tail on the
+second, whose volume depended on what the first tier scored, and since
+alpha-engine-config-I11484 dropped that tail it runs the first tier only. Measured 2026-10-07 on epoch slots,
 ``thinktank_thesis/*/claude-sonnet-4-6`` held 72 / 17 / **0 / 0** / 36 reviews
 in slots 2957..2961 — the sweep weeks (09-05, 10-03) carry it, and the weeks
 between are routinely under four. Charged against a one-week floor that is a
@@ -1166,6 +1167,7 @@ def _weekly_series_by_combo(
     combos: list[list[dict[str, str]]],
     *,
     reset_before: datetime | None = None,
+    reset_before_by_judge: dict[str, datetime] | None = None,
     end_time: datetime | None = None,
 ) -> dict[int, list[WeeklyObservation]]:
     """Map combo index → its weekly observations, oldest-first.
@@ -1180,7 +1182,9 @@ def _weekly_series_by_combo(
     Values; we zip + sort ascending so the moving range / CUSUM see the
     series in chronological order. When ``reset_before`` is set, points
     older than it are dropped so the baseline doesn't straddle a judge
-    re-anchor (L4578(a)).
+    re-anchor (L4578(a)). ``reset_before_by_judge`` does the same per
+    combo, keyed by its ``judge_model`` dimension, and the later of the two
+    applies (alpha-engine-config-I11484).
 
     **The still-open weekly bucket is dropped.** A CloudWatch bucket
     whose window has not yet elapsed holds a partial average, and the
@@ -1229,8 +1233,16 @@ def _weekly_series_by_combo(
             (t, v) for t, v in pairs
             if t + timedelta(seconds=_WEEK_SECONDS) <= cutoff
         ]
-        if reset_before is not None:
-            pairs = [(t, v) for t, v in pairs if t >= reset_before]
+        combo_reset = reset_before
+        judge_reset = (reset_before_by_judge or {}).get(
+            _dims_to_dict(combos[idx]).get("judge_model"),
+        )
+        if judge_reset is not None and (
+            combo_reset is None or judge_reset > combo_reset
+        ):
+            combo_reset = judge_reset
+        if combo_reset is not None:
+            pairs = [(t, v) for t, v in pairs if t >= combo_reset]
         pairs.sort(key=lambda tv: tv[0])  # chronological
         series_by_combo[idx] = [
             WeeklyObservation(
@@ -1255,6 +1267,7 @@ def compute_and_emit_control_bands(
     sumsq_metric: str = SOURCE_SUMSQ_METRIC_NAME,
     min_history: int = DEFAULT_MIN_HISTORY,
     reset_before: datetime | None = None,
+    reset_before_by_judge: dict[str, datetime] | None = None,
     cloudwatch_client: Any | None = None,
     s3_client: Any | None = None,
 ) -> dict[str, Any]:
@@ -1275,7 +1288,10 @@ def compute_and_emit_control_bands(
 
     ``reset_before`` (UTC) trims each combo's series to points at/after it
     — the operator sets it after a judge re-anchor (L4578(a)) so the
-    baseline doesn't straddle a model change.
+    baseline doesn't straddle a model change. ``reset_before_by_judge``
+    is the per-judge form, read from
+    ``evals.judge_reanchor.reset_before_by_judge`` by the Lambda
+    (alpha-engine-config-I11484).
     """
     cw = cloudwatch_client or boto3.client("cloudwatch")
     s3 = s3_client or boto3.client("s3")
@@ -1307,6 +1323,7 @@ def compute_and_emit_control_bands(
     metric_data_results = _get_metric_data_all(cw, queries, start, end)
     series_by_combo = _weekly_series_by_combo(
         metric_data_results, combos, reset_before=reset_before,
+        reset_before_by_judge=reset_before_by_judge,
         end_time=end,
     )
 

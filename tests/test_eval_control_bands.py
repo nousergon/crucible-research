@@ -291,6 +291,26 @@ class TestComputeAndEmit:
         assert out["combos_insufficient_history"] == 1
         assert out["breach_count"] == 0
 
+    def test_reset_before_by_judge_trims_only_that_judges_combos(self):
+        """alpha-engine-config-I11484: a declared re-anchor resets the combos
+        of the judge it names and leaves every other judge's series whole."""
+        combos = [
+            _dims("alpha", "c1", judge="claude-haiku-4-5"),
+            _dims("alpha", "c1", judge="openrouter-shadow"),
+        ]
+        steady = [4.0] * 9
+        cw = _make_cw(combos, {0: list(steady), 1: list(steady)})
+        reset = datetime(2026, 6, 9, tzinfo=_UTC) - timedelta(weeks=4, days=1)
+        out = cb.compute_and_emit_control_bands(
+            end_time=datetime(2026, 6, 9, tzinfo=_UTC),
+            reset_before_by_judge={"claude-haiku-4-5": reset},
+            cloudwatch_client=cw, s3_client=MagicMock(),
+        )
+        # The first tier keeps 4 post-reset points (insufficient); the shadow
+        # judge keeps all of its history.
+        assert out["combos_insufficient_history"] == 1
+        assert out["combos_discovered"] == 2
+
 
 # ── alpha-engine-config-I10165 ────────────────────────────────────────────
 #

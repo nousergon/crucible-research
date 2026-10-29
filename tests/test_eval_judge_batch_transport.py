@@ -302,7 +302,6 @@ class TestProcessRunsTheSyncRung:
 
         monkeypatch.setattr(orch, "evaluate_artifact", _fake_eval)
         monkeypatch.setattr(orch, "persist_eval_artifact", lambda *a, **k: "key")
-        monkeypatch.setattr(orch, "should_escalate_to_sonnet", lambda *a, **k: False)
 
         summary = orch.process_batch_results(
             batch_id="sync-2026-08-29",

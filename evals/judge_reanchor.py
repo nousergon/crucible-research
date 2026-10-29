@@ -15,6 +15,12 @@ reused rather than inventing a second changelog surface, so
 ``root_cause_category``/``event_type``-keyed corpus readers (retro
 tooling, the dashboard's changelog tile) already know how to render it.
 
+**Declared re-anchors (alpha-engine-config-I11484).** ``DECLARED_REANCHORS``
+records breaks in code, and ``reset_before_by_judge`` turns them into the
+per-judge reset the EvalRollingMean Lambda passes to the control bands, so
+a recorded break binds on merge with no operator step. The 2026-08-30
+switch of both authoritative tiers to deepseek-v4-flash is the first entry.
+
 **config#2575 status: mechanism built and unit-tested, NOT wired to any
 promotion code path.** The OpenRouter shadow judge has not been promoted
 to authoritative — item 6's perturbation-suite validation gates that,
@@ -49,6 +55,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha1
 from typing import Any
@@ -71,6 +78,96 @@ _CHANGELOG_PREFIX = "changelog/entries"
 _CHANGELOG_SCHEMA_VERSION = "1.0.0"
 
 EVENT_TYPE_JUDGE_REANCHOR = "judge_reanchor"
+
+
+# ── Declared re-anchors ───────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DeclaredReanchor:
+    """A judge regime break recorded in code, so it binds on merge.
+
+    ``log_judge_reanchor_marker`` writes a changelog entry at the moment of
+    a deliberate re-pin. A break nobody marked at the time (the case
+    below) has no such moment, and an S3 entry written by hand would bind
+    nothing: the control-band chart reads its reset from this tuple
+    (:func:`reset_before_by_judge`), never from the changelog corpus.
+
+    ``effective_utc`` is the first run graded by the new model.
+    ``last_old_run_utc`` is the last run graded by the old one; the
+    reset is floored to the week slot holding ``effective_utc``, which is
+    only sound while no old-model judging lands in that slot, and a test
+    asserts it for every entry.
+    """
+
+    logical_key: str
+    old_resolved_model: str
+    new_resolved_model: str
+    last_old_run_utc: datetime
+    effective_utc: datetime
+    reason: str
+
+
+_REANCHOR_2026_08_30_REASON = (
+    "alpha-engine-config-I11484, ruled 2026-10-28 (accept the DeepSeek judge). Both "
+    "authoritative tiers resolve through the krepis router's `low` group; "
+    "sampled records resolve to the Anthropic snapshot through the "
+    "2026-08-13 run and to deepseek-v4-flash from the 2026-08-30 run on, "
+    "with no judge run between. Nobody marked the break at the time, so "
+    "this entry marks it."
+)
+
+DECLARED_REANCHORS: tuple[DeclaredReanchor, ...] = (
+    DeclaredReanchor(
+        logical_key="claude-haiku-4-5",
+        old_resolved_model="claude-haiku-4-5-20251001",
+        new_resolved_model="deepseek-v4-flash",
+        last_old_run_utc=datetime(2026, 8, 13, tzinfo=UTC),
+        effective_utc=datetime(2026, 8, 30, tzinfo=UTC),
+        reason=_REANCHOR_2026_08_30_REASON,
+    ),
+    DeclaredReanchor(
+        logical_key="claude-sonnet-4-6",
+        old_resolved_model="claude-sonnet-4-6",
+        new_resolved_model="deepseek-v4-flash",
+        last_old_run_utc=datetime(2026, 8, 13, tzinfo=UTC),
+        effective_utc=datetime(2026, 8, 30, tzinfo=UTC),
+        reason=_REANCHOR_2026_08_30_REASON,
+    ),
+)
+"""Every judge regime break, oldest first. Append-only: an entry is a fact
+about a past run, and removing one would re-join two series."""
+
+_WEEK_SECONDS = 7 * 86400
+
+
+def _slot_start(ts: datetime) -> datetime:
+    """Start of the epoch-anchored week slot holding ``ts`` — the same
+    ``floor(t / 7 days)`` slots ``evals.control_bands`` charts on."""
+    return datetime.fromtimestamp(
+        (int(ts.timestamp()) // _WEEK_SECONDS) * _WEEK_SECONDS, tz=UTC,
+    )
+
+
+def reset_before_by_judge(
+    end_time: datetime,
+    reanchors: tuple[DeclaredReanchor, ...] = DECLARED_REANCHORS,
+) -> dict[str, datetime]:
+    """Per judge ``logical_key``, the bucket start a control-band series
+    must begin at so it never straddles a declared re-anchor.
+
+    Only re-anchors effective at or before ``end_time`` count, so a replay
+    of an earlier week sees the history that run saw. The latest one per
+    key wins. Keys with no re-anchor are absent: their series is untouched.
+    """
+    out: dict[str, datetime] = {}
+    for r in reanchors:
+        if r.effective_utc > end_time:
+            continue
+        start = _slot_start(r.effective_utc)
+        if r.logical_key not in out or start > out[r.logical_key]:
+            out[r.logical_key] = start
+    return out
 
 
 def log_judge_reanchor_marker(

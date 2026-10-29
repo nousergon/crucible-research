@@ -3,9 +3,10 @@ LLM-as-judge evaluation pipeline.
 
 Reads a captured ``DecisionArtifact``, looks up the matching rubric
 prompt, sends ``(rubric, artifact_input, artifact_output)`` to a judge
-LLM (Haiku-tier default; Sonnet-tier for the nuance-tier sampled subset —
-see the alpha-engine-config-I2997 note below for what these tiers now
-route to), and persists the structured eval result to S3.
+LLM (first-tier default; second tier on the monthly ``force_sonnet_pass``
+sweep only — there is no per-artifact escalation since
+alpha-engine-config-I11484; see the alpha-engine-config-I2997 note below for
+what these tiers now route to), and persists the structured eval result to S3.
 
 Eval is observability, NOT a gate. Runs proceed regardless of eval
 score; the eval corpus + dashboard surface quality regressions weeks
@@ -15,7 +16,7 @@ Two execution paths share the rubric-rendering + parsing core:
 
 * ``evaluate_artifact`` — synchronous single-artifact path. Used by
   ad-hoc replays, the judge_only test track, dry_run smoke, and the
-  Sonnet-escalation tail in the batch Process Lambda.
+  batch Process Lambda's sync rung and parse-retry tail.
 
 * ``build_batch_request`` + ``parse_batch_message`` — Anthropic
   Message Batches API path. Used by the Saturday SF Submit/Poll/
@@ -207,8 +208,9 @@ This is the STABLE logical key, not the API request string: the actual
 request is pinned to the dated snapshot via
 ``judge_models.request_model_for`` (L4578(a)), while this logical key
 stays constant for the S3 path / CloudWatch dimension / custom_id tag so
-a snapshot pin doesn't reset the rolling-mean time series. Sonnet
-(``claude-sonnet-4-6``) is the nuance-tier judge on the sampled subset.
+a snapshot pin doesn't reset the rolling-mean time series. The second
+tier key runs on the ``force_sonnet_pass`` sweep only (no escalation,
+alpha-engine-config-I11484).
 See ``evals/judge_models.py`` for the pin + re-anchor protocol."""
 
 DEFAULT_MAX_TOKENS = MAX_TOKENS_STRATEGIC
@@ -1113,8 +1115,8 @@ JUDGE_EXEC_CONTEXT = "lambda"
 """Default execution context for a judge call — see :func:`judge_exec_context`.
 
 Historically a hard constant, on the reasoning that "both judge call sites run
-as Lambda invocations": ``evaluate_artifact`` from the batch Process Lambda's
-Sonnet-escalation tail and ``evaluate_artifact_openrouter`` from
+as Lambda invocations": ``evaluate_artifact`` from the batch Process Lambda
+(then its escalation tail, dropped by alpha-engine-config-I11484) and ``evaluate_artifact_openrouter`` from
 ``lambda/openrouter_shadow_handler.py``. That docstring also said *"a future
 non-Lambda caller should pass its own declared context rather than assume this
 one"* — alpha-engine-config-I9309 is that caller, and this is it doing so.

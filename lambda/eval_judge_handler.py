@@ -11,7 +11,8 @@ Event shape (all fields optional):
       "force_sonnet_pass": false,    # SF passes True every 4th run
       "haiku_model": "claude-haiku-4-5",
       "sonnet_model": "claude-sonnet-4-6",
-      "haiku_escalate_threshold": 3,
+      # "haiku_escalate_threshold" is no longer read: the per-artifact
+      # escalation leg was dropped (alpha-engine-config-I11484).
 
       # PR 4e test-track flags — both default false:
       "dry_run": false,              # list + render only, no LLM calls,
@@ -145,7 +146,6 @@ def _run(event, context):
 
     # Imports deferred until after _ensure_init (Lambda cold-start pattern).
     from evals.orchestrator import (
-        DEFAULT_HAIKU_ESCALATE_THRESHOLD,
         DEFAULT_HAIKU_MODEL,
         DEFAULT_SONNET_MODEL,
         evaluate_corpus,
@@ -156,18 +156,15 @@ def _run(event, context):
     force_sonnet_pass = bool(event.get("force_sonnet_pass", False))
     haiku_model = event.get("haiku_model", DEFAULT_HAIKU_MODEL)
     sonnet_model = event.get("sonnet_model", DEFAULT_SONNET_MODEL)
-    haiku_escalate_threshold = int(
-        event.get("haiku_escalate_threshold", DEFAULT_HAIKU_ESCALATE_THRESHOLD)
-    )
     dry_run = bool(event.get("dry_run", False))
     judge_only = bool(event.get("judge_only", False))
 
     logger.info(
         "[eval_judge_handler] start date=%s force_sonnet_pass=%s "
-        "haiku_model=%s sonnet_model=%s threshold=%d "
+        "haiku_model=%s sonnet_model=%s "
         "dry_run=%s judge_only=%s",
         date, force_sonnet_pass, haiku_model, sonnet_model,
-        haiku_escalate_threshold, dry_run, judge_only,
+        dry_run, judge_only,
     )
 
     try:
@@ -177,7 +174,6 @@ def _run(event, context):
             haiku_model=haiku_model,
             sonnet_model=sonnet_model,
             force_sonnet_pass=force_sonnet_pass,
-            haiku_escalate_threshold=haiku_escalate_threshold,
             dry_run=dry_run,
             judge_only=judge_only,
         )

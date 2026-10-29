@@ -613,12 +613,13 @@ class TestProcessBatchResults:
             assert [i["id"] for i in body["judge_inputs"]] == offered[body["judged_artifact_s3_key"]]
             assert body["judge_parser_version"] and body["rubric_hash"] == "c" * 64
 
-    def test_weekly_path_runs_sonnet_escalation_tail_on_borderline_haiku(
+    def test_weekly_path_does_not_escalate_borderline_haiku(
         self, mocked_s3,
     ):
-        """A Haiku result with a dimension <3 must trigger a synchronous
-        Sonnet escalation call inside Process. ``evaluate_artifact`` is
-        the call site for the tail; pin its invocation."""
+        """alpha-engine-config-I11484: the escalation tail is dropped.
+        A first-tier result with a dimension <3 must NOT trigger a synchronous
+        second-tier call inside Process; ``evaluate_artifact`` was the tail's
+        call site, so it must not be called at all on a clean batch."""
         from unittest.mock import patch
 
         from evals.orchestrator import (
@@ -644,7 +645,7 @@ class TestProcessBatchResults:
                 Key=submit_result["plan_s3_key"],
             )["Body"].read()
         )["plan_entries"]
-        # Build batch results: ic_cio gets a borderline 2 → escalate.
+        # Build batch results: ic_cio gets a borderline 2, which used to escalate.
         fake_results = []
         for e in plan_entries:
             scores = [2, 4, 4] if e["agent_id"] == "ic_cio" else [4, 4, 4]
@@ -653,31 +654,9 @@ class TestProcessBatchResults:
             )
         fake_client.messages.batches.results.return_value = iter(fake_results)
 
-        # Stub the synchronous escalation call.
         from evals import orchestrator as orch
-        from graph.state_schemas import (
-            RubricDimensionScore,
-            RubricEvalArtifact,
-        )
 
-        def fake_evaluate(artifact, *, judge_run_id, judge_model, judged_artifact_s3_key, **kw):
-            return RubricEvalArtifact(
-                run_id=artifact.run_id,
-                judge_run_id=judge_run_id,
-                timestamp="2026-05-09T22:30:00Z",
-                judged_agent_id=artifact.agent_id,
-                rubric_id="eval_rubric_test",
-                rubric_version="1.0.0",
-                judge_model=judge_model,
-                dimension_scores=[
-                    RubricDimensionScore(
-                        dimension="d", score=4, reasoning="r",
-                    ),
-                ],
-                overall_reasoning="ok",
-            )
-
-        with patch.object(orch, "evaluate_artifact", side_effect=fake_evaluate):
+        with patch.object(orch, "evaluate_artifact") as ea_mock:
             summary = process_batch_results(
                 batch_id=submit_result["batch_id"],
                 plan_s3_key=submit_result["plan_s3_key"],
@@ -686,21 +665,14 @@ class TestProcessBatchResults:
                 s3_client=mocked_s3,
                 emit_metrics=False,
             )
+            ea_mock.assert_not_called()
         assert summary["haiku_evaluated"] == 3
-        # Exactly the ic_cio escalation should have run.
-        assert summary["sonnet_evaluated"] == 1
-        # Its distinctness from the first pass is reported, whatever it is
-        # (alpha-engine-config-I11484) — never absent.
-        assert (
-            summary["escalation_distinct_served_model"]
-            + summary["escalation_same_served_model"]
-            + summary["escalation_served_model_unknown"]
-        ) == 1
+        assert summary["sonnet_evaluated"] == 0
+        assert not [k for k in summary if k.startswith("escalation_")]
 
     def test_first_saturday_path_skips_escalation_tail(self, mocked_s3):
-        """force_sonnet_pass=True submits both tiers in the batch — the
-        Process Lambda must NOT also run the synchronous escalation
-        tail (would double-bill Sonnet on every borderline)."""
+        """force_sonnet_pass=True submits both tiers in the batch, and the
+        Process Lambda makes no synchronous judge call on top of them."""
         from unittest.mock import patch
 
         from evals.orchestrator import (

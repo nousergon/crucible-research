@@ -13,7 +13,8 @@ provenance fields beside it did not correct that:
 
 ``krepis`` already resolves the served model onto ``LLMResult.model``
 (``_resolve_group_served_model``); the judge threw it away. The same fact is
-what the Sonnet escalation needs to show whether it was a second opinion.
+what showed the escalation was never a second opinion, and that leg
+has since been dropped (Brian's 2026-10-28 ruling).
 """
 
 from __future__ import annotations
@@ -27,8 +28,6 @@ import krepis.llm as _kllm
 import pytest
 
 from evals import judge as judge_mod
-from evals import orchestrator as orch
-from graph.state_schemas import RubricDimensionScore, RubricEvalArtifact
 from tests.test_eval_judge import (
     _make_artifact,
     _make_llm_output,
@@ -179,63 +178,3 @@ def test_the_call_core_prefers_the_resolved_model_over_the_raw_echo(monkeypatch)
 
 
 # ── Escalation: was it a second opinion? ─────────────────────────────────
-
-
-def _eval(judge_model: str, served: str | None) -> RubricEvalArtifact:
-    return RubricEvalArtifact(
-        run_id="r1",
-        judge_run_id="j1",
-        timestamp="2026-09-23T00:00:00Z",
-        judged_agent_id="ic_cio",
-        rubric_id="eval_rubric_test",
-        rubric_version="1.0.0",
-        judge_model=judge_model,
-        judge_resolved_model=served,
-        dimension_scores=[RubricDimensionScore(dimension="d", score=4, reasoning="r")],
-        overall_reasoning="ok",
-    )
-
-
-@pytest.mark.parametrize(
-    ("first", "second", "verdict"),
-    [
-        (UPSTREAM, UPSTREAM, orch.ESCALATION_SAME_MODEL),
-        # Same weights through an aggregator is still the same judge.
-        ("deepseek/deepseek-v4-flash", UPSTREAM, orch.ESCALATION_SAME_MODEL),
-        (UPSTREAM, "claude-sonnet-4-6", orch.ESCALATION_DISTINCT),
-        (None, UPSTREAM, orch.ESCALATION_UNKNOWN),
-        (UPSTREAM, None, orch.ESCALATION_UNKNOWN),
-    ],
-)
-def test_escalation_verdict(first, second, verdict):
-    assert (
-        orch.escalation_served_model_verdict(
-            _eval("claude-haiku-4-5", first),
-            _eval("claude-sonnet-4-6", second),
-        )
-        == verdict
-    )
-
-
-def test_a_same_model_escalation_warns_and_is_counted(caplog):
-    counts: dict[str, int] = {}
-    with caplog.at_level(logging.WARNING, logger="evals.orchestrator"):
-        orch._note_escalation_verdict(
-            counts,
-            _eval("claude-haiku-4-5", UPSTREAM),
-            _eval("claude-sonnet-4-6", UPSTREAM),
-        )
-    assert orch._escalation_result_fields(counts) == {
-        "escalation_distinct_served_model": 0,
-        "escalation_same_served_model": 1,
-        "escalation_served_model_unknown": 0,
-    }
-    assert any("escalation_same_served_model" in r.getMessage() for r in caplog.records)
-
-
-def test_the_escalation_fields_are_reported_when_nothing_escalated():
-    assert orch._escalation_result_fields({}) == {
-        "escalation_distinct_served_model": 0,
-        "escalation_same_served_model": 0,
-        "escalation_served_model_unknown": 0,
-    }
