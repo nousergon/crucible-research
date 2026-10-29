@@ -210,5 +210,11 @@ export THINKTANK_RUN_BUDGET_SECONDS
 # llm_traces/v1/* is codified in nous-ergon-ops, not here.
 export KREPIS_TRACE_SINK_BUCKET="${KREPIS_TRACE_SINK_BUCKET:-alpha-engine-research}"
 export KREPIS_TRACE_SINK_PREFIX="${KREPIS_TRACE_SINK_PREFIX:-llm_traces/v1}"
+# Fixed status pointer (krepis-PR274, krepis>=0.59.84): after every flush that
+# did work the sink overwrites llm_traces/v1/status/thinktank.json with when it
+# ran, its last rows key, its counters and its last error, so the ops
+# krepis-llm-trace-sink row has one key to HEAD. The box role's existing
+# llm_traces/v1/* grant already covers it; thinktank/run.py passes it through.
+export KREPIS_TRACE_SINK_STATUS_NAME=thinktank
 log "starting daily run (budget=${THINKTANK_RUN_BUDGET_SECONDS}s)"
 python infrastructure/thinktank_box_runner.py
