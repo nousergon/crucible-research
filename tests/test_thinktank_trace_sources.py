@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -292,3 +293,42 @@ def test_an_env_sink_alone_also_declares_full(monkeypatch):
     monkeypatch.setenv("KREPIS_TRACE_SINK_PREFIX", "llm_traces/v1")
     client = _client(monkeypatch, None, _Completions())
     assert client.trace_capture_level() == "full"
+
+
+# ── fixed status pointer (krepis-PR274, alpha-engine-config-I12312) ──────────
+#
+# krepis reads KREPIS_TRACE_SINK_STATUS_NAME only for its process-default
+# sink. thinktank/run.py builds its own sink (to key rows on the run id), so
+# it must pass the name through, or the bootstrap's export writes nothing.
+
+_BOOTSTRAP = Path(__file__).resolve().parents[1] / "infrastructure" / "thinktank_spot_bootstrap.sh"
+
+
+def test_the_run_sink_carries_the_status_pointer_named_by_the_env(monkeypatch):
+    from krepis.trace_sink import STATUS_ENV_VAR
+
+    from thinktank.run import _trace_sink_for_run
+
+    assert STATUS_ENV_VAR == "KREPIS_TRACE_SINK_STATUS_NAME"
+    monkeypatch.setenv("KREPIS_TRACE_SINK_BUCKET", "alpha-engine-research")
+    monkeypatch.setenv("KREPIS_TRACE_SINK_PREFIX", "llm_traces/v1")
+    monkeypatch.setenv(STATUS_ENV_VAR, "thinktank")
+    sink = _trace_sink_for_run("run-under-test")
+    assert sink.status_key == "llm_traces/v1/status/thinktank.json"
+    assert sink.run_id == "run-under-test"
+
+
+def test_the_run_sink_writes_no_status_pointer_when_unnamed(monkeypatch):
+    from thinktank.run import _trace_sink_for_run
+
+    monkeypatch.setenv("KREPIS_TRACE_SINK_BUCKET", "alpha-engine-research")
+    monkeypatch.setenv("KREPIS_TRACE_SINK_PREFIX", "llm_traces/v1")
+    monkeypatch.delenv("KREPIS_TRACE_SINK_STATUS_NAME", raising=False)
+    assert _trace_sink_for_run("run-under-test").status_key is None
+
+
+def test_the_spot_bootstrap_names_the_thinktank_status_pointer():
+    text = _BOOTSTRAP.read_text(encoding="utf-8")
+    assert "\nexport KREPIS_TRACE_SINK_STATUS_NAME=thinktank\n" in text
+    # Exported beside the sink it names, before the run starts.
+    assert text.index("KREPIS_TRACE_SINK_STATUS_NAME") < text.index("\npython infrastructure/thinktank_box_runner.py")

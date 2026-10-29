@@ -763,12 +763,20 @@ def _trace_sink_for_run(run_id: str) -> Any | None:
     derives from it, join this run's manifest, cost rows and DecisionArtifacts
     (alpha-engine-config-I12312). A half-configured environment raises
     ``TraceSinkConfigError`` before any spend, as the default would.
+
+    ``KREPIS_TRACE_SINK_STATUS_NAME`` (krepis>=0.59.84, krepis-PR274) names
+    the sink's fixed status pointer, ``{prefix}/status/<name>.json``. krepis
+    reads that variable only for its process default, so a sink built here
+    must pass it on explicitly or the bootstrap's export writes nothing. The
+    pointer is the one fixed key the ops ``krepis-llm-trace-sink`` row can
+    HEAD to grade the sink's execution and data signals.
     """
     import os
 
     from krepis.trace_sink import (
         BUCKET_ENV_VAR,
         PREFIX_ENV_VAR,
+        STATUS_ENV_VAR,
         S3JsonlTraceSink,
         default_trace_sink_from_env,
     )
@@ -779,7 +787,11 @@ def _trace_sink_for_run(run_id: str) -> Any | None:
         return None
     if not bucket or not prefix:
         default_trace_sink_from_env()  # raises TraceSinkConfigError naming the gap
-    return S3JsonlTraceSink(bucket=bucket, prefix=prefix, run_id=run_id, register_atexit=True)
+    status_name = os.environ.get(STATUS_ENV_VAR, "").strip() or None
+    return S3JsonlTraceSink(
+        bucket=bucket, prefix=prefix, run_id=run_id, register_atexit=True,
+        status_name=status_name,
+    )
 
 
 def _record_pointer_lag(store: ThinktankStore, manifest: RunManifest, *, trading_day: str) -> None:
