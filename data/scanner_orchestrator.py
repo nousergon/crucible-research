@@ -420,16 +420,30 @@ def build_candidates_artifact(
     # filter, so the eval log, the universe board and every rank table and
     # cut derived from them never see it — no arm can pick it. The floor
     # check above runs on the unfiltered list: a hold is not a data loss.
-    from data.ticker_holds import active_holds
+    #
+    # Machine-written holds (alpha-engine-config-I13044) join them: an
+    # unexplained split-like break nousergon-data wrote at ERROR. A declared
+    # hold for the same name wins. An unreadable hold prefix fails the scan
+    # rather than scanning as if nothing were held.
+    from data.ticker_holds import active_holds, machine_holds
 
-    holds = active_holds(run_date)
+    try:
+        holds = {**machine_holds(s3, bucket, run_date), **active_holds(run_date)}
+    except Exception as exc:
+        raise ScannerOrchestratorError(
+            f"machine-written ticker holds unreadable under s3://{bucket}/data_quality/ticker_holds/ "
+            f"({exc}) — refusing to scan without them (alpha-engine-config-I13044)"
+        ) from exc
     held_present = sorted(t for t in holds if t in set(constituents))
     if held_present:
         constituents = [t for t in constituents if t not in holds]
         logger.warning(
             "[scanner_orchestrator] %d declared hold(s) removed from the scanner universe: %s",
             len(held_present),
-            {t: f"through {holds[t].valid_through} ({holds[t].issue})" for t in held_present},
+            {
+                t: f"through {holds[t].valid_through or 'cleared'} ({holds[t].issue}, {holds[t].source})"
+                for t in held_present
+            },
         )
 
     # ── 2. Prior cycle: population (signals) + scanner picks (candidates) ─
@@ -566,6 +580,7 @@ def build_candidates_artifact(
                 "valid_through": holds[t].valid_through,
                 "why": holds[t].why,
                 "issue": holds[t].issue,
+                "source": holds[t].source,
             }
             for t in held_present
         },

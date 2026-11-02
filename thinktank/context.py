@@ -488,6 +488,12 @@ def filings_sources(ticker: str, *, k: int = 6) -> list[dict]:
     section label, scores and rank were discarded before rendering and no
     record could say which filing a thesis was built from
     (alpha-engine-config-I12312, audit-2026-10-14 §3.3).
+
+    A hit missing its chunk id or its parent document id is WITHHELD, never
+    rendered unidentified, and counted in a ``RAG_UNIDENTIFIED`` warning, as
+    the sector-team tools do (``rag_retrieval_tools._format_results``).
+    ``as_source()`` raises on either missing id (alpha-engine-config-I12680),
+    and that raise used to escape this loop and fail the whole thesis build.
     """
     try:
         from datetime import UTC, date, datetime, timedelta
@@ -508,9 +514,13 @@ def filings_sources(ticker: str, *, k: int = 6) -> list[dict]:
         logger.warning("thinktank context: rag retrieve failed for %s: %s", ticker, exc)
         return []
     out: list[dict] = []
+    withheld = 0
     for r in hits or []:
         text = getattr(r, "content", None)
         if not text:
+            continue
+        if not getattr(r, "chunk_id", None) or not getattr(r, "document_id", None):
+            withheld += 1
             continue
         header = f"[{getattr(r, 'doc_type', '?')} | {getattr(r, 'filed_date', '?')}]"
         rank = len(out) + 1
@@ -522,5 +532,13 @@ def filings_sources(ticker: str, *, k: int = 6) -> list[dict]:
                 query=FILINGS_QUERY,
                 retrieved_at=retrieved_at,
             )
+        )
+    if withheld:
+        logger.warning(
+            "RAG_UNIDENTIFIED tool=thinktank.filings_sources ticker=%s withheld=%d "
+            "of=%d -- hits without both a rag.chunks and a rag.documents id are "
+            "not rendered into the prompt (knowledge-integrity § Retrieval "
+            "provenance)",
+            ticker, withheld, len(hits or []),
         )
     return out
