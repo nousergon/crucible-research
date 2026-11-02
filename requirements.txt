@@ -166,10 +166,19 @@ pydantic~=2.13
 # DecisionArtifact.trace_id/span_id, which thinktank/sources.py consumes to
 # cite every prompt input on the llm_trace.v1 record — below it the module
 # raises AttributeError. v0.124.173 is the first tag carrying PR472's merge
-# (0c8dbfd); v0.124.174 is the current tag, adding only a CI-action bump and
+# (0c8dbfd); v0.124.174 was then the current tag, adding only a CI-action bump and
 # the automated cost-map republish. Verified with
 # `gh api repos/nousergon/nousergon-lib/compare/0c8dbfd...v0.124.174`.
-nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.174
+# v0.124.174 -> v0.124.199: alpha-engine-config-I12680 (nousergon-lib-PR511,
+# merged 2026-10-31) makes RetrievalResult.as_source() raise on a missing
+# document_id as it already did on a missing chunk_id. v0.124.197 is the first
+# tag carrying it (2420294); both callers here withhold an id-less hit before
+# calling it (rag_retrieval_tools._format_results, and thinktank/context.py
+# since crucible-research#880). v0.124.199 is the current tag; the rest of the
+# range is CI/guard tooling, env registry additions, and lib-PR513
+# (derive_status([]) is "degraded"; the one write_health caller here passes a
+# non-empty list, so its stamp is unchanged).
+nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.199
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
