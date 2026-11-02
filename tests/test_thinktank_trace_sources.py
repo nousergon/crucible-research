@@ -129,6 +129,44 @@ def test_filings_sources_keep_chunk_and_document_ids(monkeypatch) -> None:
     assert src["text"] == "[8-K | 2026-09-04]\n" + "x" * FILINGS_EXCERPT_CHARS
 
 
+@pytest.mark.parametrize("missing", ["chunk_id", "document_id"])
+def test_filings_sources_withhold_a_hit_missing_an_id(monkeypatch, caplog, missing) -> None:
+    """A hit without both ids is withheld and logged, never rendered and
+    never allowed to raise out of the loop (alpha-engine-config-I12680)."""
+    import logging
+
+    import nousergon_lib.rag as rag
+
+    from thinktank.context import filings_sources
+
+    def _hit(n: int, **over) -> RetrievalResult:
+        kw = {
+            "content": f"body {n}",
+            "ticker": "QLYS",
+            "doc_type": "10-Q",
+            "filed_date": date(2026, 8, 1),
+            "section_label": None,
+            "similarity": 0.5,
+            "chunk_id": f"chunk-{n}",
+            "retrieval_method": "hybrid",
+            "document_id": f"doc-{n}",
+        }
+        kw.update(over)
+        return RetrievalResult(**kw)
+
+    hits = [_hit(1, **{missing: None}), _hit(2)]
+    monkeypatch.setattr(rag, "retrieve", lambda **kw: hits)
+    with caplog.at_level(logging.WARNING, logger="thinktank.context"):
+        out = filings_sources("QLYS")
+    assert [s["source_id"] for s in out] == ["rag.chunks/chunk-2"]
+    assert out[0]["cid"] == "f1"
+    assert out[0]["retrieval"]["rank"] == 1
+    assert any(
+        "RAG_UNIDENTIFIED" in rec.getMessage() and "withheld=1" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 # ── the call writes a trace that carries them ────────────────────────────────
 
 
