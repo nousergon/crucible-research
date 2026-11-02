@@ -19,20 +19,36 @@ because the post-spin price is divided by the pre-spin company's earnings.
 Each hold carries an absolute ``valid_through`` date, so a forgotten entry
 expires instead of excluding the name for ever, plus a ``why`` and the issue
 that owns removing it. Entries change by PR only.
+
+MACHINE-WRITTEN holds (alpha-engine-config-I13044) are the automatic form of
+the CTVA entry. When nousergon-data's daily append writes a bar whose ratio to
+the prior stored close is split-like and no registered corporate action
+explains it, it pages at ERROR and opens
+``s3://{bucket}/data_quality/ticker_holds/{TICKER}.json`` with
+``status: active``. That producer also clears the hold, by evidence once the
+stored series no longer prints the break, or by an operator with a reason.
+``machine_holds`` reads the active ones; they carry no ``valid_through``
+(``None``: held until cleared). A declared hold for the same ticker wins,
+since it is a person's dated decision.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
+
+MACHINE_HOLDS_PREFIX = "data_quality/ticker_holds/"
 
 
 @dataclass(frozen=True)
 class TickerHold:
     valid_from: str  # YYYY-MM-DD, inclusive
-    valid_through: str  # YYYY-MM-DD, inclusive; the hold is ignored after it
+    valid_through: str | None  # YYYY-MM-DD, inclusive; None = until cleared (machine holds only)
     why: str
     issue: str
+    source: str = "declared"
 
 
 DECLARED_HOLDS: dict[str, TickerHold] = {
@@ -66,3 +82,33 @@ def active_holds(run_date: str, holds: dict[str, TickerHold] | None = None) -> d
         for ticker, hold in table.items()
         if date.fromisoformat(hold.valid_from) <= d <= date.fromisoformat(hold.valid_through)
     }
+
+
+def machine_holds(s3_client: Any, bucket: str, run_date: str) -> dict[str, TickerHold]:
+    """Active machine-written holds whose break is on or before ``run_date``.
+
+    Raises on any read or parse failure: a hold is a correctness guard on
+    picks, so a scanner that cannot read them must not scan as if there were
+    none.
+    """
+    d = date.fromisoformat(str(run_date)[:10])
+    out: dict[str, TickerHold] = {}
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=MACHINE_HOLDS_PREFIX):
+        for item in page.get("Contents", []) or []:
+            key = item["Key"]
+            if not key.endswith(".json"):
+                continue
+            body = json.loads(s3_client.get_object(Bucket=bucket, Key=key)["Body"].read())
+            if body.get("status") != "active":
+                continue
+            if date.fromisoformat(body["break_date"]) > d:
+                continue
+            out[body["ticker"]] = TickerHold(
+                valid_from=body["break_date"],
+                valid_through=None,
+                why=body["why"],
+                issue=body.get("issue", "alpha-engine-config-I13044"),
+                source=f"s3://{bucket}/{key}",
+            )
+    return out
