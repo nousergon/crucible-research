@@ -16,16 +16,22 @@ name: Config counterpart guard
 on:
   pull_request:
   # So the required context reports on a merge-queue entry instead of leaving it
-  # in AWAITING_CHECKS until it auto-dequeues (alpha-engine-config-I12747). The
-  # lib callee reads github.head_ref, which is empty on merge_group, and exits 1
-  # there: a queue entry FAILS CLOSED on this check rather than passing blind.
-  # This repo runs no merge queue today, so no merge_group run fires.
+  # in AWAITING_CHECKS until it auto-dequeues (alpha-engine-config-I12747). On
+  # merge_group the lib callee resolves the queued PR's head branch from
+  # merge_group.head_ref through the pulls API and asks the same question,
+  # failing closed on any parse or API error (alpha-engine-config-I12754,
+  # nousergon-lib#512). This repo runs no merge queue today, so no merge_group
+  # run fires.
   merge_group:
     types: [checks_requested]
 
-permissions: {}
+# pull-requests: read is what the callee's merge_group path uses to read the
+# queued PR's head branch; without it that path fails closed. The pull_request
+# path does not use it.
+permissions:
+  pull-requests: read
 
 jobs:
   config-counterpart-merged:
-    uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@05caaeee6ef28bfb0092bb9c66ec4b81fa690968  # main
+    uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@f7da2d63fef47cd5d89988891756d7eac7859f5c  # main, includes nousergon-lib#512
     secrets: inherit
