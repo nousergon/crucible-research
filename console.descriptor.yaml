@@ -52,17 +52,22 @@ parent_component_reason: >-
   declaration of that function: no discoverer enumerates it, so without
   `parent_component` it would be reported ABSENT out of a blind spot.
 owner: brian
-lifecycle: in-service
-cadence_minutes: 10080
-cadence_source: >-
-  Stage of `ne-weekly-freshness-pipeline`, whose trigger is the EventBridge
-  rule `alpha-engine-saturday` — cron(0 9 ? * THU-SAT *). The same number and
-  the same measured provenance the sibling
-  `governance/observability.d/alpha-engine-research-signals-envelope.yaml`
-  row declares for the same stage: the rule fires on three days so a failed
-  Saturday run has two retry slots inside the same week, and the business
-  cadence it serves is weekly, so 10080 is the longest silence a healthy
-  stage can show.
+lifecycle: retired
+lifecycle_reason: >-
+  Retired 2026-11-04. Producer switched off by ruling, not failed: this row
+  is the artifact identity of the v1 weekly's SignalsEnvelope stage, and the
+  v1 weekly is off (events:alpha-engine-saturday DISABLED 2026-10-28,
+  alpha-engine-config-I12758; last run 2026-10-24, so health/research.json
+  and signals/latest.json last wrote 2026-10-24T10:57Z). Its parent Lambda
+  alpha-engine-research-signals-envelope is tombstoned by
+  nous-ergon-ops governance/decommission.d/v1-weekly-and-trading-stopped-aec13163.yaml,
+  which cannot name this row because it is a repo descriptor, not an
+  observability.d row. The resource is deleted with the v1 path under
+  Crucible v2 phase 4 (alpha-engine-config-I9760). If the producer is
+  re-enabled, move this row back to in-service in the same change
+  (alpha-engine-config-I13163).
+lifecycle_owner: brian
+lifecycle_reexam: 2027-02-04
 
 authority_tier: observe-and-report
 authority_tier_reason: >-
