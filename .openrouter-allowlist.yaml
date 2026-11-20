@@ -10,35 +10,39 @@ entries:
     env was removed (evaluate_artifact resolves its judge model via krepis.router, not this key). The
     remaining literal is historical prose in header comments explaining the migration and pointing at
     the still-open CI-router-reachability question (alpha-engine-config-I7853) — not a live call site.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7880
 - path: agents/langchain_utils.py
   pattern: base_url
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: config.py
   pattern: env_key
   reason: >-
-    Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
-    docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+    Re-measured 2026-11-20: NOT prose. config.py:530 is a live module-level read,
+    OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=False, default="") (config#2575
+    shadow-judge tier). It is not a call site: no non-test code reads config.OPENROUTER_API_KEY
+    (remaining mentions are docstrings in lambda/openrouter_shadow_handler.py and tests asserting
+    its absence), so no request is made with it. Kept until the binding is deleted; renewed 30 days
+    only so the guard stays green meanwhile. Baseline sweep for alpha-engine-config-I7864.
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: infrastructure/deploy.sh
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: lambda/openrouter_shadow_handler.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: scripts/live_validate_openrouter_judge.py
   pattern: base_url
@@ -47,7 +51,7 @@ entries:
     https://openrouter.ai/api/v1 — it resolves through krepis.router.resolve_group_spec's low group like
     production judge call sites. The remaining literal is historical prose in the module docstring naming
     the removed direct-linkage pattern for context, not a live call site.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7880
 - path: tests/live_smoke/judge_perturbation_smoke.py
   pattern: env_key
@@ -56,7 +60,7 @@ entries:
     it into run_perturbation_battery (the judge call resolves its credential via krepis.router; passing
     a real key would have overridden that resolution). The remaining literal is historical prose in the
     module docstring and comments explaining the migration — not a live call site.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7880
 - path: tests/live_smoke/judge_perturbation_smoke_openrouter.py
   pattern: env_key
@@ -65,70 +69,70 @@ entries:
     it through to evaluate_artifact_openrouter, and now catches a router-unreachable ValueError as a SKIP
     the same way its sync-primary sibling does. The remaining literal is historical prose in the module
     docstring — not a live call site. Not CI-wired today (manual/ad-hoc only per its own docstring).
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7880
 - path: tests/test_agent_llm_factory.py
   pattern: base_url
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_agent_llm_factory.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_agent_llm_factory.py
   pattern: provider_literal
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_eval_judge_openrouter.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_eval_judge_router_addressing.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_eval_judge_router_addressing.py
   pattern: provider_literal
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_no_secret_environ_reads.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_thinktank_group_addressing.py
   pattern: env_key
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: tests/test_thinktank_group_addressing.py
   pattern: provider_literal
   reason: >-
     Historical/test prose describing the direct-OpenRouter class this guard exists to catch (comment,
     docstring, or a test asserting the literal's ABSENCE) — not a live call site. Baseline sweep for alpha-engine-config-I7864.
-  expires: '2026-11-18'
+  expires: '2026-12-18'
   tracking: alpha-engine-config-I7864
 - path: .provider-linkage-allowlist.yaml
   pattern: base_url
