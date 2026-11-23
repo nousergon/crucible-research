@@ -179,6 +179,10 @@ pydantic~=2.13
 # (derive_status([]) is "degraded"; the one write_health caller here passes a
 # non-empty list, so its stamp is unchanged).
 nousergon-lib[arcticdb,flow-doctor,rag,contracts] @ git+https://github.com/nousergon/nousergon-lib@v0.124.199
+# alpha-engine-config-I14262: nousergon-lib's [arcticdb] extra is floor-only (>=6.11), and
+# arcticdb 7.0.0 (2026-11-23) changed the static-schema mismatch error the data
+# layer keys on. Cap it here until the pinned lib extra carries the ceiling.
+arcticdb<7
 # krepis floor: graph/llm_cost_tracker.py reads the operator pricing override
 # (cost/model_pricing.yaml) via alpha_engine_lib.cost -> krepis.cost.PriceCard,
 # which is extra="forbid". config#1332 adds the cache_create_1h_per_1m field,
