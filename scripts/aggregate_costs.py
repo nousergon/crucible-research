@@ -27,9 +27,14 @@ Schema posture (matches the JSONL row shape):
   ID — the per-run grouping key that distinguishes N executions on the same
   date. When absent (pre-v3 rows), aggregator groups under "(unknown)" and
   per-execution drilldown is suppressed.
-- ``cost_source`` (schema v3, additive, config#5504): ``"llm"`` (LLM API calls,
-  the v1/v2 default), ``"ec2_spot"``, or ``"ec2_on_demand"``. EC2 rows carry
-  zero token columns and a single ``cost_usd`` — one row per launched instance.
+- ``cost_source`` (schema v3, additive, config#5504): the six live values in
+  ``_COST_SOURCES``. ``price_card``, ``provider_reported``,
+  ``usage_unreported``, and ``unpriced`` are LLM rows written by
+  ``krepis.cost.record_llm_call`` (the producer of record); ``usage_unreported``
+  and ``unpriced`` can have ``cost_usd: null``. ``ec2_spot`` and
+  ``ec2_on_demand`` are EC2 rows, which carry zero token columns and a single
+  ``cost_usd`` — one row per launched instance. ``llm`` is the grandfathered
+  value on pre-v3 rows.
 - All additive going forward — never rename or remove a column without a
   ``schema_version`` bump per CLAUDE.md S3 contract safety rules. v1 rows
   predate the tool-fee columns; the aggregator treats missing as zero so
@@ -86,6 +91,19 @@ _COST_CW_NAMESPACE = "AlphaEngine/Cost"
 # from LLM rows, used by the completeness check below so "spot rows stopped
 # arriving" cannot read as "the run was cheap."
 _EC2_COST_SOURCES = frozenset({"ec2_spot", "ec2_on_demand"})
+
+# Full live cost_source domain. Keep the module-level schema description above
+# aligned with these values; unknown additive values remain accepted.
+_COST_SOURCES = frozenset(
+    {
+        "price_card",
+        "provider_reported",
+        "usage_unreported",
+        "unpriced",
+        "ec2_spot",
+        "ec2_on_demand",
+    }
+)
 
 # Anthropic's largest context window (Claude Opus 4.7) is ~1M tokens.
 # A single API response cannot exceed that. 5M is 5x the API ceiling
