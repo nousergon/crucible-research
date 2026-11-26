@@ -33,5 +33,5 @@ permissions:
 
 jobs:
   config-counterpart-merged:
-    uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@46ff3292bcc2b12fad884ca19c3b461fb51b7373  # main, includes nousergon-lib#512
+    uses: nousergon/nousergon-lib/.github/workflows/config-counterpart-guard.yml@1b40bc3e22c59152f76294d3515b293d48d35518  # main, includes nousergon-lib#512
     secrets: inherit
